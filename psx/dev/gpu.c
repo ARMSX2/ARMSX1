@@ -55,55 +55,11 @@ uint16_t gpu_to_bgr555(uint32_t color) {
 
 // #define BGR555(c) gpu_to_bgr555(c)
 
-/* Set by the DMA list walker just before it pushes a word into GP0; consumed by the next
-   psx_gpu_write32(). File-scope rather than a struct field because dma.c reaches the GPU
-   through the bus and has no psx_gpu_t to hand. */
-static uint32_t g_gp0_src_addr = PSX_GPU_SRC_CPU;
-
-void psx_gpu_note_gp0_source(uint32_t addr) {
-    g_gp0_src_addr = addr;
-}
-
-/* Accumulated across the frame, snapshotted at vblank. See the note in gpu.h. */
-static uint32_t g_dma_nodes, g_dma_bit23, g_dma_first_bit23, g_dma_first_hdr;
-
-static uint32_t g_e5ctx_src[4], g_e5ctx_node[4], g_e5ctx_hdr[4];
-static uint32_t g_e5ctx_words[4][PSX_GPU_E5_CTX];
-static unsigned g_e5ctx_n;
-
-void psx_gpu_note_e5_context(uint32_t src, uint32_t node_addr, uint32_t hdr,
-                             const uint32_t* ctx) {
-    unsigned i;
-
-    if (g_e5ctx_n >= 4u)
-        return;
-
-    g_e5ctx_src[g_e5ctx_n] = src;
-    g_e5ctx_node[g_e5ctx_n] = node_addr;
-    g_e5ctx_hdr[g_e5ctx_n] = hdr;
-
-    for (i = 0; i < PSX_GPU_E5_CTX; i++)
-        g_e5ctx_words[g_e5ctx_n][i] = ctx[i];
-
-    g_e5ctx_n++;
-}
-
-void psx_gpu_note_dma_node(uint32_t raw_next, uint32_t hdr) {
-    g_dma_nodes++;
-
-    if (raw_next & 0x800000u) {
-        if (!g_dma_bit23) {
-            g_dma_first_bit23 = raw_next;
-            g_dma_first_hdr = hdr;
-        }
-
-        g_dma_bit23++;
-    }
-}
-
-/* Always-on, marker-free. One 4-entry linear scan per primitive; see the note on off_hist
-   in gpu.h for why the offset in force DURING rasterization is the number that matters and
-   the last GP0(E5) of the frame is not. */
+/* Buckets the drawing offset that was in force as each primitive rasterized. TEST BUILDS
+   ONLY -- see the note on the census fields in gpu.h for why this must not exist in a
+   shipped binary. Without ARMSX_TEST_OFFSET_CENSUS the call sites below expand to nothing
+   and the rasterizer entry points are exactly what they were before it was written. */
+#ifdef ARMSX_TEST_OFFSET_CENSUS
 static void gpu_offset_census(psx_gpu_t* gpu) {
     const int16_t y = (int16_t)gpu->off_y;
     unsigned i;
@@ -128,6 +84,9 @@ static void gpu_offset_census(psx_gpu_t* gpu) {
         gpu->off_hist_n[3]++;
     }
 }
+#else
+#define gpu_offset_census(gpu) ((void)0)
+#endif
 
 int min3(int a, int b, int c) {
     int m = (a <= b) ? a : b;
@@ -3239,7 +3198,6 @@ void psx_gpu_update_cmd(psx_gpu_t* gpu) {
                           gpu->texw_mx, gpu->texw_my, gpu->texw_ox, gpu->texw_oy);
         } break;
         case 0xe3: {
-            gpu->gp0_e3_raw = gpu->buf[0] & 0xffffff;
             gpu->draw_x1 = (gpu->buf[0] >> 0 ) & 0x3ff;
             gpu->draw_y1 = (gpu->buf[0] >> 10) & 0x1ff;
 
@@ -3249,7 +3207,6 @@ void psx_gpu_update_cmd(psx_gpu_t* gpu) {
                           gpu->draw_x1, gpu->draw_y1, gpu->draw_x2, gpu->draw_y2);
         } break;
         case 0xe4: {
-            gpu->gp0_e4_raw = gpu->buf[0] & 0xffffff;
             gpu->draw_x2 = (gpu->buf[0] >> 0 ) & 0x3ff;
             gpu->draw_y2 = (gpu->buf[0] >> 10) & 0x1ff;
 
@@ -3259,17 +3216,11 @@ void psx_gpu_update_cmd(psx_gpu_t* gpu) {
                           gpu->draw_x1, gpu->draw_y1, gpu->draw_x2, gpu->draw_y2);
         } break;
         case 0xe5: {
+#ifdef ARMSX_TEST_OFFSET_CENSUS
             /* Verbatim, before extraction. See the note on gp0_e5_raw in gpu.h. */
             gpu->gp0_e5_raw = gpu->buf[0] & 0xffffff;
             gpu->gp0_e5_count++;
-
-            if (gpu->gp0_e5_seq_n < 8) {
-                gpu->gp0_e5_seq[gpu->gp0_e5_seq_n] = gpu->buf[0] & 0xffffff;
-                gpu->gp0_e5_seq_prim[gpu->gp0_e5_seq_n] =
-                    (uint16_t)((gpu->frame_prims > 0xffffu) ? 0xffffu : gpu->frame_prims);
-                gpu->gp0_e5_seq_src[gpu->gp0_e5_seq_n] = gpu->gp0_word_src;
-                gpu->gp0_e5_seq_n++;
-            }
+#endif
 
             gpu->off_x = ((int32_t)(((gpu->buf[0] >> 0 ) & 0x7ff) << 21)) >> 21;
             gpu->off_y = ((int32_t)(((gpu->buf[0] >> 11) & 0x7ff) << 21)) >> 21;
@@ -3295,10 +3246,6 @@ void psx_gpu_update_cmd(psx_gpu_t* gpu) {
                           (gpu->accuracy_flags & PSX_GPU_ACCURACY_MASK_BIT) ? "yes" : "no");
         } break;
         default: {
-            /* Counted, not logged: an unbounded per-word log is what dma.c already taught this
-               project not to do. The count is what a desync looks like from outside. */
-            gpu->gp0_unknown++;
-
             // log_set_quiet(0);
             // log_fatal("Unhandled GP0(%02Xh)", gpu->buf[0] >> 24);
             // log_set_quiet(1);
@@ -3312,10 +3259,6 @@ void psx_gpu_write32(psx_gpu_t* gpu, uint32_t offset, uint32_t value) {
     switch (offset) {
         // GP0
         case 0x00: {
-            /* Latch and clear, so a CPU store cannot inherit the previous DMA word's note. */
-            gpu->gp0_word_src = g_gp0_src_addr;
-            g_gp0_src_addr = PSX_GPU_SRC_CPU;
-
             switch (gpu->state) {
                 case GPU_STATE_RECV_CMD: {
                     gpu->buf_index = 0;
@@ -3380,23 +3323,6 @@ void psx_gpu_write32(psx_gpu_t* gpu, uint32_t offset, uint32_t value) {
             uint8_t cmd = value >> 24;
 
             switch (cmd) {
-                /* NOT implemented, only COUNTED — deliberately. GP1(00) resets the whole GPU
-                   and GP1(01) resets the command buffer; both are no-ops here today, and this
-                   arm changes nothing about that. It only records that one arrived, and
-                   whether it arrived while this GPU was mid-command, which is the one
-                   observable that separates "the command stream desynced" from every other
-                   explanation for a corrupt picture. See the counters in gpu.h. */
-                case 0x00:
-                case 0x01: {
-                    if (cmd == 0x00)
-                        gpu->gp1_reset++;
-                    else
-                        gpu->gp1_fifo_reset++;
-
-                    if (gpu->state != GPU_STATE_RECV_CMD)
-                        gpu->gp1_reset_midcmd++;
-                } break;
-
                 // Display enable
                 case 0x03: {
                     /* GPU_HW_DEBUG()-only, like poly_quad above. */
@@ -3409,8 +3335,6 @@ void psx_gpu_write32(psx_gpu_t* gpu, uint32_t offset, uint32_t value) {
                 case 0x04: {
                 } break;
                 case 0x05: {
-                    gpu->gp1_disp_start++;
-                    gpu->gp1_05_raw = value & 0xffffff;
                     gpu->disp_x = value & 0x3ff;
                     gpu->disp_y = (value >> 10) & 0x1ff;
                     GPU_HW_DEBUG("gp1-display-start value=%08x disp=(%u,%u)", value, gpu->disp_x, gpu->disp_y);
@@ -3426,7 +3350,6 @@ void psx_gpu_write32(psx_gpu_t* gpu, uint32_t offset, uint32_t value) {
                     GPU_HW_DEBUG("gp1-display-range-v value=%08x disp_y=(%u,%u)", value, gpu->disp_y1, gpu->disp_y2);
                 } break;
                 case 0x08:
-                    gpu->gp1_disp_mode++;
                     gpu->display_mode = value & 0xffffff;
                     GPU_HW_DEBUG(
                         "gp1-display-mode value=%08x display_mode=0x%08x video_standard=%s",
@@ -3552,37 +3475,11 @@ void gpu_hblank_event(psx_gpu_t* gpu) {
            primitive dump opens and closes its single-frame capture. */
         gpu_dump_vblank(gpu);
 
-        /* Snapshot-then-clear the offset history. The front-end samples AFTER this point in
-           the frame, so it has to read the frame that just ENDED, not the one starting. */
-        memcpy(gpu->gp0_e5_seq_last, gpu->gp0_e5_seq, sizeof(gpu->gp0_e5_seq));
-        memcpy(gpu->gp0_e5_seq_prim_last, gpu->gp0_e5_seq_prim, sizeof(gpu->gp0_e5_seq_prim));
-        memcpy(gpu->gp0_e5_seq_src_last, gpu->gp0_e5_seq_src, sizeof(gpu->gp0_e5_seq_src));
-        memcpy(gpu->off_hist_y_last, gpu->off_hist_y, sizeof(gpu->off_hist_y));
-        memcpy(gpu->off_hist_n_last, gpu->off_hist_n, sizeof(gpu->off_hist_n));
-        gpu->gp0_e5_seq_n_last = gpu->gp0_e5_seq_n;
-        gpu->off_hist_used_last = gpu->off_hist_used;
-        gpu->frame_prims_last = gpu->frame_prims;
-
-        memcpy(gpu->e5ctx_src_last, g_e5ctx_src, sizeof(g_e5ctx_src));
-        memcpy(gpu->e5ctx_node_last, g_e5ctx_node, sizeof(g_e5ctx_node));
-        memcpy(gpu->e5ctx_hdr_last, g_e5ctx_hdr, sizeof(g_e5ctx_hdr));
-        memcpy(gpu->e5ctx_words_last, g_e5ctx_words, sizeof(g_e5ctx_words));
-        gpu->e5ctx_n_last = (uint8_t)g_e5ctx_n;
-        g_e5ctx_n = 0;
-
-        gpu->dma_nodes_last = g_dma_nodes;
-        gpu->dma_bit23_last = g_dma_bit23;
-        gpu->dma_first_bit23_last = g_dma_first_bit23;
-        gpu->dma_first_hdr_last = g_dma_first_hdr;
-
-        g_dma_nodes = 0;
-        g_dma_bit23 = 0;
-        g_dma_first_bit23 = 0;
-        g_dma_first_hdr = 0;
-
-        gpu->gp0_e5_seq_n = 0;
+#ifdef ARMSX_TEST_OFFSET_CENSUS
+        /* The offset census (see gpu_offset_census) is per-frame, so it is cleared here. */
         gpu->off_hist_used = 0;
         gpu->frame_prims = 0;
+#endif
 
         GPU_HW_DEBUG(
             "vblank-start line=%d mode=%s gpustat=0x%08x display_mode=0x%08x draw=(%u,%u)-(%u,%u) disp=(%u,%u)-(%u,%u) offset=(%d,%d)",

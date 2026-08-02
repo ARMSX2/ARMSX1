@@ -538,67 +538,6 @@ static inline void psx_cpu_exception(psx_cpu_t* cpu, uint32_t cause) {
     cpu->next_pc = cpu->pc + 4;
 }
 
-/* ---- packer trace (psx/cpu.h) --------------------------------------------------------- */
-
-static psx_trace_call_t g_trace[PSX_TRACE_SLOTS];
-static int g_trace_slot = -1;   /* slot being recorded, -1 = idle */
-
-const psx_trace_call_t* psx_trace_call(unsigned slot) {
-    return (slot < PSX_TRACE_SLOTS) ? &g_trace[slot] : NULL;
-}
-
-void psx_trace_reset(void) {
-    memset(g_trace, 0, sizeof(g_trace));
-    g_trace_slot = -1;
-}
-
-/* Called once per instruction, AFTER it has executed, so the register columns show its
-   result. Idle cost is the entry-PC compare in the caller. */
-static void trace_step(psx_cpu_t* cpu) {
-    psx_trace_call_t* c;
-
-    if (g_trace_slot < 0) {
-        const uint32_t a0 = cpu->r[4];
-
-        if (cpu->saved_pc != PSX_TRACE_ENTRY || a0 < 3u || a0 > 5u)
-            return;
-
-        /* First call per argument only -- a later one would overwrite the pairing. */
-        if (g_trace[a0 - 3u].n)
-            return;
-
-        g_trace_slot = (int)(a0 - 3u);
-        c = &g_trace[g_trace_slot];
-        c->a0_in = a0;
-        c->ra_in = cpu->r[31];
-        c->s0_in = cpu->r[16];
-        c->s1_in = cpu->r[17];
-    }
-
-    c = &g_trace[g_trace_slot];
-
-    if (c->n < PSX_TRACE_STEPS) {
-        psx_trace_step_t* st = &c->step[c->n++];
-
-        st->pc = cpu->saved_pc;
-        st->opcode = cpu->opcode;
-        st->at = cpu->r[1];
-        st->v0 = cpu->r[2];
-        st->v1 = cpu->r[3];
-        st->a0 = cpu->r[4];
-    } else {
-        c->truncated = 1;
-    }
-
-    /* `jr ra` plus its delay slot ends the call; v0 is then the return value. */
-    if (cpu->opcode == 0x03e00008u && c->n > 1u) {
-        c->v0_out = cpu->r[2];
-    } else if (c->v0_out || c->truncated) {
-        c->v0_out = cpu->r[2];
-        g_trace_slot = -1;
-    }
-}
-
 void psx_cpu_cycle(psx_cpu_t* cpu) {
     cpu->last_cycles = 0;
 
@@ -696,10 +635,6 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
     cpu->total_cycles += cpu->last_cycles;
 
     cpu->r[0] = 0;
-
-    /* Packer trace (psx/cpu.h). One compare while idle. */
-    if (g_trace_slot >= 0 || cpu->saved_pc == PSX_TRACE_ENTRY)
-        trace_step(cpu);
 }
 
 void psx_cpu_set_irq_pending(psx_cpu_t* cpu) {
@@ -1059,102 +994,6 @@ static inline void psx_cpu_i_lwr(psx_cpu_t* cpu) {
     // );
 }
 
-/* ---- draw-environment store watch (psx/cpu.h) ---------------------------------------- */
-
-#define STORE_WATCH_LO 0x005a250u
-#define STORE_WATCH_HI 0x005a274u
-
-static psx_store_watch_t g_sw_win[PSX_STORE_WATCH_WIN];
-static psx_store_watch_t g_sw_val[PSX_STORE_WATCH_VAL];
-static unsigned g_sw_win_total = 0;
-static unsigned g_sw_val_total = 0;
-
-unsigned psx_store_watch_window_total(void) { return g_sw_win_total; }
-unsigned psx_store_watch_value_total(void) { return g_sw_val_total; }
-
-unsigned psx_store_watch_window_kept(void) {
-    return (g_sw_win_total < PSX_STORE_WATCH_WIN) ? g_sw_win_total : PSX_STORE_WATCH_WIN;
-}
-
-unsigned psx_store_watch_value_kept(void) {
-    return (g_sw_val_total < PSX_STORE_WATCH_VAL) ? g_sw_val_total : PSX_STORE_WATCH_VAL;
-}
-
-/* Oldest-first over whatever the ring still holds, so a wrapped ring reads in order. */
-const psx_store_watch_t* psx_store_watch_window(unsigned index) {
-    const unsigned kept = psx_store_watch_window_kept();
-    unsigned base;
-
-    if (index >= kept)
-        return NULL;
-
-    base = (g_sw_win_total >= PSX_STORE_WATCH_WIN)
-         ? (g_sw_win_total % PSX_STORE_WATCH_WIN) : 0u;
-
-    return &g_sw_win[(base + index) % PSX_STORE_WATCH_WIN];
-}
-
-const psx_store_watch_t* psx_store_watch_value(unsigned index) {
-    const unsigned kept = psx_store_watch_value_kept();
-    unsigned base;
-
-    if (index >= kept)
-        return NULL;
-
-    base = (g_sw_val_total >= PSX_STORE_WATCH_VAL)
-         ? (g_sw_val_total % PSX_STORE_WATCH_VAL) : 0u;
-
-    return &g_sw_val[(base + index) % PSX_STORE_WATCH_VAL];
-}
-
-void psx_store_watch_reset(void) {
-    g_sw_win_total = 0;
-    g_sw_val_total = 0;
-}
-
-/* Off the hot path by construction -- only reached once a store has already matched. The
-   code window is read through the bus; the store itself has not happened yet. */
-static void store_watch_fill(psx_cpu_t* cpu, psx_store_watch_t* e,
-                             uint32_t addr, uint32_t value, uint32_t width) {
-    unsigned i;
-
-    /* cpu->pc has advanced past the store; saved_pc is the instruction itself. */
-    e->pc = cpu->saved_pc;
-    e->opcode = cpu->opcode;
-    e->addr = addr;
-    e->value = value;
-    e->width = width;
-    e->base_reg = (cpu->opcode >> 21) & 0x1f;
-    e->src_reg = (cpu->opcode >> 16) & 0x1f;
-    e->base_val = cpu->r[e->base_reg];
-    e->src_val = cpu->r[e->src_reg];
-
-    for (i = 0; i < PSX_STORE_WATCH_CODE; i++)
-        e->code[i] = psx_bus_read32(cpu->bus, ((e->pc + (i * 4u)) - 16u) & 0x1ffffcu);
-}
-
-static void store_watch_maybe(psx_cpu_t* cpu, uint32_t addr, uint32_t value, uint32_t width) {
-    const uint32_t phys = addr & 0x1ffffcu;
-
-    /* The window is checked FIRST and lives in its own ring, so no amount of unrelated
-       traffic can evict the record this capture exists to obtain. */
-    if ((phys >= STORE_WATCH_LO) && (phys < STORE_WATCH_HI)) {
-        store_watch_fill(cpu, &g_sw_win[g_sw_win_total % PSX_STORE_WATCH_WIN],
-                         addr, value, width);
-        g_sw_win_total++;
-
-        return;
-    }
-
-    /* E5 only, and only whole words. The E3/E4 triggers of the previous build fired on
-       ordinary data that happened to contain those bytes and consumed the budget. */
-    if ((width == 4u) && ((value & 0xff000000u) == 0xe5000000u)) {
-        store_watch_fill(cpu, &g_sw_val[g_sw_val_total % PSX_STORE_WATCH_VAL],
-                         addr, value, width);
-        g_sw_val_total++;
-    }
-}
-
 static inline void psx_cpu_i_sb(psx_cpu_t* cpu) {
     TRACE_M("sb");
 
@@ -1170,7 +1009,6 @@ static inline void psx_cpu_i_sb(psx_cpu_t* cpu) {
         return;
     }
 
-    store_watch_maybe(cpu, s + IMM16S, t, 1);
     psx_bus_write8(cpu->bus, s + IMM16S, t);
 }
 
@@ -1193,16 +1031,11 @@ static inline void psx_cpu_i_sh(psx_cpu_t* cpu) {
     if (addr & 0x1) {
         psx_cpu_exception(cpu, CAUSE_ADES);
     } else {
-        store_watch_maybe(cpu, addr, t, 2);
         psx_bus_write16(cpu->bus, addr, t);
     }
 }
 
 static inline void psx_cpu_i_swl(psx_cpu_t* cpu) {
-    /* Unaligned stores are how a copied display list lands; the window trigger covers them
-       even though the partial value is not a whole command word. */
-    store_watch_maybe(cpu, cpu->r[S] + IMM16S, cpu->r[T], 4u);
-
     TRACE_M("swl");
 
     uint32_t s = cpu->r[S];
@@ -1247,15 +1080,11 @@ static inline void psx_cpu_i_sw(psx_cpu_t* cpu) {
         if (psx_pgxp_active())
             psx_pgxp_cpu_sw(addr, t, T);
 
-        store_watch_maybe(cpu, addr, t, 4);
-
         psx_bus_write32(cpu->bus, addr, t);
     }
 }
 
 static inline void psx_cpu_i_swr(psx_cpu_t* cpu) {
-    store_watch_maybe(cpu, cpu->r[S] + IMM16S, cpu->r[T], 4u);
-
     TRACE_M("swr");
 
     uint32_t s = cpu->r[S];

@@ -171,9 +171,9 @@ void psx_dma_write8(psx_dma_t* dma, uint32_t offset, uint8_t value) {
         case 0x76: dma_write_dicr(dma, ((uint32_t)value) << 16); break;
         case 0x77: dma_write_dicr(dma, ((uint32_t)value) << 24); break;
         default: {
-            log_fatal("Unhandled 8-bit DMA write at offset %08x (%02x)", offset, value);
-
-            //exit(1);
+            /* Not fatal, and consistent with psx_dma_write16/32 above: nothing here ends the
+               run, and log_fatal on a hot path is how the real errors get buried. */
+            log_error("Unhandled 8-bit DMA write at offset %08x (%02x)", offset, value);
         } break;
     }
 }
@@ -251,9 +251,6 @@ void psx_dma_do_gpu_linked(psx_dma_t* dma) {
     uint32_t hdr = psx_bus_read32(dma->bus, dma->gpu.madr);
     uint32_t size = hdr >> 24;
     uint32_t addr = dma->gpu.madr;
-    /* Instrumentation only: the address of the header word of the node being walked, so a
-       captured GP0(E5) can be reported with the packet it came out of. */
-    uint32_t node_addr = dma->gpu.madr;
 
     int timeout = 16384;
 
@@ -270,26 +267,6 @@ void psx_dma_do_gpu_linked(psx_dma_t* dma) {
             if (psx_pgxp_active())
                 psx_pgxp_note_gp0_word(addr);
 
-            /* Same note, unconditional and independent of PGXP: instrumentation needs the
-               source address in a normal (PGXP-off) session. One store per DMA word. */
-            psx_gpu_note_gp0_source(addr);
-
-            /* Instrumentation only, and only for GP0(E5) -- three words in a frame of tens of
-               thousands, so the bus reads below are noise. Everything else this costs is one
-               compare per DMA word. See psx_gpu_note_e5_context() in gpu.h for why. */
-            if ((cmd >> 24) == 0xe5u) {
-                uint32_t ctx[PSX_GPU_E5_CTX];
-                int i;
-
-                for (i = 0; i < PSX_GPU_E5_CTX; i++) {
-                    const uint32_t a = (addr + (uint32_t)((i - 4) * 4)) & 0x1ffffc;
-
-                    ctx[i] = psx_bus_read32(dma->bus, a);
-                }
-
-                psx_gpu_note_e5_context(addr, node_addr, hdr, ctx);
-            }
-
             // Write to GP0
             psx_bus_write32(dma->bus, 0x1f801810, cmd);
 
@@ -303,13 +280,8 @@ void psx_dma_do_gpu_linked(psx_dma_t* dma) {
         if (addr == 0xffffff)
             break;
 
-        node_addr = addr;
         hdr = psx_bus_read32(dma->bus, addr);
         size = hdr >> 24;
-
-        /* Instrumentation only -- this does NOT change the terminator test above. It records
-           whether the pointer just followed was one hardware would have stopped on. */
-        psx_gpu_note_dma_node(addr, hdr);
     }
 }
 
@@ -330,8 +302,6 @@ void psx_dma_do_gpu_request(psx_dma_t* dma) {
                command lists this way too. */
             if (psx_pgxp_active())
                 psx_pgxp_note_gp0_word(dma->gpu.madr);
-
-            psx_gpu_note_gp0_source(dma->gpu.madr);
 
             psx_bus_write32(dma->bus, 0x1f801810, data);
 

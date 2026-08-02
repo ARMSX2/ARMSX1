@@ -536,9 +536,15 @@ TEST_GPU_SOURCES := tests/gpu_renderer_parity.c psx/dev/gpu.c psx/perf.c psx/pgx
 # (PSX_GPU_MASK_WRITE / PSX_GPU_MASK_SKIP) live there and the test asserts them directly, so a
 # header-only change has to relink or the gate keeps passing against a stale binary — which it
 # did, silently, when the contract test was first written.
+# -DARMSX_TEST_OFFSET_CENSUS is deliberately set HERE AND NOWHERE ELSE. It compiles in the
+# drawing-offset census that `offset-stream-integrity` asserts on (psx/dev/gpu.h). That census
+# runs once per primitive inside gpu_render_triangle() / _rect() / _flat_line(), so leaving it
+# in a shipped binary would put ~1800 calls a frame in the hottest function in the emulator and
+# hand a PGO run a profile shaped by test-only code. Adding this flag to any other rule, or to
+# the library build, silently undoes that.
 $(TEST_GPU_BIN): $(TEST_GPU_SOURCES) psx/dev/gpu.h
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DUSE_HARDWARE -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx -Ifrontend $(SDL_CFLAGS) $(TEST_GPU_SOURCES) -lm -o $@
+	$(CC) -std=c11 -O2 -g -DUSE_HARDWARE -DPSXE_DIAG_STDIO_DISABLE -DARMSX_TEST_OFFSET_CENSUS -I. -Ipsx -Ifrontend $(SDL_CFLAGS) $(TEST_GPU_SOURCES) -lm -o $@
 
 test-gpu: $(TEST_GPU_BIN)
 	./$(TEST_GPU_BIN)
