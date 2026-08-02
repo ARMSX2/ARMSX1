@@ -15,6 +15,34 @@ MODE="$1"
 BUILD_JOBS="${BUILD_JOBS:-4}"
 export USE_CHD="${USE_CHD:-1}"
 
+# Profile-guided optimisation. Off unless asked for; forwarded verbatim to make by the android
+# branch below, which is the only target wired for it today. See the PGO block in Makefile for
+# what each value does, frontend/pgo.c for how the profile is collected on-device, and
+# tools/pgo.sh for the loop that drives all of it.
+#
+#   PGO=generate ./build.sh android     instrumented build (slow; for collecting a profile)
+#   PGO=use      ./build.sh android     optimised build against build/pgo/armsx.profdata
+#
+# PGO_PROFILE / PGO_ALLOW_STALE / PGO_STRICT ride along for the staleness guard. PGO_ALLOW_STALE
+# is NOT defaulted here on purpose: the Makefile's default of 0 is what makes a stale profile a
+# build failure instead of a silent slowdown, and defaulting it in two places is how that kind of
+# guard ends up accidentally disabled.
+#
+# Written as if-blocks rather than `[ -n "$x" ] && ...`: under `set -e` that idiom evaluates to a
+# non-zero status on the common path (the variable being unset), which is a footgun waiting for
+# whoever adds the next one.
+PGO="${PGO:-off}"
+PGO_MAKE_ARGS="PGO=${PGO}"
+if [ -n "${PGO_PROFILE:-}" ]; then
+    PGO_MAKE_ARGS="${PGO_MAKE_ARGS} PGO_PROFILE=${PGO_PROFILE}"
+fi
+if [ -n "${PGO_ALLOW_STALE:-}" ]; then
+    PGO_MAKE_ARGS="${PGO_MAKE_ARGS} PGO_ALLOW_STALE=${PGO_ALLOW_STALE}"
+fi
+if [ -n "${PGO_STRICT:-}" ]; then
+    PGO_MAKE_ARGS="${PGO_MAKE_ARGS} PGO_STRICT=${PGO_STRICT}"
+fi
+
 build_fsui_native() {
     if [ "$(uname -s)" = "Darwin" ]; then
         MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-10.15}"
@@ -345,8 +373,16 @@ elif [ "$MODE" = "android" ]; then
     # FSUI cut: the Jetpack Compose front-end owns all menus, so fsui-lib is no longer built or
     # linked. FSUI_INCLUDE_FLAGS/COMPILE_DEFS/LIBS are overridden empty (keeping only
     # -DSDL_MAIN_HANDLED, which the Android external_main entry still needs).
+    if [ "${PGO}" != "off" ]; then
+        echo "pgo: building with PGO=${PGO} (see tools/pgo.sh for the full loop)"
+    fi
+
+    # ${PGO_MAKE_ARGS} is intentionally unquoted: it is a list of make variable assignments and
+    # has to word-split. It is "PGO=off" and nothing else unless PGO was asked for, so the normal
+    # build is byte-identical to what it was before PGO existed.
     make clean
     make \
+        ${PGO_MAKE_ARGS} \
         SDL_STATIC=0 \
         ARMSX_ENABLE_GL="${ARMSX_ENABLE_GL}" \
         ARMSX_ENABLE_VULKAN="${ARMSX_ENABLE_VULKAN}" \

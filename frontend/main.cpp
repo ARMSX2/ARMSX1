@@ -101,6 +101,7 @@ extern "C" {
 // ADPF CPU clock hint + emulation-thread affinity. Both are host scheduling levers, both are
 // default-off, and both compile to empty bodies off Android — see frontend/perf_hint.h.
 #include "perf_hint.h"
+#include "pgo.h"
 #include "render.h"
 // IconsFontAwesome5.h (from fsui-lib's imgui) removed with the FSUI cut — the ICON_FA_* glyphs were
 // used only by the deleted native menus.
@@ -3016,6 +3017,13 @@ class ArmsxSession {
             psx_destroy(psx_);
             psx_ = nullptr;
         }
+
+        // The clean-shutdown PGO flush, riding the same teardown that just flushed the memory
+        // cards inside psx_destroy(). Covers Close Game and switching titles; the background
+        // flush in psxe_host_set_audio_suspended() covers everything else, including being
+        // killed. Both write-then-reset, so the two never double-count each other. No-op in a
+        // normal build (see frontend/pgo.c).
+        armsx_pgo_flush("session-teardown");
 
         if (input_ && !input_attached) {
             psx_input_destroy(input_);
@@ -8061,9 +8069,21 @@ extern "C" PSXE_API void psxe_host_set_paused(int paused) {
 // Honoured (or deliberately ignored) in applyHostControlRequests(), where [audio]
 // background_playback is in scope.
 extern "C" PSXE_API void psxe_host_set_audio_suspended(int suspended) {
-    std::lock_guard<std::mutex> lock(g_host_control_lock);
-    g_host_audio_suspend_pending = true;
-    g_host_audio_suspend_value = suspended != 0;
+    {
+        std::lock_guard<std::mutex> lock(g_host_control_lock);
+        g_host_audio_suspend_pending = true;
+        g_host_audio_suspend_value = suspended != 0;
+    }
+
+    // ★ The PGO counter flush for an instrumented build, and the one that actually matters.
+    // Going off-screen is the last callback guaranteed to arrive before Android may SIGKILL the
+    // process, and SIGKILL means compiler-rt's atexit writer never runs — an instrumented build
+    // without this hook profiles a whole play session and then loses all of it. Deliberately
+    // OUTSIDE the lock above: this does file I/O, and g_host_control_lock is taken on the
+    // emulation thread every loop tick. No-op in a normal build (see frontend/pgo.c).
+    if (suspended) {
+        armsx_pgo_flush("background");
+    }
 }
 
 // 0 = classic 4:3, 1 = square 1:1, 2 = wide 16:9; anything negative drops back to

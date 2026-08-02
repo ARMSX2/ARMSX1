@@ -1,6 +1,13 @@
 .ONESHELL:
 .SHELLFLAGS := -ec
 
+# ★ Pinned, not inherited. GNU make's default goal is whichever target it happens to read FIRST,
+# so any rule added above `all:` silently becomes what a bare `make` builds. Adding the pgo-stamp
+# helper below did exactly that — plain `make` started printing a hash instead of building the
+# emulator, and nothing complained, because ./build.sh names its goals explicitly and every test
+# gate does too. Pinning it here makes where a rule is written irrelevant.
+.DEFAULT_GOAL := all
+
 WASM_TARGET := $(filter wasm,$(MAKECMDGOALS))
 
 ifeq ($(WASM_TARGET),wasm)
@@ -352,6 +359,12 @@ C_SOURCES += frontend/host_usage.c
 # Listed unconditionally like gpu_profile.c: the whole body is behind __ANDROID__ and every entry
 # point compiles to an empty function elsewhere, so no platform needs a conditional here.
 C_SOURCES += frontend/perf_hint.c
+# frontend/pgo.c is the profile-guided-optimisation seam (see the PGO block below, and the long
+# comment at the top of the file). Listed unconditionally like gpu_profile.c: every entry point
+# exists in all three PGO modes, and that is deliberate — a caller whose control flow changed
+# between the instrumented build and the optimised build would lose its own profile to a CFG
+# hash mismatch.
+C_SOURCES += frontend/pgo.c
 ifeq ($(USE_CHD),1)
 C_SOURCES += psx/dev/cdrom/chd.c
 endif
@@ -468,6 +481,188 @@ endif
 RC_OBJS := $(patsubst %.rc,$(OBJ_DIR)/%.o,$(RC_SOURCES))
 ALL_OBJS := $(C_OBJS) $(CPP_OBJS) $(RC_OBJS)
 ALL_OBJS_SHARED := $(C_OBJS_SHARED) $(CPP_OBJS)
+
+# ================================================================================================
+# Profile-guided optimisation (PGO)
+# ================================================================================================
+#
+#   make PGO=generate shared     instrumented: counters compiled in, written on the device.
+#   make PGO=use      shared     optimised against build/pgo/armsx.profdata.
+#   make              shared     (PGO=off, the default) neither.
+#
+# ./build.sh android forwards PGO / PGO_PROFILE / PGO_ALLOW_STALE / PGO_STRICT straight through,
+# and tools/pgo.sh drives the whole loop. Runtime behaviour — where the .profraw lands, and why
+# it has to be written explicitly rather than at exit — is documented in frontend/pgo.c.
+#
+# IR instrumentation (-fprofile-generate), not frontend instrumentation
+# (-fprofile-instr-generate): fewer counters, and it is the one that composes with the -flto in
+# BASE_CFLAGS. The instrumentation and the profile annotation both run PRE-LINK, on the bitcode,
+# so the compile line is what carries -fprofile-use; only -fprofile-generate additionally needs
+# to reach the LINK line, to pull in compiler-rt's profile runtime.
+#
+# ── SCOPE ───────────────────────────────────────────────────────────────────────────────────────
+# psx/ + frontend/ only. Everything else is either built by its own cmake (SDL, libchdr,
+# librashader, adrenotools — untouched by these flags) or is rcheevos, which is listed in
+# C_SOURCES but runs a handful of times a second at most: instrumenting it would add counters and
+# profile bulk to code no amount of PGO will make matter. $(OBJ_DIR)/frontend/pgo.o is excluded
+# too, and that one is REQUIRED, not a judgement call — it is the only file whose control flow
+# legitimately differs between the instrumented and the optimised build, so feeding it its own
+# profile would guarantee the hash mismatch this whole block exists to detect.
+#
+# ── STALENESS ───────────────────────────────────────────────────────────────────────────────────
+# A profile that predates the code does not degrade to "no PGO", it degrades to "PGO pointed at
+# the wrong branches", and it is measurably slower than not using one. The sibling PS2 project
+# lost a large chunk of recompiler throughput to exactly this and it took real effort to find,
+# because nothing said the profile was old. Three independent checks, on purpose:
+#
+#   1. HERE, before a single object compiles. The merged profile carries a provenance file
+#      naming the commit AND a hash over psx/+frontend/ sources; if either disagrees with the
+#      tree being built, this is a hard error. PGO_ALLOW_STALE=1 downgrades it to a warning.
+#      The source hash is the stronger of the two: a commit hash cannot see uncommitted edits.
+#   2. clang, per function. ★ The diagnostic is "function control flow change detected (hash
+#      mismatch)" under -Wbackend-plugin. NOT -Wprofile-instr-out-of-date, which only covers
+#      frontend instrumentation and would silently never fire for this build — assuming
+#      otherwise is exactly how a stale profile gets waved through a build that "had no
+#      warnings". PGO_STRICT=1 (the default) promotes it to an error.
+#   3. Runtime, in logcat, from frontend/pgo.c's constructor — for a build already on a device.
+
+PGO ?= off
+PGO_DIR ?= build/pgo
+PGO_PROFILE ?= $(PGO_DIR)/armsx.profdata
+PGO_PROVENANCE ?= $(PGO_PROFILE).provenance
+PGO_ALLOW_STALE ?= 0
+PGO_STRICT ?= 1
+
+PGO_CFLAGS :=
+PGO_LDFLAGS :=
+PGO_STAMP_DEFS :=
+
+# Everything PGO is applied to, as a file list. $(wildcard) silently drops patterns that match
+# nothing, which is what makes it safe to list a directory that may not exist — unlike a shell
+# glob, which either errors or (worse, under zsh) expands to nothing and hands the hash below an
+# EMPTY input, producing git's empty-blob hash. That value looks like a perfectly good stamp and
+# compares equal to any other empty run, so the staleness guard would silently stop guarding.
+# `make pgo-stamp` below is the only supported way to ask for this; do not reimplement it.
+PGO_STAMP_INPUTS := $(sort $(wildcard \
+	psx/*.c psx/*.h psx/dev/*.c psx/dev/*.h psx/dev/cdrom/*.c psx/dev/cdrom/*.h \
+	psx/input/*.c psx/input/*.h \
+	frontend/*.c frontend/*.h frontend/*.cpp frontend/*.hpp))
+
+# tools/pgo.sh asks the Makefile for the stamp rather than computing its own. Two implementations
+# of the same hash drifting apart is precisely how a staleness guard turns into a rubber stamp,
+# and the first draft of that script did exactly that: its shell glob missed a directory the
+# Makefile pattern also missed, hashed nothing, and got a stable-looking answer that matched
+# nothing forever.
+.PHONY: pgo-stamp
+pgo-stamp:
+	@cat $(PGO_STAMP_INPUTS) | git hash-object --stdin | cut -c1-16
+
+ifneq ($(PGO),off)
+
+# Hash over those sources. Deliberately the SOURCES and not the commit: the commit is what a human
+# reads, this is what actually answers "is the profile describing this code" — it sees uncommitted
+# edits, which a commit hash cannot. Via git hash-object because git is already a hard dependency
+# here (VERSION_TAG) and shasum/sha256sum are spelled differently on macOS and Linux. Computed only
+# when PGO is on: it is a few MB of I/O and every `make clean` would otherwise pay for it.
+PGO_SOURCE_STAMP := $(shell cat $(PGO_STAMP_INPUTS) 2>/dev/null | git hash-object --stdin 2>/dev/null | cut -c1-16)
+PGO_BUILD_COMMIT := $(shell git rev-parse HEAD 2>/dev/null)
+
+# git's hash of empty input. If the file list came out empty this is what lands in the stamp, and
+# it would compare equal to every other broken run — a guard that always says "fresh".
+ifeq ($(PGO_SOURCE_STAMP),e69de29bb2d1d643)
+$(error PGO=$(PGO): the source stamp hashed NOTHING (empty input). PGO_STAMP_INPUTS matched no \
+files, so staleness could never be detected. Refusing to build)
+endif
+
+ifeq ($(strip $(PGO_SOURCE_STAMP)),)
+$(error PGO=$(PGO): could not compute a source stamp (is git on PATH?). Refusing to build a \
+profile that cannot be checked for staleness later)
+endif
+
+PGO_STAMP_DEFS := -DARMSX_PGO_BUILD_COMMIT='"$(PGO_BUILD_COMMIT)"' \
+                  -DARMSX_PGO_SOURCE_STAMP='"$(PGO_SOURCE_STAMP)"'
+
+endif
+
+ifeq ($(PGO),generate)
+
+PGO_CFLAGS := -fprofile-generate
+PGO_LDFLAGS := -fprofile-generate
+PGO_STAMP_DEFS += -DARMSX_PGO_GENERATE=1
+$(info [pgo] INSTRUMENTED build — commit $(PGO_BUILD_COMMIT), source stamp $(PGO_SOURCE_STAMP))
+$(info [pgo] this binary is for profiling only; it is several times slower than a release build)
+
+else ifeq ($(PGO),use)
+
+ifeq ($(wildcard $(PGO_PROFILE)),)
+$(error PGO=use: no merged profile at $(PGO_PROFILE). Build PGO=generate, play the device \
+workloads, then run: tools/pgo.sh merge)
+endif
+
+ifeq ($(wildcard $(PGO_PROVENANCE)),)
+ifneq ($(PGO_ALLOW_STALE),1)
+$(error PGO=use: $(PGO_PROFILE) exists but has no provenance file at $(PGO_PROVENANCE), so \
+there is no way to tell what code it was recorded against. Re-merge with tools/pgo.sh merge, \
+or set PGO_ALLOW_STALE=1 to build anyway)
+endif
+PGO_PROFILE_COMMIT := unknown
+PGO_PROFILE_STAMP := unknown
+else
+PGO_PROFILE_COMMIT := $(shell sed -n 's/^commit=//p' $(PGO_PROVENANCE) 2>/dev/null | head -1)
+PGO_PROFILE_STAMP := $(shell sed -n 's/^stamp=//p' $(PGO_PROVENANCE) 2>/dev/null | head -1)
+endif
+
+ifeq ($(strip $(PGO_PROFILE_STAMP)),$(strip $(PGO_SOURCE_STAMP)))
+PGO_PROFILE_FRESH := 1
+else
+PGO_PROFILE_FRESH := 0
+endif
+
+ifeq ($(PGO_PROFILE_FRESH),0)
+ifeq ($(PGO_ALLOW_STALE),1)
+$(warning [pgo] ★ STALE PROFILE, building anyway because PGO_ALLOW_STALE=1.)
+$(warning [pgo]   profile recorded from commit $(PGO_PROFILE_COMMIT) stamp $(PGO_PROFILE_STAMP))
+$(warning [pgo]   tree being built is    commit $(PGO_BUILD_COMMIT) stamp $(PGO_SOURCE_STAMP))
+$(warning [pgo]   a mismatched profile makes code SLOWER than no profile at all.)
+else
+$(error PGO=use: STALE PROFILE. $(PGO_PROFILE) was recorded from commit $(PGO_PROFILE_COMMIT) \
+(source stamp $(PGO_PROFILE_STAMP)); this tree is commit $(PGO_BUILD_COMMIT) (source stamp \
+$(PGO_SOURCE_STAMP)). Using it would mis-optimise rather than simply do nothing. Re-run the \
+loop (tools/pgo.sh generate ...) or, if you have measured that it still helps, rebuild with \
+PGO_ALLOW_STALE=1)
+endif
+endif
+
+# -Wbackend-plugin is on by default; named explicitly so that turning it OFF has to be a
+# deliberate act rather than a side effect of someone widening a -Wno- list.
+PGO_CFLAGS := -fprofile-use=$(abspath $(PGO_PROFILE)) -Wbackend-plugin
+ifeq ($(PGO_STRICT),1)
+PGO_CFLAGS += -Werror=backend-plugin
+endif
+PGO_STAMP_DEFS += -DARMSX_PGO_USE=1 \
+                  -DARMSX_PGO_PROFILE_COMMIT='"$(PGO_PROFILE_COMMIT)"' \
+                  -DARMSX_PGO_PROFILE_STAMP='"$(PGO_PROFILE_STAMP)"' \
+                  -DARMSX_PGO_PROFILE_FRESH=$(PGO_PROFILE_FRESH)
+$(info [pgo] OPTIMISED build using $(PGO_PROFILE) (commit $(PGO_PROFILE_COMMIT), stamp $(PGO_PROFILE_STAMP)))
+ifeq ($(PGO_STRICT),1)
+$(info [pgo] PGO_STRICT=1: a per-function profile hash mismatch is an ERROR, not a warning)
+endif
+
+else ifneq ($(PGO),off)
+$(error PGO must be one of: off, generate, use (got '$(PGO)'))
+endif
+
+# The emulator's own translation units, minus the two exclusions argued for above. $(sort) also
+# de-duplicates, since ALL_OBJS and ALL_OBJS_SHARED overlap almost entirely.
+PGO_OBJS := $(sort $(filter-out $(RCHEEVOS_OBJS) $(RC_OBJS) $(OBJ_DIR)/frontend/pgo.o, \
+                                $(ALL_OBJS) $(ALL_OBJS_SHARED)))
+
+$(PGO_OBJS): BASE_CFLAGS += $(PGO_CFLAGS)
+$(PGO_OBJS): BASE_CXXFLAGS += $(PGO_CFLAGS)
+
+# pgo.o gets the provenance -D's and NOT the instrumentation flags. It is the file that reports
+# what this build is; it must not be described by the profile it helps collect.
+$(OBJ_DIR)/frontend/pgo.o: BASE_CFLAGS += $(PGO_STAMP_DEFS)
 
 # Force dynamic SDL when building the shared library
 ifneq (,$(filter shared,$(MAKECMDGOALS)))
@@ -765,7 +960,7 @@ $(RUNTIME_ICON_DEST): $(RUNTIME_ICON_SRC) | $(BIN_DIR)
 	cp $< $@
 
 $(BIN): $(ALL_OBJS) $(RUNTIME_ICON_DEST) $(CHD_BUILD_DEPS) | $(BIN_DIR)
-	$(CXX) $(ALL_OBJS) $(CHD_LINK_LIBS) $(FSUI_LIBS) -o $(BIN) $(SDL_LIBS) $(PLATFORM_EXTRA_LDFLAGS) $(PLATFORM_EXTRA_LIBS) $(WASM_LDFLAGS)
+	$(CXX) $(ALL_OBJS) $(CHD_LINK_LIBS) $(FSUI_LIBS) -o $(BIN) $(SDL_LIBS) $(PLATFORM_EXTRA_LDFLAGS) $(PLATFORM_EXTRA_LIBS) $(PGO_LDFLAGS) $(WASM_LDFLAGS)
 ifeq ($(WASM_TARGET),wasm)
 	@if [ ! -f "$(BIN)" ]; then \
 		echo "WASM build did not produce $(BIN)"; \
@@ -778,8 +973,11 @@ $(VITA_NATIVE_LIB): $(ALL_OBJS) $(RUNTIME_ICON_DEST) | $(BIN_DIR)
 	$(AR) rcs $@ $(ALL_OBJS)
 	$(RANLIB) $@
 
+# $(PGO_LDFLAGS) is -fprofile-generate on an instrumented build and empty otherwise. It is what
+# links compiler-rt's profile runtime in; without it the link fails on an undefined
+# __llvm_profile_runtime rather than producing a .so that quietly writes nothing.
 $(SHARED_BIN): $(ALL_OBJS_SHARED) $(CHD_BUILD_DEPS) | $(BIN_DIR)
-	$(CXX) $(SHARED_LDFLAGS) $(ALL_OBJS_SHARED) $(CHD_LINK_LIBS) $(FSUI_LIBS) -o $(SHARED_BIN) $(SDL_LIBS_SHARED) $(PLATFORM_EXTRA_LDFLAGS) $(PLATFORM_EXTRA_LIBS)
+	$(CXX) $(SHARED_LDFLAGS) $(ALL_OBJS_SHARED) $(CHD_LINK_LIBS) $(FSUI_LIBS) -o $(SHARED_BIN) $(SDL_LIBS_SHARED) $(PLATFORM_EXTRA_LDFLAGS) $(PLATFORM_EXTRA_LIBS) $(PGO_LDFLAGS)
 
 clean:
 	rm -rf "$(BIN_DIR)"

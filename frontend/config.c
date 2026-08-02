@@ -13,6 +13,7 @@
 
 #include "config.h"
 #include "gpu_profile.h"
+#include "pgo.h"
 #include "../psx/fastboot.h"
 #include "../psx/psx.h"
 #include "../psx/dev/cdrom/cdrom.h"
@@ -1576,6 +1577,13 @@ void psxe_cfg_set_pref_path(const char* path) {
         g_pref_path[len++] = '/';
 
     g_pref_path[len] = '\0';
+
+    /* An instrumented (PGO=generate) build writes its counters under this directory. Hooked here
+       rather than in the Android JNI host because BOTH entry paths that resolve the app's private
+       files dir — EnsureAchievementsReady() and runVMThread() — already funnel it through this
+       one function, and it is a no-op after the first call, so this inherits that exactly-once
+       property for free. Compiles to an empty call in a normal build (see frontend/pgo.c). */
+    armsx_pgo_set_output_dir(g_pref_path);
 }
 
 #undef STR1
