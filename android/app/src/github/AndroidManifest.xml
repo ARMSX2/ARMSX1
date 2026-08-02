@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GitHub (sideload) flavor only. The manifest merger UNIONS this onto
+  src/main/AndroidManifest.xml, adding the sideload-only in-app updater:
+
+    - REQUEST_INSTALL_PACKAGES lets the updater hand a downloaded APK to the
+      system package installer. A self-updating app is a hard Play-policy
+      violation (Play must own updates), so it can NEVER ship in an AAB.
+
+  The play flavor has no manifest of its own, so it inherits the clean
+  src/main manifest and cannot pick this up by construction.
+  BuildConfig.IN_APP_UPDATER gates the shared call sites (AppTab, the app
+  root's AutoUpdateGate), src/play supplies no-op stubs of both, and the
+  :app:verifyPlayFlavorCleanDebug/Release Gradle tasks — which finalize every
+  play assemble/bundle task, so they cannot be skipped — fail the build if this
+  permission or the updater code ever reaches a play artifact.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- In-app GitHub-release updater (github flavor only) — install the downloaded APK. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- FileProvider that hands the downloaded update APK to the package installer. Github flavor
+         only (merged into the main <application>); never present in the play build. -->
+    <application>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updateprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
+    </application>
+
+</manifest>

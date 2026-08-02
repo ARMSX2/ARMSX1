@@ -1,0 +1,47 @@
+name: ARMSX
+options:
+  deploymentTarget:
+    iOS: "15.1"
+settings:
+  DEVELOPMENT_TEAM: ""
+  CLANG_ENABLE_OBJC_ARC: YES
+targets:
+  ARMSX:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.1"
+    sources:
+      - path: Sources
+    resources:
+      - path: ../Contents/bios.bin
+        optional: true
+      - path: ../bios.bin
+        optional: true
+      - path: ../../icons
+        optional: true
+      - path: ../../icon.icon
+        optional: true
+    settings:
+      INFOPLIST_FILE: Sources/Info.plist
+      PRODUCT_BUNDLE_IDENTIFIER: com.nanodata.armsx
+      LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+      LIBRARY_SEARCH_PATHS:
+        - "$(inherited)"
+        - "$(SDKROOT)/usr/lib/swift"
+        - "$(PROJECT_DIR)/../Frameworks"
+      FRAMEWORK_SEARCH_PATHS:
+        - "$(inherited)"
+        - "$(PROJECT_DIR)/../Frameworks"
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    dependencies:
+      - framework: ../Frameworks/SDL2.xcframework
+        embed: true
+        codeSign: true
+      - framework: ../Frameworks/libarmsx.dylib
+        embed: true
+        codeSign: true
+schemes:
+  ARMSX:
+    build:
+      targets:
+        ARMSX: all

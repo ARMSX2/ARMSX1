@@ -1,0 +1,40 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:0.66422,0.66424,0.66423,1.00000",
+      "srgb:0.66422,0.66424,0.66423,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : "none",
+          "image-name" : "88161-playstation-brand-area-png-image-high-quality.png",
+          "name" : "88161-playstation-brand-area-png-image-high-quality",
+          "position" : {
+            "scale" : 0.17,
+            "translation-in-points" : [
+              0,
+              -34
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

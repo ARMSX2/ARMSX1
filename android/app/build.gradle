@@ -1,0 +1,455 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
+plugins {
+    id 'com.android.application'
+}
+// AGP 9 has built-in Kotlin support, so the kotlin.android plugin must NOT be applied. Only the
+// first-party Compose compiler plugin is applied separately (version tracks Kotlin, from the
+// buildscript classpath in root build.gradle). This mirrors the ARMSX2 source.
+apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+
+def repoDebugKeystore = file("debug.keystore")
+def hasRepoDebugKeystore = repoDebugKeystore.exists()
+
+// ---- Discord rich presence ----------------------------------------------------------------
+//
+// The application id lives in ONE place, src/main/assets/discord_creds.env (gitignored), and is
+// read from there by both ends: here, for the OAuth callback scheme the manifest routes back on,
+// and by build.sh, for the redirect URI compiled into cpp/discord_bridge.cpp. Deriving it twice
+// from the same file is what stops the browser handing the code back to a scheme nothing listens
+// for — a failure with no error anywhere, just a sign-in that never completes.
+def discordEnvFile = file("src/main/assets/discord_creds.env")
+def discordProps = new Properties()
+if (discordEnvFile.exists()) {
+    discordEnvFile.withInputStream { discordProps.load(it) }
+}
+def discordApplicationId = discordProps.getProperty("APPLICATION_ID", "").trim()
+// Accept a bare scheme or anything written as a URI, and keep only the scheme part: the manifest's
+// <data android:scheme> wants "discord-123", not "discord-123://".
+def sanitizeScheme = { String raw ->
+    if (!raw) {
+        return ""
+    }
+    def trimmed = raw.trim()
+    def protocolIdx = trimmed.indexOf("://")
+    if (protocolIdx >= 0) {
+        trimmed = trimmed.substring(0, protocolIdx)
+    }
+    def colonIdx = trimmed.indexOf(':')
+    if (colonIdx >= 0) {
+        trimmed = trimmed.substring(0, colonIdx)
+    }
+    def slashIdx = trimmed.indexOf('/')
+    if (slashIdx >= 0) {
+        trimmed = trimmed.substring(0, slashIdx)
+    }
+    return trimmed
+}
+def discordSchemeFromEnv = sanitizeScheme(discordProps.getProperty("APPLICATION_SCHEME", ""))
+// .toString() so the placeholder is a plain String, not a lazily-evaluated Groovy GString.
+def discordCallbackScheme = (discordSchemeFromEnv ? discordSchemeFromEnv : (discordApplicationId ? "discord-${discordApplicationId}" : "armsx")).toString()
+// The Social SDK is consumed as an .aar, not unpacked by hand: the .aar is its manifest entries,
+// its consumer proguard rules and its transitive dependencies too, not just a .so. Note that the
+// helper sources (com/armsx2/discord) reference com.discord.socialsdk directly, so a tree without
+// this file cannot compile them — this flag gates packaging and the manifest, not compilation.
+def isDiscordSdkAvailable = file("${project.projectDir}/libs/discord_partner_sdk.aar").exists()
+
+// ---- App version -------------------------------------------------------------------------------
+//
+// Overridable from the command line so a release build can stamp the tag it is published under:
+//     ./gradlew :app:assembleGithubRelease -Parmsx.versionCode=9 -Parmsx.versionName=1.2.0
+// The defaults are the historical hardcoded values, so an ordinary build is unchanged.
+//
+// This matters to the in-app updater (src/github): it decides whether a GitHub release is newer by
+// comparing the release tag against BuildConfig.VERSION_NAME. A published APK still carrying the
+// placeholder 0.1.0 would go on offering the user the very release they just installed, forever.
+def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.1.0').toString()
+def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '1').toString() as Integer
+
+android {
+    namespace 'com.armsx2'
+    compileSdk rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        // applicationId stays com.nanodata.armsx so SDL_GetPrefPath / libarmsx / the JNI binding
+        // (Java_com_nanodata_armsx_*) and the native settings/BIOS paths are all unchanged. Only
+        // the module NAMESPACE moves to com.armsx2 so the lifted UI's R/BuildConfig references
+        // (com.armsx2.R, com.armsx2.BuildConfig) resolve without touching 49k lines.
+        applicationId 'com.nanodata.armsx'
+        minSdk rootProject.ext.minSdkVersion
+        targetSdk rootProject.ext.targetSdkVersion
+        versionCode armsxVersionCode
+        versionName armsxVersionName
+        vectorDrawables.useSupportLibrary = true
+        // ARMSX is sideloaded (not Play/GPL-limited) → always all-files storage (matches ARMSX2's
+        // github flavor). The lifted onboarding reads BuildConfig.STORAGE_ALL_FILES.
+        buildConfigField "boolean", "STORAGE_ALL_FILES", "true"
+        // IN_APP_UPDATER is declared PER-FLAVOR (see productFlavors below), deliberately not here:
+        // it must be true for github and false for play, and a defaultConfig value would silently
+        // apply to any future flavor that forgot to set it — which for this flag means shipping a
+        // self-updater to Play.
+
+        // Consumed by AndroidManifest.xml's com.discord.socialsdk.AuthenticationActivity intent
+        // filter. Must equal the redirect scheme registered in the Discord developer portal.
+        //
+        // .put() rather than "manifestPlaceholders = [...]": under AGP 9 this is a lazy
+        // MapProperty, which accepts put() but not a bare Groovy map assignment. put() is correct
+        // for the plain-Map form too, so it is the version-independent spelling.
+        manifestPlaceholders.put("discordCallbackScheme", discordCallbackScheme)
+        buildConfigField "boolean", "DISCORD_INTEGRATION_ENABLED", isDiscordSdkAvailable ? "true" : "false"
+
+        // arm64 only. libarmsx.so / libSDL2.so / ANGLE are all built for arm64-v8a alone, so this
+        // app cannot start on any other ABI — but the Discord SDK .aar carries armeabi-v7a, x86
+        // and x86_64, and without a filter every one of them is packaged. That was ~24 MB of
+        // libraries for architectures the build can never run on.
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // ---- Distribution split (mirrors ARMSX2's "store" dimension) --------------------------------
+    //
+    // github = the sideloaded APK. Merges src/github/AndroidManifest.xml, which adds
+    //          REQUEST_INSTALL_PACKAGES and the update FileProvider, and compiles
+    //          src/github/java's real in-app updater.
+    // play   = anything destined for an app bundle. Has NO manifest of its own, so it inherits the
+    //          clean src/main manifest by construction, and compiles src/play/java's no-op
+    //          UpdaterEntry/AutoUpdateGate stubs instead. A self-updating app is a hard Play-policy
+    //          violation, so the updater can never be in it.
+    //
+    // The stubs and the real implementation declare the SAME symbols, which is why the stub had to
+    // move out of src/main and into src/play: a flavor source set is added to main, not swapped for
+    // it, so leaving it in place would be a redeclaration error in the github variant.
+    //
+    // Belt and braces: :app:verifyPlayFlavorClean (below) scans the artifact a play variant
+    // actually produces and fails the build if any updater fingerprint is in it.
+    flavorDimensions 'store'
+    productFlavors {
+        github {
+            dimension 'store'
+            buildConfigField "boolean", "IN_APP_UPDATER", "true"
+        }
+        play {
+            dimension 'store'
+            buildConfigField "boolean", "IN_APP_UPDATER", "false"
+        }
+    }
+
+    signingConfigs {
+        if (hasRepoDebugKeystore) {
+            debug {
+                storeFile repoDebugKeystore
+                storePassword "android"
+                keyAlias "androiddebugkey"
+                keyPassword "android"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            matchingFallbacks = ['release']
+            if (hasRepoDebugKeystore) {
+                signingConfig signingConfigs.debug
+            }
+        }
+        release {
+            if (hasRepoDebugKeystore) {
+                signingConfig signingConfigs.debug
+            }
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    // Under AGP 9 built-in Kotlin, the Kotlin jvmTarget follows compileOptions (17) — no separate
+    // kotlinOptions block is available or needed.
+
+    // AGP 9 renamed packagingOptions -> packaging.
+    packaging {
+        resources {
+            excludes += ['META-INF/DEPENDENCIES']
+        }
+        jniLibs {
+            // REQUIRED by adrenotools, not a size/perf preference.
+            //
+            // adrenotools loads custom GPU drivers by dlopen()ing libmain_hook.so and friends BY
+            // PATH out of nativeLibraryDir. AGP's modern default keeps the .so files compressed
+            // inside the APK and never extracts them, so /data/app/.../lib/arm64/ does not exist
+            // and every custom-driver load fails with the hooks "missing" while they are plainly
+            // listed in the APK. Legacy packaging extracts them to disk, which is what makes the
+            // hook directory real.
+            //
+            // Set here rather than as android:extractNativeLibs in the manifest: AGP rejects the
+            // manifest attribute outright and fails packaging with a message pointing here.
+            useLegacyPackaging = true
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+        compose true
+    }
+
+    sourceSets {
+        main {
+            // Pull in SDL2's org.libsdl.app Java (EmulatorActivity extends SDLActivity). SDL's own
+            // res/ is intentionally NOT added: it re-declares app_name / AppTheme / ic_launcher,
+            // which this module now owns (see src/main/res). Keeping both would be a duplicate-
+            // resource error, and our definitions are the ones we want.
+            java.srcDirs += ['../../third_party/SDL/android-project/app/src/main/java']
+            assets.srcDirs += ['src/main/assets']
+            jniLibs.srcDirs += ['src/main/jniLibs']
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.browser:browser:1.8.0'
+    implementation 'androidx.core:core-ktx:1.19.0'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'com.google.android.material:material:1.14.0'
+    implementation 'androidx.activity:activity-compose:1.13.0'
+
+    def composeBom = platform("androidx.compose:compose-bom:${rootProject.ext.composeBomVersion}")
+    implementation composeBom
+    androidTestImplementation composeBom
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-core'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'br.com.devsrsouza.compose.icons:font-awesome:1.1.1'
+    implementation 'br.com.devsrsouza.compose.icons:line-awesome:1.1.1'
+    implementation 'org.jetbrains.kotlin:kotlin-reflect:2.4.0'
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.foundation:foundation'
+    implementation 'androidx.documentfile:documentfile:1.1.0'
+    implementation 'io.coil-kt:coil-compose:2.7.0'
+    implementation 'io.coil-kt:coil-gif:2.7.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.11.0'
+
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    // Discord Social SDK. Resolved from app/libs via the flatDir repository in settings.gradle.
+    //
+    // The .aar rather than its unpacked pieces, and androidx.browser above is why: the SDK's
+    // AuthenticationActivity drives sign-in through Custom Tabs, and hand-staging the pieces
+    // bypasses the mechanism that delivers a library's transitive dependencies — the OAuth round
+    // trip then completes and the result is dropped on the Java side with no error anywhere.
+    if (isDiscordSdkAvailable) {
+        // group:'' is explicit — a flatDir artifact has no group, and AGP 9 resolves it only when
+        // the coordinate says so rather than leaving the group null.
+        implementation(group: '', name: 'discord_partner_sdk', ext: 'aar')
+    } else {
+        logger.lifecycle("[app] Discord SDK not found; Discord integration will be disabled.")
+    }
+}
+
+def repoRootDir = rootProject.projectDir.parentFile
+def nativeOutput = file("$projectDir/src/main/jniLibs/arm64-v8a/libarmsx.so")
+def skipNativePrepare = System.getenv("ARMSX_SKIP_NATIVE_PREPARE") == "1"
+
+// build.sh shells out to cmake, which is not on a normal PATH — it ships inside the Android SDK.
+// Without this the task fails with a bare "cmake: command not found" partway through, AFTER
+// build.sh has already reported its NDK banner, which reads like a working build.
+def androidSdkDir = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?:
+    new File(System.getProperty("user.home"), "Library/Android/sdk").absolutePath
+def sdkCmakeBinDirs = new File(androidSdkDir, "cmake").listFiles()
+    ?.findAll { it.isDirectory() && new File(it, "bin/cmake").exists() }
+    ?.sort { it.name }
+    ?.collect { new File(it, "bin").absolutePath } ?: []
+
+// Gradle 9 removed Project.exec() from task actions; ExecOperations is the supported
+// replacement and has to be injected, which means a real task class rather than a closure.
+abstract class BuildNativeLibraries extends DefaultTask {
+    @InputFile abstract RegularFileProperty getBuildScript()
+    @OutputFile abstract RegularFileProperty getNativeLibrary()
+    @Internal abstract DirectoryProperty getRepoRoot()
+    @Internal abstract ListProperty<String> getExtraPathEntries()
+
+    @Inject abstract ExecOperations getExecOperations()
+
+    @TaskAction
+    void build() {
+        def extra = extraPathEntries.get()
+        execOperations.exec { spec ->
+            spec.workingDir = repoRoot.get().asFile
+            spec.commandLine "./build.sh", "android"
+            if (!extra.isEmpty()) {
+                spec.environment "PATH", (extra + [System.getenv("PATH") ?: ""]).join(File.pathSeparator)
+            }
+        }
+    }
+}
+
+tasks.register("prepareNativeBinaries", BuildNativeLibraries) {
+    group = "native"
+    description = "Build SDL2/libarmsx via build.sh android."
+    buildScript.set(new File(repoRootDir, "build.sh"))
+    nativeLibrary.set(nativeOutput)
+    repoRoot.set(repoRootDir)
+    extraPathEntries.set(sdkCmakeBinDirs)
+    // Set ARMSX_SKIP_NATIVE_PREPARE=1 when you are driving ./build.sh android yourself. Two
+    // concurrent native builds share bin/obj and clobber each other, so gradle must not start
+    // one behind your back.
+    onlyIf { !skipNativePrepare }
+}
+
+preBuild.dependsOn(tasks.named("prepareNativeBinaries"))
+
+// ---- Fail-closed guard: the in-app updater must never reach a play artifact ---------------------
+//
+// The flavor split (src/github vs src/play) is what keeps the self-updater — a hard Play-policy
+// violation — out of anything uploaded to Play. That split is enforced by source-set layout alone,
+// which is exactly the kind of invariant that silently breaks: a stray import, someone moving the
+// real UpdaterEntry back to src/main, or a REQUEST_INSTALL_PACKAGES added to src/main's manifest
+// "to fix a build" would all reintroduce it with no error anywhere.
+//
+// So the check is made on the ARTIFACT, not on the sources: every .apk / .aab a play variant
+// produces is opened and scanned for fingerprints only the real updater can leave behind. Source
+// greps are not used on purpose — the word REQUEST_INSTALL_PACKAGES appears in the *comments* of
+// src/play and src/main, so a source grep is both false-positive-prone and (for generated or
+// merged content) blind.
+//
+// Fingerprint choice was control-tested against a built pair of APKs: every string below is present
+// in app-github-debug.apk and absent from app-play-debug.apk. Note what is deliberately NOT on the
+// list — the releases URL "https://api.github.com/repos/ARMSX2/ARMSX1/releases". News.kt in
+// src/main uses the identical string, so it is in BOTH flavors' dex and would fire on every play
+// build. A guard that cries wolf gets deleted.
+abstract class VerifyPlayFlavorClean extends DefaultTask {
+    @Input abstract Property<String> getVariantName()
+    /** Output dirs that may hold this variant's .apk / .aab. */
+    @Internal abstract ListProperty<String> getArtifactRoots()
+    /** Generated BuildConfig.java dir for this variant — IN_APP_UPDATER must be false there. */
+    @Internal abstract DirectoryProperty getGeneratedBuildConfigDir()
+
+    @TaskAction
+    void verify() {
+        // Only entries that can carry code or manifest data are read; scanning the whole zip would
+        // mean reading ~100 MB of assets and native libraries on every build. A local closure and
+        // not a method: Groovy cannot dispatch a private method of the task class from inside the
+        // entry-iteration closure below (it fails at execution time with "Could not find method").
+        def isScannable = { String name ->
+            name.endsWith(".dex") || name.endsWith("AndroidManifest.xml") || name.endsWith("resources.arsc")
+        }
+
+        // Manifest entries in an APK are binary XML whose string pool is UTF-16LE, while dex and
+        // the AAB's protobuf manifest are UTF-8. Both encodings are searched for every marker, so
+        // one scanner covers APK and AAB alike. Latin-1 decoding is a byte-for-byte round trip,
+        // which turns the byte search into a plain String.contains.
+        def markers = [
+            "android.permission.REQUEST_INSTALL_PACKAGES", // the permission itself
+            ".updateprovider",                             // update FileProvider authority
+            "application/vnd.android.package-archive",     // the "install this APK" intent
+            "ARMSX1-Updater/",                             // updater User-Agent
+            "armsx1-update.apk",                           // downloaded-APK filename
+        ]
+
+        def artifacts = []
+        artifactRoots.get().each { root ->
+            def dir = new File(root)
+            if (!dir.isDirectory()) {
+                return
+            }
+            dir.eachFileRecurse { f ->
+                if (f.isFile() && (f.name.endsWith(".apk") || f.name.endsWith(".aab"))) {
+                    artifacts << f
+                }
+            }
+        }
+        if (artifacts.isEmpty()) {
+            // Fail closed. "Nothing to check" must never read as "check passed" — if packaging
+            // produced no artifact, something upstream already went wrong.
+            throw new GradleException(
+                "verify ${variantName.get()}: no .apk/.aab found under ${artifactRoots.get()} — " +
+                "nothing was verified. If an earlier task failed, fix that first.")
+        }
+
+        def violations = []
+        artifacts.each { File artifact ->
+            def zip = new java.util.zip.ZipFile(artifact)
+            try {
+                zip.entries().each { entry ->
+                    if (entry.isDirectory() || !isScannable(entry.name)) {
+                        return
+                    }
+                    def raw = zip.getInputStream(entry).withStream { it.bytes }
+                    def haystack = new String(raw, "ISO-8859-1")
+                    markers.each { m ->
+                        if (haystack.contains(m)) {
+                            violations << "${artifact.name}!${entry.name}: '${m}' (utf-8)"
+                        } else if (haystack.contains(new String(m.getBytes("UTF-16LE"), "ISO-8859-1"))) {
+                            violations << "${artifact.name}!${entry.name}: '${m}' (utf-16le)"
+                        }
+                    }
+                }
+            } finally {
+                zip.close()
+            }
+        }
+
+        // Second, independent layer: the compile-time gate the shared call sites read. If this were
+        // ever true for play, AppTab/MainActivityRuntime would call into the updater (the src/play
+        // stub, today — but the flag is what makes the split load-bearing, so it is checked too).
+        def bcDir = generatedBuildConfigDir.get().asFile
+        if (bcDir.isDirectory()) {
+            bcDir.eachFileRecurse { f ->
+                if (f.name == "BuildConfig.java" && f.text.contains("IN_APP_UPDATER = true")) {
+                    violations << "${f}: IN_APP_UPDATER is true for a play variant"
+                }
+            }
+        }
+
+        if (!violations.isEmpty()) {
+            throw new GradleException(
+                "PLAY FLAVOR IS NOT CLEAN (${variantName.get()}) — the in-app updater reached a Play " +
+                "artifact. A self-updating app is a Play-policy violation; this build must not be " +
+                "uploaded.\n  " + violations.join("\n  "))
+        }
+        logger.lifecycle("[verifyPlayFlavorClean] ${variantName.get()}: clean " +
+            "(${artifacts.size()} artifact(s), ${markers.size()} updater fingerprints, none present)")
+    }
+}
+
+def playVerifyTasks = []
+android.buildTypes.all { bt ->
+    def btName = bt.name
+    def cap = btName.capitalize()
+    def variant = "play${cap}"
+    def verify = tasks.register("verifyPlayFlavorClean${cap}", VerifyPlayFlavorClean) {
+        group = "verification"
+        description = "Fail the build if the ${variant} artifact carries in-app-updater code or REQUEST_INSTALL_PACKAGES."
+        variantName.set(variant)
+        artifactRoots.set([
+            layout.buildDirectory.dir("outputs/apk/play/${btName}").get().asFile.absolutePath,
+            layout.buildDirectory.dir("outputs/bundle/${variant}").get().asFile.absolutePath,
+        ])
+        generatedBuildConfigDir.set(layout.buildDirectory.dir("generated/source/buildConfig/play/${btName}"))
+        // A guard that can go UP-TO-DATE is not a guard: it would be skipped on exactly the
+        // rebuild where someone had just changed something.
+        outputs.upToDateWhen { false }
+    }
+    playVerifyTasks << verify
+    // finalizedBy, not dependsOn: the check needs the packaged artifact, so it has to run AFTER
+    // packaging — and a failing finalizer still fails the build, which is the property that
+    // matters. Both the APK (assemble) and the bundle (bundle) paths are wired, so there is no
+    // way to produce a play artifact without the check running.
+    tasks.matching { it.name == "assemble${variant.capitalize()}" || it.name == "bundle${variant.capitalize()}" }
+        .configureEach { finalizedBy(verify) }
+}
+
+// Convenience entry point: builds every play APK and checks it. The per-build-type tasks above are
+// what run automatically; this one exists so the guard can be exercised on its own.
+tasks.register("verifyPlayFlavorClean") {
+    group = "verification"
+    description = "Build every play variant and verify none of them contains the in-app updater."
+    dependsOn(playVerifyTasks)
+    android.buildTypes.all { bt -> dependsOn("assemblePlay${bt.name.capitalize()}") }
+}

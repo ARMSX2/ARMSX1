@@ -1,0 +1,52 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:9.2.1'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.0"
+        // Compose compiler is a first-party Kotlin plugin from Kotlin 2.0+; version tracks Kotlin.
+        classpath "org.jetbrains.kotlin:compose-compiler-gradle-plugin:2.4.0"
+    }
+}
+
+plugins {
+    id 'com.android.application' version '9.2.1' apply false
+    id 'com.android.library' version '9.2.1' apply false
+}
+
+ext {
+    minSdkVersion = 26
+    // Bumped to match the ARMSX2 UI source (Compose BOM 2026.06.01 needs a recent platform).
+    targetSdkVersion = 37
+    compileSdkVersion = 37
+    ndkVersion = '27.0.12077973'
+    // Bumped to 2.x so the Compose compiler plugin is available and the lifted Compose code
+    // (authored against Kotlin 2.4.0) compiles unchanged.
+    kotlinVersion = '2.4.0'
+    composeBomVersion = '2026.06.01'
+}
+
+allprojects { project ->
+    repositories {
+        google()
+        mavenCentral()
+        // Local .aars, currently just the Discord Social SDK in app/libs.
+        //
+        // Declared HERE and not in settings.gradle on purpose: settings.gradle uses
+        // RepositoriesMode.PREFER_PROJECT, which means a project that declares its own
+        // repositories — which this block does, for every project — ignores the ones declared in
+        // settings entirely. A flatDir added there would resolve nothing and the .aar dependency
+        // would fail with a plain "could not find discord_partner_sdk.aar".
+        flatDir { dirs "${project.projectDir}/libs" }
+    }
+
+    configurations.all { config ->
+        config.resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'org.jetbrains.kotlin') {
+                details.useVersion(rootProject.ext.kotlinVersion)
+            }
+        }
+    }
+}

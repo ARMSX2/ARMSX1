@@ -1,0 +1,40 @@
+ARMSX CRT shader pack
+=====================
+
+Copyright (c) 2026 Moon. All rights reserved.
+
+    armsx-crt.slang
+    Sharp Scanlines.slangp
+    Aperture Grille.slangp
+    Slot Mask.slangp
+    Curved TV.slangp
+
+These files are ARMSX Moon Materials and are covered by the ARMSX licence in the
+repository root (LICENSE). They are ORIGINAL WORK written for ARMSX, not adapted from
+any existing shader collection.
+
+Why they are original rather than bundled from libretro
+------------------------------------------------------
+The obvious source for CRT presets is libretro's `slang-shaders`, and it is a superb
+collection. It is also a MIXED-LICENCE work — most of the CRT shaders in it are
+GPL-2.0-or-later, some are public domain, and a few carry no clear header at all.
+ARMSX is proprietary. Redistributing GPL shader source inside a proprietary app is
+defensible (they are data interpreted at runtime, not linked code, so they do not reach
+the emulator's own licence) but it obliges us to ship each licence text, preserve every
+header, and re-audit the set on every update — for a handful of presets whose job is to
+make the app look right on first run.
+
+Writing them instead removes the question. There are no third-party obligations attached
+to anything in this folder.
+
+Third-party shaders are still fully supported — they are just not REDISTRIBUTED. The
+in-app shader manager (Settings > Shaders, or the in-game Graphics pane) downloads the
+full libretro `slang-shaders` collection, and imports any `.zip` or folder of shaders the
+user already has. Those are the user's own copy under their own terms; ARMSX only runs
+them.
+
+Runtime
+-------
+Rendered by librashader (MPL-2.0, see third_party/librashader/NOTICE), which requires the
+Vulkan present backend — set [video] gpu_backend = "vulkan" in settings.toml, or pick
+Vulkan in the renderer settings.

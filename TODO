@@ -1,0 +1,14 @@
+- add WASM target
+- add Android target
+- polish the FSUI donor shell controller-first flows across platforms
+- add touch-first FSUI interactions for mobile devices without reintroducing a separate native UI stack
+- add save states
+- finish the FSUI donor frontend on PCs
+- finish the UWP target 
+- finish the vita target
+- add the switch target
+- fix bash build.sh failing to add static SDL to the exes 
+- refactor controller support to be more generic and working across everything
+- use sdl pref path across exe/dll mode for a more consistent settings.toml generation and path handling
+- add discord game SDK for PC platforms and social SDK for mobile ones 
+- add retroachievements integration

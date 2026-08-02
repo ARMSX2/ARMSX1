@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Cover artwork (psx-covers) + online features. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The PS1 core opens games by absolute path, so users point at their own ROM folders.
+         ARMSX is sideloaded (not Play/GPL-limited), so all-files access is fine. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage" />
+
+    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
+
+    <!--
+        The Discord Social SDK .aar is a real dependency, so its manifest merges into ours and
+        brings its <queries> for CustomTabsService with it — no need to restate that here.
+
+        What we DO have to undo is its voice permissions. The SDK declares RECORD_AUDIO, three
+        foreground-service permissions and audio/Bluetooth entries for features ARMSX does not
+        ship, and merged unchallenged they would put "Microphone" on the app's permission list for
+        a capability that does not exist here.
+
+        tools:node="remove" is the supported way to drop a merged permission. BLUETOOTH_CONNECT is
+        deliberately NOT removed — ARMSX declares it itself, above, for game controllers.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" tools:node="remove" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" tools:node="remove" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" tools:node="remove" />
+
+<application
+        android:name=".Pasx2Application"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:largeHeap="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:isGame="true"
+        android:appCategory="game"
+        android:theme="@style/Theme.ARMSX2"
+        android:allowNativeHeapPointerTagging="false"
+        tools:targetApi="31"
+        >
+        <meta-data android:name="android.app.game_mode" android:value="performance" />
+        <profileable android:shell="true" tools:targetApi="29" />
+        <meta-data android:name="android.max_aspect" android:value="2.4" />
+
+        <activity
+            android:name=".BootSplashActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|uiMode|screenSize|smallestScreenSize"
+            android:hardwareAccelerated="true"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.ARMSX2.Boot">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.GAME" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".Main"
+            android:launchMode="singleTop"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density"
+            android:hardwareAccelerated="true"
+            android:exported="true"
+            android:resizeableActivity="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </activity>
+
+        <activity-alias
+            android:name=".MainActivity"
+            android:exported="true"
+            android:targetActivity=".Main">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- SDL2 gameplay runtime: runs the PS1 core (external_main) full-screen. Started by the
+             library with EXTRA_NATIVE_ARGS; also handles the armsx:// deep link. -->
+        <activity
+            android:name="com.nanodata.armsx.EmulatorActivity"
+            android:exported="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="false"
+            android:theme="@style/Theme.ARMSX2.Boot">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="armsx" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            The Discord Social SDK's OAuth landing activity. Redeclared here rather than simply
+            inherited so it can be pinned to the :discord process — the merger would otherwise put
+            it in the main one, where the SDK is not loaded and the hand-back would land nowhere.
+
+            The scheme MUST match the redirect URI registered in the Discord developer portal
+            (discord-<application id>) or the browser hands the code back to nothing and sign-in
+            silently never completes. It is a placeholder, filled by app/build.gradle from
+            assets/discord_creds.env — the same file build.sh reads for the id it compiles into
+            discord_bridge.cpp's kRedirectUri, so the two ends cannot drift.
+        -->
+        <activity
+            android:name="com.discord.socialsdk.AuthenticationActivity"
+            android:process=":discord"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:launchMode="singleTask"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="${discordCallbackScheme}" />
+            </intent-filter>
+        </activity>
+
+        <!-- Voice-only; ARMSX never starts a call, and a declared foreground service we never use
+             is just surface area (and a runtime permission prompt) for nothing. -->
+        <service android:name="com.discord.socialsdk.ForegroundService" tools:node="remove" />
+
+        <!--
+            The Discord helper, in its own process.
+
+            android:process=":discord" is the point, not a performance choice. The service is
+            bound-only and never started, so the last unbind destroys the process — with the
+            feature off the proprietary SDK is not merely idle, it is not loaded at all. It also
+            means an SDK crash costs a helper process rather than the emulator mid-game. The SDK's
+            .so is mapped only here; libarmsx has no DT_NEEDED on it.
+
+            Not exported — nothing outside this app has any business binding it.
+
+            DiscordAuthActivity must share the process: the SDK launches sign-in through an
+            Activity handed to it, and one from the app process would be unusable from here.
+        -->
+        <service
+            android:name="com.armsx2.discord.DiscordService"
+            android:process=":discord"
+            android:exported="false" />
+
+        <activity
+            android:name="com.armsx2.discord.DiscordAuthActivity"
+            android:process=":discord"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:exported="false" />
+
+        <receiver
+            android:name=".RetroAchievementsHostOverrideReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="${applicationId}.action.SET_RETROACHIEVEMENTS_HOST_OVERRIDE" />
+                <action android:name="${applicationId}.action.CLEAR_RETROACHIEVEMENTS_HOST_OVERRIDE" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

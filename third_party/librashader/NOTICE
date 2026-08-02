@@ -1,0 +1,61 @@
+librashader — RetroArch (slang) shader runtime
+==============================================
+
+Upstream:  https://github.com/SnowflakePowered/librashader
+Author:    Ronny Chan <ronny@ronnychan.ca>
+Pinned:    librashader-capi 0.12.0 (crates.io), and the 0.12.0 crates it pulls in
+Licence:   MPL-2.0 OR GPL-3.0-only
+
+ARMSX exercises the **MPL-2.0** arm of that dual licence. ARMSX itself is not
+GPL-licensed and deliberately does not become so; MPL-2.0 is a FILE-level copyleft that
+explicitly permits combining Covered Software with files under other terms in a Larger
+Work (MPL-2.0 §3.3), provided:
+
+  * this notice is preserved (MPL-2.0 §3.4), and
+  * the Source Code Form of the Covered Software is made available to recipients of the
+    binary (MPL-2.0 §3.2).
+
+The second obligation is met by `source/`, which holds the exact published crate
+tarballs every byte of `prebuilt/arm64-v8a/liblibrashader_capi.so` was built from:
+
+    source/librashader-0.12.0.crate
+    source/librashader-cache-0.12.0.crate
+    source/librashader-capi-0.12.0.crate
+    source/librashader-common-0.12.0.crate
+    source/librashader-pack-0.12.0.crate
+    source/librashader-preprocess-0.12.0.crate
+    source/librashader-presets-0.12.0.crate
+    source/librashader-reflect-0.12.0.crate
+    source/librashader-runtime-0.12.0.crate
+    source/librashader-runtime-vk-0.12.0.crate
+
+Those are the librashader crates — the MPL-covered part. They are the published
+crates.io artifacts and are byte-identical to what `cargo` fetches for the pinned
+version, so anyone can reproduce the binary with `build-android.sh`. librashader's
+non-librashader dependencies (ash, gpu-allocator, spirv-cross, glslang, rayon, …) carry
+their own permissive licences and are fetched by cargo at build time.
+
+The full MPL-2.0 text is at ../../LICENSES/MPL-2.0.txt and at
+https://mozilla.org/MPL/2.0/.
+
+How it is linked
+----------------
+`liblibrashader_capi.so` is **dlopen()ed at runtime**, not linked. `libarmsx.so` has no
+DT_NEEDED entry for it (check with `llvm-readelf -d`). Two consequences that are the
+whole reason for the choice:
+
+  1. A missing or broken librashader degrades the shader feature to plain presentation
+     with a log line. It cannot take `libarmsx.so` down with it — which is what a hard
+     DT_NEEDED would do, making every JNI method vanish and the app die at
+     NativeApp.initialize with a completely misleading error.
+  2. The MPL boundary is unambiguous: a separately distributed shared object, source
+     included, combined at runtime.
+
+The static archive (`liblibrashader_capi.a`) is NOT vendored. It is 79 MB and ARMSX's
+Makefile puts `-flto` in BASE_CFLAGS, so linking it would drag every Rust object into
+the LTO link.
+
+Note that `liblibrashader_capi.so` DOES need `libc++_shared.so` (glslang and
+SPIRV-Cross are C++ compiled through the `cc` crate). `build.sh android` already stages
+`libc++_shared.so` into jniLibs, so this costs nothing extra — but if that ever stops
+happening, librashader silently fails to dlopen.

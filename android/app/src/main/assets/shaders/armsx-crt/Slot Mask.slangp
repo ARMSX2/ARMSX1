@@ -1,0 +1,29 @@
+// ARMSX CRT — Slot Mask
+// Copyright (c) 2026 Moon. See LICENSE.txt in this folder.
+//
+// The consumer-television look: the same triads as the aperture grille, shifted half a
+// triad every two rows so they break into a brick pattern rather than continuous stripes.
+// Slightly softer horizontally than the grille preset, which is closer to how a CRT's beam
+// actually landed and hides the mask's own structure a little.
+//
+// This is the one most PlayStation games were designed to be seen on.
+
+shaders = "1"
+
+shader0 = "armsx-crt.slang"
+filter_linear0 = "true"
+scale_type0 = "viewport"
+scale0 = "1.000000"
+
+crt_scanline = "0.950000"
+crt_beam_min = "0.600000"
+crt_beam_max = "1.150000"
+crt_mask_type = "2.000000"
+crt_mask = "0.500000"
+crt_sharp = "0.650000"
+crt_curve = "0.000000"
+crt_corner = "0.000000"
+crt_vignette = "0.150000"
+crt_bright = "1.450000"
+crt_gamma_in = "2.400000"
+crt_gamma_out = "2.200000"

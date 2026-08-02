@@ -1,0 +1,77 @@
+Not working:
+  Fixed: Aconcagua (Japan) (Disc 1) *6
+  Fixed: Animetic Story Game 1 - Card Captor Sakura (Japan) (Disc 1) *1 (2989bb6)
+  Fixed: Ape Escape (USA) *21 (0=10000h CDROM DMA BS)
+  Fixed: Blade (USA) *3
+  Fixed: CTR - Crash Team Racing (USA) *16 (regression) (f7e41cf)
+  Fixed: Crash Bash (USA) *1 (2989bb6)
+  Fixed: Crime Crackers (Japan) *20 (e145a4e)
+  Fixed: Disney's Hercules Action Game (USA) *22
+  Fixed: Disney's The Emperor's New Groove (USA).cue *22
+  Fixed: Doom (All) *4 (e145a4e)
+  Fixed: Elder Gate (Japan) *1 (2989bb6)
+  Fixed: Fear Effect (USA) (Disc 1) *3
+  Fixed: Final Doom (All) *4 (e145a4e)
+  Fixed: Final Fantasy IX (USA) (Disc 1) *22
+  Fixed: Gran Turismo 2 - Music at the Speed of Sound - The Album (USA) (Bonus PlayStation Disc) *19 (regression)
+  Fixed: Hello Kitty - Cube Frenzy (USA) *22 (FMVs are very slow though)
+  Fixed: Initial D (Japan) *22
+  Fixed: Konami 80's Arcade Gallery (Japan) *1 (2989bb6)
+Nagano Winter Olympics '98 (USA) *18
+Need for Speed II (USA) *17
+Over Drivin' - Skyline Memorial (Japan) + Nissan Presents - Over Drivin' - Skyline Memorial (Japan) *7
+PS One Winter 03 Kiosk Version 1.21 (USA) *13
+PaRappa the Rapper (Japan) (USA version works) *16
+  Fixed: Paro Wars (Japan) *12 (e145a4e)
+  Fixed: Pet in TV - With My Dear Dog (Japan) *1 (2989bb6)
+  Fixed: Philosoma (USA) *15
+  Fixed: PoPoRoGue (Japan) *14 (2989bb6)
+  Fixed: RayStorm (USA) + RayCrisis (Japan) + RayCrisis - Series Termination (USA) *12
+  Fixed: Rockman (Japan) *1 (2989bb6)
+S.C.A.R.S (USA) *11
+SimCity 2000 (USA) *3
+Sister Princess 2 - Premium Fan Disc (Japan) (Disc A) *2 (regression)
+Star Wars - Rebel Assault II - The Hidden Empire (USA) (Disc 1) *9
+  Fixed: Strider Hiryuu 1 & 2 (Japan) (Disc 1) (Strider Hiryuu) *6 (2989bb6)
+Tama - Adventurous Ball in Giddy Labyrinth (Japan) *5
+  Fixed: Time Gal & Ninja Hayate (Japan) (En,Ja) (Disc 1) (Time Gal) *9
+  Fixed: Time Gal & Ninja Hayate (Japan) (En,Ja) (Disc 2) (Ninja Hayate) *9
+  Fixed: Tokimeki Memorial 2 (Japan) *1 (2989bb6)
+  Fixed: Tomb Raider (USA) *8 (e145a4e)
+  Fixed: Tony Hawk's Pro Skater (USA) *22
+  Fixed: Vib-Ribbon (Japan) *8 (f7e41cf)
+WipeOut (USA) *7
+  Fixed: Yu-Gi-Oh! Forbidden Memories (USA) *1 (2989bb6)
+
+Notes:
+*1  Hangs after CdlGetTN
+*2  Hangs while loading (possibly timer related)
+*3  Hangs after XA ReadS (MDEC playback (flags?) related, fixable)
+*4  Hangs after CdlPlay (timer? CDROM?)
+*5  Hangs after CdlSetSession (timeout)
+*6  Hangs on a retry deadloop, non-v0 command used (CdlReadTOC)
+*7  Hangs after SIO1 accesses
+*8  CdlGetlocP deadlock
+*9  Hangs on MDEC playback (tries, but dies)
+*10 Sector read errors (can't recover)
+*11 Input not working
+*12 Hang on a retry deadloop, ReadN XA playback?
+*13 Requires special hardware
+*14 Hangs after CdlTest
+*15 Hangs after CdlSetloc (early)
+*16 Hangs on XA playback
+*17 Hangs on sector error retry deadloop
+*18 Hangs on MDEC playback (Getstat deadloop)
+*19 Hangs on CdlSetloc deadloop
+*20 GetlocP loop hangs
+*21 Hangs after 0-sized CDROM DMA
+*22 MDEC corruption (fixed, XA resample buffer overflow)
+
+Graphical issues:
+Most graphical issues (black models, 1-pixel seams, polygon explosions, etc.) have been fixed!
+
+Silent Hill requires mask bit emulation, otherwise, semi-transparent white boxes appear on top of
+models/sprites
+
+Sound/music issues:
+Some games might play incorrect CDDA tracks, this is due to a bugfix that introduced slight track LBA deviations in our CUE loading code.

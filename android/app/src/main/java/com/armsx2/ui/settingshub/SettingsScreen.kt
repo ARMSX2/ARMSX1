@@ -1,0 +1,541 @@
+package com.armsx2.ui.settingshub
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
+import com.armsx2.GameInfo
+import com.armsx2.i18n.str
+import com.armsx2.navigation.SettingsCategory
+import com.armsx2.ui.common.ArmsBackdrop
+import com.armsx2.ui.common.ArmsTopBar
+import com.armsx2.ui.common.GlassPanel
+import com.armsx2.ui.common.RoundAction
+import com.armsx2.ui.common.SectionTitle
+import com.armsx2.ui.settings.controllerFocusable
+import com.armsx2.ui.settings.AppTab
+import com.armsx2.ui.settings.HotkeysTab
+import com.armsx2.ui.settings.OverlayTab
+import com.armsx2.ui.settings.PadTab
+import com.armsx2.ui.settings.Ps1AdvancedTab
+import com.armsx2.ui.settings.Ps1AudioTab
+import com.armsx2.ui.settings.Ps1BiosTab
+import com.armsx2.ui.settings.Ps1EmulationTab
+import com.armsx2.ui.settings.Ps1LibraryTab
+import com.armsx2.ui.settings.Ps1VideoTab
+import com.armsx2.ui.settings.SegmentedRow
+import com.armsx2.ui.settings.SkinsTab
+import com.armsx2.ui.settings.LocalSettingsScrollState
+
+/**
+ * Tabs are still keyed by the [SettingsCategory] enum (it lives in `navigation/`, which this port
+ * does not own), so a few of the enum names no longer describe what the tab shows: the PS1 core has
+ * no audio or network settings, and those two slots now host BIOS and Library. The user-facing name
+ * comes from [categoryTitle], never from the enum, so the mismatch is internal only.
+ */
+private data class SettingsSection(val category: SettingsCategory, val glyph: String)
+
+/**
+ * Lets L1/R1 flick between settings tabs, the way the old Refresh UI did.
+ *
+ * The callback is registered by [SettingsScreen] while it is composed and cleared on dispose,
+ * so in-game shoulder presses still reach the pad untouched. It lives here rather than in
+ * Compose focus handling because a shoulder button never reaches a Composable — the overlay
+ * nav in MainActivityRuntime.dispatchKeyEvent consumes gamepad keys first, which is the same
+ * reason hotkey and pad-bind capture are handled there.
+ */
+object SettingsCategoryNav {
+    /** -1 = previous tab, +1 = next. Null whenever the settings screen isn't showing. */
+    @Volatile
+    var cycle: ((Int) -> Unit)? = null
+}
+
+/** Retains the settings page's scroll offset across close/reopen. The selected category already
+ *  persists in the view-model, so restoring this one offset returns you to where you were (esp.
+ *  useful in long lists like Fixes) instead of snapping to the top every time. */
+private object SettingsScrollMemory {
+    var lastOffset = 0
+}
+
+@Composable
+fun SettingsScreen(
+    initialCategory: SettingsCategory,
+    game: GameInfo?,
+    onBack: () -> Unit,
+    onOpenAbout: () -> Unit = {},
+    viewModel: SettingsViewModel = viewModel(),
+) {
+    // Effective settings scope. Starts on the scope we were opened for (per-game when a game was
+    // passed, else global). A running game — even when opened from the global entry — becomes the
+    // per-game target so the top toggle can switch between Global and that game. Switching just
+    // re-load()s the ViewModel, which re-hydrates settingsState/scope/serial together (no bleed).
+    val scopeContext = game ?: com.armsx2.runtime.MainActivityRuntime.currentGame.value
+    var scopeGame by remember(game?.uri) { mutableStateOf(game) }
+    // Launch the game whose per-game settings are on screen (the "Play" action in the top bar).
+    // Return to Home first so the settings route isn't left on the back stack behind the game.
+    val playScoped: (com.armsx2.GameInfo) -> Unit = { g ->
+        com.armsx2.navigation.UiNavigator.navigate(com.armsx2.navigation.AppRoute.Home)
+        // Match the working library cover-tap launch: a file:// game must be passed as a
+        // bare filesystem path, not "file:///…", or the native boot rejects the path and
+        // kicks straight back to the library (the flash-then-library symptom). Same
+        // conversion HomeViewModel.launch / HomeShortcuts use.
+        val launchPath = if (g.uri.scheme == "file") g.uri.path ?: g.uri.toString() else g.uri.toString()
+        com.armsx2.runtime.MainActivityRuntime.launchGame(launchPath, g)
+    }
+    var showReset by remember { mutableStateOf(false) }
+    // Settings-search "jump to control": holds the resolved label of the target row while the
+    // freshly-switched tab composes + lays out, then selects it (highlight + scroll into view).
+    var pendingJump by remember { mutableStateOf<String?>(null) }
+    val openSearch = {
+        SettingsSearch.open { category, label ->
+            viewModel.selectCategory(category)
+            pendingJump = label
+        }
+    }
+    val screenScroll = rememberScrollState(initial = SettingsScrollMemory.lastOffset)
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { SettingsScrollMemory.lastOffset = screenScroll.value }
+    }
+    LaunchedEffect(initialCategory, game?.uri) { viewModel.load(initialCategory, game) }
+    // When the controller focus returns to the category-chip row (the top-most
+    // navigable element), snap the whole page back to the top so the title bar +
+    // chips are fully visible — per-row bringIntoView otherwise leaves the header
+    // scrolled off after diving deep into a tab and coming back up.
+    LaunchedEffect(com.armsx2.ui.settings.SettingsControllerNav.selectedIndex.intValue) {
+        if (com.armsx2.ui.settings.SettingsControllerNav.currentSelectedId()?.startsWith("settings.chip.") == true) {
+            screenScroll.animateScrollTo(0)
+        }
+    }
+    // Search-jump: after selectCategory swaps the tab, retry selecting the target row until its
+    // tab has composed + registered (rows self-register via controllerFocusable); the row's own
+    // bringIntoView then scrolls it on-screen and draws the focus ring.
+    LaunchedEffect(pendingJump) {
+        val anchor = pendingJump ?: return@LaunchedEffect
+        var tries = 0
+        while (tries < 40 && !com.armsx2.ui.settings.SettingsControllerNav.selectByLabel(anchor)) {
+            kotlinx.coroutines.delay(25)
+            tries++
+        }
+        pendingJump = null
+    }
+    val ui = viewModel.uiState.value
+    val contentReady = ui.game?.uri?.toString() == scopeGame?.uri?.toString()
+    val displayedCategory = if (scopeGame != null && ui.category == SettingsCategory.General) {
+        SettingsCategory.Performance
+    } else {
+        ui.category
+    }
+
+    // L1/R1 tab cycling — registered only while this screen is composed. The visible-tab
+    // filter has to match SettingsCategoryBar's, or the shoulders would land on a tab the
+    // chip row doesn't show. About is always skipped: it navigates to another screen, which
+    // is not what flicking a shoulder button should do.
+    val gameSpecific = scopeGame != null
+    DisposableEffect(displayedCategory, gameSpecific) {
+        SettingsCategoryNav.cycle = { direction ->
+            val tabs = settingsSections().map { it.category }.filterNot {
+                it == SettingsCategory.About ||
+                    (gameSpecific && it == SettingsCategory.General) ||
+                    (!gameSpecific && it == SettingsCategory.Info)
+            }
+            val current = tabs.indexOf(displayedCategory)
+            if (current >= 0 && tabs.isNotEmpty()) {
+                viewModel.selectCategory(tabs[(current + direction + tabs.size) % tabs.size])
+            }
+        }
+        onDispose { SettingsCategoryNav.cycle = null }
+    }
+
+    ArmsBackdrop {
+        CompositionLocalProvider(LocalSettingsScrollState provides screenScroll) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(screenScroll)
+                    .padding(bottom = 8.dp),
+            ) {
+                ArmsTopBar(
+                    title = scopeGame?.title ?: str("action.settings"),
+                    subtitle = if (scopeGame == null) str("scope.global") else str("scope.game"),
+                    leading = {
+                        // Registered in the settings nav so a controller reaches it (up from the chips).
+                        Box(Modifier.controllerFocusable("settings.action.back", CircleShape, onConfirm = onBack)) {
+                            RoundAction("←", str("action.back"), onBack)
+                        }
+                    },
+                    actions = {
+                        // Top-bar actions registered in the settings nav so a controller can reach them
+                        // (D-pad up from the category chips, then left/right across the bar), not just touch.
+                        // Play: only in per-game scope — launches the game these settings belong to.
+                        scopeGame?.let { g ->
+                            Box(Modifier.controllerFocusable("settings.action.play", CircleShape, onConfirm = { playScoped(g) })) {
+                                RoundAction(
+                                    "▶", str("action.play"), { playScoped(g) },
+                                    glyphColor = androidx.compose.ui.graphics.Color(0xFF3DDC84),
+                                )
+                            }
+                        }
+                        Box(Modifier.controllerFocusable("settings.action.search", CircleShape, onConfirm = openSearch)) {
+                            RoundAction("⌕", str("action.search"), openSearch)
+                        }
+                        // Only offer Reset where there is something to reset. Controls owns no
+                        // Settings fields (its state lives in ControllerMappings) but IS
+                        // resettable via resetAllControls — it was previously excluded here AND
+                        // its own resetTunables had no call site, so controls had no working
+                        // reset at all. Hotkeys/Skins still have none of their own.
+                        if (categoryHasResettableSettings(displayedCategory) ||
+                            displayedCategory == SettingsCategory.Controls) {
+                            Box(Modifier.controllerFocusable("settings.action.reset", CircleShape, onConfirm = { showReset = true })) {
+                                RoundAction("↺", str("action.reset"), { showReset = true })
+                            }
+                        }
+                    },
+                )
+                if (scopeContext != null && categorySupportsPerGame(displayedCategory)) {
+                    // Global ↔ Per-Game switch. Re-load()s the ViewModel for the chosen scope, which
+                    // re-hydrates the shared settingsState/scope/serial together (every tab follows).
+                    // Only shown on tabs that actually resolve per-game — see the helper below.
+                    Box(Modifier.padding(horizontal = 8.dp)) {
+                        // Override count in the switch itself, so "This game" advertises that it
+                        // HAS pins before the user goes looking for why a global edit did nothing.
+                        val overrideCount =
+                            com.armsx2.config.Ps1GameSettings.count(scopeContext.settingsKey)
+                        SegmentedRow(
+                            label = str("settings.scope.label"),
+                            options = listOf(str("scope.global"), str("scope.game")),
+                            selectedIndex = if (scopeGame == null) 0 else 1,
+                            description = scopeContext.title +
+                                if (overrideCount > 0) {
+                                    " · $overrideCount setting" +
+                                        (if (overrideCount == 1) "" else "s") + " pinned to this game"
+                                } else {
+                                    ""
+                                },
+                            onChange = { idx ->
+                                val next = if (idx == 0) null else scopeContext
+                                if ((next == null) != (scopeGame == null)) {
+                                    scopeGame = next
+                                    viewModel.load(ui.category, next)
+                                }
+                            },
+                        )
+                    }
+                }
+                if (contentReady) {
+                    SettingsCategoryBar(
+                        selected = displayedCategory,
+                        gameSpecific = scopeGame != null,
+                        onSelect = { category ->
+                            if (category == SettingsCategory.About) onOpenAbout() else viewModel.selectCategory(category)
+                        },
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    SettingsPanel(displayedCategory, viewModel, scopeContext, Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(16.dp))
+                }
+            }
+        }
+        // Jump-to-top for long pages — a game's giant cheat list especially. Floats over the
+        // content once you're well down the page and taps smooth-scroll home. Touch affordance;
+        // controller users already get the chip-row snap-to-top + D-pad scrolling.
+        SettingsScrollTopButton(screenScroll)
+        // Controller-native search overlay (own keyboard + result nav); inside ArmsBackdrop's
+        // BoxScope so its keyboard can dock to the bottom edge over everything.
+        SettingsSearchOverlay(this, scopeGame != null)
+    }
+
+    if (showReset) {
+        // ConfirmOverlay, not AlertDialog: a Compose dialog is its own window and swallows
+        // controller keys, so the old prompt could only be answered by touch.
+        com.armsx2.ui.common.ConfirmOverlay(
+            title = str("action.reset"),
+            // Name the TAB being reset. The old dialog said only "Global"/"Game", so users
+            // reasonably assumed Reset applied to the page they were on — and it didn't.
+            message = categoryTitle(displayedCategory) + " · " +
+                (if (scopeGame == null) str("scope.global") else str("scope.game")),
+            confirmLabel = str("action.reset"),
+            destructive = true,
+            idPrefix = "settings-reset",
+            onConfirm = {
+                if (displayedCategory == SettingsCategory.Controls) {
+                    // Controls lives in ControllerMappings, outside the Settings object, so it
+                    // resets through its own path. Per-game scope drops that game's overrides.
+                    com.armsx2.input.ControllerMappings.resetAllControls(scopeGame?.settingsKey)
+                } else {
+                    viewModel.resetCurrentScope(displayedCategory)
+                }
+                showReset = false
+            },
+            onDismiss = { showReset = false },
+        )
+    }
+}
+
+/** Floating "back to top" affordance for long settings pages — a game's giant cheat list is the
+ *  worst case. Reads the scroll position through a derivedStateOf so only THIS button recomposes
+ *  as you scroll (never the already-heavy page below it), and only appears once you're a good way
+ *  down. Touch-only by design: controller users reach the top via the chip-row snap + D-pad. */
+@Composable
+private fun BoxScope.SettingsScrollTopButton(scroll: ScrollState) {
+    val scope = rememberCoroutineScope()
+    // ~1.5 screenfuls down before it shows, so short pages never get a floating button.
+    val show by remember { derivedStateOf { scroll.value > 1500 } }
+    if (show) {
+        Box(Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 22.dp)) {
+            RoundAction(
+                glyph = "↑",
+                description = str("action.scrollTop"),
+                onClick = { scope.launch { scroll.animateScrollTo(0) } },
+                buttonSize = 52.dp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsPanel(
+    category: SettingsCategory,
+    viewModel: SettingsViewModel,
+    contextGame: GameInfo?,
+    modifier: Modifier,
+) {
+    GlassPanel(modifier = modifier.padding(horizontal = 8.dp), contentPadding = 16.dp) {
+        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)) {
+            SectionTitle(categoryTitle(category))
+            Spacer(Modifier.height(12.dp))
+            Box(Modifier.fillMaxWidth()) {
+                CategoryContent(category, viewModel, contextGame)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsCategoryBar(
+    selected: SettingsCategory,
+    gameSpecific: Boolean,
+    onSelect: (SettingsCategory) -> Unit,
+) {
+    // Row + horizontalScroll (NOT LazyRow): controllerFocusable registers each tab via a
+    // SideEffect that only runs for COMPOSED children. A LazyRow leaves every off-screen
+    // tab (Skins / Advanced, past On-Screen) unregistered and unreachable, so
+    // the controller got stuck at the last visible tab. A plain Row composes them all;
+    // each selected chip's bringIntoView then scrolls it into view as the selector moves.
+    val sections = settingsSections().filterNot {
+        // General is redundant per-game (redirects to Performance); Info only makes
+        // sense for a specific game, so hide it in the global settings.
+        (gameSpecific && it.category == SettingsCategory.General) ||
+            (!gameSpecific && it.category == SettingsCategory.Info) ||
+            (gameSpecific && it.category == SettingsCategory.About)
+    }
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Edge spacing belongs to the scrollable CONTENT, not its viewport. This
+            // lets the final chip scroll fully into view before the trailing inset.
+            Spacer(Modifier.size(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                sections.forEach { section ->
+                    val active = section.category == selected
+                    // Keep the SELECTED chip on-screen. controllerFocusable's bringIntoView
+                    // fires on FOCUS, but L1/R1 changes the selection without moving focus —
+                    // so past roughly Network the active tab scrolled off the right edge and
+                    // you were flicking blind. Requesting it whenever selection lands here
+                    // covers both the shoulder path and a touch tap.
+                    val bringIntoView = remember { BringIntoViewRequester() }
+                    LaunchedEffect(active) {
+                        if (active) runCatching { bringIntoView.bringIntoView() }
+                    }
+                    FilterChip(
+                        modifier = Modifier.height(36.dp)
+                            .bringIntoViewRequester(bringIntoView)
+                            .controllerFocusable(
+                                "settings.chip.${section.category.name}",
+                                RoundedCornerShape(11.dp),
+                                onConfirm = { onSelect(section.category) },
+                            ),
+                        selected = active,
+                        onClick = { onSelect(section.category) },
+                        label = { Text(categoryTitle(section.category), maxLines = 1, style = MaterialTheme.typography.labelLarge) },
+                        leadingIcon = {
+                            Box(Modifier.size(17.dp), contentAlignment = Alignment.Center) {
+                                Text(
+                                    section.glyph,
+                                    fontSize = 13.sp,
+                                    color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(11.dp),
+                        colors = FilterChipDefaults.filterChipColors(
+                            containerColor = Color.Transparent,
+                            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            iconColor = MaterialTheme.colorScheme.primary,
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                    )
+                }
+            }
+            Spacer(Modifier.size(8.dp))
+        }
+    }
+}
+
+/**
+ * Whether a tab's values can differ per game.
+ *
+ * Controls always could: its binds and tunables live in `ControllerMappings`, keyed by the game's
+ * settings key. The emulator tabs now can too — [com.armsx2.config.Ps1GameSettings] holds a SPARSE
+ * set of `settings.toml` keys per game and [com.armsx2.config.Ps1SettingsStore.load] resolves
+ * `defaults < global < per-game` before the one file the core reads is generated.
+ *
+ * This used to return Controls only, and the comment here explained that the emulator tabs had no
+ * per-game layer — while the game's detail screen happily showed Video / Emulation / Audio / BIOS
+ * under the game's own title and wrote every edit straight to the global file. That is the failure
+ * this switch now describes accurately rather than hiding.
+ *
+ * The Library tab is deliberately NOT per-game: the ROM folder list is a property of the install.
+ */
+private fun categorySupportsPerGame(category: SettingsCategory): Boolean =
+    category == SettingsCategory.Controls ||
+        com.armsx2.ui.settings.ps1CategoryIsPerGameCapable(category)
+
+private fun settingsSections() = listOf(
+    SettingsSection(SettingsCategory.General, "⌂"),
+    SettingsSection(SettingsCategory.Info, "ⓘ"),
+    SettingsSection(SettingsCategory.Graphics, "◫"),      // Video   — [video] + display_scale
+    SettingsSection(SettingsCategory.Performance, "↯"),   // Emulation — [cpu] + [console] + pacing
+    SettingsSection(SettingsCategory.Audio, "♫"),         // Audio   — [audio]
+    SettingsSection(SettingsCategory.Bios, "▣"),          // BIOS    — [bios]
+    SettingsSection(SettingsCategory.Network, "▤"),       // Library — [library]
+    SettingsSection(SettingsCategory.Controls, "⌁"),
+    SettingsSection(SettingsCategory.Hotkeys, "⌘"),
+    // Skins sits with the control-related tabs rather than after On-Screen: it is controller
+    // artwork, so people look for it next to Controls and Shortcuts. Requested by Isshin.
+    SettingsSection(SettingsCategory.Skins, "◈"),
+    SettingsSection(SettingsCategory.OnScreen, "⊕"),      // Interface — app chrome scaling
+    SettingsSection(SettingsCategory.Advanced, "⌥"),      // [runtime] logging + [paths]
+    // Cheats — [cheats] in settings.toml, applied by psx/cheats.c. The enum value is still
+    // called Patches because renaming it would touch every exhaustive `when` over
+    // SettingsCategory for no user-visible gain; the tab, the title and everything behind it
+    // are PS1 GameShark codes, NOT the PS2 PNACH machinery that used to sit here (that was
+    // removed — every native it called was an empty stub).
+    SettingsSection(SettingsCategory.Patches, "✦"),
+)
+
+/**
+ * [contextGame] is the game the screen is ABOUT, which is not the same as the scope: it stays set
+ * while the Global/Game switch is on Global, and that is what lets a global row warn that this very
+ * game pins its own value (see `PerGameMarker`). The scope itself is `uiState.game`, which the
+ * view-model re-loads whenever the switch moves.
+ */
+@Composable
+private fun CategoryContent(
+    category: SettingsCategory,
+    viewModel: SettingsViewModel,
+    contextGame: GameInfo?,
+) {
+    // The PS1 emulator tabs are wrapped so that the per-game layer, the badges and the override
+    // panel are provided in ONE place — a tab (or a row inside one) needs no change of its own to
+    // participate.
+    @Composable
+    fun ps1(content: @Composable () -> Unit) = com.armsx2.ui.settings.Ps1Scoped(
+        category = category,
+        scopeGame = viewModel.uiState.value.game,
+        contextGame = contextGame,
+        content = content,
+    )
+    when (category) {
+        SettingsCategory.General -> AppTab()
+        SettingsCategory.Info -> com.armsx2.ui.settings.InfoTab(viewModel.uiState.value.game)
+        SettingsCategory.Graphics -> ps1 { Ps1VideoTab() }
+        SettingsCategory.Performance -> ps1 { Ps1EmulationTab() }
+        SettingsCategory.Audio -> ps1 { Ps1AudioTab() }
+        SettingsCategory.Bios -> ps1 { Ps1BiosTab() }
+        SettingsCategory.Network -> Ps1LibraryTab()
+        SettingsCategory.Controls -> PadTab(viewModel.settings)
+        SettingsCategory.Hotkeys -> HotkeysTab(viewModel.settings)
+        SettingsCategory.OnScreen -> OverlayTab()
+        SettingsCategory.Skins -> SkinsTab(viewModel.settings)
+        SettingsCategory.Advanced -> ps1 { Ps1AdvancedTab() }
+        // Cheats. Wrapped in ps1 { } like the other emulator tabs so the scope switch, the
+        // per-game badges and the override panel all apply — the three [cheats] keys ARE
+        // per-game settings and are stored in exactly the same layer as every other one.
+        SettingsCategory.Patches -> ps1 { com.armsx2.ui.cheats.Ps1CheatsTab() }
+        // Not reachable: the About chip is not listed in settingsSections().
+        SettingsCategory.About -> Unit
+    }
+}
+
+/**
+ * User-facing tab names. The PS1 tabs use literals rather than `str(...)`: `I18n.EN` is the
+ * canonical key set and lives in a file this port does not own, so inventing keys here would only
+ * render the raw key back (`I18n.get` falls through to the key when it is unknown).
+ */
+@Composable
+internal fun categoryTitle(category: SettingsCategory): String = when (category) {
+    SettingsCategory.General -> str("tab.app")
+    SettingsCategory.Info -> str("tab.info")
+    SettingsCategory.Graphics -> str("tab.video")
+    SettingsCategory.Performance -> str("tab.emulation")
+    SettingsCategory.Audio -> str("tab.audio")
+    SettingsCategory.Bios -> str("tab.bios")
+    SettingsCategory.Network -> str("tab.library")
+    SettingsCategory.Controls -> str("tab.controls")
+    SettingsCategory.Hotkeys -> str("tab.hotkeys")
+    SettingsCategory.OnScreen -> str("tab.interface")
+    SettingsCategory.Skins -> str("tab.skins")
+    SettingsCategory.Advanced -> str("tab.fixes") // "Advanced"
+    SettingsCategory.Patches -> str("cheats.title")
+    SettingsCategory.About -> str("about.title")
+}

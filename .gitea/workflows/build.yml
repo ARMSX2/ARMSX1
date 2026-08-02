@@ -1,0 +1,570 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+env:
+  BUILD_JOBS: 4
+
+# These jobs are intended for host-mode Gitea runners.
+# Running them in docker-mode creates per-job bridge networks and can exhaust
+# the daemon's address pools on busy runners.
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.target }}
+    runs-on: ${{ vars.ARMSX_LINUX_RUNNER_LABEL || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x64
+            extra_arch: ""
+            apt_source_arch: ""
+            packages: "build-essential binutils cmake file git libgl1-mesa-dev libsdl2-dev make pkg-config python3 python3-jinja2 zip"
+          - target: x32
+            extra_arch: "i386"
+            apt_source_arch: "x32"
+            packages: "binutils cmake file gcc-multilib g++-multilib git libc6-dev-i386 libgl1-mesa-dev:i386 libsdl2-dev:i386 make pkg-config python3 python3-jinja2 zip"
+          - target: arm64
+            extra_arch: "arm64"
+            apt_source_arch: "arm64"
+            packages: "binutils cmake file gcc-aarch64-linux-gnu g++-aarch64-linux-gnu git libgl1-mesa-dev:arm64 libsdl2-dev:arm64 make pkg-config python3 python3-jinja2 zip"
+          - target: arm32
+            extra_arch: "armhf"
+            apt_source_arch: "armhf"
+            packages: "binutils cmake file gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf git libgl1-mesa-dev:armhf libsdl2-dev:armhf make pkg-config python3 python3-jinja2 zip"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch submodules with private repo token
+        shell: bash
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FSUI_SUBMODULE_TOKEN: ${{ secrets.FSUI_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
+          if [ -z "$token" ]; then
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
+            exit 1
+          fi
+
+          auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+          git config --global http.https://git.nanodata.cloud/.extraheader "AUTHORIZATION: basic $auth"
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
+
+      - name: Install Linux dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(id -u)" -eq 0 ]; then
+            apt_cmd() { "$@"; }
+          elif command -v sudo >/dev/null 2>&1; then
+            apt_cmd() { sudo "$@"; }
+          else
+            echo "Host-mode Linux runner needs root or passwordless sudo for apt-get." >&2
+            exit 1
+          fi
+          if [ -n "${{ matrix.extra_arch }}" ]; then
+            apt_cmd dpkg --add-architecture "${{ matrix.extra_arch }}"
+          fi
+          if [ -n "${{ matrix.apt_source_arch }}" ]; then
+            ./scripts/ci/configure-linux-apt-sources.sh "${{ matrix.apt_source_arch }}"
+          fi
+          apt_cmd apt-get update
+          DEBIAN_FRONTEND=noninteractive apt_cmd apt-get install -y ${{ matrix.packages }}
+
+      - name: Build Linux package
+        shell: bash
+        run: ./scripts/ci/build-linux-target.sh "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: armsx-linux-${{ matrix.target }}
+          path: artifacts/linux/${{ matrix.target }}/armsx-linux-${{ matrix.target }}.zip
+
+  macos-ventura:
+    name: macOS Ventura x64
+    runs-on: macos-ventura-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch submodules with private repo token
+        shell: bash
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FSUI_SUBMODULE_TOKEN: ${{ secrets.FSUI_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
+          if [ -z "$token" ]; then
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
+            exit 1
+          fi
+
+          auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+          git config --global http.https://git.nanodata.cloud/.extraheader "AUTHORIZATION: basic $auth"
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
+
+      - name: Validate Ventura runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(uname -s)" != "Darwin" ]; then
+            echo "macOS Ventura runner required." >&2
+            exit 1
+          fi
+          if [ "$(uname -m)" != "x86_64" ]; then
+            echo "macOS Ventura x64 runner required." >&2
+            exit 1
+          fi
+          major="$(sw_vers -productVersion | cut -d. -f1)"
+          if [ "${major:-0}" -lt 13 ]; then
+            echo "macOS Ventura 13.x or newer required." >&2
+            exit 1
+          fi
+
+      - name: Install macOS dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          if ! command -v brew >/dev/null 2>&1; then
+            echo "Homebrew is required on the macOS Ventura runner." >&2
+            exit 1
+          fi
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+          brew list sdl2 >/dev/null 2>&1 || brew install sdl2
+          brew list dylibbundler >/dev/null 2>&1 || brew install dylibbundler
+          if ! command -v python3 >/dev/null 2>&1; then
+            brew install python@3
+          fi
+          if ! python3 -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("jinja2") else 1)'; then
+            python3 -m pip install --user jinja2
+          fi
+
+      - name: Build macOS Ventura package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh macosapp
+          mkdir -p artifacts/macos/ventura
+          (
+            cd .
+            zip -r artifacts/macos/ventura/armsx-macos-ventura-x64.zip armsx.app
+          )
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: armsx-macos-ventura-x64
+          path: artifacts/macos/ventura/armsx-macos-ventura-x64.zip
+
+  psvita:
+    name: PSVita VPK
+    runs-on: ${{ vars.ARMSX_LINUX_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch submodules with private repo token
+        shell: bash
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FSUI_SUBMODULE_TOKEN: ${{ secrets.FSUI_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
+          if [ -z "$token" ]; then
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
+            exit 1
+          fi
+
+          auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+          git config --global http.https://git.nanodata.cloud/.extraheader "AUTHORIZATION: basic $auth"
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
+
+      - name: Install Vita toolchain on Ubuntu x64
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(id -u)" -eq 0 ]; then
+            apt_cmd() { "$@"; }
+          elif command -v sudo >/dev/null 2>&1; then
+            apt_cmd() { sudo "$@"; }
+          else
+            echo "Host-mode Linux runner needs root or passwordless sudo for apt-get." >&2
+            exit 1
+          fi
+          apt_cmd apt-get update
+          DEBIAN_FRONTEND=noninteractive apt_cmd apt-get install -y \
+            build-essential \
+            bzip2 \
+            ca-certificates \
+            cmake \
+            curl \
+            file \
+            git \
+            make \
+            patch \
+            pkg-config \
+            python3 \
+            python3-jinja2 \
+            unzip \
+            wget \
+            xz-utils \
+            zip
+
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain nightly
+          else
+            rustup toolchain install nightly --profile minimal
+          fi
+
+          source "$HOME/.cargo/env"
+          rustup component add rust-src --toolchain nightly
+          cargo +nightly install cargo-vita --locked
+
+          git clone --depth=1 https://github.com/vitasdk/vdpm /tmp/vdpm
+          cd /tmp/vdpm
+          ./bootstrap-vitasdk.sh
+          export VITASDK=/usr/local/vitasdk
+          export PATH="$VITASDK/bin:$PATH"
+          ./install-all.sh
+
+          {
+            echo "VITASDK=$VITASDK"
+            echo "RUSTUP_TOOLCHAIN=nightly"
+            echo "PKG_CONFIG=$VITASDK/bin/arm-vita-eabi-pkg-config"
+          } >> "$GITHUB_ENV"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$VITASDK/bin" >> "$GITHUB_PATH"
+
+      - name: Build PSVita package
+        shell: bash
+        run: ./build.sh psvita
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: armsx-psvita-vpk
+          path: bin/psvita/ARMSX.vpk
+
+  linux-musl:
+    name: Linux musl ${{ matrix.target }}
+    runs-on: ${{ vars.ARMSX_LINUX_RUNNER_LABEL || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x64
+          - target: x32
+          - target: arm64
+          - target: arm32
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch submodules with private repo token
+        shell: bash
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FSUI_SUBMODULE_TOKEN: ${{ secrets.FSUI_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
+          if [ -z "$token" ]; then
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
+            exit 1
+          fi
+
+          auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+          git config --global http.https://git.nanodata.cloud/.extraheader "AUTHORIZATION: basic $auth"
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
+
+      - name: Install musl build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(id -u)" -eq 0 ]; then
+            apt_cmd() { "$@"; }
+          elif command -v sudo >/dev/null 2>&1; then
+            apt_cmd() { sudo "$@"; }
+          else
+            echo "Host-mode Linux runner needs root or passwordless sudo for apt-get." >&2
+            exit 1
+          fi
+          apt_cmd apt-get update
+          DEBIAN_FRONTEND=noninteractive apt_cmd apt-get install -y \
+            ca-certificates \
+            cmake \
+            curl \
+            file \
+            git \
+            make \
+            pkg-config \
+            python3 \
+            python3-jinja2 \
+            tar \
+            unzip \
+            xz-utils \
+            zip
+
+      - name: Build musl package
+        shell: bash
+        run: ./scripts/ci/build-linux-musl-target.sh "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: armsx-linux-musl-${{ matrix.target }}
+          path: artifacts/linux-musl/${{ matrix.target }}/armsx-linux-musl-${{ matrix.target }}.zip
+
+  windows:
+    name: Windows ${{ matrix.target }}
+    runs-on: ${{ vars.ARMSX_LINUX_RUNNER_LABEL || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x64, x32]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch submodules with private repo token
+        shell: bash
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FSUI_SUBMODULE_TOKEN: ${{ secrets.FSUI_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
+          if [ -z "$token" ]; then
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
+            exit 1
+          fi
+
+          auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+          git config --global http.https://git.nanodata.cloud/.extraheader "AUTHORIZATION: basic $auth"
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
+
+      - name: Install MinGW toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(id -u)" -eq 0 ]; then
+            apt_cmd() { "$@"; }
+          elif command -v sudo >/dev/null 2>&1; then
+            apt_cmd() { sudo "$@"; }
+          else
+            echo "Host-mode Linux runner needs root or passwordless sudo for apt-get." >&2
+            exit 1
+          fi
+          apt_cmd apt-get update
+          DEBIAN_FRONTEND=noninteractive apt_cmd apt-get install -y \
+            binutils-mingw-w64 \
+            cmake \
+            git \
+            gcc-mingw-w64 \
+            g++-mingw-w64 \
+            make \
+            python3 \
+            python3-jinja2 \
+            zip
+
+      - name: Build Windows package
+        shell: bash
+        run: ./scripts/ci/build-windows-cross.sh "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: armsx-windows-${{ matrix.target }}
+          path: artifacts/windows/${{ matrix.target }}/armsx-windows-${{ matrix.target }}.zip
+
+  android:
+    name: Android Debug APK
+    runs-on: ${{ vars.ARMSX_LINUX_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch submodules with private repo token
+        shell: bash
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FSUI_SUBMODULE_TOKEN: ${{ secrets.FSUI_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
+          if [ -z "$token" ]; then
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
+            exit 1
+          fi
+
+          auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+          git config --global http.https://git.nanodata.cloud/.extraheader "AUTHORIZATION: basic $auth"
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
+
+      - name: Install Android build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(id -u)" -eq 0 ]; then
+            apt_cmd() { "$@"; }
+          elif command -v sudo >/dev/null 2>&1; then
+            apt_cmd() { sudo "$@"; }
+          else
+            echo "Host-mode Linux runner needs root or passwordless sudo for apt-get." >&2
+            exit 1
+          fi
+          apt_cmd apt-get update
+          DEBIAN_FRONTEND=noninteractive apt_cmd apt-get install -y \
+            cmake \
+            curl \
+            git \
+            make \
+            ninja-build \
+            openjdk-17-jdk \
+            pkg-config \
+            python3 \
+            python3-jinja2 \
+            unzip \
+            zip
+
+      - name: Build Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          export PATH="$JAVA_HOME/bin:$PATH"
+
+          export ANDROID_HOME="$PWD/.android-sdk"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+
+          curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/android-cmdline-tools.zip
+          unzip -q /tmp/android-cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          set +o pipefail
+          yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses >/dev/null
+          set -o pipefail
+          sdkmanager --sdk_root="$ANDROID_HOME" \
+            "build-tools;34.0.0" \
+            "ndk;27.1.12297006" \
+            "platform-tools" \
+            "platforms;android-34"
+
+          export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/27.1.12297006"
+          export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+          export NDK_HOME="$ANDROID_NDK_ROOT"
+          export GRADLE_USER_HOME="$PWD/.gradle-home"
+
+          curl -fsSL https://services.gradle.org/distributions/gradle-8.14.3-bin.zip -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d "$PWD/.gradle-dist"
+          export GRADLE_BIN="$PWD/.gradle-dist/gradle-8.14.3/bin/gradle"
+
+          ./scripts/ci/build-android-all.sh
+
+      # The "store" flavor dimension moved this: it is apk/<flavor>/<buildType>/app-<flavor>-<buildType>.apk
+      # now, never apk/debug/app-debug.apk. github = the sideload APK (with the in-app updater),
+      # which is what this job builds and publishes; play is the updater-free bundle flavor.
+      - uses: actions/upload-artifact@v3
+        with:
+          name: armsx-android-github-debug
+          path: android/app/build/outputs/apk/github/debug/app-github-debug.apk
+
+  wasm:
+    name: WASM
+    runs-on: ${{ vars.ARMSX_LINUX_RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch submodules with private repo token
+        shell: bash
+        env:
+          GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+          FSUI_SUBMODULE_TOKEN: ${{ secrets.FSUI_SUBMODULE_TOKEN }}
+        run: |
+          set -euo pipefail
+          token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
+          if [ -z "$token" ]; then
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
+            exit 1
+          fi
+
+          auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+          git config --global http.https://git.nanodata.cloud/.extraheader "AUTHORIZATION: basic $auth"
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth=1
+
+      - name: Install WASM packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(id -u)" -eq 0 ]; then
+            apt_cmd() { "$@"; }
+          elif command -v sudo >/dev/null 2>&1; then
+            apt_cmd() { sudo "$@"; }
+          else
+            echo "Host-mode Linux runner needs root or passwordless sudo for apt-get." >&2
+            exit 1
+          fi
+          apt_cmd apt-get update
+          DEBIAN_FRONTEND=noninteractive apt_cmd apt-get install -y cmake python3 python3-jinja2 zip
+
+      - name: Install Emscripten
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d "$HOME/emsdk/.git" ]; then
+            git clone --depth=1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          else
+            git -C "$HOME/emsdk" pull --ff-only
+          fi
+          cd "$HOME/emsdk"
+          ./emsdk install latest
+          ./emsdk activate latest
+
+      - name: Build WebAssembly package
+        shell: bash
+        run: |
+          set -euo pipefail
+          source "$HOME/emsdk/emsdk_env.sh"
+          ./build.sh wasm
+          rm -rf artifacts/wasm/package
+          mkdir -p artifacts/wasm/package/wasm
+          cp bin/wasm/armsx.html artifacts/wasm/package/wasm/
+          cp bin/wasm/armsx.js artifacts/wasm/package/wasm/
+          cp bin/wasm/armsx.wasm artifacts/wasm/package/wasm/
+          if [ -f bin/wasm/armsx.data ]; then
+            cp bin/wasm/armsx.data artifacts/wasm/package/wasm/
+          fi
+          if [ -d bin/wasm/icons ]; then
+            mkdir -p artifacts/wasm/package/wasm/icons
+            cp -R bin/wasm/icons/. artifacts/wasm/package/wasm/icons/
+          fi
+          (
+            cd artifacts/wasm/package
+            zip -r ../armsx-wasm.zip wasm
+          )
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: armsx-wasm
+          path: artifacts/wasm/armsx-wasm.zip

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TextureView, not VideoView. VideoView is a SurfaceView, and on this app's boot window the
+     SurfaceView never received a surface (surfaceCreated never fired), so MediaPlayer sat in
+     openVideo() forever: no first frame, no error callback, just black until the splash timed
+     out. A TextureView draws into the hardware-accelerated view hierarchy instead of asking
+     the compositor for a layer of its own, which sidesteps that entirely.
+
+     White, not the window's black: the intro is drawn to COVER the screen, and its own backdrop
+     is white, so this only shows for the frame or two before the first decoded frame lands. The
+     activity returns before inflating this layout when the boot logo is switched off, so that
+     path still gets the theme's black and never flashes white on the way to the library. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/boot_splash_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/white">
+
+    <TextureView
+        android:id="@+id/boot_splash_video"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:keepScreenOn="true" />
+
+</FrameLayout>

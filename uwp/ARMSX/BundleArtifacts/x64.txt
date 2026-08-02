@@ -1,0 +1,2 @@
+MainPackage=C:\Users\Naalf\Documents\ARMSX\uwp\ARMSX\bin\x64\Debug\ARMSX_1.0.3.0_x64_Debug.msix
+SymbolPackage=C:\Users\Naalf\Documents\ARMSX\uwp\ARMSX\obj\x64\Debug\Symbols\ARMSX_1.0.3.0_x64_Debug.appxsym

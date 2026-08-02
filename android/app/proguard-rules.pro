@@ -1,0 +1,3 @@
+-dontwarn org.libsdl.app.**
+-keep class org.libsdl.app.** { *; }
+-keepclassmembers class com.nanodata.armsx.** { *; }

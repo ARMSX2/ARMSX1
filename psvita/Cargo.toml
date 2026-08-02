@@ -1,0 +1,12 @@
+[package]
+name = "ARMSX_vita"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.vita]
+title_id = "ARMSX0001"
+title_name = "ARMSX PSVita"
+build_std = "std,panic_abort"
+
+[profile.release]
+panic = "abort"

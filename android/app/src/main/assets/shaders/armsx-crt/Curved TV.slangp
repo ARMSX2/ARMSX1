@@ -1,0 +1,30 @@
+// ARMSX CRT — Curved TV
+// Copyright (c) 2026 Moon. See LICENSE.txt in this folder.
+//
+// Slot mask plus barrel curvature, rounded corners and a vignette — the full 90s living
+// room. The curvature is kept mild (0.08 of the shader's 0..0.30 range): the picture is
+// already small on a handheld, and past about 0.15 the corners eat more of the image than
+// the effect is worth.
+//
+// The most expensive of the four, though still one pass. If it costs frames, "Slot Mask"
+// is the same look without the geometry.
+
+shaders = "1"
+
+shader0 = "armsx-crt.slang"
+filter_linear0 = "true"
+scale_type0 = "viewport"
+scale0 = "1.000000"
+
+crt_scanline = "0.950000"
+crt_beam_min = "0.600000"
+crt_beam_max = "1.150000"
+crt_mask_type = "2.000000"
+crt_mask = "0.500000"
+crt_sharp = "0.600000"
+crt_curve = "0.080000"
+crt_corner = "0.020000"
+crt_vignette = "0.350000"
+crt_bright = "1.450000"
+crt_gamma_in = "2.400000"
+crt_gamma_out = "2.200000"

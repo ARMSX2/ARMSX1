@@ -1,0 +1,30 @@
+// ARMSX CRT — Sharp Scanlines
+// Copyright (c) 2026 Moon. See LICENSE.txt in this folder.
+//
+// Scanlines and nothing else: no phosphor mask, no curvature. The cheapest of the four and
+// the one to start from — it is the only effect here that is unambiguously right at any
+// output size, because the scanline count comes from the source frame rather than from the
+// panel. Good on a small, bright handheld display where a mask mostly costs brightness.
+
+shaders = "1"
+
+shader0 = "armsx-crt.slang"
+// LINEAR IS REQUIRED. The shader's horizontal filter is a sharp bilinear: it computes a
+// fractional sample position and leans on the hardware to interpolate. With nearest, the
+// ramp it computes collapses and edges crawl at non-integer scales.
+filter_linear0 = "true"
+scale_type0 = "viewport"
+scale0 = "1.000000"
+
+crt_scanline = "1.000000"
+crt_beam_min = "0.550000"
+crt_beam_max = "1.050000"
+crt_mask_type = "0.000000"
+crt_mask = "0.000000"
+crt_sharp = "0.800000"
+crt_curve = "0.000000"
+crt_corner = "0.000000"
+crt_vignette = "0.000000"
+crt_bright = "1.150000"
+crt_gamma_in = "2.400000"
+crt_gamma_out = "2.200000"

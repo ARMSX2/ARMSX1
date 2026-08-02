@@ -1,0 +1,58 @@
+ARMSX PROPRIETARY LICENSE
+
+Copyright (c) 2026 Moon. All rights reserved.
+
+1. Proprietary ownership
+
+ARMSX-specific source code, documentation, artwork, branding, binaries, and
+other material for which Moon owns the applicable copyright or has authority
+to license it ("Moon Materials") are proprietary and confidential works owned
+by Moon.
+
+2. No permission granted
+
+No license or permission is granted to use, execute, copy, reproduce, modify,
+adapt, translate, reverse engineer, decompile, disassemble, publish, display,
+distribute, sublicense, sell, rent, host, transmit, create derivative works
+from, or commercially exploit any Moon Materials.
+
+Any such action requires Moon's prior express written permission and is
+subject to a separate written agreement signed by Moon. Possession of or
+access to the Moon Materials does not grant any rights, whether by implication,
+estoppel, or otherwise.
+
+3. Reservation of rights
+
+All rights not expressly granted in a separate written agreement signed by
+Moon are reserved. No patent, trademark, trade-name, logo, branding, or other
+intellectual-property rights are granted. "ARMSX", Moon branding, and
+associated logos may not be used without Moon's prior express written
+permission.
+
+4. Excluded and third-party material
+
+This proprietary license applies only to Moon Materials. It does not claim
+ownership of, relicense, restrict, or supersede material owned by Allkern,
+Lisandro Alarcon, other contributors, or third parties.
+
+The upstream psxe material previously distributed under the MIT License
+remains under that license, which is preserved in
+LICENSES/UPSTREAM-MIT.txt. Files under third_party/, bundled frameworks, and
+files containing their own copyright or license notices remain governed by
+their respective licenses. Recipients must comply with all applicable
+third-party notices.
+
+5. No warranty
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE MOON MATERIALS ARE PROVIDED "AS
+IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY KIND. MOON DISCLAIMS ALL
+EXPRESS, IMPLIED, AND STATUTORY WARRANTIES, INCLUDING MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT
+PERMITTED BY LAW, MOON SHALL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL,
+INCIDENTAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES ARISING FROM THE
+MOON MATERIALS OR THEIR USE.
+
+6. Permission requests
+
+Any requested access or use must be authorized by Moon in a separate written
+agreement signed by Moon before that access or use occurs.
