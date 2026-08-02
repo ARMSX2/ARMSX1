@@ -122,6 +122,8 @@ void cdrom_write_vol2(psx_cdrom_t* cdrom, uint8_t data);
 void cdrom_write_vol3(psx_cdrom_t* cdrom, uint8_t data);
 void cdrom_write_vapp(psx_cdrom_t* cdrom, uint8_t data);
 
+static void cdrom_trace_flush(psx_cdrom_t* cdrom);
+
 psx_cdrom_t* psx_cdrom_create(void) {
     return malloc(sizeof(psx_cdrom_t));
 }
@@ -151,6 +153,9 @@ void psx_cdrom_init(psx_cdrom_t* cdrom, psx_ic_t* ic) {
 
     cdrom->pending_lba = 150;
     cdrom->lba = 150;
+    cdrom->report_lba = 150;
+    cdrom->report_anchor = 150;
+    cdrom->report_accum = 0;
     cdrom->seek_precision = 1;
     cdrom->fake_getlocl_data = 1;
 }
@@ -171,6 +176,16 @@ void psx_cdrom_reset(psx_cdrom_t* cdrom) {
     queue_clear(cdrom->data);
     queue_clear(cdrom->response);
     queue_clear(cdrom->parameters);
+
+    cdrom_anchor_report_position(cdrom, cdrom->lba);
+
+    /* Report the run in progress rather than dropping it: a reset is exactly the boundary
+       where the last thing the drive was asked to do is worth knowing. */
+    cdrom_trace_flush(cdrom);
+
+    cdrom->trace_valid = 0;
+    cdrom->trace_in_command = 0;
+    cdrom->trace_pending_int = 0;
 
     cdrom->vol[0] = 0x80;
     cdrom->vol[1] = 0x00;
@@ -240,7 +255,186 @@ void cdrom_process_setloc(psx_cdrom_t* cdrom) {
 }
 
 void cdrom_set_int(psx_cdrom_t* cdrom, int n) {
+    /*
+        A response REPLACES the response FIFO; it does not append to it. Hardware's FIFO is a
+        fixed window that the controller refills when it produces a new response, and every
+        cdrom_set_int() call site in this device pushes its bytes immediately afterwards, so
+        this is the one place that has to know.
+
+        Measured before this line existed, with a host probe driving the real MMIO interface:
+        a driver that leaves bytes of one response unread — an INT1 sector handler that never
+        reads the status byte is the ordinary case — walks the write cursor to the end of the
+        32-byte buffer in four commands. From there queue_push() silently drops everything,
+        and the next command answers with bytes from three responses ago. The probe watched
+        CdlPause reply with 32 bytes of 22h, and CdlGetlocP reply with 26 bytes whose first
+        two were the tail of an older answer, so track read back as 03h and index as 55h.
+
+        cdrom_error() already did exactly this reset for its own INT5 path.
+
+        Can this discard a response the game has not read yet? No, and the reason is one line
+        up in psx_cdrom_update(): "Hold IRQ until IFR is acknowledged" refuses to produce ANY
+        new response while an interrupt is outstanding, so nothing can land on top of a
+        response the game has not acknowledged. Once it has acknowledged, hardware replaces
+        the FIFO too — and the previous behaviour there was worse than replacing it: during a
+        streaming read, a game that acknowledges the sector INT1 without reading its status
+        byte used to get CdlGetlocP's eight bytes appended BEHIND that byte, so an eight-byte
+        read came back as 22 01 01 00 ... — a position whose track field is the drive status.
+    */
+    queue_reset(cdrom->response);
+
+    /* Attribute the interrupt to the command being traced, or to the transport running
+       underneath it. See cdrom_trace_flush(). */
+    if (cdrom->trace_in_command)
+        cdrom->trace_pending_int = (uint8_t)(n & 7);
+    else
+        cdrom->trace_async[n & 7]++;
+
     cdrom->ifr = n;
+}
+
+/*
+    The reported (physical) position — what CdlGetlocP answers with.
+
+    `cdrom->lba` is the TRANSPORT position: the sector the next read will fetch. It only moves
+    when something moves it (Setloc, a completed seek, a sector read, a CD-DA sector). That is
+    not what CdlGetlocP returns. CdlGetlocP returns what the drive's sub-Q decoder last saw,
+    and a spinning disc always has the head over some sector — it keeps moving when nothing is
+    being read at all.
+
+    Measured before this existed, with a host probe against a synthetic single-track disc:
+
+        Setloc 00:20:00 (LBA 1500) + SeekP, then CdlGetlocP
+          -> abs 00:19:50  (LBA 1475: the target minus the 25-sector seek undershoot)
+          -> abs 00:19:50  after 60 emulated frames
+          -> abs 00:19:50  after a further 600 emulated frames
+
+        ReadN, Pause, then CdlGetlocP
+          -> abs 00:03:55 and identical 300 frames later
+
+    A game that seeks and then polls CdlGetlocP until the head arrives can never leave that
+    loop. It polls once a frame, forever — which is the failure Spyro the Dragon shows at its
+    memory-card screen: full speed, the screen drawn, and CdlGetlocp in armsx.log at frame
+    rate with no other command in sight.
+
+    Two rules, both of them what the mechanism does:
+
+      * Behind the transport position, because an imprecise seek landed short: walk forward
+        one sector per sector-time until it arrives.
+      * Sitting on it (parked or paused, motor on): cycle over CD_REPORT_HOLD_SECTORS. The
+        position moves, which is what a poll is watching for, and never runs away.
+
+    `cdrom->lba` is deliberately untouched by any of this, so a ReadN resuming after a Pause
+    still resumes on the exact sector it left off on.
+*/
+static void cdrom_update_report_position(psx_cdrom_t* cdrom, int cycles) {
+    int sector;
+
+    /* The transport moved the head itself: Setloc, a seek completing, a sector read, a CD-DA
+       sector. Checking `lba` against the anchor rather than re-anchoring at each of those
+       call sites is what makes it impossible for a new one to be forgotten. */
+    if (cdrom->lba != cdrom->report_anchor) {
+        cdrom->report_anchor = cdrom->lba;
+        cdrom->report_lba = cdrom->lba;
+        cdrom->report_accum = 0;
+
+        return;
+    }
+
+    if (!cdrom->disc || cycles <= 0)
+        return;
+
+    /* The head's own speed, so the CD-ROM speedup setting (a host-side load-time trade) does
+       not make the disc spin faster than the drive can. */
+    sector = (cdrom->mode & MODE_SPEED) ? CD_DELAY_READ_DS : CD_DELAY_READ_SS;
+
+    cdrom->report_accum += cycles;
+
+    while (cdrom->report_accum >= sector) {
+        uint32_t base, pos;
+
+        cdrom->report_accum -= sector;
+
+        /* More than a hold window short of the target: an imprecise seek landed early and the
+           head is reading its way onto it. */
+        if ((cdrom->report_lba + CD_REPORT_HOLD_SECTORS) <= cdrom->lba) {
+            cdrom->report_lba++;
+
+            continue;
+        }
+
+        /* Holding station. The window straddles the target — a drive kicks back to hold, so
+           it sits a little behind as often as a little ahead — which also keeps the reported
+           position from running far past the sector the transport is parked on. */
+        base = (cdrom->lba >= (150u + CD_REPORT_HOLD_OFFSET)) ? (cdrom->lba - CD_REPORT_HOLD_OFFSET)
+                                                             : cdrom->lba;
+        pos = (cdrom->report_lba >= base) ? (cdrom->report_lba - base) : 0u;
+
+        cdrom->report_lba = base + ((pos + 1u) % CD_REPORT_HOLD_SECTORS);
+    }
+}
+
+/* Commands that only ASK the drive something: no seek, no transport change, no mode change.
+   A read running underneath one of these must not have its sector clock restarted by it. */
+static int cdrom_command_is_query(uint8_t cmd) {
+    switch (cmd) {
+        case CDL_GETSTAT:
+        case CDL_GETPARAM:
+        case CDL_GETLOCL:
+        case CDL_GETLOCP:
+        case CDL_GETTN:
+        case CDL_GETTD:
+        case CDL_TEST:
+            return 1;
+    }
+
+    return 0;
+}
+
+/*
+    Charge the parked read for the time that passes while a query is being serviced.
+
+    This is the whole reason the stash is a countdown and not a saved constant. The first cut
+    subtracted a fixed CD_DELAY_FR on resume, on the assumption that a command costs exactly
+    that. It does not: cdrom_write_cmd() sets CD_DELAY_FR, but psx_cdrom_update() then refuses
+    to execute the command for as long as the host leaves an interrupt unacknowledged ("Hold
+    IRQ until IFR is acknowledged"), and a game that services CD interrupts from its main loop
+    can leave one sitting for most of a frame. Every microsecond of that extra wait was time
+    the read was NOT charged for, so the sector came early — and at ~50 polls a second the
+    error compounds into a drive running ~50% fast, which is the failure this file's
+    CD_DELAY_ONGOING_READ comment records as having looped Xenogears' first FMV.
+
+    A disc does not bank time while the host is busy. Ticking the stash with the same `cycles`
+    every other timer here uses makes the give-back exact by construction, with no estimate of
+    the command's cost in it at all.
+*/
+static void cdrom_tick_read_delay(psx_cdrom_t* cdrom, int cycles) {
+    if (cdrom->read_delay_pending <= 0 || cycles <= 0)
+        return;
+
+    cdrom->read_delay_pending -= cycles;
+
+    /* Floor at 1 rather than 0: 0 is the "nothing parked" sentinel, and a sector that came due
+       while the query was being serviced should fire as soon as the read resumes. */
+    if (cdrom->read_delay_pending < 1)
+        cdrom->read_delay_pending = 1;
+}
+
+/* Resume a read that a query interrupted, on the clock it was already on. Falls back to the
+   normal start-of-read delay when nothing was interrupted. */
+static void cdrom_resume_read_delay(psx_cdrom_t* cdrom) {
+    if (cdrom->read_delay_pending > 0) {
+        cdrom->delay = cdrom->read_delay_pending;
+
+        return;
+    }
+
+    cdrom->delay = CD_DELAY_ONGOING_READ;
+}
+
+void cdrom_anchor_report_position(psx_cdrom_t* cdrom, uint32_t lba) {
+    cdrom->report_anchor = cdrom->lba;
+    cdrom->report_lba = lba;
+    cdrom->report_accum = 0;
 }
 
 /*
@@ -546,11 +740,65 @@ void cdrom_handle_read(psx_cdrom_t* cdrom) {
         return;
     }
 
+    /*
+        Read into scratch FIRST, because whether this sector belongs to the host at all is a
+        property of its subheader, and overwriting the data FIFO before knowing that would
+        corrupt a sector the game has not collected yet.
+
+        With Mode.bit6 (XA-ADPCM) set, a Form2 audio sector whose file/channel match the filter
+        is consumed by the controller's ADPCM decoder: it goes to the SPU and raises NO data
+        interrupt. Only the other sectors are handed to the host.
+
+        Measured against an interleaved fixture (1 data : 7 audio, file 1/chan 4, mode c8 —
+        Spyro's own configuration from the device log), before this existed:
+
+            walked 160 sectors:  INT1 raised 160, of which 20 data and 140 XA AUDIO
+
+        Hardware raises about 20. The game's data handler was being fed eight times the
+        sectors it expected, seven of every eight containing ADPCM, so it could never parse
+        its stream — which is why three rounds of fixing the transport changed nothing. The
+        transport was already delivering; the routing was wrong.
+
+        Nothing here touches the audio: psx_cdrom_get_audio_samples() walks its own xa_lba
+        independently of this path, so suppressing the interrupt does not suppress the sound.
+    */
+    {
+        static uint8_t sector[CD_SECTOR_SIZE];
+
+        psx_disc_read(cdrom->disc, cdrom->lba, sector);
+
+        if (cdrom->mode & MODE_XA_ADPCM) {
+            const uint8_t submode = sector[0x12];
+
+            /* Audio (bit2) AND Form2 (bit5): both, or it is not an ADPCM sector. A Form2
+               sector that is not audio — video, or real-time data — is still the host's. */
+            if ((submode & 0x04) && (submode & 0x20)) {
+                /*
+                    Deliberately NOT conditioned on the filter. The filter decides which
+                    channel reaches the SPU and which is discarded; it does not decide whether
+                    an ADPCM sector counts as data. psx-spx on Setfilter: it "selects which of
+                    the interleaved audio channels shall be played (the other channels are
+                    ignored)" — ignored, not handed to the host.
+
+                    Getting this wrong left 7 of every 8 sectors still being delivered as
+                    data on an 8-channel interleave, which is exactly what Spyro streams:
+                    audio_diag showed channels cycling 00..07 against filter 01/04, every one
+                    of them audio=1 data=0 form2=1, and INT1 arriving at 131/s — 7/8 of the
+                    drive rate. SPU delivery is psx_cdrom_get_audio_samples()'s job, on its
+                    own xa_lba walk, and it applies the filter itself.
+                */
+                cdrom->pending_lba = cdrom->lba + 1;
+                cdrom->delay = cdrom_get_read_delay(cdrom);
+
+                return;
+            }
+        }
+
+        memcpy(cdrom->data->buf, sector, CD_SECTOR_SIZE);
+    }
+
     cdrom_set_int(cdrom, 1);
     queue_push(cdrom->response, cdrom_get_stat(cdrom));
-
-    // Read sector into our data FIFO
-    psx_disc_read(cdrom->disc, cdrom->lba, cdrom->data->buf);
 
     int size_bit = cdrom->mode & MODE_SECTOR_SIZE;
 
@@ -573,7 +821,198 @@ void cdrom_handle_read(psx_cdrom_t* cdrom) {
     // );
 }
 
+/*
+    CD command trace.
+
+    This was an unconditional printf on every command write. A game that polls CdlGetlocP once
+    a frame — the hang the reported-position block above exists for — turned that into ~60
+    lines a second: 9270 bytes in three seconds on the device, 1.7 MB of armsx.log in minutes,
+    with every other line in the file buried under it. A capture of the hang said almost
+    nothing as a result.
+
+    Runs of the same command with the same parameters now collapse into one line that carries
+    the repeat count and the response the drive actually gave, which is the half that was
+    missing: the old trace printed at command-WRITE time, so it could not distinguish "the
+    game keeps asking" from "the game keeps asking and we keep answering with the same thing".
+
+        cdrom: CdlGetlocp   (11) x512 exec=512 params: (none) -> INT3 01 01 00 17 50 00 19 50
+                                | async INT1 x430 | state=3 lba=113598 head=113598
+
+    The first cut of this got the attribution wrong and cost a wrong diagnosis, so it is worth
+    being explicit about. The response snapshot used to be taken after EVERY update that
+    raised an interrupt, including the per-sector INT1 of a read still running underneath the
+    polling. During an XA stream that is 75-150 interrupts a second against ~50 polls, so the
+    last one before each flush was almost always a sector interrupt, and a CdlGetlocP run
+    printed `-> INT1 22` — the read's data-ready status, attributed to a command that had in
+    fact answered INT3 correctly every time.
+
+    So an interrupt is now attributed to the command only if it was raised while that command
+    was executing (`trace_in_command`), and everything else is counted separately. The counts
+    are the diagnosis on their own: `exec` is how many of the writes reached the command
+    implementation at all, and `async INT1` is whether the transport is still delivering
+    sectors while the game polls.
+
+    A run still going after CD_TRACE_RUN_FLUSH repeats reports and keeps counting, so a hang
+    is never silent; a run ends (and prints) as soon as a different command arrives.
+*/
+#define CD_TRACE_RUN_FLUSH 512
+
+static void cdrom_trace_hex(char* dst, size_t size, const uint8_t* src, unsigned n) {
+    size_t used = 0;
+
+    dst[0] = '\0';
+
+    for (unsigned i = 0; i < n; i++) {
+        int written;
+
+        if (used + 4u >= size)
+            break;
+
+        written = snprintf(dst + used, size - used, "%02x ", src[i]);
+
+        if (written <= 0)
+            break;
+
+        used += (size_t)written;
+    }
+}
+
+static void cdrom_trace_flush(psx_cdrom_t* cdrom) {
+    char params[24];
+    char resp[40];
+    char async[64];
+    size_t used = 0;
+
+    if (!cdrom->trace_valid || !cdrom->trace_repeat)
+        return;
+
+    cdrom_trace_hex(params, sizeof(params), cdrom->trace_params, cdrom->trace_nparams);
+    cdrom_trace_hex(resp, sizeof(resp), cdrom->trace_resp, cdrom->trace_nresp);
+
+    async[0] = '\0';
+
+    for (unsigned n = 1; n < 8; n++) {
+        int written;
+
+        if (!cdrom->trace_async[n] || used + 16u >= sizeof(async))
+            continue;
+
+        written = snprintf(async + used, sizeof(async) - used, " INT%u x%u",
+                           n, cdrom->trace_async[n]);
+
+        if (written <= 0)
+            break;
+
+        used += (size_t)written;
+    }
+
+    char answer[56];
+
+    if (cdrom->trace_nresp)
+        snprintf(answer, sizeof(answer), "INT%u %s", cdrom->trace_int, resp);
+    else
+        snprintf(answer, sizeof(answer), "(no response)");
+
+    /*
+        exec < repeat means writes that never reached the command implementation; exec == 0
+        with a run in the hundreds is a wedged controller. A populated `async` column while the
+        poll makes no progress says the transport is still running underneath it; an empty one
+        says the polling starved it.
+
+        `mode` and `spd` are here because a sector rate cannot be judged without them, and
+        judging one without them has already cost a wrong call: `async INT1` counted against
+        wall time looked like the drive running 48% fast, when mode bit7 (speed) and the host's
+        read-speedup divisor between them said it was running at exactly the rate it had been
+        configured for. Expected sectors/s = (75 << mode.bit7) * spd.
+    */
+    printf("cdrom: %-14s (%02x) x%u exec=%u params: %s-> %s | async%s | state=%d lba=%u head=%u "
+           "mode=%02x spd=%ux\n",
+        psx_cdrom_command_name(cdrom->trace_cmd),
+        cdrom->trace_cmd,
+        cdrom->trace_repeat,
+        cdrom->trace_exec,
+        cdrom->trace_nparams ? params : "(none) ",
+        answer,
+        used ? async : " (none)",
+        cdrom->state,
+        cdrom->lba,
+        cdrom->report_lba,
+        cdrom->mode,
+        psx_cdrom_get_read_speedup());
+
+    cdrom->trace_repeat = 0;
+    cdrom->trace_exec = 0;
+
+    memset(cdrom->trace_async, 0, sizeof(cdrom->trace_async));
+}
+
+static void cdrom_trace_cmd(psx_cdrom_t* cdrom, uint8_t data) {
+    uint8_t params[4] = { 0, 0, 0, 0 };
+    int n = queue_size(cdrom->parameters);
+
+    if (n < 0) n = 0;
+    if (n > 4) n = 4;
+
+    for (int i = 0; i < n; i++)
+        params[i] = cdrom->parameters->buf[cdrom->parameters->read_index + i];
+
+    if (cdrom->trace_valid &&
+        cdrom->trace_cmd == data &&
+        cdrom->trace_nparams == (uint8_t)n &&
+        !memcmp(cdrom->trace_params, params, sizeof(params))) {
+        cdrom->trace_repeat++;
+
+        if (cdrom->trace_repeat >= CD_TRACE_RUN_FLUSH)
+            cdrom_trace_flush(cdrom);
+
+        return;
+    }
+
+    cdrom_trace_flush(cdrom);
+
+    cdrom->trace_valid = 1;
+    cdrom->trace_cmd = data;
+    cdrom->trace_nparams = (uint8_t)n;
+    memcpy(cdrom->trace_params, params, sizeof(params));
+    cdrom->trace_nresp = 0;
+    cdrom->trace_int = 0;
+    cdrom->trace_repeat = 1;
+    cdrom->trace_exec = 0;
+
+    memset(cdrom->trace_async, 0, sizeof(cdrom->trace_async));
+}
+
+/* Snapshot what the TRACED COMMAND put in the response FIFO, so the run's one line shows what
+   the game is actually being told. Only runs if cdrom_set_int() saw the interrupt raised from
+   inside the command dispatch — a sector interrupt from a read running underneath the polling
+   is counted in trace_async instead, and must never land here. Peeks; never consumes. */
+static void cdrom_trace_command_response(psx_cdrom_t* cdrom) {
+    int n;
+
+    if (!cdrom->trace_valid || !cdrom->trace_pending_int)
+        return;
+
+    n = queue_size(cdrom->response);
+
+    if (n < 0) n = 0;
+    if (n > (int)sizeof(cdrom->trace_resp)) n = (int)sizeof(cdrom->trace_resp);
+
+    for (int i = 0; i < n; i++)
+        cdrom->trace_resp[i] = cdrom->response->buf[cdrom->response->read_index + i];
+
+    cdrom->trace_nresp = (uint8_t)n;
+    cdrom->trace_int = cdrom->trace_pending_int;
+    cdrom->trace_pending_int = 0;
+    cdrom->trace_exec++;
+}
+
 void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
+    /* Before every early return below: the disc keeps spinning whether or not the controller
+       has anything to do. CdlGetlocP has to see that, and a read parked behind a query has to
+       be charged for it. */
+    cdrom_update_report_position(cdrom, cycles);
+    cdrom_tick_read_delay(cdrom, cycles);
+
     if (cdrom->delay > 0) {
         cdrom->delay -= cycles;
 
@@ -598,7 +1037,9 @@ void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
 
     switch (cdrom->state) {
         case CD_STATE_TX_RESP1: {
+            cdrom->trace_in_command = 1;
             cdrom_handle_resp1(cdrom);
+            cdrom->trace_in_command = 0;
 
             switch (cdrom->pending_command) {
                 case CDL_READN:
@@ -613,12 +1054,15 @@ void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
 
                 cdrom->state = CD_STATE_READ;
                 cdrom->prev_state = CD_STATE_READ;
-                cdrom->delay = CD_DELAY_ONGOING_READ;
+
+                cdrom_resume_read_delay(cdrom);
             }
         } break;
 
         case CD_STATE_TX_RESP2: {
+            cdrom->trace_in_command = 1;
             cdrom_cmd_table[cdrom->pending_command](cdrom);
+            cdrom->trace_in_command = 0;
 
             // Switching to read mode after executing a command
             // has a 500ms penalty
@@ -627,7 +1071,8 @@ void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
 
                 cdrom->state = CD_STATE_READ;
                 cdrom->prev_state = CD_STATE_READ;
-                cdrom->delay = CD_DELAY_ONGOING_READ;
+
+                cdrom_resume_read_delay(cdrom);
             }
         } break;
 
@@ -635,6 +1080,13 @@ void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
             cdrom_handle_read(cdrom);
         } break;
     }
+
+    /* One command service is the whole life of the stash. If the command errored out instead
+       of returning the drive to CD_STATE_READ, nothing consumed it and it must not survive to
+       be applied to some later read. */
+    cdrom->read_delay_pending = 0;
+
+    cdrom_trace_command_response(cdrom);
 
     if ((cdrom->ifr & cdrom->ier) == 0)
         return;
@@ -752,6 +1204,31 @@ void cdrom_write_cmd(psx_cdrom_t* cdrom, uint8_t data) {
     }
 
     cdrom->prev_state = cdrom->state;
+
+    /*
+        A command and a running read share `cdrom->delay`, so writing a command discards
+        however much of the read's sector countdown had elapsed, and the read is then
+        rescheduled from scratch. The drive's sector rate therefore collapses to the rate the
+        game asks it questions.
+
+        Measured on the host, replaying Spyro's own sequence (Setmode e0, Setfilter 01 04,
+        Setloc, ReadS, then CdlGetlocP once a frame the way the device log shows): 120 sector
+        interrupts in 120 frames. Exactly one per frame, when a 2x XA stream needs 150 a
+        second. At 1x it is worse than throttled — CD_DELAY_ONGOING_READ is 17.3 ms against a
+        16.7 ms poll period, so no sector ever completes at all.
+
+        A real drive does not restart its sector clock because the host asked where the head
+        is. So remember what the read had left and give it back, minus the time the command
+        itself takes.
+
+        Only for commands that cannot touch the transport. Setmode mid-stream is a real
+        transport event that this file already has scar tissue about, and every game that
+        works today reaches CD_DELAY_ONGOING_READ through one of those — leaving their pacing
+        bit-identical is worth more than being thorough here.
+    */
+    if (cdrom->prev_state == CD_STATE_READ && cdrom_command_is_query(data))
+        cdrom->read_delay_pending = (cdrom->delay > 0) ? cdrom->delay : 1;
+
     cdrom->state = CD_STATE_TX_RESP1;
 
     cdrom->pending_command = data;
@@ -769,20 +1246,9 @@ void cdrom_write_cmd(psx_cdrom_t* cdrom, uint8_t data) {
     if (cdrom->state == CD_STATE_READ)
         cdrom->busy = 1;
 
-    printf("cdrom: %-16s (%02x) params: ", cdrom_cmd_names[data], data);
-
-    if (queue_is_empty(cdrom->parameters)) {
-        puts("(none)");
-
-        return;
-    }
-
-    for (int i = 0; i < cdrom->parameters->write_index; i++)
-        printf("%02x ", cdrom->parameters->buf[i]);
-
-    putchar('\n');
-
-    return;
+    /* Was an unconditional printf per command, and indexed cdrom_cmd_names[] with an
+       unchecked command byte on the way. See cdrom_trace_cmd(). */
+    cdrom_trace_cmd(cdrom, data);
 }
 
 void cdrom_write_null(psx_cdrom_t* cdrom, uint8_t data) {
@@ -1084,6 +1550,11 @@ int psx_cdrom_load_state(psx_cdrom_t* cdrom, psx_state_reader_t* r) {
     psx_sr_i16_array(r, cdrom->xa_left_resample_buf, XA_STEREO_RESAMPLE_MAX_SIZE);
     psx_sr_i16_array(r, cdrom->xa_right_resample_buf, XA_STEREO_RESAMPLE_MAX_SIZE);
     psx_sr_i16_array(r, cdrom->xa_mono_resample_buf, XA_MONO_RESAMPLE_MAX_SIZE);
+
+    /* Derived, never serialised: a state written by any build (including every state already
+       on a device) restores a head sitting exactly on the transport position, which is where
+       a drive that has just been told to seek there would be. */
+    cdrom_anchor_report_position(cdrom, cdrom->lba);
 
     return PSX_STATE_OK;
 }

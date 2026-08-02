@@ -198,6 +198,14 @@ object WindowImpl {
                 // here for the same reason as the keyboard: reachable above every surface.
                 com.armsx2.ui.WelcomeBannerOverlay(this)
 
+                // The RetroAchievements toast stack (sign-in, game summary, unlocks, leaderboards).
+                // Hosted here rather than on a screen for the same reason, and specifically so it
+                // draws over live gameplay: the PS1 core renders into this activity's SurfaceView,
+                // so anything in this Box composites onto the game. Placed after the banner so it
+                // wins the corner when both are up — RaToastOverlay drops below the banner instead
+                // of overlapping it.
+                com.armsx2.ui.RaToastOverlay(this)
+
                 // App-wide confirmation prompts. Hosted last so the scrim covers everything,
                 // and here rather than at the call site because a prompt raised from inside a
                 // scrolling settings tab would clip to that tab and scroll away with it.

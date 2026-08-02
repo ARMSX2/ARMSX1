@@ -149,6 +149,38 @@
    how big it is. */
 #define PSX_SS_THUMB      PSX_FOURCC('T', 'H', 'M', 'B')
 
+/* Optional, never mandatory — same compatibility contract as PSX_SS_THUMB.
+   Memory-card fingerprints, so a load can tell whether the cards still hold
+   what the state was taken against. Payload:
+
+       off  size  field
+       0x00 4     slot_count     always PSX_STATE_MCARD_SLOTS today; a reader
+                                 stops after the slots it knows about
+       then, per slot:
+       +0x00 1    present        0 = no card was attached in that slot
+       +0x01 8    content_hash   FNV-1a over the whole 128 KiB card image
+       +0x09 8    session_id     nonce stamped on the card when it was attached
+       +0x11 4    write_generation  128-byte sectors the game had written
+       +0x15 8    file_mtime     st_mtime of the card file, seconds
+
+   content_hash answers "is it different". session_id + write_generation answer
+   "which way", and only within one attach of one card: generations from two
+   different attaches are not comparable, which is exactly why the nonce is
+   there — without it a fresh card would read as "older" than last week's state.
+
+   file_mtime is recorded for diagnosis and is NOT part of the verdict. It
+   cannot separate "the same card moved forward" from "a different card was
+   imported or erased", both of which leave the file newer; and since the image
+   is only flushed when the card is destroyed, it does not move at all while the
+   game is saving. A cross-session difference is therefore always the soft
+   verdict, which is the honest answer rather than a guess.
+
+   A state written before this existed simply has no section, which the reader
+   treats as "unknown" and passes silently. See PSX_STATE_ERR_CARD_* below. */
+#define PSX_SS_MCARD      PSX_FOURCC('M', 'C', 'F', 'P')
+
+#define PSX_STATE_MCARD_SLOTS 2u
+
 #define PSX_STATE_THUMB_PNG 1u
 
 /* Refuses anything larger, so a corrupt or hostile length cannot turn a picker
@@ -181,8 +213,27 @@ enum {
     PSX_STATE_ERR_UNSUPPORTED = -11, /* the machine cannot be captured faithfully */
     PSX_STATE_ERR_NO_MACHINE = -12,  /* no VM registered / running */
     PSX_STATE_ERR_BUSY = -13,        /* another request is already parked */
-    PSX_STATE_ERR_TIMEOUT = -14      /* the emulation thread never serviced it */
+    PSX_STATE_ERR_TIMEOUT = -14,     /* the emulation thread never serviced it */
+
+    /* Memory-card divergence. Raised in the load's identity phase, BEFORE any
+       byte of the machine has been touched, exactly like WRONG_DISC — so a
+       front-end can put the question to the user and re-issue the load with
+       PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE without anything having half
+       happened in between. Both are advisory: neither means the state is
+       damaged, only that the cards moved on since it was taken. */
+
+    /* The card carries writes the state does not: the game saved AFTER this
+       state was captured. Loading rewinds the console behind its own card. */
+    PSX_STATE_ERR_CARD_NEWER = -15,
+
+    /* The card differs, but nothing establishes which way (a different session,
+       an imported or erased card, a rewound one). */
+    PSX_STATE_ERR_CARD_DIVERGED = -16
 };
+
+/* Flags for psx_load_state_ex() / psx_load_state_from_memory_ex() /
+   psx_state_request_slot_ex(). */
+#define PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE 0x00000001u
 
 const char* psx_state_strerror(int code);
 
@@ -272,6 +323,13 @@ void psx_state_service_requests(void);
    there (typically: the front-end has the VM paused). base_dir is the host's
    data directory; slot files land in <base_dir>/savestates/. */
 int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_ms);
+
+/* The same, with PSX_STATE_LOAD_* flags. psx_state_request_slot() is exactly
+   this with flags == 0, so an existing caller keeps the checked behaviour and a
+   front-end that has already asked the user passes
+   PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE to say "yes, load it anyway". */
+int psx_state_request_slot_ex(int op, int slot, const char* base_dir, int timeout_ms,
+                              unsigned flags);
 
 /* Builds the on-disk path for a slot: <base_dir>/savestates/<game>.slot<N>.pss
    where <game> is derived from the mounted disc (sanitised file stem + the

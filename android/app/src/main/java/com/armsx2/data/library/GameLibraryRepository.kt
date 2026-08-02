@@ -8,6 +8,7 @@ import com.armsx2.FilenameParser
 import com.armsx2.GameInfo
 import com.armsx2.GamePlatform
 import com.armsx2.core.Ps1Covers
+import com.armsx2.core.Ps1DiscId
 import com.armsx2.core.Ps1Folders
 import com.armsx2.core.Ps1Game
 import com.armsx2.core.Ps1Library
@@ -20,6 +21,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * The library, backed by the PS1 core.
@@ -100,11 +104,52 @@ class GameLibraryRepository(private val context: Context) {
         }
 
         val collected = linkedMapOf<String, GameInfo>()
+        val probeLog = ArrayList<String>()
         Ps1Library.scan(context).forEach { game ->
             val uri = Uri.fromFile(File(game.path))
-            collected.putIfAbsent(uri.toString(), createGame(uri, game))
+            if (collected.containsKey(uri.toString())) return@forEach
+            collected[uri.toString()] = createGame(uri, game, probeLog)
         }
+        writeProbeLog("full scan", probeLog, append = false)
         collected.values.sortedBy { it.title.lowercase() }.also { saveCache(directories, it) }
+    }
+
+    /**
+     * Re-identify the games the last scan could not put a serial on, and rewrite the cache if any
+     * of them now resolve.
+     *
+     * `serial` is a STORED field: a warm start reads the game list straight out of
+     * SharedPreferences and never touches the discs again unless the set of library folders
+     * changed. That makes a failed identification permanent — a disc that came back null once
+     * stays null through every launch, and through every update that fixes the extractor, because
+     * nothing ever asks again. The user's library would keep the blank tile until they thought to
+     * hit Refresh.
+     *
+     * So a null serial is treated as "not determined yet", not as "known to have none". It costs a
+     * few kilobytes of disc reads per unidentified game, only for games that HAVE no serial, and
+     * only until they get one. Returns the updated list, or null when nothing changed.
+     */
+    suspend fun retryMissingSerials(games: List<GameInfo>): List<GameInfo>? = withContext(Dispatchers.IO) {
+        if (games.none { it.serial.isNullOrBlank() }) return@withContext null
+        var changed = false
+        val probeLog = ArrayList<String>()
+        val updated = games.map { game ->
+            if (!game.serial.isNullOrBlank()) return@map game
+            val path = pathOf(game.uri)?.takeIf { runCatching { File(it).isFile }.getOrDefault(false) }
+                ?: return@map game
+            // reprobe, not probe: the process-lifetime memo may already hold this scan's failure.
+            val probe = runCatching { Ps1Covers.reprobeForPath(path) }.getOrNull() ?: return@map game
+            probeLog += describe(File(path).name, probe)
+            val serial = probe.serial?.takeIf { it.isNotBlank() } ?: return@map game
+            changed = true
+            game.copy(serial = serial)
+        }
+        writeProbeLog("retry of unidentified discs", probeLog, append = true)
+        if (!changed) return@withContext null
+        // Only the rows change; the cache KEY still describes the same folders, so it is left
+        // exactly as the scan that wrote it left it.
+        saveGamesCache(updated)
+        updated
     }
 
     fun recentGames(allGames: List<GameInfo>): List<GameInfo> {
@@ -227,15 +272,18 @@ class GameLibraryRepository(private val context: Context) {
     private fun pathOf(uri: Uri): String? =
         if (uri.scheme == null || uri.scheme == "file") uri.path?.takeIf { it.isNotBlank() } else null
 
-    private fun createGame(uri: Uri, game: Ps1Game): GameInfo {
+    private fun createGame(uri: Uri, game: Ps1Game, probeLog: MutableList<String>): GameInfo {
         val name = File(game.path).name
         val extension = name.substringAfterLast('.', "").lowercase()
         val (fileTitle, fileSerial) = FilenameParser.parse(name)
         // The disc's own boot line beats the filename: a renamed dump still boots the same disc,
         // and psx-covers is keyed by the real serial. Null for .chd/.zip/.exe (Ps1DiscId can't
-        // read inside a compressed container) — those fall back to a serial in the filename, and
-        // failing that to no serial at all, which is a filename title + placeholder cover.
-        val serial = runCatching { Ps1Covers.serialForPath(game.path) }.getOrNull() ?: fileSerial
+        // read inside a compressed container) — those fall back to a serial in the filename, then
+        // to a dump-name lookup for the cover only (GameInfo.coverSerial), and failing that to a
+        // placeholder tile.
+        val probe = runCatching { Ps1Covers.probeForPath(game.path) }.getOrNull()
+        probe?.let { probeLog += describe(name, it) }
+        val serial = probe?.serial ?: fileSerial
         // Warm the sibling-cover probe here, on IO, so GameInfo.coverUrl is a pure map lookup
         // by the time the grid composes it.
         runCatching { Ps1Covers.siblingCoverPath(game.path) }
@@ -257,6 +305,20 @@ class GameLibraryRepository(private val context: Context) {
     }
 
     private fun saveCache(directories: List<String>, games: List<GameInfo>) {
+        MainActivityRuntime.prefs.edit {
+            putString("gamesCacheKey", cacheKey(directories))
+                .putString("gamesCache", serialise(games))
+        }
+    }
+
+    /** Rewrite the cached ROWS without touching `gamesCacheKey`. Used by
+     *  [retryMissingSerials], which improves the rows for the SAME set of folders — rewriting the
+     *  key there would be claiming a scan that never ran. */
+    private fun saveGamesCache(games: List<GameInfo>) {
+        MainActivityRuntime.prefs.edit { putString("gamesCache", serialise(games)) }
+    }
+
+    private fun serialise(games: List<GameInfo>): String {
         val array = JSONArray()
         games.forEach { game ->
             array.put(JSONObject().apply {
@@ -270,11 +332,58 @@ class GameLibraryRepository(private val context: Context) {
                 put("titleEn", game.titleEn)
             })
         }
-        MainActivityRuntime.prefs.edit {
-            putString("gamesCacheKey", cacheKey(directories))
-                .putString("gamesCache", array.toString())
+        return array.toString()
+    }
+
+    /** One log entry: what the disc resolved to, and the trace of how. */
+    private fun describe(name: String, probe: Ps1DiscId.Probe): String = buildString {
+        append(name).append(" -> ").append(probe.serial ?: "NO SERIAL")
+        if (probe.method.isNotEmpty()) append(" [").append(probe.method).append(']')
+        probe.detail.lineSequence().forEach { line ->
+            if (line.isNotBlank()) append("\n    ").append(line.trim())
+        }
+    }
+
+    /**
+     * Mirror the identification trace to `serial_probe.log` next to `recent_games.json`.
+     *
+     * A game with no serial loses its cover, its RetroAchievements identity, its play-time record
+     * and its per-game settings key — and before this there was nothing anywhere saying which step
+     * of the read failed, so "no cover" was indistinguishable from "never looked". A few KB of
+     * plain text, rewritten on each scan, is the difference between diagnosing that and guessing.
+     */
+    private fun writeProbeLog(reason: String, lines: List<String>, append: Boolean) {
+        if (lines.isEmpty()) return
+        val root = MainActivityRuntime.systemDirPosix()
+            ?: context.getExternalFilesDir(null)?.absolutePath
+            ?: return
+        val stamp = runCatching {
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+        }.getOrDefault("")
+        val text = buildString {
+            append("=== ARMSX disc identification (").append(reason).append(") ")
+            append(stamp).append(" ===\n")
+            lines.take(MAX_PROBE_LOG_ENTRIES).forEach { append(it).append('\n') }
+            if (lines.size > MAX_PROBE_LOG_ENTRIES) {
+                append("… ").append(lines.size - MAX_PROBE_LOG_ENTRIES).append(" more\n")
+            }
+        }
+        synchronized(exportLock) {
+            runCatching {
+                val file = File(root, "serial_probe.log")
+                if (append && file.isFile && file.length() < MAX_PROBE_LOG_BYTES) {
+                    file.appendText(text)
+                } else {
+                    file.writeText(text)
+                }
+            }
         }
     }
 
     data class CachedLibrary(val key: String?, val games: List<GameInfo>)
+
+    private companion object {
+        const val MAX_PROBE_LOG_ENTRIES = 400
+        const val MAX_PROBE_LOG_BYTES = 256L * 1024
+    }
 }

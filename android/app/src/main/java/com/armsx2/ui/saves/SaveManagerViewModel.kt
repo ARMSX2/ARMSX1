@@ -67,17 +67,24 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
             val hasActiveVm = withContext(Dispatchers.IO) {
                 runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
             }
-            val ok = if (hasActiveVm) {
-                withContext(Dispatchers.IO) {
-                    runCatching { NativeApp.loadStateFromSlot(slot) }.getOrDefault(false)
-                }
+            // With a VM up this is a live load, so it goes through SaveStateGuard and may ask
+            // about memory-card divergence first. Cold-booting into the slot does not: that
+            // path retries on a timer until the renderer is presenting, and a prompt inside a
+            // retry loop would ask the same question sixty times.
+            val outcome = if (hasActiveVm) {
+                SaveStateGuard.load(slot)
+            } else if (MainActivityRuntime.launchCurrentGameFromSaveSlot(slot)) {
+                SaveStateGuard.Outcome.Loaded
             } else {
-                MainActivityRuntime.launchCurrentGameFromSaveSlot(slot)
+                SaveStateGuard.Outcome.Failed
             }
-            state.value = if (ok) {
-                state.value.copy(message = "${I18n.get("touch.stateAction.load")} · ${slot + 1}")
-            } else {
-                state.value.copy(error = "${I18n.get("touch.stateAction.load")} · ${slot + 1}")
+            state.value = when (outcome) {
+                SaveStateGuard.Outcome.Loaded ->
+                    state.value.copy(message = "${I18n.get("touch.stateAction.load")} · ${slot + 1}")
+                // Declined, not failed. An error banner would misreport the user's own choice.
+                SaveStateGuard.Outcome.Cancelled -> state.value
+                SaveStateGuard.Outcome.Failed ->
+                    state.value.copy(error = "${I18n.get("touch.stateAction.load")} · ${slot + 1}")
             }
         }
     }
@@ -138,7 +145,7 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
             .map { File(MainActivityRuntime.assetCopyRoot(getApplication()), it) }
         val discovered = roots.flatMap { root ->
             if (!root.isDirectory) emptyList()
-            else root.walkTopDown().filter { it.isFile && it.extension.equals("p2s", true) }.toList()
+            else root.walkTopDown().filter { it.isFile && it.extension.equals("pss", true) }.toList()
         }
         val allFiles = (activePaths + discovered)
             .distinctBy { it.absolutePath.lowercase() }
@@ -180,11 +187,20 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
     private fun slotFrom(file: File): Int? = SLOT_PATTERN.find(file.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
     private fun serialFrom(file: File): String = file.name.substringBefore(" (").ifBlank {
-        file.nameWithoutExtension.substringBeforeLast('.')
+        // psx/state.c:1268 writes "<sanitised title>-<crc32>.slot<N>.pss". nameWithoutExtension
+        // strips ".pss", substringBeforeLast('.') strips ".slotN", and CRC_SUFFIX strips the
+        // content hash — leaving the title, which is what the card shows.
+        file.nameWithoutExtension.substringBeforeLast('.').replace(CRC_SUFFIX, "")
     }
 
     private companion object {
         const val SLOT_COUNT = 10
-        val SLOT_PATTERN = Regex("\\.([0-9]{2})\\.p2s$", RegexOption.IGNORE_CASE)
+
+        /* This core writes PS1 states as "<title>-<crc32>.slotN.pss" (psx/state.c:1268). The
+           inherited PS2 pattern looked for a two-digit slot in a ".p2s" — wrong extension AND
+           wrong slot form, so the Save Manager listed nothing at all. Slot is 1+ digits and
+           carries the "slot" prefix. */
+        val SLOT_PATTERN = Regex("\\.slot([0-9]+)\\.pss$", RegexOption.IGNORE_CASE)
+        val CRC_SUFFIX = Regex("-[0-9a-f]{8}$", RegexOption.IGNORE_CASE)
     }
 }

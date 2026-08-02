@@ -171,6 +171,14 @@ object GlobalConfirm {
         val confirmLabel: String?,
         val destructive: Boolean,
         val onConfirm: () -> Unit,
+        /** Runs when the user declines — Cancel, a tap on the scrim, or back. Optional
+         *  because most prompts here are fire-and-forget; a caller that is WAITING on the
+         *  answer (SaveStateGuard suspends on it) needs the negative edge too, or it hangs
+         *  on the prompt the user already dismissed. */
+        val onCancel: (() -> Unit)? = null,
+        /** Dismiss label override, so a prompt can offer a real alternative rather than a
+         *  bare "Cancel". */
+        val dismissLabel: String? = null,
     )
 
     val pending = mutableStateOf<Request?>(null)
@@ -180,9 +188,12 @@ object GlobalConfirm {
         message: String,
         confirmLabel: String? = null,
         destructive: Boolean = false,
+        dismissLabel: String? = null,
+        onCancel: (() -> Unit)? = null,
         onConfirm: () -> Unit,
     ) {
-        pending.value = Request(title, message, confirmLabel, destructive, onConfirm)
+        pending.value =
+            Request(title, message, confirmLabel, destructive, onConfirm, onCancel, dismissLabel)
     }
 
     fun dismiss() {
@@ -196,6 +207,7 @@ object GlobalConfirm {
             title = request.title,
             message = request.message,
             confirmLabel = request.confirmLabel ?: str("action.ok"),
+            dismissLabel = request.dismissLabel ?: str("action.cancel"),
             destructive = request.destructive,
             idPrefix = "global",
             onConfirm = {
@@ -204,7 +216,10 @@ object GlobalConfirm {
                 pending.value = null
                 request.onConfirm()
             },
-            onDismiss = { pending.value = null },
+            onDismiss = {
+                pending.value = null
+                request.onCancel?.invoke()
+            },
         )
     }
 }

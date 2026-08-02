@@ -288,7 +288,7 @@ data class GameInfo(
      */
     val coverUrl: String? get() {
         localCoverPath()?.let { return Uri.fromFile(File(it)).toString() }
-        val s = serial ?: return null
+        val s = coverSerial ?: return null
         // 3D cases live under covers/3d/*.png; flat 2D scans under
         // covers/default/*.jpg. Coil decodes by content, so the extension
         // mismatch on the cached file is fine.
@@ -297,6 +297,19 @@ data class GameInfo(
         else
             "https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/default/$s.jpg"
     }
+
+    /**
+     * The serial to fetch BOX ART with — [serial] where the disc identified itself, otherwise a
+     * dump-name lookup ([com.armsx2.core.Ps1TitleSerials]).
+     *
+     * Separate from [serial] on purpose. [serial] is the game's identity: RetroAchievements hashes
+     * against it, per-game settings and play time key off it, and a value guessed from a filename
+     * has no business deciding any of those. Art is the one thing a guess can safely drive — the
+     * worst case is the wrong picture — so a disc the extractor cannot read (a .chd, a damaged
+     * image) degrades to "cover still works" rather than a blank tile.
+     */
+    val coverSerial: String? get() = serial?.takeIf { it.isNotBlank() }
+        ?: com.armsx2.core.Ps1TitleSerials.coverSerialFor(title, uri.lastPathSegment)
 
     /** Absolute path of a cover sitting next to this ROM, or null. */
     private fun localCoverPath(): String? {

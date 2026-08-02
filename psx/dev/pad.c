@@ -7,6 +7,106 @@
 
 #define JOY_IRQ_DELAY 512
 
+/*
+    SIO0 transaction trace.
+
+    The controller and the memory card are the same serial port with a different device select
+    byte, so a card transaction that never completes takes the pad down with it — and only on
+    the screen that talks to the card, which is exactly the shape of "input works everywhere
+    except Spyro's memory-card screen". Nothing in this device logged anything at all, which
+    is why four rounds of investigation kept landing on the CD-ROM: it was the only subsystem
+    that could be seen.
+
+    A transaction is a select (TX of 01h pad / 81h card) plus the bytes that follow it, ended
+    by a deselect (CTRL.JOUT cleared) or by the next select. Runs of identical transactions
+    collapse to one line, the way the CD trace does, because a game polls the pad every frame
+    and an uncollapsed line per poll buries the file.
+
+        sio0: slot0 JOY (01) cmd=42 len=9 x256 | stat=0007 ctrl=1003 dest=00/00 irq=0
+
+    What to read off it:
+      * JOY runs present, len 9, no INCOMPLETE   -> the pad is being polled and answered
+      * no JOY runs at all                       -> the game stopped asking; not a bus fault
+      * an MCD run marked INCOMPLETE             -> a card transaction never deselected, which
+                                                    is what would wedge the port
+      * dest=01/00 or dest=81/00 at flush time   -> a device still holds the bus right now
+*/
+#define PAD_TRACE_RUN_FLUSH 256
+
+static const char* pad_trace_device_name(uint8_t dev) {
+    switch (dev) {
+        case DEST_JOY: return "JOY";
+        case DEST_MCD: return "MCD";
+    }
+
+    return "???";
+}
+
+static void pad_trace_flush(psx_pad_t* pad) {
+    if (!pad->trace_valid || !pad->trace_repeat)
+        return;
+
+    printf("sio0: slot%u %s (%02x) cmd=%02x len=%u x%u%s | stat=%04x ctrl=%04x dest=%02x/%02x irq=%d\n",
+        pad->trace_slot,
+        pad_trace_device_name(pad->trace_dev),
+        pad->trace_dev,
+        pad->trace_cmd,
+        pad->trace_bytes,
+        pad->trace_repeat,
+        pad->trace_incomplete ? " INCOMPLETE" : "",
+        pad->stat,
+        pad->ctrl,
+        (unsigned)pad->dest[0] & 0xffu,
+        (unsigned)pad->dest[1] & 0xffu,
+        pad->cycles_until_irq ? 1 : 0);
+
+    pad->trace_repeat = 0;
+}
+
+/* A device just took the bus. */
+static void pad_trace_begin(psx_pad_t* pad, int slot, uint8_t dev) {
+    pad->trace_open = 1;
+    pad->trace_open_slot = (uint8_t)slot;
+    pad->trace_open_dev = dev;
+    pad->trace_open_cmd = 0;
+    pad->trace_open_bytes = 0;
+}
+
+/* `incomplete` means the transaction was still holding the bus when it ended — a deselect
+   mid-transfer, or an abort because the device was not plugged in. */
+static void pad_trace_end(psx_pad_t* pad, int incomplete) {
+    if (!pad->trace_open)
+        return;
+
+    pad->trace_open = 0;
+
+    const int same = pad->trace_valid &&
+                     pad->trace_slot == pad->trace_open_slot &&
+                     pad->trace_dev == pad->trace_open_dev &&
+                     pad->trace_cmd == pad->trace_open_cmd &&
+                     pad->trace_bytes == pad->trace_open_bytes &&
+                     pad->trace_incomplete == (uint8_t)(incomplete ? 1 : 0);
+
+    if (same) {
+        pad->trace_repeat++;
+
+        if (pad->trace_repeat >= PAD_TRACE_RUN_FLUSH)
+            pad_trace_flush(pad);
+
+        return;
+    }
+
+    pad_trace_flush(pad);
+
+    pad->trace_valid = 1;
+    pad->trace_slot = pad->trace_open_slot;
+    pad->trace_dev = pad->trace_open_dev;
+    pad->trace_cmd = pad->trace_open_cmd;
+    pad->trace_bytes = pad->trace_open_bytes;
+    pad->trace_incomplete = (uint8_t)(incomplete ? 1 : 0);
+    pad->trace_repeat = 1;
+}
+
 uint32_t pad_read_rx(psx_pad_t* pad) {
     int slot = (pad->ctrl >> 13) & 1;
 
@@ -29,8 +129,11 @@ uint32_t pad_read_rx(psx_pad_t* pad) {
 
             uint8_t data = joy->read_func(joy->udata);
 
-            if (!joy->query_fifo_func(joy->udata))
+            if (!joy->query_fifo_func(joy->udata)) {
                 pad->dest[slot] = 0;
+
+                pad_trace_end(pad, 0);
+            }
 
             return data;
         } break;
@@ -44,8 +147,11 @@ uint32_t pad_read_rx(psx_pad_t* pad) {
 
             uint8_t data = psx_mcd_read(mcd);
 
-            if (!psx_mcd_query(mcd))
+            if (!psx_mcd_query(mcd)) {
                 pad->dest[slot] = 0;
+
+                pad_trace_end(pad, 0);
+            }
 
             return data;
         } break;
@@ -67,33 +173,60 @@ void pad_write_tx(psx_pad_t* pad, uint16_t data) {
         if ((data == DEST_JOY) || (data == DEST_MCD)) {
             pad->dest[slot] = data;
 
-            if ((data == DEST_JOY) && !joy)
-                return;
+            /* A select while one is still open means the previous transaction never
+               deselected — worth seeing, so close it as incomplete rather than losing it. */
+            pad_trace_end(pad, 1);
+            pad_trace_begin(pad, slot, (uint8_t)data);
 
-            if ((data == DEST_MCD) && !mcd)
+            if ((data == DEST_JOY) && !joy) {
+                pad_trace_end(pad, 1);
+
                 return;
+            }
+
+            if ((data == DEST_MCD) && !mcd) {
+                pad_trace_end(pad, 1);
+
+                return;
+            }
 
             if (pad->ctrl & CTRL_ACIE)
                 pad->cycles_until_irq = JOY_IRQ_DELAY;
         }
     } else {
+        /* A payload byte. The first one after the select is the command (42h pad read,
+           52h/57h card read/write, ...), which is what names the transaction. */
+        if (pad->trace_open) {
+            if (!pad->trace_open_bytes)
+                pad->trace_open_cmd = (uint8_t)data;
+
+            pad->trace_open_bytes++;
+        }
+
         switch (pad->dest[slot]) {
             case DEST_JOY: {
                 if (!joy) {
                     pad->dest[slot] = 0;
+
+                    pad_trace_end(pad, 1);
 
                     return;
                 }
 
                 joy->write_func(joy->udata, data);
 
-                if (!joy->query_fifo_func(joy->udata))
+                if (!joy->query_fifo_func(joy->udata)) {
                     pad->dest[slot] = 0;
+
+                    pad_trace_end(pad, 0);
+                }
             } break;
 
             case DEST_MCD: {
                 if (!mcd) {
                     pad->dest[slot] = 0;
+
+                    pad_trace_end(pad, 1);
 
                     return;
                 }
@@ -107,8 +240,11 @@ void pad_write_tx(psx_pad_t* pad, uint16_t data) {
                     return;
                 }
 
-                if (!psx_mcd_query(mcd))
+                if (!psx_mcd_query(mcd)) {
                     pad->dest[slot] = 0;
+
+                    pad_trace_end(pad, 0);
+                }
             } break;
         }
 
@@ -130,6 +266,31 @@ void pad_handle_ctrl_write(psx_pad_t* pad, uint32_t value) {
 
     if (!(pad->ctrl & CTRL_JOUT)) {
         pad->ctrl &= ~CTRL_SLOT;
+
+        /* Deselect. A transaction still open here never finished its transfer, which is the
+           signature worth catching: the port is being dropped mid-conversation. */
+        if (pad->trace_open)
+            pad_trace_end(pad, 1);
+
+        /*
+            Dropping /SEL ENDS the transaction, so the port must forget which device held it.
+
+            This used to reset the memory card's state machine but leave pad->dest[] set, and
+            dest[] is what routes the next byte written to TX. A transaction that ends by
+            deselect rather than by running its FIFO dry — which is how a card command
+            normally finishes — therefore left the port still believing the card was selected,
+            and the game's NEXT device-select byte (01h, "talk to the controller") was fed to
+            psx_mcd_write() as a command byte instead of selecting the pad. The controller is
+            never addressed again, so its reads stop returning.
+
+            That is precisely the reported symptom: input alive everywhere, dead only on the
+            one screen that talks to the memory card, on a bus the pad and the card share.
+
+            Both slots, because CTRL.SLOT has already been cleared above and a stale select on
+            the slot that is not being addressed is just as wedged.
+        */
+        pad->dest[0] = 0;
+        pad->dest[1] = 0;
 
         if (pad->mcd_slot[slot >> 13])
             psx_mcd_reset(pad->mcd_slot[slot >> 13]);
@@ -186,10 +347,6 @@ uint16_t psx_pad_read16(psx_pad_t* pad, uint32_t offset) {
     }
 
     return v;
-
-    printf("Unhandled 16-bit PAD read at offset %08x", offset);
-
-    return 0x0;
 }
 
 uint8_t psx_pad_read8(psx_pad_t* pad, uint32_t offset) {
@@ -389,6 +546,42 @@ void psx_pad_detach_mcd(psx_pad_t* pad, int slot) {
     psx_mcd_destroy(pad->mcd_slot[slot]);
 
     pad->mcd_slot[slot] = NULL;
+}
+
+int psx_pad_mcd_fingerprint(psx_pad_t* pad, int slot, uint64_t* out_hash,
+                            uint64_t* out_session, uint32_t* out_generation,
+                            int64_t* out_mtime) {
+    psx_mcd_t* mcd;
+
+    if (out_hash)
+        *out_hash = 0;
+    if (out_session)
+        *out_session = 0;
+    if (out_generation)
+        *out_generation = 0;
+    if (out_mtime)
+        *out_mtime = 0;
+
+    if (!pad || slot < 0 || slot > 1)
+        return 0;
+
+    mcd = pad->mcd_slot[slot];
+
+    /* An attached card with no image is not a card the state can be compared
+       against — treat it as absent rather than fingerprinting a null buffer. */
+    if (!mcd || !mcd->buf)
+        return 0;
+
+    if (out_hash)
+        *out_hash = psx_mcd_content_hash(mcd);
+    if (out_session)
+        *out_session = psx_mcd_session_id(mcd);
+    if (out_generation)
+        *out_generation = psx_mcd_write_generation(mcd);
+    if (out_mtime)
+        *out_mtime = psx_mcd_file_mtime(mcd);
+
+    return 1;
 }
 
 void psx_pad_update(psx_pad_t* pad, int cyc) {

@@ -156,9 +156,21 @@ fun SaveStatePickerScreen(mode: SaveMode, onBack: () -> Unit) {
                                 // a refused save closed the picker looking exactly like a successful
                                 // one — no state written, no warning. That is the reported "closes
                                 // as if saved, takes 2-3 attempts". Stay open and say why instead.
+                                // Load goes through SaveStateGuard: it may put the memory-card
+                                // divergence question to the user and suspend here until it is
+                                // answered. Cancel is NOT a failure — nothing was touched — so
+                                // it leaves the picker open with no error banner.
+                                var cancelled = false
                                 val ok = when (mode) {
                                     SaveMode.Save -> NativeApp.saveStateToSlot(selected)
-                                    SaveMode.Load -> NativeApp.loadStateFromSlot(selected)
+                                    SaveMode.Load -> when (SaveStateGuard.load(selected)) {
+                                        SaveStateGuard.Outcome.Loaded -> true
+                                        SaveStateGuard.Outcome.Cancelled -> {
+                                            cancelled = true
+                                            false
+                                        }
+                                        SaveStateGuard.Outcome.Failed -> false
+                                    }
                                 }
                                 val busy = !ok && mode == SaveMode.Save &&
                                     runCatching { NativeApp.isMemcardBusy() }.getOrDefault(false)
@@ -168,6 +180,10 @@ fun SaveStatePickerScreen(mode: SaveMode, onBack: () -> Unit) {
                                     if (ok) {
                                         failure = null
                                         onBack()
+                                    } else if (cancelled) {
+                                        // The user was warned and said no. Stay exactly where
+                                        // they were; an error banner here would be a lie.
+                                        failure = null
                                     } else {
                                         // Store the KEY, not the resolved text — str() is
                                         // @Composable and this is a coroutine, and keeping the key
@@ -200,6 +216,9 @@ private fun AutoOptions(modifier: Modifier = Modifier) {
     val prefs = MainActivityRuntime.prefs
     var autoSave by remember { mutableStateOf(prefs.getBoolean("autoSaveOnExit", false)) }
     var autoLoad by remember { mutableStateOf(prefs.getBoolean("autoLoadOnBoot", false)) }
+    var skipCardWarning by remember {
+        mutableStateOf(prefs.getBoolean(SaveStateGuard.PREF_SKIP_CARD_WARNING, false))
+    }
     var interval by remember {
         mutableIntStateOf(prefs.getInt(MainActivityRuntime.KEY_AUTOSAVE_INTERVAL_MIN, 0))
     }
@@ -216,6 +235,18 @@ private fun AutoOptions(modifier: Modifier = Modifier) {
             ToggleRow("save.opt.autoLoad", str("savestate.autoLoadOnBoot"), autoLoad) { value ->
                 autoLoad = value
                 prefs.edit().putBoolean("autoLoadOnBoot", value).apply()
+            }
+            Spacer(Modifier.height(6.dp))
+            // Off by default, and it lives here rather than in a settings tab because this is
+            // the screen where the warning is met — the moment someone decides they don't want
+            // it is the moment they have just dismissed one.
+            ToggleRow(
+                "save.opt.skipCardWarning",
+                str("savestate.cardWarning.dontWarn"),
+                skipCardWarning,
+            ) { value ->
+                skipCardWarning = value
+                prefs.edit().putBoolean(SaveStateGuard.PREF_SKIP_CARD_WARNING, value).apply()
             }
             Spacer(Modifier.height(6.dp))
             // Writes the SAME autosave slot the two toggles above use, so a crash and a

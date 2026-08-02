@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <string.h>
 #include <limits.h>
+#include <time.h>
 #ifdef _WIN32
 #include <direct.h>
 #endif
@@ -67,11 +68,39 @@ psx_mcd_t* psx_mcd_create(void) {
     return (psx_mcd_t*)malloc(sizeof(psx_mcd_t));
 }
 
+/*
+    Session nonce for the divergence check.
+
+    write_generation only means anything relative to another sample of the SAME
+    card instance: it starts at 0 on every attach, so comparing a generation
+    across two runs of the app would happily "prove" that a fresh card is older
+    than a state taken last week. Stamping each attach with a nonce lets the
+    comparison say "these two numbers are not comparable" instead of guessing —
+    which is the difference between the confident warning and the soft one.
+
+    Mixes a clock reading (distinct across processes) with a counter (distinct
+    within one process, where two cards attach in the same second).
+*/
+static uint64_t g_mcd_session_seq = 0;
+
+static uint64_t psx_mcd_new_session_id(void) {
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seq = ++g_mcd_session_seq;
+
+    return psx_state_fnv1a(&now, sizeof(now), PSX_STATE_FNV_SEED) ^
+           (seq * 0x9e3779b97f4a7c15ull);
+}
+
 int psx_mcd_init(psx_mcd_t* mcd, const char* path) {
     memset(mcd, 0, sizeof(psx_mcd_t));
 
     mcd->state = MCD_STATE_TX_HIZ;
     mcd->flag = 0x08;
+
+    /* Fresh instance: generation 0, no cached hash, new session. */
+    mcd->session_id = psx_mcd_new_session_id();
+    mcd->write_generation = 0;
+    mcd->hash_valid = 0;
 
     /*
         OWN the path. This used to store the caller's pointer.
@@ -223,7 +252,20 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
 
             mcd->buf[mcd->addr++] = mcd->rx_data;
 
+            /*
+                The card image just changed, so any cached content hash is stale.
+                Two stores on a path that already does a bounds-free byte write;
+                nothing here reads mcd->path, touches the file, or can alter what
+                the game observes on the wire.
+
+                The generation counts COMPLETED 128-byte sectors rather than
+                bytes, because a sector is what the card protocol calls a write
+                and what a game's save actually consists of.
+            */
+            mcd->hash_valid = 0;
+
             if (!mcd->pending_bytes) {
+                mcd->write_generation++;
                 mcd->tx_data = mcd->rx_data;
 
                 break;
@@ -370,11 +412,55 @@ int psx_mcd_load_state(psx_mcd_t* mcd, psx_state_reader_t* r) {
 
     if (g_psx_mcd_state_restores_image) {
         psx_sr_bytes(r, mcd->buf, MCD_MEMORY_SIZE);
+
+        /* The image was just replaced wholesale — the cached hash describes the
+           bytes that were there a moment ago. The generation is deliberately NOT
+           reset: it counts writes this card instance has seen, and a load is not
+           the game writing to the card. Leaving it monotonic is what stops a
+           reload of the same state from re-triggering the warning. */
+        mcd->hash_valid = 0;
     } else {
         psx_sr_skip(r, MCD_MEMORY_SIZE);
     }
 
     return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
+}
+
+/* --------------------------------------------------------------------------
+   Fingerprint accessors. Read-only: see the contract in mcd.h.
+   -------------------------------------------------------------------------- */
+
+uint64_t psx_mcd_content_hash(psx_mcd_t* mcd) {
+    if (!mcd || !mcd->buf)
+        return 0;
+
+    if (!mcd->hash_valid) {
+        mcd->hash_cached = psx_state_fnv1a(mcd->buf, MCD_MEMORY_SIZE, PSX_STATE_FNV_SEED);
+        mcd->hash_valid = 1;
+    }
+
+    return mcd->hash_cached;
+}
+
+uint32_t psx_mcd_write_generation(const psx_mcd_t* mcd) {
+    return mcd ? mcd->write_generation : 0;
+}
+
+uint64_t psx_mcd_session_id(const psx_mcd_t* mcd) {
+    return mcd ? mcd->session_id : 0;
+}
+
+int64_t psx_mcd_file_mtime(const psx_mcd_t* mcd) {
+    struct stat info;
+
+    if (!mcd || !mcd->path || !*mcd->path)
+        return 0;
+
+    /* stat() only. The path is read, never re-owned, freed or opened here. */
+    if (stat(mcd->path, &info) != 0)
+        return 0;
+
+    return (int64_t)info.st_mtime;
 }
 
 void psx_mcd_destroy(psx_mcd_t* mcd) {

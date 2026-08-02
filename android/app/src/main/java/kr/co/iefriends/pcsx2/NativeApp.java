@@ -787,25 +787,34 @@ public class NativeApp {
 	 *  .wav. 1.0 = the sound as authored. */
 	public static volatile float sSoundVolume = 1.0f;
 
-	/** One-line RetroAchievements notification for the app-wide transient banner: the game
-	 *  summary when a disc is identified at boot, an achievement unlock, a game completed, a
-	 *  saved sign-in that expired.
+	/** A RetroAchievements toast: signing in (with the user's avatar and score), the game summary
+	 *  when a disc is identified at boot (with its box art), an achievement unlock (with its
+	 *  badge), a leaderboard attempt, a completed set, a saved sign-in that expired.
 	 *
 	 *  Called from native (frontend/android_jni.cpp AchievementsNotify) on the emulation thread,
 	 *  by the notice pump in frontend/achievements.cpp — never straight out of an rc_client
 	 *  callback, which can land on any thread. Hops to the main looper here because
-	 *  {@link com.armsx2.ui.WelcomeBanner} is Compose state, and the overlay that renders it is
-	 *  hosted once in WindowImpl so it shows over the game and over the library alike.
+	 *  {@link com.armsx2.ui.RaToasts} is Compose state, and the overlay that renders it is hosted
+	 *  once in WindowImpl so it shows over the game and over the library alike.
 	 *
-	 *  [durationMs] is the user's configured notification duration (Achievements screen), already
-	 *  clamped to 3..30 s on the native side. Must never throw back to JNI. */
-	public static void onAchievementNotice(String message, int durationMs) {
-		if (message == null || message.isEmpty()) return;
-		final long ms = durationMs > 0 ? durationMs : com.armsx2.ui.WelcomeBanner.DEFAULT_DURATION_MS;
+	 *  [kind] is an ARMSX_ACH_NOTICE_* value (frontend/achievements.h) and only picks the caption,
+	 *  accent and fallback icon — an unknown one must still render. [key] collapses repeats: a
+	 *  notice whose key is already on screen replaces it instead of stacking. [imageUrl] is an
+	 *  https RA image, fetched by Coil off the shared cover cache; "" means draw the fallback icon.
+	 *  [durationMs] is the user's configured duration for this category (achievement and
+	 *  leaderboard notifications are timed separately), already clamped to 3..30 s natively.
+	 *
+	 *  Every String is non-null by construction on the native side. Must never throw back to JNI. */
+	public static void onAchievementNotice(int kind, String key, String title, String detail,
+	                                       String imageUrl, int durationMs) {
+		if (title == null || title.isEmpty()) return;
+		final String safeKey = key != null ? key : "";
+		final String safeDetail = detail != null ? detail : "";
+		final String safeImage = imageUrl != null ? imageUrl : "";
 		try {
 			new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
 				try {
-					com.armsx2.ui.WelcomeBanner.show(message, ms);
+					com.armsx2.ui.RaToasts.show(kind, safeKey, title, safeDetail, safeImage, durationMs);
 				} catch (Throwable t) {
 					android.util.Log.e("ARMSX2", "achievement notice failed", t);
 				}
@@ -1250,8 +1259,30 @@ public class NativeApp {
 	 *  the card. The counter only ticks down while the VM runs, so it does NOT clear while paused. */
 	public static boolean isMemcardBusy() { return false; }
 	/** Restore slot [slot]. Same blocking contract as {@link #saveStateToSlot(int)}. False if the
-	 *  slot is empty, was written by an incompatible build, or holds a different disc. */
+	 *  slot is empty, was written by an incompatible build, or holds a different disc.
+	 *
+	 *  Does NOT check memory-card divergence — it has no way to ask the user, and a boolean
+	 *  cannot carry the difference between "broken" and "are you sure". Use
+	 *  {@link #loadStateFromSlotChecked(int, boolean)} through
+	 *  {@code com.armsx2.ui.saves.SaveStateGuard} for anything the user drives. */
 	public static native boolean loadStateFromSlot(int slot);
+	/** Restore slot [slot], returning the raw core result code instead of a boolean.
+	 *
+	 *  0 is success. {@link #STATE_ERR_CARD_NEWER} and {@link #STATE_ERR_CARD_DIVERGED} are
+	 *  ADVISORY: the state is intact and nothing has been applied to the machine, but the
+	 *  memory cards no longer hold what the state was taken against. Ask, then call again with
+	 *  ignoreCardDivergence = true. Any other negative value is a real failure.
+	 *
+	 *  Same blocking contract as {@link #saveStateToSlot(int)}. */
+	public static native int loadStateFromSlotChecked(int slot, boolean ignoreCardDivergence);
+
+	/** psx/state.h PSX_STATE_OK. */
+	public static final int STATE_OK = 0;
+	/** psx/state.h PSX_STATE_ERR_CARD_NEWER — the game saved to the card AFTER this state was
+	 *  taken, so loading it puts the console behind its own card. The dangerous direction. */
+	public static final int STATE_ERR_CARD_NEWER = -15;
+	/** psx/state.h PSX_STATE_ERR_CARD_DIVERGED — the card differs, but nothing says which way. */
+	public static final int STATE_ERR_CARD_DIVERGED = -16;
 	/** Disc path recorded for [slot], or "" when the slot holds nothing for the mounted disc.
 	 *  The save/load picker uses non-empty here to mean "occupied", and disables the tile for
 	 *  LOADING when it is empty — so while this was a stub returning "", every slot looked empty

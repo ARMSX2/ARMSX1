@@ -116,6 +116,9 @@ typedef struct rect_data_t {
 struct psx_gpu_backend;
 #endif
 
+/* Words of RAM captured around a DMA-delivered GP0(E5); see psx_gpu_note_e5_context(). */
+#define PSX_GPU_E5_CTX 8
+
 struct psx_gpu_t {
     uint32_t bus_delay;
     uint32_t io_base, io_size;
@@ -222,6 +225,110 @@ struct psx_gpu_t {
     uint32_t disp_x1, disp_x2;
     uint32_t disp_y1, disp_y2;
 
+    /* ---- command-stream health counters ------------------------------------------------
+
+       Always on (an increment on a path that runs a handful of times per frame), never saved
+       in a state, and read only by instrumentation. They exist because "the picture is wrong
+       but the primitives are innocent" has two very different explanations, and the cheap one
+       to rule out is a DESYNCED COMMAND STREAM: this GPU implements neither GP1(00) "reset
+       GPU" nor GP1(01) "reset command buffer", so a game that issues either to resynchronise
+       after an aborted transfer leaves us parked in RECV_ARGS/RECV_DATA, eating the following
+       words as arguments. Everything after that is misparsed — including GP0(E5), which is
+       exactly the register that has been observed carrying an impossible value.
+
+       gp1_reset_midcmd is the smoking gun: a non-zero count means a reset arrived while this
+       GPU was mid-command and was ignored. Zero means the desync hypothesis is dead and the
+       corruption is elsewhere. */
+    uint32_t gp1_reset;          /* GP1(00) seen (unimplemented) */
+    uint32_t gp1_fifo_reset;     /* GP1(01) seen (unimplemented) */
+    uint32_t gp1_reset_midcmd;   /* ... of those, the ones that arrived mid-command */
+    uint32_t gp1_disp_start;     /* GP1(05) writes; several per frame = mid-frame scroll */
+    uint32_t gp1_disp_mode;      /* GP1(08) writes */
+    uint32_t gp0_unknown;        /* GP0 opcodes the dispatch does not recognise */
+
+    /* ---- raw draw-state payloads ---------------------------------------------------------
+
+       The last 24-bit payload of each of GP0(E3/E4/E5) and GP1(05), verbatim, before any
+       field extraction. This is the `st=<RAWWORD>` the frame-summary banner has always
+       advertised and never actually emitted, and it exists for one question:
+
+       Xenogears sets a drawing offset of y=112 on exactly 10% of frames, against a drawing
+       area of (0,224)-(319,447), and every primitive on those frames is clipped. 112 is not
+       an arbitrary number. GP0(E5) packs Y at bit 11; GP1(05) packs Y at bit 10. The SAME
+       payload 0x038000 therefore reads as offset y=112 under one layout and display-start
+       y=224 under the other — and 224 is exactly this game's second framebuffer row. A
+       factor of two between two registers whose only difference is one shift position is not
+       a coincidence worth arguing about from the extraction code; it is worth reading the
+       word off the device.
+
+       So: if e5_raw is 0x070000 on a bad frame we mis-extracted (and the extraction is
+       provably right, so it will not be); if it is 0x038000 the value arrived that way and
+       the defect is upstream of this GPU; if it equals gp1_05_raw on the same frame, the two
+       registers' payloads are being crossed. Three different bugs, one datum.
+
+       Cost: four stores on commands that occur about three times per frame. */
+    uint32_t gp0_e3_raw, gp0_e4_raw, gp0_e5_raw;
+    uint32_t gp1_05_raw;
+    uint32_t gp0_e5_count;       /* GP0(E5) writes; >1 per frame means the offset moved */
+
+    /* ---- per-frame offset history ---------------------------------------------------------
+
+       The fields above record the LAST GP0(E5) of a frame, and a Xenogears battle frame turns
+       out to issue THREE. "The last one carried the wrong payload" and "the scene was drawn
+       with the wrong offset" are then completely different claims, and only the second one
+       explains lost pixels: if the game sets a good offset, draws 1600 primitives, and only
+       then writes a bad offset for a trailing pass, nothing is clipped and the once-per-frame
+       sample is simply looking at the wrong moment.
+
+       So two things are recorded per frame:
+
+         e5_seq   every GP0(E5) payload in order, with the primitive index it landed between
+         off_hist the offset ACTUALLY IN FORCE as each primitive rasterized, bucketed
+
+       off_hist is the one that decides it. `224:1598, 112:3` means the frame drew correctly
+       and the anomaly is cosmetic; `112:1650` means every primitive was displaced and this is
+       the defect. Nothing else distinguishes those two, and they need opposite fixes.
+
+       Double-buffered: the accumulators are snapshotted into the _last copies at vblank and
+       then cleared, because the front-end samples AFTER the core's vblank and would otherwise
+       always read a freshly-zeroed frame.
+
+       Cost: one bucket search (4 entries, linear) per primitive. */
+    uint32_t gp0_e5_seq[8];
+    uint16_t gp0_e5_seq_prim[8];
+    /* Where each GP0(E5) word CAME FROM: the RAM address the DMA read it out of, or
+       PSX_GPU_SRC_CPU for a direct MMIO store. This is the datum that separates "the game's
+       display list really contains this word" from "something in this emulator produced it":
+       with a RAM address in hand the list can be dumped and read. */
+    uint32_t gp0_e5_seq_src[8];
+    uint8_t  gp0_e5_seq_n;
+    int16_t  off_hist_y[4];
+    uint32_t off_hist_n[4];
+    uint8_t  off_hist_used;
+    uint32_t frame_prims;
+    uint32_t gp0_word_src;   /* source of the GP0 word being dispatched right now */
+    /* Linked-list walk census, snapshotted at vblank with the rest. bit23 counts
+       next-pointers that hardware would have treated as the end of the list and this
+       walker followed anyway; first_* keep the first such pointer and the header it led to. */
+    uint32_t dma_nodes_last, dma_bit23_last, dma_first_bit23_last, dma_first_hdr_last;
+    /* Up to four E5 words per frame with their surrounding RAM; double-buffered like the
+       rest, because the front-end samples after the core's vblank. */
+    uint32_t e5ctx_src[4], e5ctx_node[4], e5ctx_hdr[4];
+    uint32_t e5ctx_words[4][PSX_GPU_E5_CTX];
+    uint8_t  e5ctx_n;
+    uint32_t e5ctx_src_last[4], e5ctx_node_last[4], e5ctx_hdr_last[4];
+    uint32_t e5ctx_words_last[4][PSX_GPU_E5_CTX];
+    uint8_t  e5ctx_n_last;
+
+    uint32_t gp0_e5_seq_last[8];
+    uint16_t gp0_e5_seq_prim_last[8];
+    uint32_t gp0_e5_seq_src_last[8];
+    uint8_t  gp0_e5_seq_n_last;
+    int16_t  off_hist_y_last[4];
+    uint32_t off_hist_n_last[4];
+    uint8_t  off_hist_used_last;
+    uint32_t frame_prims_last;
+
     // Timing and IRQs
     float cycles;
     int line;
@@ -252,6 +359,40 @@ uint32_t psx_gpu_read32(psx_gpu_t*, uint32_t);
 uint16_t psx_gpu_read16(psx_gpu_t*, uint32_t);
 uint8_t psx_gpu_read8(psx_gpu_t*, uint32_t);
 void psx_gpu_write32(psx_gpu_t*, uint32_t, uint32_t);
+
+/* "The next GP0 word comes from this RAM address." Called by the DMA list walker
+   immediately before it pushes the word; consumed by the very next psx_gpu_write32(). A
+   plain store, unconditional, so it works with PGXP off (which is the shipping default and
+   the reason the existing PGXP note could not be used for this). */
+#define PSX_GPU_SRC_CPU 0xffffffffu
+void psx_gpu_note_gp0_source(uint32_t addr);
+
+/* "The list walker has just followed a next-pointer to this node." `raw_next` is the
+   pointer BEFORE any masking, which is the whole point: PlayStation hardware ends a GPU
+   linked list when the next-pointer has bit 23 set, and psx_dma_do_gpu_linked() tests only
+   for an exact 0xffffff. If a game terminates with any other bit-23 value this walker keeps
+   going, and the inner loop's `& 0x1ffffc` folds the runaway pointer back into low RAM,
+   where unrelated data is then executed as GP0 commands.
+
+   That is not a theory about the observed Xenogears failure, it is arithmetic: a terminator
+   of 0x85a240 folds to a first word read at 0x005a244, which is exactly the address the
+   spurious GP0(E5) was measured coming from. This records whether it actually happens. */
+void psx_gpu_note_dma_node(uint32_t raw_next, uint32_t hdr);
+
+/* The RAM around a GP0(E5) word that arrived by DMA, captured by the list walker (which is
+   the only place that still has a bus to read with). `ctx` is eight words: the four
+   preceding the E5, the E5 itself, and three after.
+
+   This is the measurement that ends the ambiguity the source addresses could not. Every
+   other explanation is now excluded -- not a mis-extraction, not a FIFO desync, not
+   display-start crossover, and not a walker runaway (bit23 was measured at 0). What is left
+   is whether the words at 0x005a2xx are a legitimate GP0 packet the game submitted, or some
+   other structure we are reaching by a route nobody has found yet. Eight words of context
+   plus the node header that links there distinguishes those by inspection: a real packet has
+   recognisable opcodes in its top bytes and a plausible header word count; a texture, a
+   vertex buffer or a sound table does not. */
+void psx_gpu_note_e5_context(uint32_t src, uint32_t node_addr, uint32_t hdr,
+                             const uint32_t* ctx);
 void psx_gpu_write16(psx_gpu_t*, uint32_t, uint16_t);
 void psx_gpu_write8(psx_gpu_t*, uint32_t, uint8_t);
 /* VRAM plus every GP0/GP1 latch and the scanline/dot-clock counters. The

@@ -121,6 +121,24 @@ typedef struct {
     int irq_bit;
 
     uint16_t mode, ctrl, baud, stat;
+
+    /* SIO0 transaction trace. Host-side only: never serialised, and every field is derived
+       from traffic that has already happened. The controller and the memory card share this
+       one serial port, so "which device held the bus, for how many bytes, and did the
+       transaction finish" is the only way to tell a card that never deselects from a pad that
+       is simply never polled. See pad_trace_flush() in pad.c. */
+    uint32_t trace_repeat;
+    uint32_t trace_bytes;
+    uint32_t trace_open_bytes;
+    uint8_t trace_slot;
+    uint8_t trace_dev;
+    uint8_t trace_cmd;
+    uint8_t trace_incomplete;
+    uint8_t trace_valid;
+    uint8_t trace_open;
+    uint8_t trace_open_slot;
+    uint8_t trace_open_dev;
+    uint8_t trace_open_cmd;
 } psx_pad_t;
 
 psx_pad_t* psx_pad_create(void);
@@ -150,6 +168,14 @@ void psx_pad_attach_joy(psx_pad_t*, int, psx_input_t*);
 void psx_pad_detach_joy(psx_pad_t*, int);
 int psx_pad_attach_mcd(psx_pad_t*, int, const char*);
 void psx_pad_detach_mcd(psx_pad_t*, int);
+/* Read-only fingerprint of the card in `slot`, for the save-state divergence
+   check (psx/state.c, PSX_SS_MCARD). Returns 1 when a card is attached and the
+   out params are filled, 0 when the slot is empty (out params zeroed). Any
+   out pointer may be NULL. Nothing is mutated except the card's lazily cached
+   content hash. */
+int psx_pad_mcd_fingerprint(psx_pad_t*, int slot, uint64_t* out_hash,
+                            uint64_t* out_session, uint32_t* out_generation,
+                            int64_t* out_mtime);
 void psx_pad_update(psx_pad_t*, int);
 /* JOY_STAT/CTRL/MODE/BAUD, the ACK countdown, and tagged sub-blocks for
    whatever is in the two controller and two memory-card slots. */

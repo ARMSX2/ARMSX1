@@ -441,12 +441,13 @@ void cdrom_cmd_getlocl(psx_cdrom_t* cdrom) {
 }
 
 void cdrom_cmd_getlocp(psx_cdrom_t* cdrom) {
-    int lba = cdrom->lba;
+    /* The HEAD's position, not the transport's — see the reported-position block in cdrom.c.
+       This used to read cdrom->lba and subtract 25 in place after a CdlSeekP, which reported
+       the target minus 25 for as long as the drive stayed parked. The undershoot is now
+       applied once, by cdrom_cmd_seekp(), and walks off on its own. */
+    int lba = (int)cdrom->report_lba;
     int track = psx_disc_get_track_number(cdrom->disc, lba);
     int track_lba = psx_disc_get_track_lba(cdrom->disc, track);
-
-    if (!cdrom->seek_precision)
-        lba -= 25;
 
     uint8_t subq[12];
     if (lba >= 0 && psx_disc_read_subchannel_q(cdrom->disc, (uint32_t)lba, subq)) {
@@ -622,6 +623,15 @@ void cdrom_cmd_seekp(psx_cdrom_t* cdrom) {
 
         cdrom_process_setloc(cdrom);
         cdrom->seek_precision = 0;
+
+        /* CdlSeekP is the coarse seek: the head lands short of the target and reads its way
+           onto it. Apply the undershoot ONCE, here, and let psx_cdrom_update() close the gap
+           at the drive's sector rate. Reporting target-25 for as long as the drive stayed
+           parked — which is what subtracting it inside CdlGetlocP did — is a poll loop that
+           can never finish. Never below the first addressable sector. */
+        cdrom_anchor_report_position(cdrom,
+            (cdrom->lba > (150u + CD_SEEKP_UNDERSHOOT)) ? (cdrom->lba - CD_SEEKP_UNDERSHOOT)
+                                                        : 150u);
 
         cdrom_restore_state(cdrom);
     }

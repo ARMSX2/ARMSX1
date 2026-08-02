@@ -52,6 +52,12 @@ int psx_load_state(psx_t*, const char*);
 int psx_save_state(psx_t*, const char*);
 int psx_load_state_from_memory(psx_t*, const void*, size_t);
 int psx_save_state_to_memory(psx_t*, void**, size_t*);
+/* Load with PSX_STATE_LOAD_* flags (psx/state.h). The two plain loaders above
+   are these with flags == 0, so they keep refusing a state whose memory-card
+   fingerprint has diverged; pass PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE once the
+   user has been asked. The refusal happens before the machine is touched. */
+int psx_load_state_ex(psx_t*, const char* path, unsigned flags);
+int psx_load_state_from_memory_ex(psx_t*, const void*, size_t, unsigned flags);
 /* Capture with options, and with buffer reuse. *io_data / *io_capacity may carry
    a buffer a previous call returned (NULL/0 for a fresh one); it is grown in
    place when needed and handed back updated, and the caller always frees it.

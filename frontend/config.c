@@ -748,7 +748,11 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
             fseek(settings, 0, 0);
         }
 
-        log_info("Parsing settings file...");
+        /* The PATH, not just "a settings file". There is more than one plausible location on
+           a device (app-private vs a user-visible folder), and a value that came from a file
+           nobody was looking at reads as an emulator bug — which has already cost a round of
+           this investigation, over [cdrom] read_speedup. */
+        log_info("Parsing settings file: %s", settings_path ? settings_path : "settings.toml");
 
         toml_table_t* conf = toml_parse_file(settings, error, sizeof(error));
 
@@ -832,6 +836,17 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
 
             if (s_seek_speedup.ok)
                 psx_cdrom_set_seek_speedup((unsigned)s_seek_speedup.u.i);
+
+            /* Say so out loud. This is the one lever psx/dev/cdrom/cdrom.h singles out as
+               able to break FMV and streamed XA audio, it has no UI, and it is only reachable
+               by hand-editing a file — so a device running with it set looks identical to a
+               device with an emulator bug unless the log names it. */
+            if (psx_cdrom_get_read_speedup() != 1 || psx_cdrom_get_seek_speedup() != 1) {
+                log_warn("CD-ROM speedup active: read=%ux seek=%ux (1 = authentic timing). "
+                         "Read speedup delivers sectors faster than the drive can and is "
+                         "known to break FMV and streamed XA audio.",
+                         psx_cdrom_get_read_speedup(), psx_cdrom_get_seek_speedup());
+            }
         }
 
         toml_table_t* s_runtime_table = toml_table_in(conf, "runtime");

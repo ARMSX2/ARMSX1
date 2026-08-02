@@ -490,7 +490,11 @@ std::string HashDiscImage(const char* path) {
 // frontend/main.cpp.
 
 struct PendingNotice {
-    std::string text;
+    int kind = ARMSX_ACH_NOTICE_INFO;
+    std::string key;
+    std::string title;
+    std::string detail;
+    std::string image_url;
     int duration_ms = 5000;
 };
 
@@ -498,26 +502,49 @@ std::mutex g_notice_mutex;
 std::deque<PendingNotice> g_notice_queue;
 std::chrono::steady_clock::time_point g_notice_next_at{};
 
-// The host banner has a single slot, so a burst delivered in one go would leave only the last one
-// readable. Notices are spaced out instead — by their own duration, capped so a long queue of
-// unlocks does not run minutes behind the game.
-constexpr int kNoticeMaxSpacingMs = 3500;
+// The host stacks toasts, so a burst no longer costs anything but screen space — but handing it
+// six at once still means five of them share one fade-out and read as a wall. They are released
+// one every kNoticeSpacingMs instead, which is short enough that a combo unlock still feels
+// immediate and long enough that each one arrives as its own event.
+constexpr int kNoticeSpacingMs = 600;
 
 // A hard cap so a disconnect storm cannot grow the queue without bound. Sixteen is far more than
 // will ever be readable anyway.
 constexpr size_t kNoticeQueueMax = 16;
 
 // Park a note. Caller holds g_lock (the store reads below need it).
-void QueueNotice(std::string text) {
-    if (text.empty()) {
+void QueueNotice(int kind, std::string key, std::string title,
+                 std::string detail = std::string(), std::string image_url = std::string(),
+                 int duration_ms = 0) {
+    if (title.empty()) {
         return;
+    }
+    if (key.empty()) {
+        key = "ra_notice";
     }
 
     PendingNotice notice;
-    notice.duration_ms = std::clamp(StoreGetInt("NotificationsDuration", 5), 3, 30) * 1000;
-    notice.text = std::move(text);
+    notice.kind = kind;
+    notice.duration_ms = duration_ms > 0
+                             ? duration_ms
+                             : std::clamp(StoreGetInt("NotificationsDuration", 5), 3, 30) * 1000;
+    notice.key = std::move(key);
+    notice.title = std::move(title);
+    notice.detail = std::move(detail);
+    notice.image_url = std::move(image_url);
 
     std::lock_guard<std::mutex> lock(g_notice_mutex);
+
+    // Collapse against anything still waiting under the same key: a leaderboard that starts and
+    // submits before the pump has drained either one should reach the screen once, showing the
+    // later state. The host does the same for keys already on screen.
+    for (PendingNotice& queued : g_notice_queue) {
+        if (queued.key == notice.key) {
+            queued = std::move(notice);
+            return;
+        }
+    }
+
     if (g_notice_queue.size() >= kNoticeQueueMax) {
         return; // keep the oldest; they are the ones the user has been waiting to see
     }
@@ -527,11 +554,30 @@ void QueueNotice(std::string text) {
 // Achievement/gameplay chatter, suppressed by the user's "notifications" option. Failures that
 // mean achievements are silently not being tracked deliberately go through QueueNotice() instead
 // — turning notifications off asks for less noise, not for a broken session to stay hidden.
-void QueueAchievementNotice(std::string text) {
+void QueueAchievementNotice(int kind, std::string key, std::string title,
+                            std::string detail = std::string(),
+                            std::string image_url = std::string()) {
     if (!StoreGetBool("Notifications", true)) {
         return;
     }
-    QueueNotice(std::move(text));
+    QueueNotice(kind, std::move(key), std::move(title), std::move(detail), std::move(image_url));
+}
+
+// Leaderboard traffic. Separately switchable and separately timed, because a leaderboard attempt
+// fires start/fail pairs during normal play far more often than an achievement unlocks — a user
+// who wants unlocks but not that stream has an option for exactly this, and it has never until
+// now had anything to suppress.
+void QueueLeaderboardNotice(uint32_t leaderboard_id, std::string title,
+                            std::string detail = std::string(),
+                            std::string image_url = std::string()) {
+    if (!StoreGetBool("Notifications", true) || !StoreGetBool("LeaderboardNotifications", true)) {
+        return;
+    }
+    // Keyed by leaderboard, not by event: start → submitted → scoreboard for one attempt is one
+    // story, and it should update a single toast rather than stack three.
+    QueueNotice(ARMSX_ACH_NOTICE_LEADERBOARD, "ra_lb_" + std::to_string(leaderboard_id),
+                std::move(title), std::move(detail), std::move(image_url),
+                std::clamp(StoreGetInt("LeaderboardsDuration", 10), 3, 30) * 1000);
 }
 
 // Hand parked notices to the host. Must be called with g_lock NOT held.
@@ -559,22 +605,73 @@ void DrainNotices() {
 
         const auto now = std::chrono::steady_clock::now();
         if (now < g_notice_next_at) {
-            return; // the previous banner is still up
+            return; // let the one just released land before stacking another on top of it
         }
 
         notice = std::move(g_notice_queue.front());
         g_notice_queue.pop_front();
-        g_notice_next_at = now + std::chrono::milliseconds(
-            std::min(notice.duration_ms, kNoticeMaxSpacingMs));
+        g_notice_next_at = now + std::chrono::milliseconds(kNoticeSpacingMs);
     }
 
-    handler(notice.text.c_str(), notice.duration_ms, user);
+    handler(notice.kind, notice.key.c_str(), notice.title.c_str(), notice.detail.c_str(),
+            notice.image_url.c_str(), notice.duration_ms, user);
 }
 
 void ClearNotices() {
     std::lock_guard<std::mutex> lock(g_notice_mutex);
     g_notice_queue.clear();
     g_notice_next_at = {};
+}
+
+// --- RA image URLs -------------------------------------------------------------------------
+//
+// The picture that makes a toast a RetroAchievements toast rather than a line of text: the user's
+// avatar on sign-in, the game's box art at boot, the achievement's badge on an unlock. rc_client
+// composes them into a caller-provided buffer, and every one can legitimately come back empty —
+// a user with no avatar, a game with no badge — so failure returns "" and the host draws its
+// fallback icon. Nothing here downloads anything; the host owns fetching and caching.
+
+std::string UserImageUrl(const rc_client_t* client) {
+    const rc_client_user_t* user = client ? rc_client_get_user_info(client) : nullptr;
+    if (!user) {
+        return std::string();
+    }
+
+    char url[512];
+    if (rc_client_user_get_image_url(user, url, sizeof(url)) != RC_OK) {
+        // Restored-from-token sessions have the URL in the store before the client has a user.
+        return StoreGet("AvatarUrl");
+    }
+    return std::string(url);
+}
+
+std::string GameImageUrl(const rc_client_t* client) {
+    const rc_client_game_t* game = client ? rc_client_get_game_info(client) : nullptr;
+    if (!game) {
+        return std::string();
+    }
+
+    char url[512];
+    if (rc_client_game_get_image_url(game, url, sizeof(url)) != RC_OK) {
+        return std::string();
+    }
+    return std::string(url);
+}
+
+std::string AchievementImageUrl(const rc_client_achievement_t* achievement) {
+    if (!achievement) {
+        return std::string();
+    }
+
+    // Always the UNLOCKED art. This is only ever called for an achievement the player just
+    // earned, and the locked badge is the greyed-out version — showing that on an unlock toast
+    // would read as a failure.
+    char url[512];
+    if (rc_client_achievement_get_image_url(achievement, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED, url,
+                                            sizeof(url)) != RC_OK) {
+        return std::string();
+    }
+    return std::string(url);
 }
 
 // --- rc_client callbacks -------------------------------------------------------------------
@@ -653,20 +750,27 @@ void RC_CCONV ClientEventHandler(const rc_client_event_t* event, rc_client_t* cl
     switch (event->type) {
         case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED: {
             if (event->achievement) {
-                ARMSX_ACH_LOGI("unlocked: %s (%u pts)",
-                               event->achievement->title ? event->achievement->title : "?",
-                               event->achievement->points);
+                const rc_client_achievement_t* ach = event->achievement;
+                ARMSX_ACH_LOGI("unlocked: %s (%u pts)", ach->title ? ach->title : "?", ach->points);
 
-                std::string text = "Achievement unlocked: ";
-                text += (event->achievement->title && *event->achievement->title)
-                            ? event->achievement->title
-                            : "(untitled)";
-                if (event->achievement->points > 0) {
-                    text += " (";
-                    text += std::to_string(event->achievement->points);
-                    text += event->achievement->points == 1 ? " point)" : " points)";
+                // Title line is the achievement's own name — the badge next to it already says
+                // "achievement", so spending the first line on the word would push the name into
+                // the ellipsis on a phone.
+                std::string title = (ach->title && *ach->title) ? ach->title : "Achievement unlocked";
+
+                std::string detail = (ach->description && *ach->description) ? ach->description : "";
+                if (ach->points > 0) {
+                    if (!detail.empty()) {
+                        detail += "  ·  ";
+                    }
+                    detail += std::to_string(ach->points);
+                    detail += ach->points == 1 ? " point" : " points";
                 }
-                QueueAchievementNotice(std::move(text));
+
+                // Per-achievement key: two different unlocks must never collapse into one toast.
+                QueueAchievementNotice(ARMSX_ACH_NOTICE_UNLOCK,
+                                       "ra_unlock_" + std::to_string(ach->id), std::move(title),
+                                       std::move(detail), AchievementImageUrl(ach));
             }
             PlayUnlockSound();
             break;
@@ -678,33 +782,142 @@ void RC_CCONV ClientEventHandler(const rc_client_event_t* event, rc_client_t* cl
             // "Completed", not "Mastered". On RetroAchievements those are two different
             // accomplishments and mastery is the hardcore one — which this build cannot earn.
             const rc_client_game_t* game = client ? rc_client_get_game_info(client) : nullptr;
-            std::string text = "Completed ";
-            text += (game && game->title && *game->title) ? game->title : "this game";
+            std::string title = "Completed ";
+            title += (game && game->title && *game->title) ? game->title : "this game";
 
             rc_client_user_game_summary_t summary{};
             if (client) {
                 rc_client_get_user_game_summary(client, &summary);
             }
+
+            std::string detail;
             if (summary.num_core_achievements > 0) {
-                text += " — all ";
-                text += std::to_string(summary.num_core_achievements);
-                text += " achievements earned";
+                detail = "All ";
+                detail += std::to_string(summary.num_core_achievements);
+                detail += " achievements earned";
+                if (summary.points_core > 0) {
+                    detail += "  ·  ";
+                    detail += std::to_string(summary.points_core);
+                    detail += " points";
+                }
             } else {
-                text += " — every achievement earned";
+                detail = "Every achievement earned";
             }
-            QueueAchievementNotice(std::move(text));
+
+            QueueAchievementNotice(ARMSX_ACH_NOTICE_MASTERY, "ra_mastery", std::move(title),
+                                   std::move(detail), GameImageUrl(client));
             PlayUnlockSound();
             break;
         }
 
         case RC_CLIENT_EVENT_SUBSET_COMPLETED: {
-            std::string text = "Completed ";
-            text += (event->subset && event->subset->title && *event->subset->title)
-                        ? event->subset->title
-                        : "this achievement set";
-            ARMSX_ACH_LOGI("%s", text.c_str());
-            QueueAchievementNotice(std::move(text));
+            std::string title = "Completed ";
+            title += (event->subset && event->subset->title && *event->subset->title)
+                         ? event->subset->title
+                         : "this achievement set";
+            ARMSX_ACH_LOGI("%s", title.c_str());
+            QueueAchievementNotice(ARMSX_ACH_NOTICE_MASTERY,
+                                   "ra_subset_" +
+                                       std::to_string(event->subset ? event->subset->id : 0u),
+                                   std::move(title), "Every achievement in the set earned",
+                                   GameImageUrl(client));
             PlayUnlockSound();
+            break;
+        }
+
+        // --- Leaderboards ----------------------------------------------------------------
+        //
+        // rc_client evaluates these whether or not anything is shown, so the only thing that was
+        // ever missing was somewhere to put them. They carry the game's art rather than a badge:
+        // leaderboards have no image of their own on RetroAchievements.
+
+        case RC_CLIENT_EVENT_LEADERBOARD_STARTED: {
+            if (!event->leaderboard) {
+                break;
+            }
+            const rc_client_leaderboard_t* lb = event->leaderboard;
+            ARMSX_ACH_LOGI("leaderboard started: %s", lb->title ? lb->title : "?");
+            std::string detail = (lb->description && *lb->description) ? lb->description
+                                                                       : "Attempt started";
+            QueueLeaderboardNotice(lb->id,
+                                   (lb->title && *lb->title) ? lb->title : "Leaderboard attempt",
+                                   std::move(detail), GameImageUrl(client));
+            break;
+        }
+
+        case RC_CLIENT_EVENT_LEADERBOARD_FAILED: {
+            if (!event->leaderboard) {
+                break;
+            }
+            const rc_client_leaderboard_t* lb = event->leaderboard;
+            ARMSX_ACH_LOGI("leaderboard failed: %s", lb->title ? lb->title : "?");
+            std::string title = "Attempt failed: ";
+            title += (lb->title && *lb->title) ? lb->title : "leaderboard";
+            QueueLeaderboardNotice(lb->id, std::move(title), "No score was submitted",
+                                   GameImageUrl(client));
+            break;
+        }
+
+        case RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED: {
+            if (!event->leaderboard) {
+                break;
+            }
+            const rc_client_leaderboard_t* lb = event->leaderboard;
+            ARMSX_ACH_LOGI("leaderboard submitted: %s (%s)", lb->title ? lb->title : "?",
+                           lb->tracker_value ? lb->tracker_value : "");
+            std::string detail = "Submitted";
+            if (lb->tracker_value && *lb->tracker_value) {
+                detail += " ";
+                detail += lb->tracker_value;
+            }
+            QueueLeaderboardNotice(lb->id, (lb->title && *lb->title) ? lb->title : "Leaderboard",
+                                   std::move(detail), GameImageUrl(client));
+            break;
+        }
+
+        case RC_CLIENT_EVENT_LEADERBOARD_SCOREBOARD: {
+            // The server's answer to a submission: where the score actually landed. Worth its own
+            // toast because RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED fires optimistically, before the
+            // rank is known.
+            if (!event->leaderboard_scoreboard) {
+                break;
+            }
+            const rc_client_leaderboard_scoreboard_t* sb = event->leaderboard_scoreboard;
+            const rc_client_leaderboard_t* lb =
+                client ? rc_client_get_leaderboard_info(client, sb->leaderboard_id) : nullptr;
+
+            std::string title = (lb && lb->title && *lb->title) ? lb->title : "Leaderboard";
+
+            std::string detail;
+            if (sb->submitted_score[0]) {
+                detail += "Scored ";
+                detail += sb->submitted_score;
+            }
+            if (sb->new_rank > 0) {
+                if (!detail.empty()) {
+                    detail += "  ·  ";
+                }
+                detail += "rank ";
+                detail += std::to_string(sb->new_rank);
+                if (sb->num_entries > 0) {
+                    detail += " of ";
+                    detail += std::to_string(sb->num_entries);
+                }
+            }
+            // The player's own best, when the new score did not beat it — otherwise the toast
+            // reads as though a worse run replaced a better one.
+            if (sb->best_score[0] && sb->submitted_score[0] &&
+                std::strcmp(sb->best_score, sb->submitted_score) != 0) {
+                detail += "  ·  best ";
+                detail += sb->best_score;
+            }
+            if (detail.empty()) {
+                detail = "Score submitted";
+            }
+
+            ARMSX_ACH_LOGI("leaderboard scoreboard: %s", detail.c_str());
+            QueueLeaderboardNotice(sb->leaderboard_id, std::move(title), std::move(detail),
+                                   GameImageUrl(client));
             break;
         }
 
@@ -715,34 +928,36 @@ void RC_CCONV ClientEventHandler(const rc_client_event_t* event, rc_client_t* cl
             ARMSX_ACH_LOGE("server error: %s", message ? message : "(unknown)");
             // Ungated: this is a request rcheevos has given up on, so something the user did
             // (most often an unlock) did not reach their account.
-            std::string text = "RetroAchievements error";
-            if (message && *message) {
-                text += ": ";
-                text += message;
-            }
-            QueueNotice(std::move(text));
+            QueueNotice(ARMSX_ACH_NOTICE_ERROR, "ra_server_error", "RetroAchievements error",
+                        (message && *message) ? message : "A request could not be completed");
             break;
         }
 
         case RC_CLIENT_EVENT_DISCONNECTED:
             ARMSX_ACH_LOGW("disconnected from RetroAchievements");
-            QueueAchievementNotice("RetroAchievements is offline — unlocks will be sent when the connection returns");
+            // Shares a key with the reconnect notice: they are two states of one thing, and a
+            // flaky connection should toggle a single toast rather than build a column of them.
+            QueueAchievementNotice(ARMSX_ACH_NOTICE_INFO, "ra_connection",
+                                   "RetroAchievements is offline",
+                                   "Unlocks will be sent when the connection returns");
             break;
 
         case RC_CLIENT_EVENT_RECONNECTED:
             ARMSX_ACH_LOGI("reconnected to RetroAchievements");
-            QueueAchievementNotice("RetroAchievements reconnected — pending unlocks sent");
+            QueueAchievementNotice(ARMSX_ACH_NOTICE_INFO, "ra_connection",
+                                   "RetroAchievements reconnected", "Pending unlocks sent");
             break;
 
         default:
             // Deliberately not handled: the challenge and progress indicators
             // (RC_CLIENT_EVENT_ACHIEVEMENT_CHALLENGE_INDICATOR_* /
-            // RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*) are persistent on-screen widgets,
-            // not transient notes, and the host banner is a single transient slot — routing a
-            // show/hide pair through it would flash a banner every time a challenge armed. The
-            // leaderboard events are unhandled because leaderboards are not implemented at all on
-            // this core (no submission, no tracker, no scoreboard). RC_CLIENT_EVENT_RESET only
-            // fires when hardcore is switched on, which this module cannot do.
+            // RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_*) and the leaderboard tracker
+            // (RC_CLIENT_EVENT_LEADERBOARD_TRACKER_*) are persistent on-screen widgets driven by
+            // show/hide/update triples, not transient notes — routing them through the toast
+            // stack would spawn a toast every time a challenge armed or a timer ticked. They need
+            // a pinned HUD element, which is a separate piece of work.
+            // RC_CLIENT_EVENT_RESET only fires when hardcore is switched on, which this module
+            // cannot do.
             break;
     }
 }
@@ -811,12 +1026,9 @@ void RC_CCONV LoadGameCallback(int result, const char* error_message, rc_client_
             // the achievements panel is simply empty for a game that does have a set, which
             // reads exactly like "achievements are broken".
             ARMSX_ACH_LOGW("could not load achievements: %s", detail);
-            std::string text = "RetroAchievements: could not load this game's achievements";
-            if (detail && *detail) {
-                text += " — ";
-                text += detail;
-            }
-            QueueNotice(std::move(text));
+            QueueNotice(ARMSX_ACH_NOTICE_ERROR, "ra_game_load",
+                        "Could not load this game's achievements",
+                        (detail && *detail) ? detail : "The set could not be fetched");
         }
         return;
     }
@@ -836,29 +1048,74 @@ void RC_CCONV LoadGameCallback(int result, const char* error_message, rc_client_
     rc_client_user_game_summary_t summary{};
     rc_client_get_user_game_summary(client, &summary);
 
-    std::string text = (game && game->title && *game->title) ? game->title : "This game";
+    std::string title = (game && game->title && *game->title) ? game->title : "This game";
     // Only ever appended when hardcore is genuinely on. It is wired shut in this module, so
     // asking is how the text stays honest instead of hard-coding an assumption in a second place.
     if (armsx_ach_hardcore_active()) {
-        text += " (Hardcore Mode)";
+        title += " (Hardcore Mode)";
     }
+
+    std::string detail;
     if (summary.num_core_achievements > 0) {
-        text += " — ";
-        text += std::to_string(summary.num_unlocked_achievements);
-        text += " of ";
-        text += std::to_string(summary.num_core_achievements);
-        text += " achievements earned, ";
-        text += std::to_string(summary.points_unlocked);
-        text += " of ";
-        text += std::to_string(summary.points_core);
-        text += " points";
+        detail = std::to_string(summary.num_unlocked_achievements);
+        detail += " of ";
+        detail += std::to_string(summary.num_core_achievements);
+        detail += " achievements  ·  ";
+        detail += std::to_string(summary.points_unlocked);
+        detail += " of ";
+        detail += std::to_string(summary.points_core);
+        detail += " points";
     } else {
-        text += " — this game has no achievements";
+        detail = "This game has no achievements";
     }
-    QueueAchievementNotice(std::move(text));
+
+    QueueAchievementNotice(ARMSX_ACH_NOTICE_GAME, "ra_game_summary", std::move(title),
+                           std::move(detail), GameImageUrl(client));
 }
 
-void RC_CCONV TokenLoginCallback(int result, const char* error_message, rc_client_t* /*client*/,
+// The "signed in as …" toast, with the avatar and the account's score. Shared by the saved-token
+// restore and the interactive password login so both routes look identical to the user.
+//
+// This used to be deliberately suppressed: the host had ONE banner slot, so a sign-in note posted
+// here was overwritten by the game summary a frame or two later and never got read. The host now
+// stacks toasts and collapses by key, so the two coexist — which is the whole reason the summary
+// alone was never the "logged in" confirmation a RetroAchievements user is looking for.
+void QueueLoginNotice(const rc_client_t* client) {
+    const rc_client_user_t* user = client ? rc_client_get_user_info(client) : nullptr;
+    if (!user) {
+        return;
+    }
+
+    std::string title = "Signed in as ";
+    if (user->display_name && *user->display_name) {
+        title += user->display_name;
+    } else if (user->username && *user->username) {
+        title += user->username;
+    } else {
+        title += "RetroAchievements";
+    }
+
+    // Softcore is the only score this build can move, so it leads. The full score is still worth
+    // showing — it is the number on the user's profile page — but labelling which is which is
+    // what stops "my points are wrong" reports from a softcore-only client.
+    std::string detail = std::to_string(user->score_softcore);
+    detail += " softcore points";
+    if (user->score > 0) {
+        detail += "  ·  ";
+        detail += std::to_string(user->score);
+        detail += " total";
+    }
+    if (user->num_unread_messages > 0) {
+        detail += "  ·  ";
+        detail += std::to_string(user->num_unread_messages);
+        detail += user->num_unread_messages == 1 ? " unread message" : " unread messages";
+    }
+
+    QueueAchievementNotice(ARMSX_ACH_NOTICE_LOGIN, "ra_login", std::move(title), std::move(detail),
+                           UserImageUrl(client));
+}
+
+void RC_CCONV TokenLoginCallback(int result, const char* error_message, rc_client_t* client,
                                  void* /*userdata*/) {
     if (result != RC_OK) {
         ARMSX_ACH_LOGW("saved login rejected: %s", error_message ? error_message : rc_error_str(result));
@@ -868,15 +1125,28 @@ void RC_CCONV TokenLoginCallback(int result, const char* error_message, rc_clien
         // achievement earned this session goes nowhere. Silently erasing the token and carrying on
         // is exactly the failure the user cannot diagnose — the panel just shows the login form
         // again with no explanation of when or why.
-        QueueNotice("RetroAchievements sign-in expired — sign in again from the Achievements screen");
+        QueueNotice(ARMSX_ACH_NOTICE_ERROR, "ra_login", "RetroAchievements sign-in expired",
+                    "Sign in again from the Achievements screen");
         return;
     }
 
-    // Nothing is shown for a successful token restore. It lands a frame or two before the game
-    // summary below re-arms and fires, and the host banner has one slot — a "signed in" note here
-    // would be overwritten by the summary before it could be read. The summary is the proof that
-    // the sign-in worked.
     ARMSX_ACH_LOGI("signed in from saved token");
+
+    // The toast the user has been missing at every boot. It arrives before the game summary and
+    // sits above it in the stack, so a normal start now reads: signed in as <you>, then <game> —
+    // N of M achievements. Refresh the stored score/avatar off the response while it is here, so
+    // the library screen agrees with what the toast just said.
+    const rc_client_user_t* user = client ? rc_client_get_user_info(client) : nullptr;
+    if (user) {
+        StoreSetInt("LastScore", static_cast<int>(user->score));
+        StoreSetInt("LastScoreSoftcore", static_cast<int>(user->score_softcore));
+        char url[512];
+        if (rc_client_user_get_image_url(user, url, sizeof(url)) == RC_OK) {
+            StoreSet("AvatarUrl", url);
+        }
+    }
+    QueueLoginNotice(client);
+
     if (g_psx) {
         g_pending_game_load = true;
     }
@@ -921,6 +1191,11 @@ void RC_CCONV PasswordLoginCallback(int result, const char* error_message, rc_cl
     if (rc_client_user_get_image_url(user, url, sizeof(url)) == RC_OK) {
         StoreSet("AvatarUrl", url);
     }
+
+    // Same toast as the saved-token route. The Achievements screen the user is standing in front
+    // of already redraws itself on success, but the toast is what confirms it while a game is
+    // running behind the pause menu.
+    QueueLoginNotice(client);
 }
 
 // Kick a game load for whatever disc is mounted. Caller holds g_lock and must be on the
@@ -1399,15 +1674,25 @@ std::string armsx_ach_login(const char* username, const char* password) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    std::lock_guard<std::recursive_mutex> lock(g_lock);
-    if (!state.ok) {
-        return state.error.empty() ? std::string("Login failed.") : state.error;
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_lock);
+        if (!state.ok) {
+            // The screen shows this error itself; drop the sign-in toast the failed attempt may
+            // have parked so it cannot surface later over an unrelated game.
+            ClearNotices();
+            return state.error.empty() ? std::string("Login failed.") : state.error;
+        }
+
+        ApplyClientOptions();
+        if (g_psx) {
+            g_pending_game_load = true; // the emulation thread picks this up and hashes the disc
+        }
     }
 
-    ApplyClientOptions();
-    if (g_psx) {
-        g_pending_game_load = true; // the emulation thread picks this up and hashes the disc
-    }
+    // Deliver the "signed in as …" toast now, with g_lock released. Signing in from the library
+    // means there is no emulation loop to run the pump, so without this the toast would sit in the
+    // queue until a game started — and then appear as a stale sign-in note over the boot summary.
+    DrainNotices();
 
     return {};
 }

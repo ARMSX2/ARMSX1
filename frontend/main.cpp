@@ -3708,6 +3708,548 @@ class ArmsxSession {
                ((psx_->gpu->display_mode & 0x4) != 0) && psx_get_display_format(psx_) == 0;
     }
 
+    /* ---- `scanout_census` --------------------------------------------------------------
+
+       240 consecutive frames, ONE line per frame, to files/logs/scanout_census.txt. Armed by
+       a marker file exactly like psx/dev/gpu.c's `gpu_prim_dump` / `gpu_frame_summary` and
+       gpu_hw_gl.c's gl_debug_marker() switches, and self-disarming: the marker is deleted the
+       moment a capture starts.
+
+       WHY THIS EXISTS, and why it is not the census gpu.c already has. gpu.c's summary is
+       written from the CORE's vblank and describes what the GAME asked for: the display
+       registers, the drawing area, the primitives. It cannot see what this function then DOES
+       with those registers — which branch of the source selection ran, how big the texture is,
+       which pixel format, and above all what the pixels actually handed to the present layer
+       look like. A picture that flashes while the command stream is provably clean is either
+       (a) VRAM itself changing, or (b) the same VRAM being read differently frame to frame.
+       Nothing measured so far separates those two, and every remaining hypothesis lives on one
+       side or the other of that line.
+
+       So each line carries FOUR independent fingerprints of the same frame:
+
+         disp=  the display region of the software VRAM at (disp_x, disp_y), i.e. what the
+                console's own framebuffer holds. This is the ground truth.
+         b0=    the same-sized region at VRAM y=0
+         b1=    the same-sized region at VRAM y=256
+                — the two halves a double-buffered NTSC game flips between. If b0 and b1 are
+                each steady and only `disp` alternates, the game is flipping and we are
+                following it; if b0/b1 themselves churn, the corruption is upstream in VRAM.
+         up=    the buffer actually uploaded to the present layer, decoded through
+                texture_format_. This is the only fingerprint that goes through the 24bpp
+                branch, the internal-resolution surface and the deinterlacer.
+
+       `disp` steady + `up` swinging  => the defect is in this function's source selection.
+       `disp` swinging + b0/b1 steady => the flip/scanout origin is wrong.
+       b0/b1 swinging                 => VRAM is being written wrongly; not a scanout bug.
+       everything steady, screen bad  => the present layer below upload_frame().
+
+       Cost when disarmed: one integer decrement per frame. Nothing here runs per pixel unless
+       a capture is live. */
+    struct CensusFp {
+        uint32_t sum = 0;    /* order-sensitive hash; equal sums mean an identical sample set */
+        uint32_t n = 0;
+        uint32_t nz = 0;
+        uint32_t r = 0, g = 0, b = 0;
+        /* Packed 15-bit min/max. lo == hi means every sampled pixel is the SAME colour, i.e.
+           the buffer is a flat fill and not a picture — the one thing a mean cannot tell you.
+           A whole-screen mean of "near white" is either a bright frame or a white GP0(02),
+           and those need completely different explanations. */
+        uint32_t lo = 0xffffu, hi = 0;
+    };
+
+    /* Samples every 4th row and every 8th column — enough to characterise a whole-screen
+       colour, far too coarse to be confused by a moving sprite. */
+    static void censusAccum(CensusFp& fp, int r5, int g5, int b5) {
+        const uint32_t packed = (uint32_t)((r5 << 10) | (g5 << 5) | b5);
+
+        fp.n++;
+        fp.r += (uint32_t)r5;
+        fp.g += (uint32_t)g5;
+        fp.b += (uint32_t)b5;
+
+        if (r5 || g5 || b5) {
+            fp.nz++;
+        }
+
+        if (packed < fp.lo) {
+            fp.lo = packed;
+        }
+
+        if (packed > fp.hi) {
+            fp.hi = packed;
+        }
+
+        fp.sum = fp.sum * 31u + packed;
+    }
+
+    /* A rectangle of the software VRAM, in native halfwords. Clamped to the VRAM edge rather
+       than wrapped: a region that runs off the bottom is exactly one of the things under
+       investigation, so it must be visible as a short sample (n=) and not silently folded. */
+    CensusFp censusVram(uint32_t x, uint32_t y, int w, int h) const {
+        CensusFp fp;
+
+        if (!psx_ || !psx_->gpu || !psx_->gpu->vram || w <= 0 || h <= 0) {
+            return fp;
+        }
+
+        const uint16_t* vram = psx_->gpu->vram;
+
+        for (int row = 0; row < h; row += 4) {
+            const uint32_t vy = y + (uint32_t)row;
+
+            if (vy >= PSX_GPU_FB_HEIGHT) {
+                break;
+            }
+
+            const uint16_t* line = vram + (size_t)vy * PSX_GPU_FB_WIDTH;
+
+            for (int col = 0; col < w; col += 8) {
+                const uint32_t vx = x + (uint32_t)col;
+
+                if (vx >= PSX_GPU_FB_WIDTH) {
+                    break;
+                }
+
+                const uint16_t p = line[vx];
+                censusAccum(fp, p & 31, (p >> 5) & 31, (p >> 10) & 31);
+            }
+        }
+
+        return fp;
+    }
+
+    /* The buffer this function is about to hand armsx_renderer_upload_frame(), decoded the way
+       the present layer will decode it. BGR555 and RGB24 both, because which one is in force
+       is itself part of the question. */
+    CensusFp censusSource(const uint8_t* source, uint32_t stride, Uint32 format,
+                          int w, int h) const {
+        CensusFp fp;
+
+        if (!source || w <= 0 || h <= 0) {
+            return fp;
+        }
+
+        const bool rgb24 = (format == SDL_PIXELFORMAT_RGB24);
+
+        for (int row = 0; row < h; row += 4) {
+            const uint8_t* line = source + (size_t)row * (size_t)stride;
+
+            for (int col = 0; col < w; col += 8) {
+                if (rgb24) {
+                    const uint8_t* px = line + (size_t)col * 3u;
+                    censusAccum(fp, px[0] >> 3, px[1] >> 3, px[2] >> 3);
+                } else {
+                    const uint16_t p =
+                        *reinterpret_cast<const uint16_t*>(line + (size_t)col * 2u);
+                    censusAccum(fp, p & 31, (p >> 5) & 31, (p >> 10) & 31);
+                }
+            }
+        }
+
+        return fp;
+    }
+
+    /* ---- vertical-duplication probe -----------------------------------------------------
+
+       The second reported symptom is "the picture appears doubled or vertically displaced",
+       and nothing measured so far tests it: `up == disp` only proves we present the region
+       disp_start names, not that the region CONTAINS one copy of one image. So the display
+       region is hashed in four equal horizontal bands.
+
+         b0==b2 and b1==b3   the image repeats with a period of half the screen — doubled
+         b0==b1==b2==b3      a flat or banded fill, not a picture
+         all four distinct   an ordinary frame; the doubling is not in this buffer
+
+       Deliberately over the DISPLAY region rather than the draw buffer: a doubled picture the
+       user can see has to be inside what is scanned out. */
+    void censusBands(char* out, size_t cap, uint32_t x, uint32_t y, int w, int h) const {
+        const int band = h / 4;
+
+        if (band < 2) {
+            std::snprintf(out, cap, "-");
+
+            return;
+        }
+
+        std::snprintf(out, cap, "%08x/%08x/%08x/%08x",
+                      censusVram(x, y + (uint32_t)(0 * band), w, band).sum,
+                      censusVram(x, y + (uint32_t)(1 * band), w, band).sum,
+                      censusVram(x, y + (uint32_t)(2 * band), w, band).sum,
+                      censusVram(x, y + (uint32_t)(3 * band), w, band).sum);
+    }
+
+    /* "224:1598 112:3" — the offset actually in force as each primitive rasterized, and the
+       whole point of the field: it separates a cosmetic trailing GP0(E5) from a frame that
+       really did draw everything at the wrong origin. */
+    static void censusOffHist(char* out, size_t cap, const psx_gpu_t* gpu) {
+        size_t used = 0;
+
+        out[0] = '\0';
+
+        if (!gpu) {
+            std::snprintf(out, cap, "-");
+
+            return;
+        }
+
+        for (unsigned i = 0; i < gpu->off_hist_used_last && i < 4u; i++) {
+            const int w = std::snprintf(out + used, cap - used, "%s%d:%u",
+                                        i ? "," : "", (int)gpu->off_hist_y_last[i],
+                                        (unsigned)gpu->off_hist_n_last[i]);
+
+            if (w < 0 || (size_t)w >= (cap - used)) {
+                return;
+            }
+
+            used += (size_t)w;
+        }
+
+        if (!used) {
+            std::snprintf(out, cap, "-");
+        }
+    }
+
+    /* Every GP0(E5) of the frame in order, each tagged with the primitive count at the moment
+       it arrived — so "wrote a bad offset before drawing" and "wrote it after" are readable
+       apart at a glance. */
+    static void censusE5Seq(char* out, size_t cap, const psx_gpu_t* gpu) {
+        size_t used = 0;
+
+        out[0] = '\0';
+
+        if (!gpu || !gpu->gp0_e5_seq_n_last) {
+            std::snprintf(out, cap, "-");
+
+            return;
+        }
+
+        for (unsigned i = 0; i < gpu->gp0_e5_seq_n_last && i < 8u; i++) {
+            const uint32_t src = gpu->gp0_e5_seq_src_last[i];
+            char where[16];
+
+            if (src == PSX_GPU_SRC_CPU) {
+                std::snprintf(where, sizeof(where), "cpu");
+            } else {
+                std::snprintf(where, sizeof(where), "%07x", (unsigned)src);
+            }
+
+            const int w = std::snprintf(out + used, cap - used, "%s%06x@%u:%s",
+                                        i ? "," : "",
+                                        (unsigned)gpu->gp0_e5_seq_last[i],
+                                        (unsigned)gpu->gp0_e5_seq_prim_last[i], where);
+
+            if (w < 0 || (size_t)w >= (cap - used)) {
+                return;
+            }
+
+            used += (size_t)w;
+        }
+    }
+
+    /* The core's counters are monotonic; what a per-frame line wants is the delta. */
+    static unsigned censusDelta(uint32_t now, uint32_t& prev) {
+        const uint32_t d = now - prev;
+
+        prev = now;
+
+        return (unsigned)d;
+    }
+
+    static void censusFormatFp(char* out, size_t cap, const CensusFp& fp) {
+        const uint32_t n = fp.n ? fp.n : 1u;
+
+        std::snprintf(out, cap, "%02x%02x%02x/nz=%u/n=%u/h=%08x/lo=%04x/hi=%04x",
+                      (unsigned)((fp.r / n) << 3), (unsigned)((fp.g / n) << 3),
+                      (unsigned)((fp.b / n) << 3), fp.nz, fp.n, fp.sum,
+                      (unsigned)(fp.n ? fp.lo : 0u), (unsigned)fp.hi);
+    }
+
+    /* Probe / arm. Mirrors gpu.c's gpu_dump_marker_armed(): the marker is consumed on a hit so
+       one `touch` buys exactly one capture, and the budget stops a forgotten marker from
+       running the session dry. */
+    void censusPoll() {
+        if (census_file_) {
+            return;
+        }
+
+        if (census_budget_ <= 0 || --census_poll_ > 0) {
+            return;
+        }
+
+        census_poll_ = 30;
+
+        const char* log_path = psxe_diag_log_path();
+        const char* slash = log_path ? std::strrchr(log_path, '/') : nullptr;
+
+        if (!slash) {
+            return;
+        }
+
+        const std::string dir(log_path, static_cast<size_t>(slash - log_path) + 1u);
+        const std::string marker = dir + "scanout_census";
+        FILE* probe = std::fopen(marker.c_str(), "rb");
+
+        if (!probe) {
+            return;
+        }
+
+        std::fclose(probe);
+        std::remove(marker.c_str());
+        census_budget_--;
+
+        census_file_ = std::fopen((dir + "scanout_census.txt").c_str(), "a");
+
+        if (!census_file_) {
+            return;
+        }
+
+        census_frames_ = 240;
+        census_idx_ = 0;
+        census_stores_dumped_ = false;
+        psx_store_watch_reset();
+        psx_trace_reset();
+
+        /* Seed the deltas from the running totals, so line F0000 reports one frame's worth of
+           GP1 traffic and not the whole session's. */
+        if (psx_ && psx_->gpu) {
+            census_prev_[0] = psx_->gpu->gp1_disp_start;
+            census_prev_[1] = psx_->gpu->gp1_disp_mode;
+            census_prev_[2] = psx_->gpu->gp1_reset;
+            census_prev_[3] = psx_->gpu->gp1_fifo_reset;
+            census_prev_[4] = psx_->gpu->gp1_reset_midcmd;
+            census_prev_[5] = psx_->gpu->gp0_unknown;
+            census_prev_[6] = psx_->gpu->gp0_e5_count;
+        }
+
+        /* fputs(), not fprintf(): frontend/diagnostics.h #defines fprintf into the diag pipe,
+           which would mirror every line into armsx.log as well. Same reason gpu.c does. */
+        std::fputs("=== scanout_census: 240 consecutive frames ===\n"
+                   "=== fp format RRGGBB/nz=<non-black samples>/n=<samples>/h=<hash>. "
+                   "disp=VRAM at (disp_x,disp_y); b0=VRAM y=0; b1=VRAM y=256; "
+                   "up=the buffer uploaded to the present layer. ===\n"
+                   "=== src: adopted-gl = no CPU frame this frame (the GL render target IS "
+                   "the picture, so up= is absent). ===\n",
+                   static_cast<FILE*>(census_file_));
+    }
+
+    void censusEmit(int native_w, int native_h, Uint32 format, bool use_vram_source,
+                    bool adopted, bool scaled_surface, int display_scale, uint32_t stride,
+                    const uint8_t* source) {
+        FILE* f = static_cast<FILE*>(census_file_);
+
+        if (!f) {
+            return;
+        }
+
+        static const int kCensusHres[4] = {256, 320, 512, 640};
+        char disp[128], b0[128], b1[128], up[128], bands[80], offhist[96], e5seq[256];
+        const psx_gpu_t* gpu = (psx_ && psx_->gpu) ? psx_->gpu : nullptr;
+        const uint32_t dx = gpu ? gpu->disp_x : 0u;
+        const uint32_t dy = gpu ? gpu->disp_y : 0u;
+
+        censusFormatFp(disp, sizeof(disp), censusVram(dx, dy, native_w, native_h));
+        censusFormatFp(b0, sizeof(b0), censusVram(dx, 0, native_w, native_h));
+        censusFormatFp(b1, sizeof(b1), censusVram(dx, 256, native_w, native_h));
+        censusBands(bands, sizeof(bands), dx, dy, native_w, native_h);
+        censusOffHist(offhist, sizeof(offhist), gpu);
+        censusE5Seq(e5seq, sizeof(e5seq), gpu);
+
+        if (source) {
+            censusFormatFp(up, sizeof(up),
+                           censusSource(source, stride, format, texture_width_,
+                                        texture_height_));
+        } else {
+            std::snprintf(up, sizeof(up), "-");
+        }
+
+        char line[2048];
+
+        std::snprintf(
+            line, sizeof(line),
+            "F%04d vbl=%llu mode=%06x hres=%d vres=%s %s %s enable=%d stat31=%d "
+            "disp_start=(%u,%u) disp_h=(%u,%u) disp_v=(%u,%u) "
+            "draw=(%u,%u)-(%u,%u) off=(%d,%d) "
+            "native=%dx%d tex=%dx%d fmt=%s src=%s scale=%d stride=%u "
+            "gp1[start=%u mode=%u rst=%u fifo=%u midcmd=%u] gp0unk=%u "
+            "raw[e3=%06x e4=%06x e5=%06x e5n=%u gp105=%06x] "
+            "prims=%u offhist=%s e5seq=%s "
+            "dma[nodes=%u bit23=%u first=%06x hdr=%08x] "
+            "bands=%s disp=%s b0=%s b1=%s up=%s\n",
+            census_idx_,
+            static_cast<unsigned long long>(vblank_counter_),
+            gpu ? gpu->display_mode : 0u,
+            gpu ? ((gpu->display_mode & 0x40) ? 368
+                                              : kCensusHres[gpu->display_mode & 3])
+                : 0,
+            (gpu && (gpu->display_mode & 0x04)) ? "480" : "240",
+            (gpu && (gpu->display_mode & 0x10)) ? "24bpp" : "15bpp",
+            (gpu && (gpu->display_mode & 0x20)) ? "interlace" : "progressive",
+            (gpu && (gpu->gpustat & 0x00800000)) ? 0 : 1,
+            (gpu && (gpu->gpustat & 0x80000000u)) ? 1 : 0,
+            dx, dy,
+            gpu ? gpu->disp_x1 : 0u, gpu ? gpu->disp_x2 : 0u,
+            gpu ? gpu->disp_y1 : 0u, gpu ? gpu->disp_y2 : 0u,
+            gpu ? gpu->draw_x1 : 0u, gpu ? gpu->draw_y1 : 0u,
+            gpu ? gpu->draw_x2 : 0u, gpu ? gpu->draw_y2 : 0u,
+            gpu ? gpu->off_x : 0, gpu ? gpu->off_y : 0,
+            native_w, native_h, texture_width_, texture_height_,
+            SDL_GetPixelFormatName(format),
+            adopted ? "adopted-gl"
+                    : (scaled_surface ? "backend-readback"
+                                      : (use_vram_source ? "vram-origin" : "display-ptr")),
+            display_scale, stride,
+            censusDelta(gpu ? gpu->gp1_disp_start : 0u, census_prev_[0]),
+            censusDelta(gpu ? gpu->gp1_disp_mode : 0u, census_prev_[1]),
+            censusDelta(gpu ? gpu->gp1_reset : 0u, census_prev_[2]),
+            censusDelta(gpu ? gpu->gp1_fifo_reset : 0u, census_prev_[3]),
+            censusDelta(gpu ? gpu->gp1_reset_midcmd : 0u, census_prev_[4]),
+            censusDelta(gpu ? gpu->gp0_unknown : 0u, census_prev_[5]),
+            gpu ? gpu->gp0_e3_raw : 0u,
+            gpu ? gpu->gp0_e4_raw : 0u,
+            gpu ? gpu->gp0_e5_raw : 0u,
+            censusDelta(gpu ? gpu->gp0_e5_count : 0u, census_prev_[6]),
+            gpu ? gpu->gp1_05_raw : 0u,
+            gpu ? gpu->frame_prims_last : 0u, offhist, e5seq,
+            gpu ? gpu->dma_nodes_last : 0u,
+            gpu ? gpu->dma_bit23_last : 0u,
+            gpu ? gpu->dma_first_bit23_last : 0u,
+            gpu ? gpu->dma_first_hdr_last : 0u,
+            bands, disp, b0, b1, up);
+
+        std::fputs(line, f);
+
+        /* The RAM around each DMA-delivered GP0(E5), emitted only on frames that used more
+           than one drawing offset -- i.e. the anomalous ones. On a normal frame this is
+           silent, so the file stays one line per frame. */
+        if (gpu && gpu->e5ctx_n_last > 1u) {
+            for (unsigned k = 0; k < gpu->e5ctx_n_last && k < 4u; k++) {
+                char ctx[512];
+                size_t used = 0;
+                const uint32_t src = gpu->e5ctx_src_last[k];
+                const uint32_t node = gpu->e5ctx_node_last[k];
+
+                used = (size_t)std::snprintf(
+                    ctx, sizeof(ctx),
+                    "      e5ctx[%u] src=%07x node=%07x hdr=%08x nodewords=%u idx=%d ram:",
+                    k, (unsigned)src, (unsigned)node,
+                    (unsigned)gpu->e5ctx_hdr_last[k],
+                    (unsigned)(gpu->e5ctx_hdr_last[k] >> 24),
+                    (int)(((int32_t)src - (int32_t)node) / 4));
+
+                for (unsigned w = 0; w < PSX_GPU_E5_CTX && used < sizeof(ctx); w++) {
+                    const int n = std::snprintf(ctx + used, sizeof(ctx) - used, " %s%08x%s",
+                                                (w == 4) ? "[" : "",
+                                                (unsigned)gpu->e5ctx_words_last[k][w],
+                                                (w == 4) ? "]" : "");
+
+                    if (n < 0 || (size_t)n >= (sizeof(ctx) - used)) {
+                        break;
+                    }
+
+                    used += (size_t)n;
+                }
+
+                std::snprintf(ctx + used, sizeof(ctx) - used, "\n");
+                std::fputs(ctx, f);
+            }
+        }
+
+        /* Draw-environment store watch (psx/cpu.h). Dumped ONCE per arming, at the end of
+           the capture, because it is a whole-session record. Two rings, reported with their
+           MONOTONIC totals so a wrapped ring is distinguishable from a short one -- and so
+           that "nothing ever wrote the packet" is reportable as the answer it is. */
+        if (!census_stores_dumped_ && census_frames_ <= 1) {
+            char sw[640];
+            const unsigned win_total = psx_store_watch_window_total();
+
+            census_stores_dumped_ = true;
+
+            std::snprintf(sw, sizeof(sw),
+                          "--- store_watch: window[%07x..%07x] matched=%u kept=%u | "
+                          "e5-valued elsewhere matched=%u kept=%u%s ---\n",
+                          0x005a250u, 0x005a274u,
+                          win_total, psx_store_watch_window_kept(),
+                          psx_store_watch_value_total(), psx_store_watch_value_kept(),
+                          win_total ? ""
+                                    : "  *** NO CPU STORE EVER TOUCHED THE PACKET ***");
+            std::fputs(sw, f);
+
+            /* Packer trace (psx/cpu.h): the routine the store watch named, once per
+               argument, so a0=3 (correct payload) and a0=5 (wrong one) can be diffed
+               instruction by instruction. */
+            for (unsigned slot = 0; slot < PSX_TRACE_SLOTS; slot++) {
+                const psx_trace_call_t* c = psx_trace_call(slot);
+
+                if (!c || !c->n) {
+                    continue;
+                }
+
+                std::snprintf(sw, sizeof(sw),
+                              "--- packer_trace a0=%u entry=%08x ra=%08x s0=%08x s1=%08x "
+                              "steps=%u%s returned=%08x ---\n",
+                              c->a0_in, PSX_TRACE_ENTRY, c->ra_in, c->s0_in, c->s1_in,
+                              c->n, c->truncated ? " TRUNCATED" : "", c->v0_out);
+                std::fputs(sw, f);
+
+                for (unsigned i = 0; i < c->n; i++) {
+                    std::snprintf(sw, sizeof(sw),
+                                  "      %02u %08x %08x  at=%08x v0=%08x v1=%08x a0=%08x\n",
+                                  i, c->step[i].pc, c->step[i].opcode, c->step[i].at,
+                                  c->step[i].v0, c->step[i].v1, c->step[i].a0);
+                    std::fputs(sw, f);
+                }
+            }
+
+            for (int pass = 0; pass < 2; pass++) {
+                const unsigned kept = pass ? psx_store_watch_value_kept()
+                                           : psx_store_watch_window_kept();
+
+                for (unsigned k = 0; k < kept; k++) {
+                    const psx_store_watch_t* e = pass ? psx_store_watch_value(k)
+                                                      : psx_store_watch_window(k);
+                    size_t used;
+
+                    if (!e) {
+                        break;
+                    }
+
+                    used = (size_t)std::snprintf(
+                        sw, sizeof(sw),
+                        "      %s[%02u] pc=%08x op=%08x w%u -> [%08x]=%08x base=r%u(%08x) "
+                        "src=r%u(%08x) code:",
+                        pass ? "val" : "WIN", k, e->pc, e->opcode, e->width,
+                        e->addr, e->value, e->base_reg, e->base_val,
+                        e->src_reg, e->src_val);
+
+                    for (unsigned w = 0; w < PSX_STORE_WATCH_CODE && used < sizeof(sw); w++) {
+                        const int n = std::snprintf(sw + used, sizeof(sw) - used, " %s%08x%s",
+                                                    (w == 4) ? "[" : "", e->code[w],
+                                                    (w == 4) ? "]" : "");
+
+                        if (n < 0 || (size_t)n >= (sizeof(sw) - used)) {
+                            break;
+                        }
+
+                        used += (size_t)n;
+                    }
+
+                    std::snprintf(sw + used, sizeof(sw) - used, "\n");
+                    std::fputs(sw, f);
+                }
+            }
+        }
+
+        census_idx_++;
+
+        if (--census_frames_ <= 0) {
+            std::fputs("--- end scanout_census ---\n", f);
+            std::fclose(f);
+            census_file_ = nullptr;
+        } else {
+            std::fflush(f);
+        }
+    }
+
     /* Drains a setPs1TextureOptions() request onto the EMULATION thread. psx_texrep_configure
        frees every decoded replacement and the rasterizers hold pointers into them, so this
        cannot run on the caller's thread. One relaxed atomic load per frame when idle. */
@@ -3745,6 +4287,7 @@ class ArmsxSession {
 #endif
 
         applyPendingTextureOptions();
+        censusPoll();
 
         int next_width = debug_view_ ? PSX_GPU_FB_WIDTH : static_cast<int>(psx_get_display_width(psx_));
         int next_height = debug_view_ ? PSX_GPU_FB_HEIGHT : static_cast<int>(psx_get_display_height(psx_));
@@ -3893,6 +4436,9 @@ class ArmsxSession {
                                g_resume_probe_frames, texture_width_, texture_height_);
             }
 
+            censusEmit(texture_native_width_, texture_native_height_, texture_format_, false,
+                       true, false, display_scale, PSX_GPU_FB_STRIDE, nullptr);
+
             return;
         }
 #endif
@@ -3915,6 +4461,10 @@ class ArmsxSession {
             source = deinterlaceFrame(source, display_stride, resolveDeinterlace(settings),
                                       display_scale);
         }
+
+        censusEmit(texture_native_width_, texture_native_height_, texture_format_,
+                   use_vram_source, false, scaled_surface != nullptr, display_scale,
+                   display_stride, source);
 
         // Dirty-row scan: only the changed span of the framebuffer is handed to the backend.
         // Unchanged from the pre-abstraction path; every backend gets the same row range.
@@ -5186,6 +5736,15 @@ class ArmsxSession {
     bool hardware_backend_active_ = false;
 #endif
     std::uint64_t vblank_counter_ = 0;
+    /* `scanout_census` state. Emulation thread only, like every other member here. */
+    void* census_file_ = nullptr;   /* FILE*, held open across the frames of one arming */
+    int census_frames_ = 0;
+    int census_idx_ = 0;
+    int census_poll_ = 1;           /* probe on the first frame, then every 30 */
+    int census_budget_ = 4;         /* captures per process, each needing its own `touch` */
+    /* Previous value of each monotonic core counter, so the line can carry deltas. */
+    uint32_t census_prev_[7] = {0, 0, 0, 0, 0, 0, 0};
+    bool census_stores_dumped_ = false;
     int texture_width_ = 0;
     int texture_height_ = 0;
     // Pre-multiplier display size, kept so the degenerate "display width reported 0"

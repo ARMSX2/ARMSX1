@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +62,86 @@ static inline void spu_reg_write16(uint8_t* ptr, uint32_t offset, uint16_t value
 
 static inline void spu_reg_write32(uint8_t* ptr, uint32_t offset, uint32_t value) {
     memcpy(ptr + offset, &value, sizeof(value));
+}
+
+/* ---------------------------------------------------------------------------------------
+    ACCESS WIDTH AND THE BOUND OF THE REGISTER FILE.
+
+    Every register access — 8, 16 or 32 bit — resolves against one flat mirror: the
+    psx_spu_t fields from voice[0].volumel through vrin, laid out packed so a field's byte
+    offset in the struct IS its offset from 1F801C00h.
+
+    WIDTH. The SPU register file is 16 bits wide. Hardware serves a byte access out of the
+    containing halfword — low byte at an even offset, high byte at an odd one — and there is
+    nothing else it could do, because there is no byte-addressable storage behind it. This
+    file used to implement only 16- and 32-bit access; psx_spu_read8() logged and returned 0
+    and psx_spu_write8() logged and dropped the write. Xenogears reads voice ADSR registers
+    a byte at a time (offsets 58h, 98h, 118h, 138h = 1F801C08h+N*10h for voices 5, 9, 17 and
+    19), so it was polling envelope configuration and being told zero, several times a
+    second, forever.
+
+    BOUND. The mirror is 200h bytes: 1F801C00h..1F801DFFh. The window psx_bus dispatches
+    into is PSX_SPU_SIZE = 400h, twice that. 1F801E00h upwards — the internal current-volume
+    block and the unused space above it — has NO backing field, and an access there used to
+    index the mirror anyway. Past the mirror's end that is not the register file, it is the
+    next members of psx_spu_t: taddr, the transfer FIFO, and the 24 voice decoder/ADSR
+    contexts. A 32-bit write to 1F801E00h landed squarely on the sound-RAM transfer address.
+
+    The bound is derived from the struct instead of written as a literal so it follows the
+    layout: add a register field and it moves with it.
+   --------------------------------------------------------------------------------------- */
+
+#define SPU_REG_MIRROR_SIZE \
+    ((uint32_t)(offsetof(psx_spu_t, vrin) + sizeof(int16_t) - offsetof(psx_spu_t, voice)))
+
+static inline int spu_reg_in_mirror(uint32_t offset, uint32_t width) {
+    return (offset < SPU_REG_MIRROR_SIZE) && ((SPU_REG_MIRROR_SIZE - offset) >= width);
+}
+
+/*
+    Unimplemented-access logging, once per offset per direction.
+
+    The 8-bit read path was log_fatal(), on a poll that repeats several times a second: 1.1 MB
+    of log in a few minutes, at the highest severity there is, for something that never stopped
+    the emulator. Nothing survives that — a genuine error scrolls past unread. An access with no
+    register behind it is a warn, and a warn that repeats thousands of times a second is not
+    readable either, so each offset says its piece once.
+
+    File-scope on purpose: this is host-side log bookkeeping, not guest state, and must stay out
+    of the save-state payload the same way reverb_disabled and gen_ring do.
+*/
+static uint8_t g_spu_unimpl_read_seen[PSX_SPU_SIZE / 8];
+static uint8_t g_spu_unimpl_write_seen[PSX_SPU_SIZE / 8];
+
+static int spu_warn_once(uint8_t* seen, uint32_t offset) {
+    const uint32_t masked = offset & (PSX_SPU_SIZE - 1u);
+    const uint8_t bit = (uint8_t)(1u << (masked & 7u));
+
+    if (seen[masked >> 3] & bit)
+        return 0;
+
+    seen[masked >> 3] |= bit;
+
+    return 1;
+}
+
+/* The halfword the mirror holds, or 0 when the offset has no register behind it. No side
+   effects — in particular it never touches the transfer FIFO, so it is safe to call on the
+   read-modify-write path of an 8-bit write. */
+static inline uint16_t spu_reg_mirror16(const psx_spu_t* spu, uint32_t offset) {
+    if (!spu_reg_in_mirror(offset, 2))
+        return 0;
+
+    return spu_reg_read16((const uint8_t*)&spu->voice[0].volumel, offset);
+}
+
+static inline uint16_t spu_reg_peek16(const psx_spu_t* spu, uint32_t offset) {
+    if (!spu_reg_in_mirror(offset, 2) && spu_warn_once(g_spu_unimpl_read_seen, offset)) {
+        log_warn("SPU read at offset %08x has no register behind it, returning 0"
+                 " (logged once per offset)", offset);
+    }
+
+    return spu_reg_mirror16(spu, offset);
 }
 
 // static float interpolate_hermite(float a, float b, float c, float d, float t) {
@@ -198,6 +279,15 @@ void psx_spu_set_reverb_disabled(psx_spu_t* spu, int disabled) {
 }
 
 uint32_t psx_spu_read32(psx_spu_t* spu, uint32_t offset) {
+    if (!spu_reg_in_mirror(offset, 4)) {
+        if (spu_warn_once(g_spu_unimpl_read_seen, offset)) {
+            log_warn("SPU read at offset %08x has no register behind it, returning 0"
+                     " (logged once per offset)", offset);
+        }
+
+        return 0x0;
+    }
+
     const uint8_t* ptr = (uint8_t*)&spu->voice[0].volumel;
 
     return spu_reg_read32(ptr, offset);
@@ -211,15 +301,23 @@ uint16_t psx_spu_read16(psx_spu_t* spu, uint32_t offset) {
         return data;
     }
 
-    const uint8_t* ptr = (uint8_t*)&spu->voice[0].volumel;
-
-    return spu_reg_read16(ptr, offset);
+    return spu_reg_peek16(spu, offset);
 }
 
-uint8_t psx_spu_read8(psx_spu_t* spu, uint32_t offset) {
-    log_fatal("Unhandled 8-bit SPU read at offset %08x", offset);
+/*
+    8-bit read: the byte of the containing 16-bit register that this offset selects.
 
-    return 0x0;
+    Deliberately NOT routed through psx_spu_read16(), because that read has a side effect —
+    1F801DA8h pops a halfword of sound RAM and advances the transfer address. Serving a byte
+    read out of it would consume a whole halfword per byte, so reading both halves of one
+    register would return bytes from two different words and would drag the transfer address
+    along with it. nocash lists the FIFO port as write-only; a byte read of it gets the last
+    value written (what the mirror holds), and nothing here disturbs a transfer in flight.
+*/
+uint8_t psx_spu_read8(psx_spu_t* spu, uint32_t offset) {
+    const uint16_t reg = spu_reg_peek16(spu, offset & ~1u);
+
+    return (offset & 1u) ? (uint8_t)(reg >> 8) : (uint8_t)(reg & 0xffu);
 }
 
 /*
@@ -684,6 +782,15 @@ void psx_spu_write32(psx_spu_t* spu, uint32_t offset, uint32_t value) {
     if (spu_handle_write(spu, offset, value))
         return;
 
+    if (!spu_reg_in_mirror(offset, 4)) {
+        if (spu_warn_once(g_spu_unimpl_write_seen, offset)) {
+            log_warn("SPU write at offset %08x (%08x) has no register behind it, ignored"
+                     " (logged once per offset)", offset, value);
+        }
+
+        return;
+    }
+
     uint8_t* ptr = (uint8_t*)&spu->voice[0];
 
     spu_note_repeat_addr_write(spu, offset, 4);
@@ -696,6 +803,15 @@ void psx_spu_write16(psx_spu_t* spu, uint32_t offset, uint16_t value) {
     if (spu_handle_write(spu, offset, value))
         return;
 
+    if (!spu_reg_in_mirror(offset, 2)) {
+        if (spu_warn_once(g_spu_unimpl_write_seen, offset)) {
+            log_warn("SPU write at offset %08x (%04x) has no register behind it, ignored"
+                     " (logged once per offset)", offset, value);
+        }
+
+        return;
+    }
+
     uint8_t* ptr = (uint8_t*)&spu->voice[0].volumel;
 
     spu_note_repeat_addr_write(spu, offset, 2);
@@ -704,8 +820,32 @@ void psx_spu_write16(psx_spu_t* spu, uint32_t offset, uint16_t value) {
         spu_reg_write16(ptr, offset, value);
 }
 
+/*
+    8-bit write: merge the byte into the containing 16-bit register and dispatch that.
+
+    The register file is 16 bits wide, so hardware has no narrower write than this. Going
+    back through psx_spu_write16() is the point rather than a shortcut — it is what keeps
+    a byte write to a register with behaviour attached working at all: KON/KOFF still key
+    voices, 1F801DA6h still recomputes the transfer address, 1F801DAAh still flushes the
+    FIFO, 1F801DA2h still moves the reverb base, and spu_note_repeat_addr_write() still
+    latches, which its own comment already anticipated ("a game that sets the address with
+    two 8-bit writes still means it"). Before this, all of that was a printf and a dropped
+    write.
+
+    The merge reads the mirror directly and never the FIFO, so composing a halfword out of
+    two byte writes cannot disturb a sound-RAM transfer. Registers whose writes are consumed
+    by spu_handle_write() never reach the mirror, so KON/KOFF merge against 0 and a byte
+    write keys exactly the voices that byte names — which is the hardware behaviour.
+*/
 void psx_spu_write8(psx_spu_t* spu, uint32_t offset, uint8_t value) {
-    printf("Unhandled 8-bit SPU write at offset %08x (%02x)\n", offset, value);
+    const uint32_t aligned = offset & ~1u;
+    const uint16_t current = spu_reg_mirror16(spu, aligned);
+
+    const uint16_t merged = (offset & 1u)
+        ? (uint16_t)((current & 0x00ffu) | ((uint16_t)value << 8))
+        : (uint16_t)((current & 0xff00u) | (uint16_t)value);
+
+    psx_spu_write16(spu, aligned, merged);
 }
 
 

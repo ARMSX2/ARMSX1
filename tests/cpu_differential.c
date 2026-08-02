@@ -265,6 +265,134 @@ static int case_opcode_matrix(const char* bios_path) {
     return ok;
 }
 
+/* ------------------------------------------------------------------------------------
+   The shift family against the MIPS rule, exhaustively.
+
+   WHY THIS EXISTS, AND WHY case_opcode_matrix ABOVE CANNOT REPLACE IT
+
+   Two structural blindnesses meet here. First, every case above is DIFFERENTIAL: it runs
+   the interpreter against the cached interpreter and compares state. Both are this project's
+   own code and were written from the same understanding, so a wrong rule is green in all of
+   them -- the identical blindness that let GPU_PARITY pass while all three rasterizers
+   dropped the same oversize primitives. Second, the opcode matrix does contain the shift
+   family (SPECIAL 0x00/0x02/0x03/0x04/0x06/0x07), but it encodes ONE shift amount, sa=4, and
+   one operand. An error at a single shift position is invisible to it.
+
+   That combination matters because of a live investigation. A Xenogears battle submits a
+   three-word GP0 packet whose GP0(E5) drawing-offset word carries 0x038000 where 0x070000
+   is wanted -- the same row number encoded one bit position short (224<<10 rather than
+   224<<11). The GPU executes it faithfully; the value is wrong before it ever arrives. A
+   single off-by-one shift somewhere in the CPU would produce exactly that, and nothing in
+   this harness could have seen it.
+
+   So this asserts the architectural definition directly, over every shift amount:
+
+       SLL  rd = rt << sa            SLLV  rd = rt << (rs & 31)
+       SRL  rd = (unsigned)rt >> sa  SRLV  rd = (unsigned)rt >> (rs & 31)
+       SRA  rd = (signed)rt >> sa    SRAV  rd = (signed)rt >> (rs & 31)
+
+   The variable forms are swept past 31 on purpose: only the low five bits of rs may be used,
+   and a missing mask shows up nowhere else. 224 is in the operand set by name, so the exact
+   value under investigation is covered at the exact shift amounts in question.
+   ------------------------------------------------------------------------------------ */
+static uint32_t shift_ref(unsigned funct, uint32_t rt, unsigned amount) {
+    const unsigned s = amount & 31u;
+
+    switch (funct) {
+        case 0x00: /* SLL  */
+        case 0x04: /* SLLV */
+            return (uint32_t)(rt << s);
+
+        case 0x02: /* SRL  */
+        case 0x06: /* SRLV */
+            return rt >> s;
+
+        default:   /* SRA / SRAV -- sign-replicating, computed without relying on the
+                      implementation-defined behaviour of >> on a negative signed int. */
+            if (rt & 0x80000000u)
+                return s ? ((rt >> s) | (0xffffffffu << (32u - s))) : rt;
+
+            return rt >> s;
+    }
+}
+
+static int case_shift_matrix(const char* bios_path) {
+    static const uint32_t operands[] = {
+        0x00000000u, 0x00000001u, 0x000000e0u /* 224 */, 0x00000038u,
+        0x00007fffu, 0x0000ffffu, 0x12345678u, 0x7fffffffu,
+        0x80000000u, 0xdeadbeefu, 0xffffffffu, 0xaaaaaaaau,
+    };
+    /* Immediate funct then variable funct, paired so one loop drives both encodings. */
+    static const unsigned imm_functs[] = {0x00u, 0x02u, 0x03u};
+    static const unsigned var_functs[] = {0x04u, 0x06u, 0x07u};
+    const unsigned rs = 8u, rt = 9u, rd = 10u;
+    psx_t* psx = psx_create();
+    unsigned long checked = 0;
+    int ok = 1;
+
+    if (!psx || psx_init(psx, bios_path, NULL) != 0) {
+        fprintf(stderr, "CPU_DIFFERENTIAL failed case=shift-matrix reason=init\n");
+        return 0;
+    }
+
+    psx_cpu_set_execution_mode(psx->cpu, PSX_CPU_INTERPRETER);
+
+    printf("CPU_DIFFERENTIAL begin case=shift-matrix\n");
+
+    for (size_t v = 0; v < sizeof(operands) / sizeof(operands[0]) && ok; ++v) {
+        /* Variable forms are swept to 63 so the mandatory & 31 on rs is exercised. */
+        for (unsigned amount = 0; amount < 64u && ok; ++amount) {
+            for (size_t f = 0; f < 3u && ok; ++f) {
+                const int variable = (amount > 31u) || ((amount & 1u) != 0u);
+                const unsigned funct = variable ? var_functs[f] : imm_functs[f];
+                uint32_t opcode;
+                uint32_t want;
+                uint32_t got;
+
+                if (variable) {
+                    opcode = (rs << 21) | (rt << 16) | (rd << 11) | funct;
+                } else {
+                    opcode = (rt << 16) | (rd << 11) | ((amount & 31u) << 6) | funct;
+                }
+
+                psx_cpu_init(psx->cpu, psx->bus);
+                psx_cpu_set_execution_mode(psx->cpu, PSX_CPU_INTERPRETER);
+                psx->cpu->pc = TEST_PC;
+                psx->cpu->next_pc = TEST_PC + 4u;
+                psx->cpu->r[rt] = operands[v];
+                /* A high bit set in rs proves the mask is applied and not just a small value
+                   happening to fit. */
+                psx->cpu->r[rs] = amount | (variable ? 0x5a5a0000u : 0u);
+                psx->cpu->r[rd] = 0xcafef00du;
+
+                psx_bus_write32(psx->bus, TEST_OFFSET, opcode);
+                psx_cpu_cycle(psx->cpu);
+
+                want = shift_ref(funct, operands[v], amount);
+                got = psx->cpu->r[rd];
+
+                ++checked;
+
+                if (got != want) {
+                    fprintf(stderr,
+                            "CPU_DIFFERENTIAL failed case=shift-matrix reason=shift-rule "
+                            "opcode=%08x funct=%02x %s rt=%08x amount=%u want=%08x got=%08x\n",
+                            opcode, funct, variable ? "variable" : "immediate",
+                            operands[v], amount, want, got);
+                    ok = 0;
+                }
+            }
+        }
+    }
+
+    psx_destroy(psx);
+
+    if (ok)
+        printf("CPU_DIFFERENTIAL passed case=shift-matrix checked=%lu\n", checked);
+
+    return ok;
+}
+
 int main(void) {
     const char* bios_path = "build/tests/blank-bios.bin";
     if (!write_blank_bios(bios_path)) {
@@ -275,7 +403,8 @@ int main(void) {
     if (!case_integer_memory_branch(bios_path) ||
         !case_self_modifying_alias(bios_path) ||
         !case_irq_and_exception(bios_path) ||
-        !case_opcode_matrix(bios_path)) {
+        !case_opcode_matrix(bios_path) ||
+        !case_shift_matrix(bios_path)) {
         return 1;
     }
 

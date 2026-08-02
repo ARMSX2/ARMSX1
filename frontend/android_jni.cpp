@@ -1120,8 +1120,9 @@ void ResolveAchievementsGlue(JNIEnv* env) {
     if (native_app_local) {
         g_native_app_play_sound = env->GetStaticMethodID(native_app_local, "playSound", "(Ljava/lang/String;)V");
         clear_exception();
-        g_native_app_notice = env->GetStaticMethodID(native_app_local, "onAchievementNotice",
-                                                     "(Ljava/lang/String;I)V");
+        g_native_app_notice = env->GetStaticMethodID(
+            native_app_local, "onAchievementNotice",
+            "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
         clear_exception();
 
         // Either one is reason enough to keep the class alive — losing the global ref because the
@@ -1132,8 +1133,8 @@ void ResolveAchievementsGlue(JNIEnv* env) {
         // Said out loud because a silently unresolved method is exactly how an achievements
         // integration ends up earning unlocks that never reach the screen.
         if (!g_native_app_notice) {
-            ARMSX_LOGE("NativeApp.onAchievementNotice(String,int) not found; "
-                       "RetroAchievements notifications will not be shown");
+            ARMSX_LOGE("NativeApp.onAchievementNotice(int,String,String,String,String,int) not "
+                       "found; RetroAchievements notifications will not be shown");
         }
         env->DeleteLocalRef(native_app_local);
     } else {
@@ -1239,16 +1240,21 @@ void AchievementsPlaySound(const char* path, void* /*user*/) {
     env->DeleteLocalRef(j_path);
 }
 
-// The one route RetroAchievements has to something the user can actually see: the game summary at
-// boot, an unlock, a sign-in that expired. NativeApp.onAchievementNotice() hops to the main looper
-// and hands the line to com.armsx2.ui.WelcomeBanner — the app-wide transient banner that
-// WindowImpl already hosts above every screen, in-game and library alike.
+// The one route RetroAchievements has to something the user can actually see: signing in, the game
+// summary at boot, an unlock, a leaderboard attempt. NativeApp.onAchievementNotice() hops to the
+// main looper and hands the toast to com.armsx2.ui.RaToasts — the stacking notification host that
+// WindowImpl mounts above every screen, in-game and library alike.
+//
+// [image_url] is an https RetroAchievements image; it is handed over as a URL rather than a
+// downloaded file because the app already has one image pipeline (Coil, with the shared
+// files/cover_cache disk cache) and a second downloader in native code would duplicate it.
 //
 // Called from the achievements module's notice pump, which runs on the emulation thread (a Java
 // thread, so ScopedJniThread finds an env rather than attaching) with no achievements lock held.
 // Never called from an rc_client callback directly — see the notice queue in achievements.cpp.
-void AchievementsNotify(const char* text, int duration_ms, void* /*user*/) {
-    if (!text || !*text || !g_native_app_class || !g_native_app_notice) {
+void AchievementsNotify(int kind, const char* key, const char* title, const char* detail,
+                        const char* image_url, int duration_ms, void* /*user*/) {
+    if (!title || !*title || !g_native_app_class || !g_native_app_notice) {
         return;
     }
 
@@ -1258,14 +1264,30 @@ void AchievementsNotify(const char* text, int duration_ms, void* /*user*/) {
         return;
     }
 
-    jstring j_text = env->NewStringUTF(text);
-    env->CallStaticVoidMethod(g_native_app_class, g_native_app_notice, j_text,
-                              static_cast<jint>(duration_ms));
+    // Every string is passed non-null; the Kotlin side treats "" as absent. NewStringUTF(nullptr)
+    // returns null, which would land as a Kotlin null on a non-null parameter and throw.
+    jstring j_key = env->NewStringUTF(key ? key : "");
+    jstring j_title = env->NewStringUTF(title);
+    jstring j_detail = env->NewStringUTF(detail ? detail : "");
+    jstring j_image = env->NewStringUTF(image_url ? image_url : "");
+
+    env->CallStaticVoidMethod(g_native_app_class, g_native_app_notice, static_cast<jint>(kind),
+                              j_key, j_title, j_detail, j_image, static_cast<jint>(duration_ms));
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
     }
-    if (j_text) {
-        env->DeleteLocalRef(j_text);
+
+    if (j_image) {
+        env->DeleteLocalRef(j_image);
+    }
+    if (j_detail) {
+        env->DeleteLocalRef(j_detail);
+    }
+    if (j_title) {
+        env->DeleteLocalRef(j_title);
+    }
+    if (j_key) {
+        env->DeleteLocalRef(j_key);
     }
 }
 
@@ -1972,23 +1994,38 @@ Java_kr_co_iefriends_pcsx2_NativeApp_resetGame(JNIEnv*, jclass) {
 // a failed press rather than a hang.
 static constexpr int kStateRequestTimeoutMs = 2000;
 
-static jboolean RequestStateSlot(int op, jint slot) {
+// Returns the raw PSX_STATE_* code so a caller can tell the advisory memory-card verdicts
+// (PSX_STATE_ERR_CARD_NEWER / _DIVERGED) from a real failure. Those two mean the state is
+// intact and untouched, and that the user should be asked before it is applied.
+static jint RequestStateSlotCode(int op, jint slot, unsigned flags) {
     const std::string files_dir = CachedFilesDir();
     if (files_dir.empty()) {
         ARMSX_LOGE("state slot %d: no files dir (no run has started)", static_cast<int>(slot));
-        return JNI_FALSE;
+        return PSX_STATE_ERR_ARG;
     }
 
-    const int result = psx_state_request_slot(op, static_cast<int>(slot), files_dir.c_str(),
-                                              kStateRequestTimeoutMs);
+    const int result = psx_state_request_slot_ex(op, static_cast<int>(slot), files_dir.c_str(),
+                                                 kStateRequestTimeoutMs, flags);
+    if (result == PSX_STATE_ERR_CARD_NEWER || result == PSX_STATE_ERR_CARD_DIVERGED) {
+        // Not an error: nothing was applied, and the Kotlin side is about to put the question
+        // to the user. Logged at info so a diag file does not read as though a load broke.
+        ARMSX_LOGI("load slot %d deferred to user: %s (%d)", static_cast<int>(slot),
+                   psx_state_strerror(result), result);
+        return result;
+    }
+
     if (result != PSX_STATE_OK) {
         ARMSX_LOGE("%s slot %d failed: %s (%d)", op == PSX_STATE_OP_SAVE ? "save" : "load",
                    static_cast<int>(slot), psx_state_strerror(result), result);
-        return JNI_FALSE;
+        return result;
     }
 
     ARMSX_LOGI("%s slot %d ok", op == PSX_STATE_OP_SAVE ? "save" : "load", static_cast<int>(slot));
-    return JNI_TRUE;
+    return PSX_STATE_OK;
+}
+
+static jboolean RequestStateSlot(int op, jint slot) {
+    return RequestStateSlotCode(op, slot, 0) == PSX_STATE_OK ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -1998,7 +2035,25 @@ Java_kr_co_iefriends_pcsx2_NativeApp_saveStateToSlot(JNIEnv*, jclass, jint slot)
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_loadStateFromSlot(JNIEnv*, jclass, jint slot) {
-    return RequestStateSlot(PSX_STATE_OP_LOAD, slot);
+    // Legacy entry point. Keeps its exact original meaning — "load it, tell me yes or no" —
+    // by opting out of the card check, so a caller that has not been taught to ask the user
+    // cannot start silently refusing loads that used to work.
+    return RequestStateSlotCode(PSX_STATE_OP_LOAD, slot,
+                                PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE) == PSX_STATE_OK
+               ? JNI_TRUE
+               : JNI_FALSE;
+}
+
+// The checked load. Returns a PSX_STATE_* code; the Kotlin guard (SaveStateGuard.kt) turns
+// ERR_CARD_NEWER / ERR_CARD_DIVERGED into the warning dialog and re-issues with
+// ignoreCardDivergence = true if the user chooses to load anyway.
+extern "C" JNIEXPORT jint JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_loadStateFromSlotChecked(JNIEnv*, jclass, jint slot,
+                                                              jboolean ignore_card_divergence) {
+    const unsigned flags =
+        ignore_card_divergence ? PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE : 0u;
+
+    return RequestStateSlotCode(PSX_STATE_OP_LOAD, slot, flags);
 }
 
 // PNG preview for a state, or an empty array when there is none. Never null — the picker's

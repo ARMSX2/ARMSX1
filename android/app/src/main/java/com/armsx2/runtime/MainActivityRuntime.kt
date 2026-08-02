@@ -1803,6 +1803,13 @@ open class MainActivityRuntime : ComponentActivity() {
                         if (++attempts < 60) handler.postDelayed(this, 250)
                         return
                     }
+                    // Deliberately the UNCHECKED loader (no memory-card divergence prompt).
+                    // This runnable re-posts itself up to 60 times until the load lands, and a
+                    // dialog inside that loop would ask the same question on every retry. The
+                    // cards were also only just attached from disk, so there is nothing the
+                    // player could have done since boot to diverge them. Live loads — the
+                    // picker, the pause menu, the hotkey, the Save Manager with a VM up — all
+                    // go through SaveStateGuard instead.
                     val loaded = runCatching {
                         if (requestedSlot != null) NativeApp.loadStateFromSlot(requestedSlot)
                         else NativeApp.loadAutosaveState()
@@ -4003,12 +4010,30 @@ open class MainActivityRuntime : ComponentActivity() {
 
     fun loadState(onLoaded: (() -> Unit)? = null) {
         val slot = currentSaveSlot.value
-        kotlin.concurrent.thread {
-            val ok = runCatching { NativeApp.loadStateFromSlot(slot) }.getOrDefault(false)
-            com.armsx2.ui.GameOsd.toast(if (ok) "State loaded from slot $slot" else "Slot $slot is empty")
+        // auxScope, not eScope: SaveStateGuard may raise a dialog and suspend until the user
+        // answers, and eDispatcher's single thread is occupied by the blocking runVMThread()
+        // for the whole session (see auxScope's doc comment) — a job parked there would never
+        // run. kotlin.concurrent.thread is gone for the same reason the guard is suspend: the
+        // prompt has to be awaited, not polled.
+        auxScope.launch {
+            val outcome = com.armsx2.ui.saves.SaveStateGuard.load(slot)
+            when (outcome) {
+                com.armsx2.ui.saves.SaveStateGuard.Outcome.Loaded ->
+                    com.armsx2.ui.GameOsd.toast("State loaded from slot $slot")
+                // The user was warned and declined. Nothing was touched, and saying "cancelled"
+                // rather than "failed" matters — they just made a deliberate choice.
+                com.armsx2.ui.saves.SaveStateGuard.Outcome.Cancelled ->
+                    com.armsx2.ui.GameOsd.toast("Load cancelled")
+                com.armsx2.ui.saves.SaveStateGuard.Outcome.Failed ->
+                    com.armsx2.ui.GameOsd.toast("Slot $slot is empty")
+            }
             // Resume/dismiss only AFTER the load lands. The caller used to resume
             // immediately, which raced the async load (the menu resumed the VM before
             // the state was restored) — that's why "Load" appeared to do nothing.
+            //
+            // Still fires when the user cancels: the caller's callback is what dismisses the
+            // pause menu and resumes the VM, and leaving the session wedged behind a menu
+            // would be a worse outcome than the load they declined.
             onLoaded?.let { cb -> android.os.Handler(android.os.Looper.getMainLooper()).post(cb) }
         }
     }

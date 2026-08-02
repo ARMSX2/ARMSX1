@@ -486,7 +486,7 @@ endif
 SDL_LIBS := $(if $(filter 1,$(SDL_STATIC)),$(SDL_LIBS_STATIC),$(SDL_LIBS_DYNAMIC))
 SDL_LIBS_SHARED := $(SDL_LIBS_DYNAMIC)
 
-.PHONY: all clean shared wasm psvita-lib test test-cpu test-cheats test-gpu test-texrep test-raster-select test-present-dst test-chd test-zip test-sdl-runtime disc-probe
+.PHONY: all clean shared wasm psvita-lib test test-cpu test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime disc-probe
 
 all: $(BIN)
 
@@ -614,6 +614,81 @@ $(TEST_PRESENT_DST_BIN): tests/present_dst_rect.c frontend/render.cpp frontend/r
 
 test-present-dst: $(TEST_PRESENT_DST_BIN)
 	./$(TEST_PRESENT_DST_BIN)
+
+# SPU register access WIDTH (psx/dev/spu.c): 8/16/32-bit against a 16-bit-wide register file.
+#
+# The file implemented 16- and 32-bit access only. An 8-bit read logged at FATAL and returned
+# 0, an 8-bit write was dropped, and Xenogears reads voice ADSR registers a byte at a time —
+# so it polled envelope state, got zero, and produced 1.1 MB of log doing it. No existing gate
+# could see that: nothing crashes, and the 16-bit path everything else exercises stays correct.
+#
+# Links the whole core for the same reason test-cpu does — the byte-write path deliberately
+# goes back through psx_spu_write16(), so key-on, key-off and the sound-RAM transfer address
+# have to be reachable, not stubbed.
+#
+# psx/dev/spu.h is a PREREQUISITE, not a source: the register mirror's bound is derived from
+# the psx_spu_t layout, so a header-only change has to relink or the gate keeps passing against
+# a stale binary — the trap $(TEST_GPU_BIN) documents above.
+TEST_SPU_WIDTH_BIN := build/tests/spu_register_widths
+
+$(TEST_SPU_WIDTH_BIN): tests/spu_register_widths.c $(TEST_CORE_SOURCES) psx/dev/spu.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx \
+		tests/spu_register_widths.c $(TEST_CORE_SOURCES) -lm -o $@
+
+test-spu-width: $(TEST_SPU_WIDTH_BIN)
+	./$(TEST_SPU_WIDTH_BIN)
+
+# Save-state <-> memory-card divergence (PSX_SS_MCARD in psx/state.c).
+#
+# Links the whole core because the interesting behaviour is the interaction between three
+# real things: the card's serial write protocol, the state container's optional-section
+# rule, and the identity phase that refuses a load before touching the machine. A gate over
+# the verdict function alone would pass while the section was never written, never read, or
+# marked mandatory — the last of which would brick every save state already on a device.
+#
+# psx/state.h and psx/dev/mcd.h are PREREQUISITES, not sources: the section id, the error
+# codes and the load flag live in headers, so a header-only change has to relink or the gate
+# keeps passing against a stale binary — the trap $(TEST_GPU_BIN) documents above.
+TEST_MCARD_BIN := build/tests/state_mcard_divergence
+
+$(TEST_MCARD_BIN): tests/state_mcard_divergence.c $(TEST_CORE_SOURCES) psx/state.h psx/dev/mcd.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx \
+		tests/state_mcard_divergence.c $(TEST_CORE_SOURCES) -lm -o $@
+
+test-mcard-diverge: $(TEST_MCARD_BIN)
+	./$(TEST_MCARD_BIN)
+
+# What the drive REPORTS about itself: CdlGetlocP (psx/dev/cdrom/impl.c) and the response
+# FIFO it comes back through (psx/dev/cdrom/cdrom.c).
+#
+# CdlGetlocP is the one command a game can sit in a loop on, so a wrong answer does not look
+# like a CD bug: the emulator runs at full speed, the last frame keeps being drawn, and the
+# only symptom is that input appears dead, because the game's main loop never gets past its
+# poll. Nothing else in the suite can see that — the drive answers, it answers promptly, and
+# every byte it answers with is well-formed. What was wrong was that the answer never
+# changed, so the two properties this gate exists for are that the position MOVES and that it
+# moves to somewhere useful.
+#
+# Links the whole core, like test-cpu, because the interesting behaviour is the interaction
+# between the command state machine, the response FIFO and psx_cdrom_update()'s clock — the
+# position advances on emulated time, so a gate over the response builder alone would pass
+# against a drive that never moves. The disc is a 2352-byte-sector image the test writes and
+# deletes itself; no real game image is involved.
+#
+# psx/dev/cdrom/cdrom.h is a PREREQUISITE, not a source: the hold window, the seek undershoot
+# and the reported-position fields live in the header, so a header-only change has to relink
+# or the gate keeps passing against a stale binary — the trap $(TEST_GPU_BIN) documents above.
+TEST_GETLOCP_BIN := build/tests/cdrom_getlocp
+
+$(TEST_GETLOCP_BIN): tests/cdrom_getlocp.c $(TEST_CORE_SOURCES) psx/dev/cdrom/cdrom.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx \
+		tests/cdrom_getlocp.c $(TEST_CORE_SOURCES) -lm -o $@
+
+test-cdrom-getlocp: $(TEST_GETLOCP_BIN)
+	./$(TEST_GETLOCP_BIN) $(dir $(TEST_GETLOCP_BIN))
 
 $(TEST_CHD_BIN): tests/chd_logic.c $(CHD_BUILD_DEPS)
 	mkdir -p $(dir $@)

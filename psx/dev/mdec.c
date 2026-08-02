@@ -338,16 +338,52 @@ uint32_t psx_mdec_read32(psx_mdec_t* mdec, uint32_t offset) {
     return 0x0;
 }
 
-uint16_t psx_mdec_read16(psx_mdec_t* mdec, uint32_t offset) {
-    printf("Unhandled 16-bit MDEC read offset=%u\n", offset);
+/*
+    Sub-word MDEC reads.
 
-    exit(1);
+    Both of these used to printf and then exit(1) — a legal bus access killing the whole
+    process. Nothing about a narrow read is invalid on hardware; the CPU simply takes the
+    slice of the containing 32-bit register it asked for.
+
+    STATUS (offset 4) is a plain status word with no side effects, so it can be derived from
+    psx_mdec_read32() and sliced. DATA (offset 0) is NOT: reading it consumes the output
+    stream, and a byte read must not swallow a word of a decoded macroblock. Same reasoning as
+    the SPU's FIFO at 1F801DA8h, where a byte read must not advance the transfer address.
+    So the data register answers 0 rather than popping, and says so once per offset instead of
+    once per access — this class of message produced a 1.7 MB log in minutes.
+*/
+static uint8_t g_mdec_narrow_warned[8];
+
+static void mdec_warn_narrow_once(uint32_t offset, int width) {
+    uint32_t slot = offset & 7;
+
+    if (g_mdec_narrow_warned[slot])
+        return;
+
+    g_mdec_narrow_warned[slot] = 1;
+
+    log_warn("%d-bit MDEC read of the data register at offset %u returns 0; reading it for "
+             "real would consume output the decoder still owes a 32-bit reader", width, offset);
+}
+
+uint16_t psx_mdec_read16(psx_mdec_t* mdec, uint32_t offset) {
+    if ((offset & ~3u) == 0) {
+        mdec_warn_narrow_once(offset, 16);
+
+        return 0;
+    }
+
+    return (uint16_t)(psx_mdec_read32(mdec, offset & ~3u) >> ((offset & 2u) * 8u));
 }
 
 uint8_t psx_mdec_read8(psx_mdec_t* mdec, uint32_t offset) {
-    printf("Unhandled 8-bit MDEC read offset=%u\n", offset);
+    if ((offset & ~3u) == 0) {
+        mdec_warn_narrow_once(offset, 8);
 
-    exit(1);
+        return 0;
+    }
+
+    return (uint8_t)(psx_mdec_read32(mdec, offset & ~3u) >> ((offset & 3u) * 8u));
 }
 
 void psx_mdec_write32(psx_mdec_t* mdec, uint32_t offset, uint32_t value) {

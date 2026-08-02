@@ -1105,6 +1105,27 @@ val EN: Map<String, String> = mapOf(
     "savestate.error.save" to "Couldn't save to that slot. Check the log for @@ANDROID_SAVESTATE@@.",
     "savestate.error.load" to "Couldn't load that slot.",
     "savestate.title.save" to "Save State",
+    // Memory-card divergence. Says what happens to the player's save, in the player's terms —
+    // "the card is ahead of the state" is the diagnosis, not the consequence, and the
+    // consequence is what they need in order to answer the question.
+    "savestate.cardWarning.newer.title" to "Memory card is newer than this save state",
+    "savestate.cardWarning.newer.body" to
+        "You saved to the memory card after this save state was made. Loading it takes the game " +
+        "back to before that card save — and undoes it.\n\n" +
+        "Some games cope with this. Others refuse to load their save file afterwards, or behave " +
+        "as though the memory card is damaged.",
+    "savestate.cardWarning.diverged.title" to "Memory card doesn't match this save state",
+    "savestate.cardWarning.diverged.body" to
+        "The memory card has changed since this save state was made — it may have been erased, " +
+        "imported, or written by a different session. There's no way to tell which one is newer.\n\n" +
+        "Loading can leave the game and the card disagreeing about what has been saved, which " +
+        "some games report as a damaged card.",
+    "savestate.cardWarning.loadAnyway" to "Load anyway",
+    "savestate.cardWarning.dontWarn" to "Skip memory card mismatch warning",
+    "savestate.cardWarning.dontWarn.description" to
+        "Don't ask before loading a save state whose memory card has changed since it was made. " +
+        "The warning exists because loading such a state can undo an in-game save and make some " +
+        "games refuse their own save file. Off by default.",
     "setup.aspect.stretch" to "Stretch",
     "setup.bios.error.noneFound" to "No valid PS1 BIOS files found in that folder.",
     "setup.bios.multipleFound" to "BIOS files ready — switch anytime in BIOS settings.",

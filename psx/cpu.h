@@ -355,4 +355,97 @@ int  psx_cpu_widescreen_hack(void);
 #define GTEF_M1POVF 0x40000000
 #define GTEF_ERRORF 0x80000000
 
+/* ---- draw-environment store watch -----------------------------------------------------
+
+   ONE-SHOT diagnostic, always compiled, inert until read. Rebuilt after a first capture
+   filled its ring on irrelevant traffic before reaching the interesting store.
+
+   The question is narrow: a Xenogears battle sends a GP0 packet whose drawing-offset word
+   holds 0x038000 where the console produces 0x070000 -- the same row one bit position short.
+   Real hardware does not clip, so the value is ours. The packet has sat at 0x005a25c across
+   three capture sessions. Does anything in this emulator ever WRITE that word?
+
+   Two SEPARATE rings, so neither can crowd the other out:
+
+     window  every store into 0x005a250-0x005a274 at any width, including SWL/SWR (a memcpy
+             of a display list is an unaligned copy, not a run of SW). This is the answer.
+     value   32-bit stores of an E5-prefixed word ANYWHERE else. This is the control: the
+             game demonstrably builds correct e5070000 / e5000000 packets, and their PCs are
+             what a wrong one has to be compared against.
+
+   Both keep the LAST N, not the first: the interesting store happens after frame setup, so
+   first-N is precisely the wrong end. Both also keep a monotonic total, so a ring that
+   wrapped is distinguishable from one that did not.
+
+   The E3/E4 value triggers are GONE. They fired on ordinary data bytes that happen to equal
+   0xe3 and ate the budget.
+
+   A ZERO window total is a real result, not a failed capture: it means the packet is static
+   or load-time data, nothing on the CPU store path builds it during the battle, and the CPU
+   line of inquiry is closed.
+
+   Cost when idle: one range compare on the store paths. */
+#define PSX_STORE_WATCH_WIN   24
+#define PSX_STORE_WATCH_VAL   8
+#define PSX_STORE_WATCH_CODE  8
+
+typedef struct {
+    uint32_t pc;
+    uint32_t opcode;
+    uint32_t addr;
+    uint32_t value;
+    uint32_t width;
+    uint32_t base_reg, base_val;
+    uint32_t src_reg, src_val;
+    uint32_t code[PSX_STORE_WATCH_CODE];
+} psx_store_watch_t;
+
+/* Monotonic totals -- how many stores MATCHED, whether or not the ring kept them. */
+unsigned psx_store_watch_window_total(void);
+unsigned psx_store_watch_value_total(void);
+/* Entries held, newest last. Index is into the kept ring, not the total. */
+unsigned psx_store_watch_window_kept(void);
+unsigned psx_store_watch_value_kept(void);
+const psx_store_watch_t* psx_store_watch_window(unsigned index);
+const psx_store_watch_t* psx_store_watch_value(unsigned index);
+void psx_store_watch_reset(void);
+
+/* ---- packer trace ---------------------------------------------------------------------
+
+   The store watch named the site: a shared routine at 0x80046638 is called with the GP0
+   command index in a0 (3 = E3, 4 = E4, 5 = E5) and returns the coordinate payload, which the
+   caller ORs with the command byte and stores. It returns 0x038000 for BOTH a0=3 and a0=5,
+   where a0=5 must give 0x070000 -- Y at bit 11 rather than bit 10. On the other buffer
+   parity it returns 0 for both, which is why exactly half the frames are correct.
+
+   `shift-matrix` already cleared the shift instructions over all 32 amounts, so a wrong
+   shift AMOUNT reaching a correct shift is still live, as is an a0-indexed table load, a
+   mis-resolved branch on a0, or the jal/jr path. Reading which of those it is needs the
+   instruction sequence, not another aggregate.
+
+   So: trace the routine. One entry per distinct a0, first call only, so a0=3 and a0=5 come
+   back as two traces of the same code that can be diffed instruction by instruction --
+   a0=3 is the built-in control, since it produces the CORRECT payload from the same routine.
+
+   Cost: one compare against the entry PC per instruction while idle. */
+#define PSX_TRACE_ENTRY  0x80046638u
+#define PSX_TRACE_STEPS  96
+#define PSX_TRACE_SLOTS  3     /* a0 = 3, 4, 5 */
+
+typedef struct {
+    uint32_t pc, opcode;
+    uint32_t at, v0, v1, a0;   /* r1, r2, r3, r4 AFTER the instruction executed */
+} psx_trace_step_t;
+
+typedef struct {
+    uint32_t a0_in, ra_in, s0_in, s1_in;
+    uint32_t v0_out;
+    uint32_t n;
+    uint32_t truncated;
+    psx_trace_step_t step[PSX_TRACE_STEPS];
+} psx_trace_call_t;
+
+const psx_trace_call_t* psx_trace_call(unsigned slot);   /* slot 0..2 -> a0 3..5 */
+void psx_trace_reset(void);
+
 #endif

@@ -17,7 +17,7 @@ object Ps1Covers {
 
     private const val BASE = "https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/default"
     private val COVER_EXTS = listOf("jpg", "jpeg", "png", "webp")
-    private val serialCache = ConcurrentHashMap<String, String>()  // path -> serial ("" = none)
+    private val probeCache = ConcurrentHashMap<String, Ps1DiscId.Probe>() // path -> identification
     private val siblingCache = ConcurrentHashMap<String, String>() // path -> cover path ("" = none)
 
     fun coverUrl(serial: String): String = "$BASE/${serial.uppercase(Locale.US)}.jpg"
@@ -35,12 +35,20 @@ object Ps1Covers {
     /**
      * [serialFor] keyed by absolute path — what the library repository has (it builds its own
      * [com.armsx2.GameInfo] rows rather than holding onto [Ps1Game]s). Memoised per path, so the
-     * up-to-16 MB scan happens once per game per process.
+     * disc read happens once per game per process.
      *
      * **Blocking.** Call from an IO dispatcher.
      */
-    fun serialForPath(romPath: String): String? {
-        serialCache[romPath]?.let { return it.ifEmpty { null } }
+    fun serialForPath(romPath: String): String? = probeForPath(romPath).serial
+
+    /**
+     * [serialForPath] with the trace of how identification went — which sector layout was
+     * detected, where SYSTEM.CNF lives, what its BOOT line said. The library scan writes these to
+     * `serial_probe.log` so a disc that comes back with no serial says why, instead of leaving a
+     * blank tile and no evidence.
+     */
+    fun probeForPath(romPath: String): Ps1DiscId.Probe {
+        probeCache[romPath]?.let { return it }
 
         /*
             A .m3u is a PLAYLIST, not a disc — scanning it for a serial finds nothing, because
@@ -58,18 +66,37 @@ object Ps1Covers {
             File(romPath)
         }
 
-        val serial = Ps1DiscId.serialOf(target)
-        serialCache[romPath] = serial ?: ""
-        return serial
+        val probe = Ps1DiscId.probe(target)
+        probeCache[romPath] = probe
+        return probe
+    }
+
+    /**
+     * Identify [romPath] again, discarding any memoised result.
+     *
+     * A FAILED identification must never be treated as final. The memo above is a
+     * process-lifetime cache of "we already looked", which is right for a serial that was found
+     * (it cannot change) but wrong for one that was not: a disc can fail to identify because the
+     * storage volume was not mounted yet, because the extractor had a bug, or — the case this was
+     * written for — because a build shipped an extractor that could not read that particular
+     * layout. Those all become permanent if "no serial" is cached as "known to have none".
+     */
+    fun reprobeForPath(romPath: String): Ps1DiscId.Probe {
+        probeCache.remove(romPath)
+        return probeForPath(romPath)
     }
 
     /**
      * Seed the serial cache from a persisted library scan. Serials never change for a given file,
-     * so a warm start must not re-read megabytes off disk for games it already identified.
+     * so a warm start must not re-read the disc for games it already identified.
+     *
+     * A null/blank serial is deliberately NOT seeded: seeding it would turn "we failed to identify
+     * this once" into "this disc has no serial" for the rest of the process, which is exactly the
+     * trap described on [reprobeForPath].
      */
     fun prime(romPath: String, serial: String?) {
         if (romPath.isBlank() || serial.isNullOrBlank()) return
-        serialCache[romPath] = serial
+        probeCache[romPath] = Ps1DiscId.Probe(serial, "cache", "seeded from the previous scan")
     }
 
     /**

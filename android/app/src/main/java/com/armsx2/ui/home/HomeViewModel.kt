@@ -36,6 +36,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private var scanJob: Job? = null
     private var loaded = false
     private var pendingInitialScan = false
+    private var retriedSerials = false
     private var directories: List<String> = emptyList()
 
     var state = androidx.compose.runtime.mutableStateOf(HomeUiState())
@@ -62,14 +63,44 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             // Library-wide RetroAchievements progress. Hooked here because this is where the game
             // list lives, and the sync needs paths to hash. No-op unless a web API key is set.
             if (nativeReady) com.armsx2.RaLibrary.onLibraryLoaded(state.value.allGames)
-            if (nativeReady && pendingInitialScan) refresh()
+            if (nativeReady && pendingInitialScan) refresh() else retryMissingSerials()
         } else if (nativeReady && pendingInitialScan) {
             refresh()
+        } else {
+            retryMissingSerials()
+        }
+    }
+
+    /**
+     * Give the discs that came back with no serial another go, in the background.
+     *
+     * A warm start reads the library out of the cache and never touches a disc again — so a game
+     * that failed to identify once keeps its blank cover, and stays invisible to
+     * RetroAchievements and play-time tracking, for as long as the folder list is unchanged. That
+     * includes across the update that fixes the extractor, which would make such a fix reach only
+     * people who happened to hit Refresh. A null serial means "not determined yet".
+     *
+     * Only runs when a full scan ISN'T about to happen (that re-reads everything anyway), only
+     * once per process, and only when something is actually missing.
+     */
+    private fun retryMissingSerials() {
+        if (retriedSerials) return
+        val games = state.value.allGames
+        if (games.none { it.serial.isNullOrBlank() }) return
+        retriedSerials = true
+        scope.launch {
+            val updated = runCatching { repository.retryMissingSerials(games) }.getOrNull() ?: return@launch
+            // A scan may have replaced the list while we were reading discs; it wins.
+            if (state.value.allGames !== games) return@launch
+            state.value = buildState(state.value.copy(allGames = updated))
+            com.armsx2.RaLibrary.onLibraryLoaded(updated)
         }
     }
 
     fun refresh() {
         if (directories.isEmpty() || scanJob?.isActive == true) return
+        // A full scan re-reads every disc, so it IS the retry — no need to do it twice.
+        retriedSerials = true
         scanJob = scope.launch {
             val initialScan = pendingInitialScan && state.value.allGames.isEmpty()
             state.value = state.value.copy(

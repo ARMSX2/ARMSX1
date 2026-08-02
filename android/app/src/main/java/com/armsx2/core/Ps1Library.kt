@@ -94,18 +94,9 @@ object Ps1Library {
         return games.filter { it.path !in tracks }
     }
 
-    private val CUE_FILE_LINE = Regex("""(?i)^\s*FILE\s+(?:"([^"]+)"|(\S+))""")
-
-    /** Absolute paths of every `FILE "…"` line in [cue], resolved next to the cue itself. */
-    fun cueReferencedPaths(cue: File): List<String> = try {
-        cue.useLines { lines ->
-            lines.take(512).mapNotNull { line ->
-                val m = CUE_FILE_LINE.find(line) ?: return@mapNotNull null
-                val name = m.groupValues[1].ifEmpty { m.groupValues[2] }.trim('"').trim()
-                name.takeIf { it.isNotEmpty() }?.let { File(cue.parentFile, it).absolutePath }
-            }.toList()
-        }
-    } catch (_: Exception) {
-        emptyList()
-    }
+    /** Absolute paths of every `FILE "…"` line in [cue], resolved next to the cue itself.
+     *  Lives in [Ps1DiscId] because identification needs the same answer — following the cue to
+     *  its real data track is the FIRST step of reading a serial, and two parsers that disagree
+     *  would list a game the identifier cannot then read. */
+    fun cueReferencedPaths(cue: File): List<String> = Ps1DiscId.cueReferencedPaths(cue)
 }

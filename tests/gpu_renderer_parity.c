@@ -1379,6 +1379,88 @@ static int gp0_check_pixels(const char* name, const char* what, psx_gpu_t* gpu,
     triangle is the guard against a rect desynchronising the stream behind it, which is
     the failure mode that takes a whole frame down rather than one primitive.
 */
+/*
+    GP1(10h) GPUINFO round-trip: what a game writes into a draw-environment register is
+    exactly what the readback must return. psx-spx: index 2 echoes GP0(E2) (20 bit), 3 and 4
+    echo GP0(E3)/GP0(E4) (19 bit), 5 echoes GP0(E5) (22 bit) — as written. Exhaustive over
+    every payload each register retains, because the bug this pins was a one-bit layout error
+    — the E5 readback repacked Y at bit 10 (E3's layout) instead of bit 11 — and no sampled
+    or differential case had a reason to catch it: both halves of a differential pair would
+    happily agree on the wrong layout. Xenogears reads its own offset back through
+    GPUINFO(5), ORs the command byte on, and resubmits it as a GP0(E5); on hardware that
+    round trip is identity, and with the bit-10 repack it halved the Y offset and clipped
+    ~13% of battle frames.
+
+    Sign matters: off_x/off_y are stored sign-extended, so payloads with bit 10 or bit 21
+    set (negative fields) must echo verbatim rather than smearing sign bits over the word.
+    The sweeps below include every such value.
+*/
+static int run_gpuinfo_roundtrip_case(void) {
+    const char* name = "gpuinfo-roundtrip";
+    psx_gpu_t* gpu = make_gpu();
+    int failed = 0;
+
+    /* GP0(E5): X bits 0-10, Y bits 11-21, both signed 11-bit; all 22 bits retained. */
+    for (uint32_t p = 0; p < (1u << 22) && !failed; p++) {
+        psx_gpu_write32(gpu, 0, 0xe5000000 | p);
+        psx_gpu_write32(gpu, 4, 0x10000005);
+
+        uint32_t got = psx_gpu_read32(gpu, 0) & 0x3fffff;
+
+        if (got != p) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=e5-roundtrip wrote=%06x read=%06x\n",
+                    name, p, got);
+            failed = 1;
+        }
+    }
+
+    /* GP0(E3)/GP0(E4): X 10 bits, Y 9 bits at bit 10. Bits above 18 are dropped at decode,
+       so the identity is over what the GPU retains. Sweep one bit past retention to pin the
+       drop as well as the echo. */
+    for (uint32_t p = 0; p < (1u << 20) && !failed; p++) {
+        psx_gpu_write32(gpu, 0, 0xe3000000 | p);
+        psx_gpu_write32(gpu, 4, 0x10000003);
+
+        uint32_t got3 = psx_gpu_read32(gpu, 0) & 0xfffff;
+
+        psx_gpu_write32(gpu, 0, 0xe4000000 | p);
+        psx_gpu_write32(gpu, 4, 0x10000004);
+
+        uint32_t got4 = psx_gpu_read32(gpu, 0) & 0xfffff;
+
+        if (got3 != (p & 0x7ffff) || got4 != (p & 0x7ffff)) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=e3e4-roundtrip wrote=%06x "
+                    "read3=%06x read4=%06x want=%06x\n",
+                    name, p, got3, got4, p & 0x7ffff);
+            failed = 1;
+        }
+    }
+
+    /* GP0(E2): four 5-bit fields, each stored x8 and divided back on readback. */
+    for (uint32_t p = 0; p < (1u << 20) && !failed; p++) {
+        psx_gpu_write32(gpu, 0, 0xe2000000 | p);
+        psx_gpu_write32(gpu, 4, 0x10000002);
+
+        uint32_t got = psx_gpu_read32(gpu, 0) & 0xfffff;
+
+        if (got != p) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=e2-roundtrip wrote=%06x read=%06x\n",
+                    name, p, got);
+            failed = 1;
+        }
+    }
+
+    psx_gpu_destroy(gpu);
+
+    if (!failed)
+        printf("GPU_PARITY passed case=%s\n", name);
+
+    return failed;
+}
+
 static int run_gp0_rect_intake_case(void) {
     const char* name = "gp0-rect-intake";
     static uint16_t expect[32 * 16];
@@ -1765,6 +1847,376 @@ static int run_mask_bit_textured_sprite_case(void) {
     return 0;
 }
 
+/* ------------------------------------------------------------------------------------
+   Semi-transparency, asserted against the HARDWARE RULE over its whole input matrix.
+
+   WHY THIS EXISTS, AND WHY PARITY CANNOT REPLACE IT
+
+   A Xenogears battle submits ~124 semi-transparent primitives per drawn frame, and the
+   only ones covering the whole screen are flat GP0(62) rectangles in mode 2 (B-F) — the
+   fade primitive. When the reported symptom is a whole-screen colour that strobes, the
+   blend rule is the first thing that has to be either convicted or cleared, and comparing
+   the three rasterizers cannot do it: they were all cloned from the same expression, so a
+   wrong rule reads green in every comparative case (the same blindness §0.5.13's size cull
+   and the mask-from-texel bug were found through).
+
+   So this asserts the rule itself, from psx-spx, per 5-bit channel with saturation:
+
+       mode 0   (B + F) / 2      integer division, truncating
+       mode 1    B + F           saturating at 31
+       mode 2    B - F           saturating at 0
+       mode 3    B + F/4         F/4 truncating, saturating at 31
+
+   All 32x32 background/foreground pairs, all four modes, both rasterizers — 4096 pairs
+   per rasterizer. The channels are loaded with DIFFERENT values on purpose: a blend that
+   is right on grey and wrong across channels (a swapped shift, a mask that spans two
+   fields) passes every uniform-colour test ever written.
+
+   Driven through gpu_render_rect() rather than a synthesised expression because the point
+   is to test the shipping code path, including its float round-trip: the rasterizers hold
+   the channels as floats scaled by 8 and quantise back through BGR555(), and whether that
+   is exactly the integer rule at every one of the 1024 corners is precisely the question.
+   ------------------------------------------------------------------------------------ */
+static int blend_ref(int mode, int b, int f) {
+    int v;
+
+    switch (mode) {
+        case 0:  v = (b + f) / 2;  break;
+        case 1:  v = b + f;        break;
+        case 2:  v = b - f;        break;
+        default: v = b + (f / 4);  break;
+    }
+
+    return (v < 0) ? 0 : ((v > 31) ? 31 : v);
+}
+
+/* 5-bit channels -> the packed BGR555 halfword the rasterizers read out of VRAM. */
+static uint16_t blend_pack(int r, int g, int b) {
+    return (uint16_t)((r & 0x1f) | ((g & 0x1f) << 5) | ((b & 0x1f) << 10));
+}
+
+/* 5-bit channels -> the 24-bit command colour whose BGR555() is exactly those channels.
+   BGR555 keeps the top 5 bits of each byte, so << 3 is the exact inverse. */
+static uint32_t blend_cmd_colour(int r, int g, int b) {
+    return (uint32_t)((r << 3) | ((g << 3) << 8) | ((b << 3) << 16));
+}
+
+static int check_blend_matrix(const char* name, int use_backend) {
+    psx_gpu_backend_t* backend = NULL;
+    psx_gpu_t* gpu = psx_gpu_create();
+    int failed = 0;
+    int mode;
+
+    if (!gpu) {
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=allocation\n", name);
+        return 1;
+    }
+
+    psx_gpu_init(gpu, NULL);
+    gpu->draw_x1 = 0;
+    gpu->draw_y1 = 0;
+    gpu->draw_x2 = PSX_GPU_FB_WIDTH - 1;
+    gpu->draw_y2 = PSX_GPU_FB_HEIGHT - 1;
+    gpu->off_x = 0;
+    gpu->off_y = 0;
+    psx_gpu_set_accuracy_flags(gpu, 0);
+
+    if (use_backend) {
+        backend = armsx_hw_rt_create(gpu, 1);
+
+        if (!backend) {
+            fprintf(stderr, "GPU_PARITY failed case=%s reason=backend-create\n", name);
+            psx_gpu_destroy(gpu);
+            return 1;
+        }
+
+        psx_gpu_set_backend(gpu, backend);
+    }
+
+    for (mode = 0; mode < 4 && !failed; mode++) {
+        int bi;
+
+        /* A sprite takes its blend mode from GPUSTAT bits 5-6, which is where GP0(E1) and
+           the last textured polygon leave it. Nothing else in GPUSTAT matters here. */
+        gpu->gpustat = (uint32_t)(mode << 5);
+
+        for (bi = 0; bi < 32 && !failed; bi++) {
+            int fi;
+
+            for (fi = 0; fi < 32; fi++) {
+                /* Three different pairs in one probe, so a channel that borrowed its
+                   neighbour's value cannot come out equal by coincidence. */
+                const int br = bi, bg = (bi + 11) & 0x1f, bb = (bi + 23) & 0x1f;
+                const int fr = fi, fg = (fi + 7) & 0x1f, fb = (fi + 19) & 0x1f;
+                const uint16_t back = blend_pack(br, bg, bb);
+                const int px = 40, py = 40;
+                rect_data_t rect;
+                uint16_t got;
+                int wr, wg, wb;
+
+                memset(gpu->vram, 0, PSX_GPU_VRAM_SIZE);
+
+                if (use_backend) {
+                    /* Seed the backend's own target through the hook the core uses, so the
+                       destination it blends against is the same value the software path
+                       sees in gpu->vram. */
+                    gpu->vram[px + (py * PSX_GPU_FB_WIDTH)] = back;
+                    backend->upload_vram(backend, 0, 0, PSX_GPU_FB_WIDTH, PSX_GPU_FB_HEIGHT,
+                                         gpu->vram, PSX_GPU_FB_WIDTH);
+                } else {
+                    gpu->vram[px + (py * PSX_GPU_FB_WIDTH)] = back;
+                }
+
+                memset(&rect, 0, sizeof(rect));
+                rect.attrib = RA_TRANSP;         /* flat, untextured, variable size */
+                rect.width = 4;
+                rect.height = 4;
+                rect.v0.x = (int16_t)(px - 1);
+                rect.v0.y = (int16_t)(py - 1);
+                rect.v0.c = blend_cmd_colour(fr, fg, fb);
+
+                /* The core dispatches to the backend at the COMMAND level, not inside
+                   gpu_render_rect(), so a backend run has to be driven the same way the
+                   GP0(6x) handler drives it. */
+                if (use_backend) {
+                    backend->draw_rect(backend, gpu, &rect);
+                } else {
+                    gpu_render_rect(gpu, rect);
+                }
+
+                if (use_backend) {
+                    uint32_t stride = 0;
+                    const uint16_t* surface = (const uint16_t*)backend->display_buffer(
+                        backend, 0, 0, &stride);
+
+                    got = surface[px + (py * (stride / 2u))];
+                } else {
+                    got = gpu->vram[px + (py * PSX_GPU_FB_WIDTH)];
+                }
+
+                wr = blend_ref(mode, br, fr);
+                wg = blend_ref(mode, bg, fg);
+                wb = blend_ref(mode, bb, fb);
+
+                if ((got & 0x7fff) != blend_pack(wr, wg, wb)) {
+                    fprintf(stderr,
+                            "GPU_PARITY failed case=%s reason=blend-rule mode=%d "
+                            "back=(%d,%d,%d) fore=(%d,%d,%d) want=(%d,%d,%d) "
+                            "got=(%d,%d,%d) [%04x vs %04x]\n",
+                            name, mode, br, bg, bb, fr, fg, fb, wr, wg, wb,
+                            got & 0x1f, (got >> 5) & 0x1f, (got >> 10) & 0x1f,
+                            got & 0x7fff, blend_pack(wr, wg, wb));
+                    failed = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (use_backend) {
+        psx_gpu_set_backend(gpu, NULL);
+        armsx_hw_rt_destroy(backend);
+    }
+
+    psx_gpu_destroy(gpu);
+
+    if (failed)
+        return 1;
+
+    printf("GPU_PARITY passed case=%s\n", name);
+    return 0;
+}
+
+static int run_blend_matrix_case(void) {
+    int failed = 0;
+
+    failed |= check_blend_matrix("blend-rule-software-4096-pairs", 0);
+    failed |= check_blend_matrix("blend-rule-hw-rt-1x-4096-pairs", 1);
+
+    return failed;
+}
+
+/* ------------------------------------------------------------------------------------
+   The drawing offset in force during rasterization is the one the command stream set.
+
+   WHY THIS EXISTS
+
+   A Xenogears battle frame draws 1800 primitives. On 10% of frames, 1799 of them rasterize
+   at drawing offset y=112 against a drawing area of (0,224)-(319,447), so the whole scene is
+   displaced above the clip rectangle and thrown away. Measured on device, the frame issues
+   THREE GP0(E5) writes where a good frame issues one:
+
+       good   e5seq=070000@0                          offhist=224:1806
+       bad    e5seq=070000@0,000000@0,038000@1        offhist=0:1,112:1799
+
+   0x070000 is offset y=224 (E5 packs Y at bit 11). 0x038000 is offset y=112 under that same
+   layout -- and is byte-identical to that frame's GP0(E3) payload, where the identical bits
+   correctly mean row 224 because E3 packs Y at bit 10. So the third write carries a
+   draw-area-shaped payload into the offset register, and it arrives after exactly one
+   primitive has drawn, i.e. interleaved with drawing rather than during frame setup.
+
+   Two mechanisms remain and they need opposite fixes: either those three words genuinely
+   reach the GP0 port (and the defect is upstream, in what produces them), or this GPU
+   synthesises/mis-slots one of them (and the defect is the intake). This gate pins the
+   second half down. It feeds a stream through psx_gpu_write32() -- the real MMIO intake, not
+   a handler called directly -- shaped like the observed frame, and asserts:
+
+     * after every GP0(E5) the offset is EXACTLY what that word encoded, and
+     * the number of E5 executions equals the number of E5 words fed (nothing synthesised
+       or replayed), and
+     * every primitive rasterized under the offset in force when it was submitted.
+
+   The interleaved multi-word commands are the adversarial part. A handler that reads the
+   wrong buf[] slot, or an argument counter that lets a following word fall through into the
+   command dispatch, shows up here and nowhere else -- the existing cases all call
+   gpu_render_*() directly and never exercise the intake's state machine at all.
+
+   Deliberately NOT asserted: off_y == draw_y1. That is not a hardware invariant. This
+   repo's own gpu_prim_dump_capture.txt shows Silent Hill running off=(160,368) against
+   draw=(0,256)-(319,479) on every frame -- a centre-origin convention -- so a gate on that
+   rule would fire on correct games.
+   ------------------------------------------------------------------------------------ */
+#define GP0W(gpu, w) psx_gpu_write32((gpu), 0, (uint32_t)(w))
+
+static uint32_t e5_word(int x, int y) {
+    return 0xe5000000u | (((uint32_t)y & 0x7ffu) << 11) | ((uint32_t)x & 0x7ffu);
+}
+
+static uint32_t e3_word(int x, int y) {
+    return 0xe3000000u | (((uint32_t)y & 0x1ffu) << 10) | ((uint32_t)x & 0x3ffu);
+}
+
+static uint32_t e4_word(int x, int y) {
+    return 0xe4000000u | (((uint32_t)y & 0x1ffu) << 10) | ((uint32_t)x & 0x3ffu);
+}
+
+/* One flat variable-size sprite: GP0(60) plus two argument words. */
+static void feed_rect(psx_gpu_t* gpu, int x, int y, int w, int h) {
+    GP0W(gpu, 0x60808080u);
+    GP0W(gpu, ((uint32_t)(y & 0xffff) << 16) | (uint32_t)(x & 0xffff));
+    GP0W(gpu, ((uint32_t)(h & 0xffff) << 16) | (uint32_t)(w & 0xffff));
+}
+
+static int check_offset_stream(void) {
+    const char* name = "offset-stream-integrity";
+    psx_gpu_t* gpu = psx_gpu_create();
+    int failed = 0;
+    unsigned i;
+
+    if (!gpu) {
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=allocation\n", name);
+        return 1;
+    }
+
+    psx_gpu_init(gpu, NULL);
+    psx_gpu_set_accuracy_flags(gpu, 0);
+    memset(gpu->vram, 0, PSX_GPU_VRAM_SIZE);
+
+    /* The real frame's draw area: the second 320x224 buffer. */
+    GP0W(gpu, e3_word(0, 224));
+    GP0W(gpu, e4_word(319, 447));
+
+    /* --- offset #1, the value a good frame uses ------------------------------------- */
+    GP0W(gpu, e5_word(0, 224));
+
+    if (gpu->off_x != 0 || gpu->off_y != 224) {
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=e5-1 want=(0,224) got=(%d,%d)\n",
+                name, gpu->off_x, gpu->off_y);
+        failed = 1;
+    }
+
+    feed_rect(gpu, 8, 8, 4, 4);
+
+    /* A texpage latch and a full opaque quad: five words, the longest ordinary command. */
+    GP0W(gpu, 0xe1000000u);
+    GP0W(gpu, 0x28404040u);
+    GP0W(gpu, 0x00100010u);
+    GP0W(gpu, 0x00100030u);
+    GP0W(gpu, 0x00300010u);
+    GP0W(gpu, 0x00300030u);
+
+    /* --- offset #2 ------------------------------------------------------------------- */
+    GP0W(gpu, e5_word(0, 0));
+
+    if (gpu->off_x != 0 || gpu->off_y != 0) {
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=e5-2 want=(0,0) got=(%d,%d)\n",
+                name, gpu->off_x, gpu->off_y);
+        failed = 1;
+    }
+
+    feed_rect(gpu, 8, 8, 4, 4);
+
+    /* A VRAM fill (3 words, no data phase) and an upload (3 words plus a data phase) --
+       the two commands that drive the intake through RECV_DATA. An upload that consumes one
+       word too few or too many would spill the next command word into the pixel stream, or
+       leave a pixel word to be dispatched as a command; either shows up as a wrong offset or
+       a wrong E5 count below. */
+    GP0W(gpu, 0x02102030u);
+    GP0W(gpu, 0x00000000u);
+    GP0W(gpu, 0x00100010u);
+
+    GP0W(gpu, 0xa0000000u);
+    GP0W(gpu, 0x01000000u);   /* dst (0,256) */
+    GP0W(gpu, 0x00010004u);   /* 4x1 -> 4 halfwords -> 2 words */
+    GP0W(gpu, 0x11112222u);
+    GP0W(gpu, 0x33334444u);
+
+    /* --- offset #3, the one the device gets wrong ------------------------------------ */
+    GP0W(gpu, e5_word(0, 224));
+
+    if (gpu->off_x != 0 || gpu->off_y != 224) {
+        fprintf(stderr,
+                "GPU_PARITY failed case=%s reason=e5-3-after-upload want=(0,224) got=(%d,%d) "
+                "raw=%06x\n",
+                name, gpu->off_x, gpu->off_y, gpu->gp0_e5_raw);
+        failed = 1;
+    }
+
+    for (i = 0; i < 5; i++) {
+        feed_rect(gpu, 8, 8, 4, 4);
+    }
+
+    /* Nothing may have invented, replayed or swallowed an offset write. */
+    if (gpu->gp0_e5_count != 3) {
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=e5-count want=3 got=%u\n",
+                name, gpu->gp0_e5_count);
+        failed = 1;
+    }
+
+    /* And every primitive must have drawn under the offset that was in force when it was
+       submitted: 1 sprite at y=224, then 1 at y=0, then 5 back at y=224. The quad is two
+       triangles, so it contributes 2 at y=224. */
+    {
+        uint32_t at224 = 0, at0 = 0, other = 0;
+
+        for (i = 0; i < gpu->off_hist_used && i < 4u; i++) {
+            if (gpu->off_hist_y[i] == 224) {
+                at224 += gpu->off_hist_n[i];
+            } else if (gpu->off_hist_y[i] == 0) {
+                at0 += gpu->off_hist_n[i];
+            } else {
+                other += gpu->off_hist_n[i];
+            }
+        }
+
+        if (at224 != 8 || at0 != 1 || other != 0) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=offset-in-force want=(224:8,0:1,other:0) "
+                    "got=(224:%u,0:%u,other:%u) prims=%u\n",
+                    name, at224, at0, other, gpu->frame_prims);
+            failed = 1;
+        }
+    }
+
+    psx_gpu_destroy(gpu);
+
+    if (failed)
+        return 1;
+
+    printf("GPU_PARITY passed case=%s\n", name);
+    return 0;
+}
+
 int main(void) {
     int failed = 0;
     poly_data_t flat = {.attrib = 0};
@@ -1823,6 +2275,15 @@ int main(void) {
        difference is one level and invisible on any single primitive. */
     failed |= run_tex_modulate_case();
 
+    /* Semi-transparency against psx-spx's rule over all 32x32 pairs x 4 modes, per
+       rasterizer. Behavioural for the same reason as the two above: the three rasterizers
+       share one blend expression, so a wrong rule is invisible to every comparative case. */
+    failed |= run_blend_matrix_case();
+
+    /* The offset in force during rasterization is the one the stream set, through the real
+       MMIO intake and with multi-word commands interleaved. See the note above the case. */
+    failed |= check_offset_stream();
+
     /* A polyline never ends on a count, only on a terminator the game has to send. The GP0
        intake must survive one that never arrives without writing past gpu->buf[]. */
     failed |= run_polyline_overrun_case();
@@ -1832,6 +2293,13 @@ int main(void) {
        that decides whether a rect is submitted at all — which is what "the BIOS draws its
        logo but not its text, and the overlay says 0 rect" turned out to be about. */
     failed |= run_gp0_rect_intake_case();
+
+    /* A game that asks the GPU for its own draw-environment registers must be told the
+       truth, in the register's own bit layout. Exhaustive over every retained payload of
+       E2/E3/E4/E5 — the Xenogears battle clipping was this readback repacking the offset
+       in the wrong layout, and only an against-spec sweep can see a bug both halves of a
+       differential pair share. */
+    failed |= run_gpuinfo_roundtrip_case();
 
     /* Turning accurate_mask_bit on must not make textured content disappear — the setting
        is inert until a game sends GP0(E6), and a sprite into a clean buffer draws in full

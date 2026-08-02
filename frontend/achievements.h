@@ -49,14 +49,41 @@ typedef void (*armsx_ach_http_fn)(const char* url, const char* post_data, const 
    (armsx_ach_set_unlock_sound); ARMSX1 bundles no RA sounds of its own. */
 typedef void (*armsx_ach_sound_fn)(const char* path, void* user);
 
-/* One short line for the host's transient on-screen banner: the game summary at boot, an unlock,
-   a sign-in that expired. [duration_ms] is the user's configured notification duration.
+/* What a notice is about. The host uses this to style the toast (accent colour, fallback icon)
+   and nothing else — every kind carries the same fields, and an unknown kind must render as
+   ARMSX_ACH_NOTICE_INFO rather than be dropped. */
+enum {
+    ARMSX_ACH_NOTICE_INFO = 0,        /* connection state, and anything uncategorised */
+    ARMSX_ACH_NOTICE_LOGIN = 1,       /* signed in — [image_url] is the user's avatar */
+    ARMSX_ACH_NOTICE_GAME = 2,        /* disc identified — [image_url] is the game's box art */
+    ARMSX_ACH_NOTICE_UNLOCK = 3,      /* achievement earned — [image_url] is its badge */
+    ARMSX_ACH_NOTICE_MASTERY = 4,     /* whole set (or a subset) completed — game box art */
+    ARMSX_ACH_NOTICE_LEADERBOARD = 5, /* leaderboard attempt started/failed/submitted */
+    ARMSX_ACH_NOTICE_ERROR = 6        /* something the user needs to act on */
+};
+
+/* One toast for the host's on-screen notification stack: signing in, the game summary at boot,
+   an unlock, a leaderboard attempt, a sign-in that expired.
+
+   [key] identifies the toast for replacement, and is never null or empty. A notice whose key
+   matches one already on screen REPLACES it in place rather than stacking — this is what keeps a
+   game that starts and submits six leaderboards in the same frame (they exist) from burying an
+   unlock under a wall of its own attempt notices. Unlocks carry a per-achievement key so they
+   always stack; leaderboards carry a per-leaderboard one so a start/submit pair collapses.
+
+   [title] is always non-null and non-empty. [detail] is the second line and may be empty, never
+   null. [image_url] is an https RetroAchievements image (avatar / box art / badge) and may be
+   empty, never null — the host downloads and caches it; it must never block on that download
+   before showing the text. [duration_ms] is the user's configured notification duration for this
+   category (achievement notifications and leaderboard notifications are configured separately).
 
    Called ONLY from the notice pump (armsx_ach_frame_update / the login loop) with no lock held,
    never from an rc_client callback — those run on whichever thread happened to be draining HTTP,
    which on Android is not necessarily one that can talk to Java. The host may therefore assume a
    thread that is safe to make a JNI call from, but must NOT assume the UI thread. */
-typedef void (*armsx_ach_notify_fn)(const char* text, int duration_ms, void* user);
+typedef void (*armsx_ach_notify_fn)(int kind, const char* key, const char* title,
+                                    const char* detail, const char* image_url, int duration_ms,
+                                    void* user);
 
 void armsx_ach_set_http_handler(armsx_ach_http_fn handler, void* user);
 void armsx_ach_set_sound_handler(armsx_ach_sound_fn handler, void* user);

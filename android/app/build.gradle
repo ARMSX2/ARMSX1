@@ -237,6 +237,12 @@ dependencies {
 
     debugImplementation 'androidx.compose.ui:ui-tooling'
 
+    // Host-side (JVM) unit tests. Only src/test — nothing here is packaged into the APK, and
+    // assembleGithubDebug never resolves this configuration. Used by Ps1DiscIdTest, which builds
+    // synthetic PS1 disc images and reads them back: disc identification is pure java.io with no
+    // Android API in it, which is exactly what makes it testable without a device.
+    testImplementation 'junit:junit:4.13.2'
+
     // Discord Social SDK. Resolved from app/libs via the flatDir repository in settings.gradle.
     //
     // The .aar rather than its unpacked pieces, and androidx.browser above is why: the SDK's

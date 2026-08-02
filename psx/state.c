@@ -389,6 +389,8 @@ const char* psx_state_strerror(int code) {
         case PSX_STATE_ERR_NO_MACHINE: return "no emulated machine is running";
         case PSX_STATE_ERR_BUSY: return "another save state request is already pending";
         case PSX_STATE_ERR_TIMEOUT: return "the emulation thread did not service the request";
+        case PSX_STATE_ERR_CARD_NEWER: return "the memory card has been saved to since this state was made";
+        case PSX_STATE_ERR_CARD_DIVERGED: return "the memory card no longer matches this state";
         default: return "unknown error";
     }
 }
@@ -490,6 +492,136 @@ static void state_read_string(psx_state_reader_t* r, char* out, size_t out_size)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Memory-card fingerprints                                                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+    The problem this exists for.
+
+    A save state and a memory card are two independent timelines of the same
+    playthrough, and the player can move one without the other. Save a state,
+    keep playing, save to the card in-game, then load that old state: the
+    console is now behind its own card. A real PS1 game notices — the save file
+    it is told to expect does not match the directory it cached, and depending
+    on the title it copes, refuses to load its own save, or misbehaves in ways
+    that look like corruption. In this core it is worse than an inconsistency:
+    psx_mcd_load_state() restores the card image along with the machine, and
+    psx_mcd_destroy() writes that rewound image back out at shutdown, so the
+    in-game save made after the state is quietly discarded.
+
+    None of that is detectable after the fact, which is why the state records
+    what the cards looked like when it was taken.
+
+    What is compared, and why it is the LIVE card and not the file: the image is
+    only flushed to disk when the card is destroyed, so a mid-session in-game
+    save changes psx_mcd_t::buf and leaves slot1.mcd untouched. Comparing files
+    would find nothing in exactly the case that matters.
+*/
+
+typedef struct {
+    int present;
+    uint64_t content_hash;
+    uint64_t session_id;
+    uint32_t write_generation;
+    int64_t file_mtime;
+} state_mcard_fp_t;
+
+static void state_mcard_capture(psx_t* psx, state_mcard_fp_t* out) {
+    uint32_t i;
+
+    for (i = 0; i < PSX_STATE_MCARD_SLOTS; i++) {
+        out[i].present = 0;
+        out[i].content_hash = 0;
+        out[i].session_id = 0;
+        out[i].write_generation = 0;
+        out[i].file_mtime = 0;
+
+        if (!psx || !psx->pad)
+            continue;
+
+        out[i].present = psx_pad_mcd_fingerprint(psx->pad, (int)i,
+                                                 &out[i].content_hash,
+                                                 &out[i].session_id,
+                                                 &out[i].write_generation,
+                                                 &out[i].file_mtime);
+    }
+}
+
+/* Worst verdict wins across the slots: PSX_STATE_OK, then ERR_CARD_DIVERGED,
+   then ERR_CARD_NEWER. Pure function of the two fingerprints — no I/O, nothing
+   mutated — so the gate in tests/state_mcard_divergence.c can drive it directly. */
+static int state_mcard_verdict_slot(const state_mcard_fp_t* recorded,
+                                    const state_mcard_fp_t* live) {
+    /* Neither run had a card here: nothing to disagree about. */
+    if (!recorded->present && !live->present)
+        return PSX_STATE_OK;
+
+    /* A card appeared or vanished between capture and load. Something changed,
+       but a presence flag says nothing about which timeline is ahead. */
+    if (recorded->present != live->present)
+        return PSX_STATE_ERR_CARD_DIVERGED;
+
+    /* The decisive test, and deliberately first: identical contents mean the
+       card holds exactly what the state expects, whatever the counters say.
+       This is what stops a second load of the same state from asking twice —
+       the first load rewound the image to match. */
+    if (recorded->content_hash == live->content_hash)
+        return PSX_STATE_OK;
+
+    /* Contents differ. Which way? */
+    if (recorded->session_id && recorded->session_id == live->session_id) {
+        /* Same attach of the same card, so the generations are comparable and
+           this is a real answer rather than an inference. */
+        if (live->write_generation > recorded->write_generation)
+            return PSX_STATE_ERR_CARD_NEWER;
+
+        /* Fewer writes than the state remembers, or the same count with
+           different bytes: the card was rewound or rewritten underneath us.
+           Different, but not the time-travel case. */
+        return PSX_STATE_ERR_CARD_DIVERGED;
+    }
+
+    /*
+        Different attach: the generations are not comparable, and nothing else
+        here can establish direction — so this is the soft verdict, always.
+
+        file_mtime is recorded (and is worth having in a bug report) but is
+        deliberately NOT consulted, because it cannot tell the two cross-session
+        stories apart. "The same card moved forward" and "a different card was
+        imported or erased in the card manager" both leave the file newer than
+        the state, and only the first is the time-travel case. Promoting on
+        mtime would state the strong warning — the one that says the game saved
+        after this state — about a card the game never touched.
+
+        It is also the wrong resolution for the question: st_mtime is whole
+        seconds, and the image is only flushed to disk when the card is
+        destroyed, so within a session it does not move at all.
+
+        Saying "something changed, I can't tell which way" is both true and
+        still actionable: the user is asked, and the dialog says what is unknown.
+    */
+    return PSX_STATE_ERR_CARD_DIVERGED;
+}
+
+static int state_mcard_verdict(const state_mcard_fp_t* recorded,
+                               const state_mcard_fp_t* live) {
+    int worst = PSX_STATE_OK;
+    uint32_t i;
+
+    for (i = 0; i < PSX_STATE_MCARD_SLOTS; i++) {
+        int slot_verdict = state_mcard_verdict_slot(&recorded[i], &live[i]);
+
+        if (slot_verdict == PSX_STATE_ERR_CARD_NEWER)
+            return PSX_STATE_ERR_CARD_NEWER;
+
+        if (slot_verdict == PSX_STATE_ERR_CARD_DIVERGED)
+            worst = PSX_STATE_ERR_CARD_DIVERGED;
+    }
+
+    return worst;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Save                                                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -540,6 +672,32 @@ int psx_save_state_to_memory_ex(psx_t* psx, void** io_data, size_t* io_capacity,
         state_write_string(&w, psx_cdrom_get_disc_path(psx->cdrom));
         state_write_string(&w, PSXE_VERSION);
     });
+
+    /* Memory-card fingerprints. A NEW optional section rather than extra fields
+       on the existing mcd payload, and that is the whole compatibility story:
+       adding to psx_mcd_save_state() would change a section that already ships,
+       which state.h requires be paid for with a PSX_STATE_CORE_ABI bump — and a
+       bump rejects every state already sitting on a user's device. A new
+       section at version 1 costs nothing in either direction, exactly as
+       PSX_SS_THUMB did. It is NOT added to g_psx_state_mandatory. */
+    {
+        state_mcard_fp_t cards[PSX_STATE_MCARD_SLOTS];
+        uint32_t slot;
+
+        state_mcard_capture(psx, cards);
+
+        STATE_SECTION(&w, PSX_SS_MCARD, 1, {
+            psx_sw_u32(&w, PSX_STATE_MCARD_SLOTS);
+
+            for (slot = 0; slot < PSX_STATE_MCARD_SLOTS; slot++) {
+                psx_sw_u8(&w, (uint8_t)(cards[slot].present ? 1 : 0));
+                psx_sw_u64(&w, cards[slot].content_hash);
+                psx_sw_u64(&w, cards[slot].session_id);
+                psx_sw_u32(&w, cards[slot].write_generation);
+                psx_sw_i64(&w, cards[slot].file_mtime);
+            }
+        });
+    }
 
     /* Preview image. Written here, near the front of the file, so a picker can
        reach it after one seek instead of walking past several megabytes of RAM
@@ -706,7 +864,78 @@ static const uint32_t g_psx_state_mandatory[] = {
             return PSX_STATE_ERR_TRUNCATED;                                             \
     } while (0)
 
+/*
+    Reads PSX_SS_MCARD out of an already-indexed container and compares it with
+    the cards attached right now.
+
+    Returns PSX_STATE_OK when the state predates this feature (no section), when
+    the section is malformed, or when the cards agree. "No fingerprint recorded"
+    is deliberately indistinguishable from "they match": a state written before
+    this landed can never grow one, and nagging about every such state forever
+    would train the user to dismiss the dialog without reading it — at which
+    point the warning is worth less than nothing.
+*/
+static int state_check_mcard_divergence(psx_t* psx,
+                                        const psx_state_section_t* sections,
+                                        int section_count) {
+    const psx_state_section_t* s =
+        state_find_section(sections, section_count, PSX_SS_MCARD);
+    state_mcard_fp_t recorded[PSX_STATE_MCARD_SLOTS];
+    state_mcard_fp_t live[PSX_STATE_MCARD_SLOTS];
+    psx_state_reader_t mr;
+    uint32_t slot_count;
+    uint32_t i;
+
+    if (!s)
+        return PSX_STATE_OK;
+
+    psx_sr_init(&mr, s->data, s->size);
+
+    slot_count = psx_sr_u32(&mr);
+
+    for (i = 0; i < PSX_STATE_MCARD_SLOTS; i++) {
+        recorded[i].present = 0;
+        recorded[i].content_hash = 0;
+        recorded[i].session_id = 0;
+        recorded[i].write_generation = 0;
+        recorded[i].file_mtime = 0;
+    }
+
+    for (i = 0; i < slot_count; i++) {
+        uint8_t present = psx_sr_u8(&mr);
+        uint64_t hash = psx_sr_u64(&mr);
+        uint64_t session = psx_sr_u64(&mr);
+        uint32_t generation = psx_sr_u32(&mr);
+        int64_t mtime = psx_sr_i64(&mr);
+
+        /* A future core may record more slots than this one understands. Read
+           past them so the stream stays aligned, but do not invent a comparison
+           for a slot we have no card for. */
+        if (i >= PSX_STATE_MCARD_SLOTS)
+            continue;
+
+        recorded[i].present = present ? 1 : 0;
+        recorded[i].content_hash = hash;
+        recorded[i].session_id = session;
+        recorded[i].write_generation = generation;
+        recorded[i].file_mtime = mtime;
+    }
+
+    /* A short or corrupt section is not a reason to block a load the user asked
+       for — it only means we cannot answer the question. Stay silent. */
+    if (mr.error)
+        return PSX_STATE_OK;
+
+    state_mcard_capture(psx, live);
+
+    return state_mcard_verdict(recorded, live);
+}
+
 int psx_load_state_from_memory(psx_t* psx, const void* data, size_t size) {
+    return psx_load_state_from_memory_ex(psx, data, size, 0);
+}
+
+int psx_load_state_from_memory_ex(psx_t* psx, const void* data, size_t size, unsigned flags) {
     psx_state_reader_t r;
     psx_state_section_t sections[PSX_STATE_MAX_SECTIONS];
     int section_count = 0;
@@ -836,6 +1065,23 @@ int psx_load_state_from_memory(psx_t* psx, const void* data, size_t size) {
         }
     }
 
+    /* Phase 1c: memory cards. Last of the up-front checks and, unlike the ones
+       above, ADVISORY — the state is perfectly loadable, the cards have just
+       moved on since it was taken. The front-end turns the refusal into a
+       question and re-issues with PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE if the
+       user says load anyway. Still nothing has been written to the machine, so
+       "cancel" really does leave the session exactly as it was. */
+    if (!(flags & PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE)) {
+        int card_verdict = state_check_mcard_divergence(psx, sections, section_count);
+
+        if (card_verdict != PSX_STATE_OK) {
+            log_info("Save state memory-card divergence: %s",
+                psx_state_strerror(card_verdict));
+
+            return card_verdict;
+        }
+    }
+
     /* Phase 2: apply. From here the machine is being mutated; a failure past
        this point leaves it in a partial state, which is why every check that
        CAN be made up front is made up front. */
@@ -870,6 +1116,10 @@ int psx_load_state_from_memory(psx_t* psx, const void* data, size_t size) {
 }
 
 int psx_load_state(psx_t* psx, const char* path) {
+    return psx_load_state_ex(psx, path, 0);
+}
+
+int psx_load_state_ex(psx_t* psx, const char* path, unsigned flags) {
     FILE* file;
     long size;
     void* data;
@@ -917,7 +1167,7 @@ int psx_load_state(psx_t* psx, const char* path) {
         return PSX_STATE_ERR_IO;
     }
 
-    result = psx_load_state_from_memory(psx, data, (size_t)size);
+    result = psx_load_state_from_memory_ex(psx, data, (size_t)size, flags);
 
     free(data);
 
@@ -931,6 +1181,11 @@ int psx_load_state(psx_t* psx, const char* path) {
 
         log_info("Save state loaded from %s", path);
     }
+    /* The card verdicts are a question for the user, not a failure: the state
+       is intact and nothing was touched. Logging them at error level would put
+       a red line in the diag file every time the front-end asks. */
+    else if (result == PSX_STATE_ERR_CARD_NEWER || result == PSX_STATE_ERR_CARD_DIVERGED)
+        log_info("Save state '%s' not loaded yet: %s", path, psx_state_strerror(result));
     else
         log_error("Failed to load save state '%s': %s", path, psx_state_strerror(result));
 
@@ -1078,6 +1333,11 @@ static PSX_STATE_ATOMIC_INT g_state_request = 0;
 static PSX_STATE_ATOMIC_INT g_state_result = 0;
 static int g_state_slot = 0;
 static char g_state_path[1024];
+/* Plain int, like g_state_slot and g_state_path: written by the producer BEFORE
+   the release-store that parks the request, and read by the emulation thread
+   after its acquire-load of it, so the CAS that admits one producer at a time
+   is what publishes it. */
+static unsigned g_state_flags = 0;
 
 void psx_state_set_machine(psx_t* psx) {
     g_state_machine = psx;
@@ -1286,7 +1546,7 @@ void psx_state_service_requests(void) {
 
         result = psx_save_state(g_state_machine, g_state_path);
     } else {
-        result = psx_load_state(g_state_machine, g_state_path);
+        result = psx_load_state_ex(g_state_machine, g_state_path, g_state_flags);
     }
 
     (void)g_state_slot;
@@ -1296,6 +1556,11 @@ void psx_state_service_requests(void) {
 }
 
 int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_ms) {
+    return psx_state_request_slot_ex(op, slot, base_dir, timeout_ms, 0);
+}
+
+int psx_state_request_slot_ex(int op, int slot, const char* base_dir, int timeout_ms,
+                              unsigned flags) {
     int expected = 0;
     int waited = 0;
     int result;
@@ -1315,6 +1580,7 @@ int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_m
         return result;
 
     g_state_slot = slot;
+    g_state_flags = flags;
 
     PSX_STATE_STORE(g_state_result, PSX_STATE_ERR_TIMEOUT);
 

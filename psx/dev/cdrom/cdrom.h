@@ -46,6 +46,19 @@
    Any future attempt at real sector pacing must be tested against an FMV, not just a codec call. */
 #define CD_DELAY_ONGOING_READ (cdrom_get_read_delay(cdrom) + (CD_DELAY_1MS * 4))
 
+/* How far short of its target the coarse (audio) seek lands. CdlSeekP does not position the
+   head exactly; the drive arrives early and reads its way onto the target. This is the size of
+   that undershoot, applied ONCE when the seek completes — psx_cdrom_update() then walks the
+   reported position forward onto the target at the drive's sector rate. */
+#define CD_SEEKP_UNDERSHOOT 25
+
+/* Sectors the reported position cycles through while the drive is parked with the motor on,
+   and how far below the parked sector that window starts. A paused drive keeps spinning and
+   keeps following the spiral, kicking back about a revolution to hold station, so its sub-Q
+   position moves without running away — over roughly [parked-2, parked+4]. */
+#define CD_REPORT_HOLD_SECTORS 7
+#define CD_REPORT_HOLD_OFFSET  2
+
 #define XA_STEREO_SAMPLES 2016 // Samples per sector
 #define XA_MONO_SAMPLES 4032 // Samples per sector
 #define XA_STEREO_RESAMPLE_SIZE 2352 // 2352
@@ -220,6 +233,11 @@ typedef struct {
     int region;
     int index;
     int pending_speed_switch_delay;
+    /* 0 after CdlSeekP, 1 after CdlSeekL: which of the two seeks last ran. CdlGetlocP used to
+       read this and subtract the coarse seek's undershoot from its answer every time it was
+       asked, which reported the target minus 25 for as long as the drive stayed parked. The
+       undershoot is now a landing position that CdlSeekP sets once and psx_cdrom_update()
+       walks off; the field itself stays because save states carry it. */
     int seek_precision;
     int fake_getlocl_data;
     uint8_t ier;
@@ -249,8 +267,17 @@ typedef struct {
     int int1_pending;
     int int2_pending;
     int delay;
+    /* What a running read had left on its sector countdown when a query command borrowed
+       `delay` from it. Lives for exactly one command service — see cdrom_write_cmd(). */
+    int read_delay_pending;
     uint32_t pending_lba;
     uint32_t lba;
+    /* Where the HEAD is, as opposed to `lba`, which is the sector the transport will read
+       next. CdlGetlocP reports this one and nothing else does. Derived state: never
+       serialised, re-anchored to `lba` on load. See psx_cdrom_update() in cdrom.c. */
+    uint32_t report_lba;
+    uint32_t report_anchor;
+    int report_accum;
     int16_t cdda_buf[CD_SECTOR_SIZE >> 1];
     int32_t cdda_remaining_samples;
     uint32_t cdda_sample_index;
@@ -270,6 +297,23 @@ typedef struct {
        this plus a fingerprint so a state can be refused if it is loaded against a different
        game, and so the already-open disc can simply be re-seeked on load. */
     char disc_path[1024];
+    /* Run-length state for the command trace in cdrom_write_cmd(). Host-side only.
+       `trace_async` counts interrupts raised while the run was current that did NOT come from
+       the traced command — the per-sector INT1 of a read that is still running is the one
+       that matters, and conflating it with the command's own answer is a mistake this trace
+       has already made once. */
+    uint32_t trace_repeat;
+    uint32_t trace_exec;
+    uint32_t trace_async[8];
+    uint8_t trace_cmd;
+    uint8_t trace_nparams;
+    uint8_t trace_nresp;
+    uint8_t trace_int;
+    uint8_t trace_valid;
+    uint8_t trace_in_command;
+    uint8_t trace_pending_int;
+    uint8_t trace_params[4];
+    uint8_t trace_resp[8];
 } psx_cdrom_t;
 
 enum {
@@ -302,6 +346,10 @@ int cdrom_get_pause_delay(psx_cdrom_t* cdrom);
 int cdrom_get_read_delay(psx_cdrom_t* cdrom);
 void cdrom_set_int(psx_cdrom_t* cdrom, int n);
 void cdrom_process_setloc(psx_cdrom_t* cdrom);
+/* Put the head at `lba` and re-anchor it to the transport position. Only a seek that lands
+   somewhere other than its target needs this; every other transport move is picked up by
+   psx_cdrom_update() on its own. */
+void cdrom_anchor_report_position(psx_cdrom_t* cdrom, uint32_t lba);
 
 psx_cdrom_t* psx_cdrom_create(void);
 void psx_cdrom_init(psx_cdrom_t* cdrom, psx_ic_t* ic);
