@@ -1444,6 +1444,64 @@ static int run_gp1_mode_mirror_case(void) {
     return failed;
 }
 
+/*
+    GP1(07) - Display range on screen (vertical): Y1 in bits 0-9, Y2 in bits 10-19.
+    Both fields are TEN bits wide. The decode used 0x1ff for each, so bit 9 of Y1
+    wrapped and bit 9 of Y2 was dropped outright — a 480i title whose range ends
+    past scanline 511 got a picture 512 lines short. Sweep every 10-bit value in
+    both positions plus the full 20-bit payload at the boundaries so a re-narrowed
+    mask cannot pass.
+*/
+static int run_gp1_vrange_case(void) {
+    const char* name = "gp1-vrange-10bit";
+    psx_gpu_t* gpu = make_gpu();
+    int failed = 0;
+    uint32_t v;
+
+    for (v = 0; v < 0x400 && !failed; v++) {
+        /* Y1 swept, Y2 held at a value whose own bit 9 is set. */
+        psx_gpu_write32(gpu, 4, 0x07000000u | v | (0x2aau << 10));
+
+        if (gpu->disp_y1 != v || gpu->disp_y2 != 0x2aau) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=y1-sweep wrote=%05x "
+                    "y1=%u want=%u y2=%u want=682\n",
+                    name, v | (0x2aau << 10), gpu->disp_y1, v, gpu->disp_y2);
+            failed = 1;
+        }
+
+        /* Y2 swept, Y1 held. */
+        psx_gpu_write32(gpu, 4, 0x07000000u | 0x155u | (v << 10));
+
+        if (gpu->disp_y1 != 0x155u || gpu->disp_y2 != v) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=y2-sweep wrote=%05x "
+                    "y1=%u want=341 y2=%u want=%u\n",
+                    name, 0x155u | (v << 10), gpu->disp_y1, gpu->disp_y2, v);
+            failed = 1;
+        }
+    }
+
+    /* Bits 20-23 of the payload belong to no field and must not leak in. */
+    if (!failed) {
+        psx_gpu_write32(gpu, 4, 0x07000000u | 0xfffffu | (0xfu << 20));
+
+        if (gpu->disp_y1 != 0x3ffu || gpu->disp_y2 != 0x3ffu) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=upper-bits y1=%u y2=%u want=1023,1023\n",
+                    name, gpu->disp_y1, gpu->disp_y2);
+            failed = 1;
+        }
+    }
+
+    psx_gpu_destroy(gpu);
+
+    if (!failed)
+        printf("GPU_PARITY passed case=%s\n", name);
+
+    return failed;
+}
+
 static int run_gpuinfo_roundtrip_case(void) {
     const char* name = "gpuinfo-roundtrip";
     psx_gpu_t* gpu = make_gpu();
@@ -1499,6 +1557,48 @@ static int run_gpuinfo_roundtrip_case(void) {
                     "GPU_PARITY failed case=%s reason=e2-roundtrip wrote=%06x read=%06x\n",
                     name, p, got);
             failed = 1;
+        }
+    }
+
+    /*
+        GP1(10h).7 - Read GPU Type. Retail silicon answers 2; 0 is the pre-production
+        160-pin part. Indices 0, 1 and 6 answer nothing at all and must leave the previous
+        GPUREAD word standing, so seed a known value through index 5 and check that only
+        7 changes it. Index 8+ mirrors low indices, so 0x0f re-selects 7.
+    */
+    {
+        psx_gpu_write32(gpu, 0, 0xe5000000 | 0x1234);   /* a distinctive latched word */
+        psx_gpu_write32(gpu, 4, 0x10000005);
+
+        uint32_t seed = psx_gpu_read32(gpu, 0);
+
+        static const uint32_t quiet[] = { 0, 1, 6 };
+
+        for (unsigned i = 0; i < sizeof(quiet) / sizeof(quiet[0]) && !failed; i++) {
+            psx_gpu_write32(gpu, 4, 0x10000000 | quiet[i]);
+
+            uint32_t got = psx_gpu_read32(gpu, 0);
+
+            if (got != seed) {
+                fprintf(stderr,
+                        "GPU_PARITY failed case=%s reason=gpuinfo-quiet-index index=%u "
+                        "read=%08x want-unchanged=%08x\n",
+                        name, quiet[i], got, seed);
+                failed = 1;
+            }
+        }
+
+        for (unsigned i = 0; i < 2 && !failed; i++) {
+            psx_gpu_write32(gpu, 4, 0x10000007 | (i ? 8u : 0u));
+
+            uint32_t got = psx_gpu_read32(gpu, 0);
+
+            if (got != 2) {
+                fprintf(stderr,
+                        "GPU_PARITY failed case=%s reason=gpu-type req=%u read=%08x want=00000002\n",
+                        name, 7u | (i ? 8u : 0u), got);
+                failed = 1;
+            }
         }
     }
 
@@ -2353,6 +2453,7 @@ int main(void) {
     /* GPUSTAT must tell the game the video mode it actually set — a zeroed mirror told
        every title it was on a 256-wide screen. */
     failed |= run_gp1_mode_mirror_case();
+    failed |= run_gp1_vrange_case();
 
     /* Turning accurate_mask_bit on must not make textured content disappear — the setting
        is inert until a game sends GP0(E6), and a sprite into a clean buffer draws in full

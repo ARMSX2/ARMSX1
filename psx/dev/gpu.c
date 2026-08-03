@@ -962,9 +962,25 @@ void psx_gpu_init(psx_gpu_t* gpu, psx_ic_t* ic) {
 uint32_t psx_gpu_read32(psx_gpu_t* gpu, uint32_t offset) {
     switch (offset) {
         case 0x00: {
-            uint32_t data = 0x0;
+            /*
+                GPUREAD is a LATCH, not a strobe. It holds the last word the GPU placed
+                there — a VRAM->CPU transfer word, or a GP1(10h) answer — until something
+                overwrites it. GP1(10h) indices 0, 1 and 6 are documented as "returns
+                nothing", meaning the previous contents stay readable.
+
+                This started at 0 on every read, so any read outside an active transfer
+                answered 0 rather than the retained word, and the "returns nothing"
+                indices actively destroyed the latch instead of preserving it.
+                gpu->gpuread already existed and was already serialised in the save state;
+                it simply was not the value being returned.
+                Gate: gpuinfo-roundtrip (quiet-index arm) in tests/gpu_renderer_parity.c.
+            */
+            uint32_t data = gpu->gpuread;
 
             if (gpu->c0_tsiz) {
+                /* A transfer word replaces the latch outright; it is assembled with |=. */
+                data = 0;
+
                 data |= gpu->vram[gpu->c0_addr + (gpu->c0_xcnt + (gpu->c0_ycnt * 1024))];
 
                 gpu->c0_xcnt += 1;
@@ -1018,10 +1034,27 @@ uint32_t psx_gpu_read32(psx_gpu_t* gpu, uint32_t offset) {
                         data = (((uint32_t)gpu->off_y & 0x7ff) << 11) |
                                ((uint32_t)gpu->off_x & 0x7ff);
                     } break;
+                    case 7: {
+                        /*
+                            GP1(10h).7 - Read GPU Type. Every retail console reports 2
+                            (the 208-pin GPU); 0 means the early 160-pin part found only
+                            in pre-production PU-7 boards.
+
+                            There was no case 7 here, so the query fell through and
+                            returned whatever was left in GPUREAD — 0 on a cold boot.
+                            Any code that version-checks the GPU therefore saw
+                            prototype silicon. Same defect class as GPUINFO(5) and the
+                            GP1(08) mirror: a readback describing hardware we are not.
+                            Gate: gpuinfo-gpu-type in tests/gpu_renderer_parity.c.
+                        */
+                        data = 2;
+                    } break;
                 }
 
                 gpu->gp1_10h_req = 0;
             }
+
+            gpu->gpuread = data;
 
             return data;
         } break;
@@ -3345,8 +3378,27 @@ void psx_gpu_write32(psx_gpu_t* gpu, uint32_t offset, uint32_t value) {
                     GPU_HW_DEBUG("gp1-display-range-h value=%08x disp_x=(%u,%u)", value, gpu->disp_x1, gpu->disp_x2);
                 } break;
                 case 0x07: {
-                    gpu->disp_y1 = value & 0x1ff;
-                    gpu->disp_y2 = (value >> 10) & 0x1ff;
+                    /*
+                        GP1(07) - Display range on screen (vertical), per psx-spx:
+
+                            bits 0-9   Y1 (first scanline shown)
+                            bits 10-19 Y2 (last scanline shown)
+
+                        TEN bits each, not nine. The masks here were 0x1ff, which
+                        silently dropped bit 9 of BOTH fields: any Y1 >= 512 wrapped,
+                        and — the reachable half — Y2's bit 9 landed nowhere, so a
+                        game asking for a range ending at scanline 512..1023 got one
+                        ending 512 lines earlier. 240p titles keep Y2 <= 0x100 and so
+                        never notice (Crash sets disp_v=(16,256)); a 480i title that
+                        counts in field lines does.
+
+                        Same defect class as the GPUINFO(5) layout and the GP1(08)
+                        mode mirror above: a decode that silently narrows a field the
+                        hardware keeps.
+                        Gate: gp1-vrange-10bit in tests/gpu_renderer_parity.c.
+                    */
+                    gpu->disp_y1 = value & 0x3ff;
+                    gpu->disp_y2 = (value >> 10) & 0x3ff;
                     GPU_HW_DEBUG("gp1-display-range-v value=%08x disp_y=(%u,%u)", value, gpu->disp_y1, gpu->disp_y2);
                 } break;
                 case 0x08:
