@@ -1395,6 +1395,55 @@ static int gp0_check_pixels(const char* name, const char* what, psx_gpu_t* gpu,
     set (negative fields) must echo verbatim rather than smearing sign bits over the word.
     The sweeps below include every such value.
 */
+/*
+    GP1(08) -> GPUSTAT mirror. psx-spx: mode bits 0-5 land in GPUSTAT 17-22, bit 6 (hres2)
+    in 16, bit 7 (reverse) in 14. These were never written at all, so a game reading its
+    video mode back saw 256x240/15bpp/progressive/NTSC forever — for Crash (512-wide,
+    GP1(08)=0x02) the readback claimed a screen half the real width, and an engine that
+    sizes its culling viewport from GPUSTAT drops exactly the outer flank geometry.
+    Exhaustive over all 256 mode bytes, and the texpage/mask bits E1/E6 own must survive.
+*/
+static int run_gp1_mode_mirror_case(void) {
+    const char* name = "gp1-mode-mirror";
+    psx_gpu_t* gpu = make_gpu();
+    int failed = 0;
+
+    /* Seed the E1/E6-owned low bits so a clobber is visible. */
+    psx_gpu_write32(gpu, 0, 0xe1000000 | 0x2ff);
+    psx_gpu_write32(gpu, 0, 0xe6000003);
+
+    for (uint32_t m = 0; m < 0x100 && !failed; m++) {
+        psx_gpu_write32(gpu, 4, 0x08000000 | m);
+
+        uint32_t stat = psx_gpu_read32(gpu, 4);
+        uint32_t want = ((m & 0x3fu) << 17) | ((m & 0x40u) << 10) | ((m & 0x80u) << 7);
+
+        if ((stat & 0x007f4000u) != want) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=mode-mirror mode=%02x stat=%08x "
+                    "mirror=%06x want=%06x\n",
+                    name, m, stat, stat & 0x007f4000u, want);
+            failed = 1;
+        }
+
+        /* E1's texpage bits 0-10 and E6's mask bits 11-12 must be untouched. */
+        if ((stat & 0x1fffu) != 0x1aff) {
+            fprintf(stderr,
+                    "GPU_PARITY failed case=%s reason=low-bits-clobbered mode=%02x "
+                    "stat=%08x low=%04x want=1aff\n",
+                    name, m, stat, stat & 0x1fffu);
+            failed = 1;
+        }
+    }
+
+    psx_gpu_destroy(gpu);
+
+    if (!failed)
+        printf("GPU_PARITY passed case=%s\n", name);
+
+    return failed;
+}
+
 static int run_gpuinfo_roundtrip_case(void) {
     const char* name = "gpuinfo-roundtrip";
     psx_gpu_t* gpu = make_gpu();
@@ -2300,6 +2349,10 @@ int main(void) {
        in the wrong layout, and only an against-spec sweep can see a bug both halves of a
        differential pair share. */
     failed |= run_gpuinfo_roundtrip_case();
+
+    /* GPUSTAT must tell the game the video mode it actually set — a zeroed mirror told
+       every title it was on a 256-wide screen. */
+    failed |= run_gp1_mode_mirror_case();
 
     /* Turning accurate_mask_bit on must not make textured content disappear — the setting
        is inert until a game sends GP0(E6), and a sprite into a clean buffer draws in full

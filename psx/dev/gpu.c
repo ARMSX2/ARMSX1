@@ -3351,6 +3351,35 @@ void psx_gpu_write32(psx_gpu_t* gpu, uint32_t offset, uint32_t value) {
                 } break;
                 case 0x08:
                     gpu->display_mode = value & 0xffffff;
+
+                    /*
+                        Mirror the mode into GPUSTAT, per psx-spx:
+
+                            GP1(08).0-1 hres1     -> GPUSTAT.17-18
+                            GP1(08).2   vres      -> GPUSTAT.19
+                            GP1(08).3   PAL/NTSC  -> GPUSTAT.20
+                            GP1(08).4   24bpp     -> GPUSTAT.21
+                            GP1(08).5   interlace -> GPUSTAT.22
+                            GP1(08).6   hres2     -> GPUSTAT.16
+                            GP1(08).7   reverse   -> GPUSTAT.14
+
+                        These were never written, so a game reading its video mode back saw
+                        every field as 0 — 256x240, 15bpp, progressive, NTSC — regardless of
+                        what it had set. A readback lying about live state, the same defect
+                        class as GPUINFO(5) and GTE ORGB. For a 512-wide title (Crash runs
+                        GP1(08)=0x02) the readback claimed a 256-wide screen: an engine that
+                        sizes its own culling viewport from GPUSTAT drops exactly the outer
+                        flank geometry, which is the measured Crash wedge — the game submits
+                        no triangles over those pixels while the GPU stream stays well-formed.
+                        Confirmed in the device dump header: display_mode=000002 (hres=512)
+                        alongside stat=8000001e (mode bits all zero).
+                        Gate: gp1-mode-mirror in tests/gpu_renderer_parity.c.
+                    */
+                    gpu->gpustat = (gpu->gpustat & ~0x007f4000u)
+                                 | ((value & 0x3fu) << 17)
+                                 | ((value & 0x40u) << 10)
+                                 | ((value & 0x80u) << 7);
+
                     GPU_HW_DEBUG(
                         "gp1-display-mode value=%08x display_mode=0x%08x video_standard=%s",
                         value,
@@ -3802,6 +3831,14 @@ int psx_gpu_load_state(psx_gpu_t* gpu, psx_state_reader_t* r) {
     gpu->display_mode = psx_sr_u32(r);
     gpu->gpuread = psx_sr_u32(r);
     gpu->gpustat = psx_sr_u32(r);
+
+    /* States saved before the GP1(08) -> GPUSTAT mirror existed carry zeros in the mode
+       bits, and a game rarely re-sends GP1(08) after boot — recompute the mirror from the
+       restored display_mode so a loaded state can't reintroduce the lying readback. */
+    gpu->gpustat = (gpu->gpustat & ~0x007f4000u)
+                 | ((gpu->display_mode & 0x3fu) << 17)
+                 | ((gpu->display_mode & 0x40u) << 10)
+                 | ((gpu->display_mode & 0x80u) << 7);
 
     gpu->draw_x1 = psx_sr_u32(r);
     gpu->draw_y1 = psx_sr_u32(r);
