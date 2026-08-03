@@ -1,6 +1,27 @@
 ARMSX1 — Changelog
 ==================
 
+0.1.1
+-----
+
+Cover art for .chd games
+  * CHD games now show their real cover art. ARMSX1 could not read the disc's serial
+    number out of a compressed .chd, and the serial is what cover art is looked up by,
+    so most CHD libraries showed blank placeholder tiles. The serial is now read using
+    the same disc reader that plays the game, so a .chd identifies itself exactly like
+    a .bin or .cue does.
+  * The same fix gives CHD games everything else the serial unlocks: RetroAchievements
+    identification, play-time tracking, and per-game settings.
+  * Use Settings > App > "Download cover art" to fetch art for your whole library at
+    once, now that CHDs can be matched.
+
+Note for existing CHD users
+  * A CHD that had no serial in its filename used to store its per-game settings under
+    that filename. Now that the disc reports its real serial, those settings are stored
+    under the serial instead, so per-game settings, cheats, custom names, per-game BIOS
+    and the per-game memory card choice go back to their global values once for those
+    games. Save states and memory card files are not affected.
+
 0.1.0 — first public release
 ----------------------------
 
