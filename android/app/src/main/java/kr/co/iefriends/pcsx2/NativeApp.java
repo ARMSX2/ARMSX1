@@ -1191,16 +1191,38 @@ public class NativeApp {
 	 *
 	 * Returns null if the file isn't a valid BIOS image.
 	 */
+	/** Plain ASCII substring search over the first {@code length} bytes of {@code buf}. */
+	private static int indexOfAscii(byte[] buf, int length, String needle) {
+		final int m = needle.length();
+		if (m == 0 || length < m) return -1;
+		outer:
+		for (int i = 0; i + m <= length; i++) {
+			for (int j = 0; j < m; j++) {
+				if (buf[i + j] != (byte) needle.charAt(j)) continue outer;
+			}
+			return i;
+		}
+		return -1;
+	}
+
 	public static BiosInfo getBiosInfoFromFd(int fd) {
 		android.os.ParcelFileDescriptor pfd = null;
 		try {
 			pfd = android.os.ParcelFileDescriptor.adoptFd(fd);
 			long size = pfd.getStatSize();
-			if (size < 128 * 1024 || size > 8L * 1024 * 1024) return null;
+			// A PlayStation 1 BIOS is exactly 512 KiB. The old bound here was "anything from
+			// 128 KiB to 8 MiB", which accepts a PS2 BIOS (~4 MiB) and calls it a PlayStation
+			// BIOS — so pointing the wizard at a PS2 BIOS folder "found" BIOSes that the core
+			// then refused at boot with only "No BIOS could be resolved" to show for it.
+			if (size != 512 * 1024) return null;
 			java.io.FileInputStream fis = new java.io.FileInputStream(pfd.getFileDescriptor());
-			byte[] buf = new byte[(int) Math.min(size, 1024 * 1024)];
+			byte[] buf = new byte[(int) size];
 			int read = 0, n;
 			while (read < buf.length && (n = fis.read(buf, read, buf.length - read)) > 0) read += n;
+			// Every retail PS1 BIOS carries this copyright string. Size alone is not enough:
+			// plenty of unrelated files are exactly 512 KiB.
+			if (indexOfAscii(buf, read, "Sony Computer Entertainment Inc.") < 0) return null;
+			// Region from the SCEI/SCEA/SCEE licence magic, unchanged — it was already correct.
 			int region = 10;
 			for (int i = 0; i + 4 <= read; i++) {
 				if (buf[i] == 'S' && buf[i+1] == 'C' && buf[i+2] == 'E') {
