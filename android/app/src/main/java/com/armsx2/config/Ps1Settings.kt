@@ -68,7 +68,12 @@ data class Ps1Settings(
     val defaultPsxExe: String = "",
     // [video]
     val vsync: Boolean = true,
-    val gpuBackend: String = GPU_SOFTWARE,       // software | sdl-accelerated | opengl | angle | vulkan
+    // GLES by default, not software: "opengl" binds EGL directly to the Compose Surface's
+    // ANativeWindow and removes the full-resolution CPU blit the software present path does.
+    // MUST match config.c's cfg->gpu_backend default (2 = opengl) — a Kotlin default that
+    // disagrees with the core's is how a setting ends up looking set while the core runs the
+    // other path.
+    val gpuBackend: String = GPU_OPENGL,         // software | sdl-accelerated | opengl | angle | vulkan
     val textureScaleMode: Boolean = false,       // bilinear filtering
     val debugPanel: Boolean = false,
     val stretchMode: Boolean = false,

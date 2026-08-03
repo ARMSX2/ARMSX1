@@ -103,7 +103,7 @@ static const char g_default_settings[] =
 #endif
     "\n"
 #ifdef USE_HARDWARE
-    "    gpu_backend = \"software\" # software | sdl-accelerated | opengl | angle | vulkan\n"
+    "    gpu_backend = \"opengl\"   # software | sdl-accelerated | opengl | angle | vulkan\n"
     "    gl_driver = \"system\"     # GLES implementation for the opengl backend: system | angle\n"
     "    renderer = \"hardware\"    # rasterizer: software | hardware | hardware-cpu | hardware-gl\n"
     "    internal_scale = 1        # 1..8; internal resolution, hardware rasterizer only\n"
@@ -491,7 +491,12 @@ void psxe_cfg_load_defaults(psxe_config_t* cfg) {
     cfg->vsync_enabled = 1;
 #endif
 #ifdef USE_HARDWARE
-    cfg->gpu_backend = 0;
+    /* 2 = opengl. GLES binds EGL straight to the Compose Surface's ANativeWindow, which drops
+       the full-resolution CPU blit the software present path does — so it is both faster and
+       the path the hardware rasteriser expects. MUST match Ps1Settings.gpuBackend's default;
+       a Kotlin default that disagrees is how a setting looks set while the core runs the
+       other path. */
+    cfg->gpu_backend = 2;
     cfg->gl_driver = 0;
     /* 1 = hardware (GLES when a GL context exists, CPU otherwise). Upscaling is impossible
        without it. Matches Ps1Settings.hwRasterizer's default; the two must not disagree, or a
