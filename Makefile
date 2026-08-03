@@ -681,7 +681,7 @@ endif
 SDL_LIBS := $(if $(filter 1,$(SDL_STATIC)),$(SDL_LIBS_STATIC),$(SDL_LIBS_DYNAMIC))
 SDL_LIBS_SHARED := $(SDL_LIBS_DYNAMIC)
 
-.PHONY: all clean shared wasm psvita-lib test test-cpu test-gte test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime disc-probe
+.PHONY: all clean shared wasm psvita-lib test test-cpu test-cpu-spec test-gte test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime disc-probe
 
 all: $(BIN)
 
@@ -740,6 +740,28 @@ $(TEST_GTE_BIN): tests/gte_matrix.c psx/cpu.c psx/cpu.h $(TEST_GTE_CORE_SOURCES)
 
 test-gte: $(TEST_GTE_BIN)
 	./$(TEST_GTE_BIN)
+
+# R3000A against psx-spx / the R3000A manual, independently recomputed (tests/cpu_spec.c).
+#
+# Separate from cpu_differential for the same reason test-gte is: every case there is
+# DIFFERENTIAL (interpreter vs cached interpreter -- both this project's code, one
+# understanding), which is structurally blind to a rule that is wrong in both halves. This
+# one re-implements the rules INSIDE the test -- load sign/zero extension, address-error
+# behaviour, the LWL/LWR/SWL/SWR switch forms and the unaligned idioms they exist for, the
+# load delay slot for every consumer class, the shift matrix, the ALU/overflow matrix,
+# MULT/DIV including the degenerate results, branch/jump targets and link values, the
+# exception model (EPC, CAUSE.BD, the SR mode stack, both vectors, RFE) and the COP0 write
+# masks -- and runs every vector through BOTH execution modes.
+#
+# Links the whole core, like test-cpu, because the loads and stores go through the real bus.
+TEST_CPU_SPEC_BIN := build/tests/cpu_spec
+
+$(TEST_CPU_SPEC_BIN): tests/cpu_spec.c $(TEST_CORE_SOURCES)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $^ -lm -o $@
+
+test-cpu-spec: $(TEST_CPU_SPEC_BIN)
+	./$(TEST_CPU_SPEC_BIN)
 
 # Cheat engine (psx/cheats.c): the .cht parser, name-based arming, every implemented
 # GameShark code type, and the RetroAchievements hardcore interlock. Links the whole core

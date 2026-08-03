@@ -1038,19 +1038,31 @@ static inline void psx_cpu_i_sh(psx_cpu_t* cpu) {
 static inline void psx_cpu_i_swl(psx_cpu_t* cpu) {
     TRACE_M("swl");
 
+    /* BOTH source registers are sampled before the pending load is committed. Reading
+       cpu->r[T] after DO_PENDING_LOAD made an SWL sitting in a load delay slot store the
+       value the previous load is about to deliver, where the R3000A stores the OLD one --
+       every other store in this file samples rt first, these two did not. */
     uint32_t s = cpu->r[S];
+    uint32_t t = cpu->r[T];
 
     DO_PENDING_LOAD;
+
+    // Cache isolated
+    if (cpu->cop0_r[COP0_SR] & SR_ISC) {
+        log_debug("Ignoring write while cache is isolated");
+
+        return;
+    }
 
     uint32_t addr = s + IMM16S;
     uint32_t aligned = addr & 0xfffffffc;
     uint32_t v = psx_bus_read32(cpu->bus, aligned);
 
     switch (addr & 0x3) {
-        case 0: v = (v & 0xffffff00) | (cpu->r[T] >> 24); break;
-        case 1: v = (v & 0xffff0000) | (cpu->r[T] >> 16); break;
-        case 2: v = (v & 0xff000000) | (cpu->r[T] >> 8 ); break;
-        case 3: v =                     cpu->r[T]       ; break;
+        case 0: v = (v & 0xffffff00) | (t >> 24); break;
+        case 1: v = (v & 0xffff0000) | (t >> 16); break;
+        case 2: v = (v & 0xff000000) | (t >> 8 ); break;
+        case 3: v =                     t       ; break;
     }
 
     psx_bus_write32(cpu->bus, aligned, v);
@@ -1087,19 +1099,29 @@ static inline void psx_cpu_i_sw(psx_cpu_t* cpu) {
 static inline void psx_cpu_i_swr(psx_cpu_t* cpu) {
     TRACE_M("swr");
 
+    /* See psx_cpu_i_swl: rt is sampled before the pending load, and an isolated cache
+       swallows this store like every other one. */
     uint32_t s = cpu->r[S];
+    uint32_t t = cpu->r[T];
 
     DO_PENDING_LOAD;
+
+    // Cache isolated
+    if (cpu->cop0_r[COP0_SR] & SR_ISC) {
+        log_debug("Ignoring write while cache is isolated");
+
+        return;
+    }
 
     uint32_t addr = s + IMM16S;
     uint32_t aligned = addr & 0xfffffffc;
     uint32_t v = psx_bus_read32(cpu->bus, aligned);
 
     switch (addr & 0x3) {
-        case 0: v =                     cpu->r[T]       ; break;
-        case 1: v = (v & 0x000000ff) | (cpu->r[T] << 8 ); break;
-        case 2: v = (v & 0x0000ffff) | (cpu->r[T] << 16); break;
-        case 3: v = (v & 0x00ffffff) | (cpu->r[T] << 24); break;
+        case 0: v =                     t       ; break;
+        case 1: v = (v & 0x000000ff) | (t << 8 ); break;
+        case 2: v = (v & 0x0000ffff) | (t << 16); break;
+        case 3: v = (v & 0x00ffffff) | (t << 24); break;
     }
 
     psx_bus_write32(cpu->bus, aligned, v);
