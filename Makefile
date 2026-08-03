@@ -696,6 +696,16 @@ TEST_CORE_SOURCES := $(wildcard psx/*.c) \
                      $(wildcard psx/dev/cdrom/*.c) \
                      $(wildcard psx/input/*.c)
 TEST_CORE_SOURCES := $(filter-out psx/dev/cdrom/chd.c,$(TEST_CORE_SOURCES))
+
+# chd.c is filtered out above because disc.c reaches it only under #ifdef USE_CHD, so a gate that
+# does not want libchdr simply does not compile it. psx/dev/cdrom/pbp.c has NO such guard —
+# disc.c's CD_EXT_PBP case is unconditional — so every gate that links the core also compiles
+# pbp.c, which #include's miniz.h and calls into it. Without these three the whole suite fails to
+# build with "'miniz.h' file not found", which is what it did from the moment PBP support landed.
+# All three come from the libchdr build (miniz is one of its deps) and are empty when USE_CHD=0.
+TEST_CORE_CFLAGS := $(LIBCHDR_INCLUDE_FLAGS)
+TEST_CORE_LIBS := $(CHD_LINK_LIBS)
+TEST_CORE_DEPS := $(CHD_BUILD_DEPS)
 TEST_CPU_BIN := build/tests/cpu_differential
 TEST_CHEATS_BIN := build/tests/cheat_engine
 TEST_GPU_BIN := build/tests/gpu_renderer_parity
@@ -704,9 +714,9 @@ TEST_ZIP_BIN := build/tests/zip_integration
 TEST_SDL_BIN := build/tests/sdl_renderer_smoke
 DISC_PROBE_BIN := build/tests/disc_probe
 
-$(TEST_CPU_BIN): tests/cpu_differential.c $(TEST_CORE_SOURCES)
+$(TEST_CPU_BIN): tests/cpu_differential.c $(TEST_CORE_SOURCES) | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $^ -lm -o $@
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) $^ $(TEST_CORE_LIBS) -lm -o $@
 
 test-cpu: $(TEST_CPU_BIN)
 	./$(TEST_CPU_BIN)
@@ -734,9 +744,9 @@ test-cpu: $(TEST_CPU_BIN)
 TEST_GTE_BIN := build/tests/gte_matrix
 TEST_GTE_CORE_SOURCES := $(filter-out psx/cpu.c,$(TEST_CORE_SOURCES))
 
-$(TEST_GTE_BIN): tests/gte_matrix.c psx/cpu.c psx/cpu.h $(TEST_GTE_CORE_SOURCES)
+$(TEST_GTE_BIN): tests/gte_matrix.c psx/cpu.c psx/cpu.h $(TEST_GTE_CORE_SOURCES) | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx tests/gte_matrix.c $(TEST_GTE_CORE_SOURCES) -lm -lpthread -o $@
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) tests/gte_matrix.c $(TEST_GTE_CORE_SOURCES) $(TEST_CORE_LIBS) -lm -lpthread -o $@
 
 test-gte: $(TEST_GTE_BIN)
 	./$(TEST_GTE_BIN)
@@ -756,9 +766,9 @@ test-gte: $(TEST_GTE_BIN)
 # Links the whole core, like test-cpu, because the loads and stores go through the real bus.
 TEST_CPU_SPEC_BIN := build/tests/cpu_spec
 
-$(TEST_CPU_SPEC_BIN): tests/cpu_spec.c $(TEST_CORE_SOURCES)
+$(TEST_CPU_SPEC_BIN): tests/cpu_spec.c $(TEST_CORE_SOURCES) | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $^ -lm -o $@
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) $^ $(TEST_CORE_LIBS) -lm -o $@
 
 test-cpu-spec: $(TEST_CPU_SPEC_BIN)
 	./$(TEST_CPU_SPEC_BIN)
@@ -766,9 +776,9 @@ test-cpu-spec: $(TEST_CPU_SPEC_BIN)
 # Cheat engine (psx/cheats.c): the .cht parser, name-based arming, every implemented
 # GameShark code type, and the RetroAchievements hardcore interlock. Links the whole core
 # because it applies codes to a REAL psx_t, through the same RAM writer the emulator uses.
-$(TEST_CHEATS_BIN): tests/cheat_engine.c $(TEST_CORE_SOURCES)
+$(TEST_CHEATS_BIN): tests/cheat_engine.c $(TEST_CORE_SOURCES) | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $^ -lm -o $@
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) $^ $(TEST_CORE_LIBS) -lm -o $@
 
 test-cheats: $(TEST_CHEATS_BIN)
 	./$(TEST_CHEATS_BIN)
@@ -884,10 +894,10 @@ test-present-dst: $(TEST_PRESENT_DST_BIN)
 # a stale binary — the trap $(TEST_GPU_BIN) documents above.
 TEST_SPU_WIDTH_BIN := build/tests/spu_register_widths
 
-$(TEST_SPU_WIDTH_BIN): tests/spu_register_widths.c $(TEST_CORE_SOURCES) psx/dev/spu.h
+$(TEST_SPU_WIDTH_BIN): tests/spu_register_widths.c $(TEST_CORE_SOURCES) psx/dev/spu.h | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx \
-		tests/spu_register_widths.c $(TEST_CORE_SOURCES) -lm -o $@
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) \
+		tests/spu_register_widths.c $(TEST_CORE_SOURCES) $(TEST_CORE_LIBS) -lm -o $@
 
 test-spu-width: $(TEST_SPU_WIDTH_BIN)
 	./$(TEST_SPU_WIDTH_BIN)
@@ -905,10 +915,10 @@ test-spu-width: $(TEST_SPU_WIDTH_BIN)
 # keeps passing against a stale binary — the trap $(TEST_GPU_BIN) documents above.
 TEST_MCARD_BIN := build/tests/state_mcard_divergence
 
-$(TEST_MCARD_BIN): tests/state_mcard_divergence.c $(TEST_CORE_SOURCES) psx/state.h psx/dev/mcd.h
+$(TEST_MCARD_BIN): tests/state_mcard_divergence.c $(TEST_CORE_SOURCES) psx/state.h psx/dev/mcd.h | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx \
-		tests/state_mcard_divergence.c $(TEST_CORE_SOURCES) -lm -o $@
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) \
+		tests/state_mcard_divergence.c $(TEST_CORE_SOURCES) $(TEST_CORE_LIBS) -lm -o $@
 
 test-mcard-diverge: $(TEST_MCARD_BIN)
 	./$(TEST_MCARD_BIN)
@@ -935,10 +945,10 @@ test-mcard-diverge: $(TEST_MCARD_BIN)
 # or the gate keeps passing against a stale binary — the trap $(TEST_GPU_BIN) documents above.
 TEST_GETLOCP_BIN := build/tests/cdrom_getlocp
 
-$(TEST_GETLOCP_BIN): tests/cdrom_getlocp.c $(TEST_CORE_SOURCES) psx/dev/cdrom/cdrom.h
+$(TEST_GETLOCP_BIN): tests/cdrom_getlocp.c $(TEST_CORE_SOURCES) psx/dev/cdrom/cdrom.h | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
-	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx \
-		tests/cdrom_getlocp.c $(TEST_CORE_SOURCES) -lm -o $@
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) \
+		tests/cdrom_getlocp.c $(TEST_CORE_SOURCES) $(TEST_CORE_LIBS) -lm -o $@
 
 test-cdrom-getlocp: $(TEST_GETLOCP_BIN)
 	./$(TEST_GETLOCP_BIN) $(dir $(TEST_GETLOCP_BIN))
