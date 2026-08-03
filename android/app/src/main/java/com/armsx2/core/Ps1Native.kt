@@ -35,7 +35,7 @@ object Ps1Native {
     // "m3u" is a multi-disc PLAYLIST, not an image. It is bootable because the launch path
     // resolves it to its first existing disc (Ps1Playlist.resolveForLaunch) before the core
     // ever sees it — the core is never handed a .m3u.
-    private val DISC_EXTS = setOf("cue", "bin", "iso", "img", "chd", "m3u")
+    private val DISC_EXTS = setOf("cue", "bin", "iso", "img", "chd", "m3u", "pbp")
 
     /** PS-X executable extensions (`IsExePath`). */
     private val EXE_EXTS = setOf("exe", "ps-exe", "psexe")

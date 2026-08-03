@@ -86,6 +86,78 @@ object Ps1DiscId {
     /** A boot-executable name (`SLUS_006.64`, `SLUS_00664`, `slus-006.64`) → `SLUS-00664`. */
     private val EXE_NAME_REGEX = Regex("""^([A-Za-z]{4})[_\-.]?(\d{3})\.?(\d{2})""")
 
+
+    /**
+     * Serial of the FIRST disc inside a PSP EBOOT (.PBP). Layout (see psx/dev/cdrom/pbp.c, which
+     * reads the same fields to actually mount it):
+     *
+     *   PBP  +0x24                     u32 offset of DATA.PSAR
+     *   PSAR "PSTITLEIMG000000"        multi-disc: +0x200 holds u32 disc offsets (rel. PSAR)
+     *        "PSISOIMG0000"            single-disc: the PSAR is the disc
+     *   disc +0x400                    NUL-terminated ASCII serial, "_SCES_02380"
+     *
+     * Disc 1's serial is the right one to report: it is what the cover, the per-game settings key
+     * and the achievements identity all hang off, exactly as for a multi-disc .m3u.
+     */
+    private fun probePbp(rom: File): Probe? = runCatching {
+        java.io.RandomAccessFile(rom, "r").use { f ->
+            fun u32(at: Long): Long {
+                f.seek(at)
+                val b = ByteArray(4)
+                if (f.read(b) != 4) return -1
+                return (b[0].toLong() and 0xff) or ((b[1].toLong() and 0xff) shl 8) or
+                    ((b[2].toLong() and 0xff) shl 16) or ((b[3].toLong() and 0xff) shl 24)
+            }
+
+            val magic = ByteArray(4)
+            f.seek(0)
+            if (f.read(magic) != 4) return@runCatching null
+            if (!(magic[0].toInt() == 0 && magic[1].toInt().toChar() == 'P' &&
+                    magic[2].toInt().toChar() == 'B' && magic[3].toInt().toChar() == 'P')) {
+                return@runCatching null
+            }
+
+            val psar = u32(0x24)
+            if (psar <= 0) return@runCatching null
+
+            val psarMagic = ByteArray(16)
+            f.seek(psar)
+            if (f.read(psarMagic) != 16) return@runCatching null
+            val tag = String(psarMagic, Charsets.US_ASCII)
+
+            val disc = when {
+                tag.startsWith("PSISOIMG0000") -> psar
+                tag.startsWith("PSTITLEIMG") -> {
+                    val rel = u32(psar + 0x200)
+                    if (rel <= 0) return@runCatching null
+                    psar + rel
+                }
+                else -> return@runCatching null
+            }
+
+            val raw = ByteArray(15)
+            f.seek(disc + 0x400)
+            if (f.read(raw) != raw.size) return@runCatching null
+
+            // "_SCES_02380" -> "SCES-02380". Stop at the first NUL.
+            val text = String(raw, Charsets.US_ASCII).substringBefore('\u0000')
+            val serial = text.trim('_', ' ').replace('_', '-').replace('.', '-').trim()
+            val normalised = NORMALISE.find(serial)?.let { m ->
+                "${m.groupValues[1].uppercase(Locale.US)}-${m.groupValues[2]}${m.groupValues[3]}"
+            }
+            if (normalised.isNullOrBlank()) return@runCatching null
+
+            Probe(
+                normalised, "pbp",
+                "${rom.name}: PBP ${if (tag.startsWith("PSTITLEIMG")) "multi-disc" else "single-disc"}; " +
+                    "disc serial @+0x400 = $text -> $normalised",
+            )
+        }
+    }.getOrNull()
+
+    /** `SCES-02380` / `SCES02380` / `SCES-023.80` in any case -> the three capture groups. */
+    private val NORMALISE = Regex("""(?i)^([A-Za-z]{4})[-_.]?(\d{3})[-_.]?(\d{2})""")
+
     fun serialOf(rom: File): String? = probe(rom).serial
 
     /**
@@ -93,6 +165,14 @@ object Ps1DiscId {
      * serial and a [Probe.detail] saying what happened.
      */
     fun probe(rom: File): Probe {
+        // A PBP keeps the serial in clear ASCII at disc+0x400, so it needs no decompression and
+        // no ISO9660 walk — which is just as well, since the disc inside is deflate-compressed
+        // in 16-sector blocks and the generic reader below cannot see into it at all.
+        if (rom.extension.lowercase(Locale.US) == "pbp") {
+            probePbp(rom)?.let { return it }
+            return Probe(null, "", "${rom.name}: PBP container carried no readable disc serial")
+        }
+
         val candidates = runCatching { dataCandidates(rom) }.getOrDefault(emptyList())
         if (candidates.isEmpty()) {
             return Probe(

@@ -6,6 +6,7 @@
 #include "disc.h"
 #include "cue.h"
 #include "chd.h"
+#include "pbp.h"
 #include "../../log.h"
 #include "../../perf.h"
 
@@ -18,6 +19,7 @@ const char* disc_cd_extensions[] = {
 #ifdef USE_CHD
     "chd",
 #endif
+    "pbp",
     0
 };
 
@@ -184,6 +186,27 @@ int psx_disc_open_as(psx_disc_t* disc, const char* path, int type) {
             disc->get_track_count = raw_get_track_count;
             disc->get_track_lba = raw_get_track_lba;
             disc->destroy = raw_destroy;
+        } break;
+
+        case CD_EXT_PBP: {
+            pbp_t* pbp = pbp_create();
+
+            pbp_init(pbp);
+
+            if (pbp_load(pbp, path)) {
+                pbp_destroy(pbp);
+
+                return CDT_ERROR;
+            }
+
+            disc->udata = pbp;
+            disc->read_sector = (read_sector_func)pbp_read_sector;
+            disc->query_sector = (query_sector_func)pbp_query;
+            disc->get_track_number = (get_track_number_func)pbp_get_track_number;
+            disc->get_track_count = (get_track_count_func)pbp_get_track_count;
+            disc->get_track_lba = (get_track_lba_func)pbp_get_track_lba;
+            disc->read_subchannel_q = (read_subchannel_q_func)pbp_read_subchannel_q;
+            disc->destroy = (destroy_func)pbp_destroy;
         } break;
 
 #ifdef USE_CHD

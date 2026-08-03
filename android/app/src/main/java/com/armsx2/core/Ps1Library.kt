@@ -62,7 +62,7 @@ object Ps1Library {
      *  only knows extensions, and `.bin` is the same extension a BIOS uses. */
     private const val MIN_DISC_BYTES = 1L * 1024 * 1024
 
-    private val SIZED_EXTS = setOf("cue", "bin", "iso", "img", "chd", "zip")
+    private val SIZED_EXTS = setOf("cue", "bin", "iso", "img", "chd", "zip", "pbp")
 
     private fun looksLikeGame(file: File): Boolean {
         // Never surface our own app data (bios/, memcards/, savestates/, covers/) as games.

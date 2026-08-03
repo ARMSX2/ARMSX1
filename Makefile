@@ -965,10 +965,10 @@ $(TEST_SDL_BIN): tests/sdl_renderer_smoke.c
 test-sdl-runtime: $(TEST_SDL_BIN)
 	./$(TEST_SDL_BIN)
 
-$(DISC_PROBE_BIN): tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c $(CHD_BUILD_DEPS)
+$(DISC_PROBE_BIN): tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c $(CHD_BUILD_DEPS)
 	mkdir -p $(dir $@)
 	$(CC) -std=c11 -O2 -g -DUSE_CHD -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(LIBCHDR_INCLUDE_FLAGS) \
-		tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c \
+		tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c \
 		$(CHD_LINK_LIBS) -lm -o $@
 
 disc-probe: $(DISC_PROBE_BIN)
