@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -103,17 +104,37 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
                 ?.let(viewModel::selectCustomStorage)
         }
     }
+    /*
+        All-files access is not optional for the LIBRARY, only for the data root.
+
+        Ps1Library.scan() walks folders with java.io.File. On R+ a /storage path is only
+        genuinely listable with MANAGE_EXTERNAL_STORAGE (see romsAccessible(), which says
+        exactly this) — the ONE exception being an app-specific directory, which needs no
+        grant at all. Requesting the permission was wired solely to the "custom app folder"
+        button, so anyone who skipped that step got a POSIX scan that could read nothing but
+        app-specific dirs, i.e. an empty library no matter where their ROMs were. That is the
+        reported "games only show up if you use a custom app folder".
+
+        So the game-folder picker now goes through the same gate. Whatever the user was about
+        to do is held in `pendingAfterAllFiles` and resumed when they come back from the
+        system screen, instead of the old hard-coded "always continue into customFolderPicker".
+    */
+    var pendingAfterAllFiles by remember { mutableStateOf<(() -> Unit)?>(null) }
     val allFilesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
+        val granted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R ||
             android.os.Environment.isExternalStorageManager()
-        ) {
-            customFolderPicker.launch(null)
-        }
+        val resume = pendingAfterAllFiles
+        pendingAfterAllFiles = null
+        // Declining is a valid answer: carry on to the picker anyway rather than dead-ending.
+        // A SAF grant still lets the file land; only the POSIX library scan needs all-files.
+        resume?.invoke()
+        if (!granted) Unit
     }
-    val onCustomStorage: () -> Unit = {
+    val requireAllFiles: (() -> Unit) -> Unit = { action ->
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
             !android.os.Environment.isExternalStorageManager()
         ) {
+            pendingAfterAllFiles = action
             val manageIntent = android.content.Intent(
                 android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                 android.net.Uri.parse("package:${context.packageName}"),
@@ -123,12 +144,17 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
                     allFilesLauncher.launch(
                         android.content.Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
                     )
+                }.onFailure {
+                    // No system screen on this device — go straight to the picker.
+                    pendingAfterAllFiles = null
+                    action()
                 }
             }
         } else {
-            customFolderPicker.launch(null)
+            action()
         }
     }
+    val onCustomStorage: () -> Unit = { requireAllFiles { customFolderPicker.launch(null) } }
 
     LaunchedEffect(Unit) { viewModel.load() }
 
@@ -184,7 +210,7 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
                             PageViewport(compact = false) {
                                 WizardPage(page, state, viewModel, biosPicker = {
                                     biosPicker.launch(null)
-                                }, folderPicker = { folderPicker.launch(null) }, onCustomStorage = onCustomStorage)
+                                }, folderPicker = { requireAllFiles { folderPicker.launch(null) } }, onCustomStorage = onCustomStorage)
                             }
                         }
                         NavigationBar(
@@ -224,7 +250,7 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
                         PageViewport(compact = true) {
                             WizardPage(page, state, viewModel, biosPicker = {
                                 biosPicker.launch(null)
-                            }, folderPicker = { folderPicker.launch(null) }, onCustomStorage = onCustomStorage)
+                            }, folderPicker = { requireAllFiles { folderPicker.launch(null) } }, onCustomStorage = onCustomStorage)
                         }
                     }
                     NavigationBar(
