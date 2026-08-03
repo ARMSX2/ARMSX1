@@ -1,0 +1,75 @@
+ARMSX1 — Changelog
+==================
+
+0.1.0 — first public release
+----------------------------
+
+ARMSX1 is a PlayStation 1 emulator for Android, built on allkern's psxe core with a
+completely new Android frontend.
+
+Interface
+  * Brand-new interface built in Jetpack Compose — fast, modern, and made for phones
+    and handhelds rather than ported from a desktop menu.
+  * Library with grid and shelf views, automatic cover art, and folder support.
+  * Themes, accent colours and custom backgrounds.
+  * Guided first-run setup for BIOS and game folders.
+  * On-screen touch layout editor — move, resize and restyle every control.
+  * Memory card manager, and an in-app keyboard for text entry.
+  * Live language switching — change language without restarting.
+  * Detailed on-screen display: FPS, CPU/GPU load, frame timing, DMA, SPU and more.
+
+Graphics
+  * Hardware rasteriser with internal resolution upscaling up to 8x.
+  * OpenGL ES and Vulkan presentation paths. GLES is the default.
+  * PGXP (experimental) to reduce the PlayStation's characteristic polygon wobble.
+  * Aspect ratio options including a fully custom mode, plus a widescreen hack.
+  * Texture replacement — load your own upscaled textures.
+  * Fixed visible seams along polygon edges when upscaling.
+
+Custom GPU drivers
+  * Load custom Vulkan drivers (Turnip and friends) through adrenotools, for better
+    performance and compatibility on supported devices.
+
+Shaders
+  * librashader support — run RetroArch shader presets, including CRT filters.
+  * Full shader parameter editing with save and load of your own presets.
+
+RetroAchievements
+  * Sign in and earn achievements, with your profile, stats and unlock notifications
+    shown in game.
+
+Extras
+  * Save states with thumbnails, plus a warning when a save state and memory card
+    have drifted out of sync.
+  * Cheats (GameShark .cht), per game.
+  * Full physical controller support with remappable buttons and analogue sticks.
+  * Skip BIOS for faster boots.
+  * Fast-forward with its own audio and speed settings.
+  * Discord Rich Presence.
+
+Emulation accuracy
+  Many games were fixed by getting the hardware details right:
+  * Audio now runs on the correct clock — fixes missing or broken sound in Metal Gear
+    Solid, including the alert and sentry effects.
+  * Corrected the GPU's drawing-offset readback — fixes clipped and cut-off graphics
+    in Xenogears battles.
+  * Five CD-ROM fixes covering seeking, streaming audio and read timing.
+  * Fixed controller and memory card input dropping out on shared-bus reads
+    (Spyro and others).
+  * Corrected unaligned stores, GPU status and GPU register readbacks, video mode
+    reporting, DMA interrupt handling, and SPU register widths.
+  * Whole-program optimisation (PGO) for better performance across the board.
+
+Known issues
+  * The widescreen hack changes the 3D projection, so some games (notably Crash
+    Bandicoot) stop drawing scenery at the edges of the screen. Turn it off if you
+    see missing geometry at the left and right edges. It is off by default.
+
+Licence
+  ARMSX1 is now free and open source under the LGPL-3.0. See LICENSE and NOTICE.
+
+Credits
+  allkern (Lisandro Alarcon)  Original PlayStation 1 emulator core, psxe.
+                              https://github.com/allkern/psxe
+  Moonpower                   Cached interpreter and cross-platform compatibility.
+  jpolo1224                   Everything else.
