@@ -277,10 +277,11 @@ class GameLibraryRepository(private val context: Context) {
         val extension = name.substringAfterLast('.', "").lowercase()
         val (fileTitle, fileSerial) = FilenameParser.parse(name)
         // The disc's own boot line beats the filename: a renamed dump still boots the same disc,
-        // and psx-covers is keyed by the real serial. Null for .chd/.zip/.exe (Ps1DiscId can't
-        // read inside a compressed container) — those fall back to a serial in the filename, then
-        // to a dump-name lookup for the cover only (GameInfo.coverSerial), and failing that to a
-        // placeholder tile.
+        // and psx-covers is keyed by the real serial. A .chd answers too — Ps1DiscId hands the
+        // compressed container to the core's disc reader rather than giving up on it. What is
+        // still null is a .zip/.exe and an image whose filesystem is unreadable; those fall back
+        // to a serial in the filename, then to a dump-name lookup for the cover only
+        // (GameInfo.coverSerial), and failing that to a placeholder tile.
         val probe = runCatching { Ps1Covers.probeForPath(game.path) }.getOrNull()
         probe?.let { probeLog += describe(name, it) }
         val serial = probe?.serial ?: fileSerial

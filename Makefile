@@ -681,7 +681,7 @@ endif
 SDL_LIBS := $(if $(filter 1,$(SDL_STATIC)),$(SDL_LIBS_STATIC),$(SDL_LIBS_DYNAMIC))
 SDL_LIBS_SHARED := $(SDL_LIBS_DYNAMIC)
 
-.PHONY: all clean shared wasm psvita-lib test test-cpu test-cpu-spec test-gte test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime disc-probe
+.PHONY: all clean shared wasm psvita-lib test test-cpu test-cpu-spec test-gte test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime test-disc-serial disc-probe
 
 all: $(BIN)
 
@@ -712,6 +712,7 @@ TEST_GPU_BIN := build/tests/gpu_renderer_parity
 TEST_CHD_BIN := build/tests/chd_logic
 TEST_ZIP_BIN := build/tests/zip_integration
 TEST_SDL_BIN := build/tests/sdl_renderer_smoke
+TEST_DISC_SERIAL_BIN := build/tests/disc_serial
 DISC_PROBE_BIN := build/tests/disc_probe
 
 $(TEST_CPU_BIN): tests/cpu_differential.c $(TEST_CORE_SOURCES) | $(TEST_CORE_DEPS)
@@ -974,6 +975,25 @@ $(TEST_SDL_BIN): tests/sdl_renderer_smoke.c
 
 test-sdl-runtime: $(TEST_SDL_BIN)
 	./$(TEST_SDL_BIN)
+
+# Disc serial identification (psx/discid.c), which is what gives a .chd its cover art, its
+# per-game settings key and its achievements identity. Built with USE_CHD and the real disc
+# readers so `--image <path>` can identify an actual .chd end to end; the gate itself needs no
+# game image and no libchdr decode — see the header of tests/disc_serial.c.
+#
+# psx/discid.h is a PREREQUISITE, not a source: the buffer size and the API contract live there,
+# so a header-only change has to relink or the gate keeps passing against a stale binary.
+$(TEST_DISC_SERIAL_BIN): tests/disc_serial.c psx/discid.c psx/discid.h psx/perf.c \
+		psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c \
+		psx/dev/cdrom/pbp.c $(CHD_BUILD_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DUSE_CHD -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(LIBCHDR_INCLUDE_FLAGS) \
+		tests/disc_serial.c psx/discid.c psx/perf.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c \
+		psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c \
+		$(CHD_LINK_LIBS) -lm -o $@
+
+test-disc-serial: $(TEST_DISC_SERIAL_BIN)
+	./$(TEST_DISC_SERIAL_BIN) $(dir $(TEST_DISC_SERIAL_BIN))
 
 $(DISC_PROBE_BIN): tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c $(CHD_BUILD_DEPS)
 	mkdir -p $(dir $@)

@@ -187,13 +187,25 @@ class Ps1DiscIdTest {
         assertEquals("rawscan", probe.method)
     }
 
+    /**
+     * A `.chd` is handed to the core's disc reader — nothing in Kotlin can see inside a
+     * compressed container, and that is exactly why every CHD used to come back with no serial
+     * and no cover.
+     *
+     * On this JVM there IS no core: `System.loadLibrary("armsx")` cannot resolve on the build
+     * machine. So what this pins is the DEGRADATION — a probe that reaches the native reader and
+     * cannot use it must come back with a null serial and a trace saying so, never a guess and
+     * never a crash. The identification itself is gated host-side against real disc geometry in
+     * `tests/disc_serial.c` (`make test-disc-serial`), where the reader actually exists.
+     */
     @Test
-    fun compressedContainersAreSkippedWithAReason() {
+    fun compressedContainersGoToTheCoreAndDegradeCleanlyWithoutIt() {
         val chd = temp.newFile("game.chd")
         chd.writeBytes(ByteArray(1024))
         val probe = Ps1DiscId.probe(chd)
         assertNull(probe.serial)
         assertTrue(probe.detail, probe.detail.contains("no readable data track"))
+        assertTrue(probe.detail, probe.detail.contains("core disc reader"))
     }
 
     // ---- dump-name fallback (cover art only) -------------------------------------------------

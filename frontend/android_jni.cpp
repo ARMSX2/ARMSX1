@@ -71,6 +71,9 @@ extern "C" {
 #include "config.h"
 #include "../psx/pgxp.h"
 #include "../psx/state.h"
+/* Disc serial identification. The launcher reads SYSTEM.CNF in Kotlin for the containers Java
+   can seek around in; a .chd is the one it cannot, and this is the seam it comes through. */
+#include "../psx/discid.h"
 /* [cheats] — the GameShark engine. Read psx/cheats.h before touching the four natives at the
    bottom of this file: the format choice, the threading contract (this file is the UI thread;
    the emulation thread only ever adopts a published program) and the hardcore interlock are
@@ -2282,6 +2285,34 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getAchievementsHashForPath(JNIEnv* env, jcl
     EnsureAchievementsReady(env);
     const std::string path = JStringToUtf8(env, image_path);
     return Utf8ToJString(env, path.empty() ? std::string() : armsx_ach_hash_for_path(path.c_str()));
+}
+
+// The serial of a disc image that is NOT mounted — "SLUS-00594" — or "" when it carries none.
+//
+// This is what gives a .chd its cover art, its per-game settings key and its play-time record.
+// com.armsx2.core.Ps1DiscId reads SYSTEM.CNF itself for .bin/.cue/.iso/.pbp and only comes here
+// for containers Java cannot seek inside of, because CHD v5 Huffman-compresses its own hunk map:
+// there is no way to reach the filesystem without decompressing it, and a second decoder that is
+// slightly wrong would return a plausible WRONG serial rather than failing. psx/discid.c goes
+// through the same reader the emulated drive does, so whatever boots can be identified.
+//
+// Reads the disc (and decompresses, for a CHD): the Kotlin side calls it off the UI thread.
+// Never returns null — Ps1DiscId treats "" as "no serial" and falls back exactly as before.
+extern "C" JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getDiscSerialForPath(JNIEnv* env, jclass, jstring image_path) {
+    const std::string path = JStringToUtf8(env, image_path);
+
+    if (path.empty()) {
+        return Utf8ToJString(env, std::string());
+    }
+
+    char serial[PSX_DISCID_MAX] = {};
+
+    if (!psx_discid_from_path(path.c_str(), serial, sizeof(serial))) {
+        return Utf8ToJString(env, std::string());
+    }
+
+    return Utf8ToJString(env, std::string(serial));
 }
 
 extern "C" JNIEXPORT jstring JNICALL

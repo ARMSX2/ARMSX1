@@ -6,9 +6,14 @@ import java.util.Locale
  * Last-resort **cover-art only** serial lookup, by No-Intro / Redump dump name.
  *
  * [Ps1DiscId] reads the serial off the disc itself and that is the answer wherever it works. This
- * table exists so a disc it *cannot* read — a `.chd` or `.zip` (compressed, needs the native core
- * to open), an image whose filesystem is damaged, a homebrew-style disc whose boot executable is
- * named `PSX.EXE` — degrades to "cover art still works" instead of a blank tile.
+ * table exists so a disc it *cannot* read — a `.zip`, an image whose filesystem is damaged, a
+ * homebrew-style disc whose boot executable is named `PSX.EXE` — degrades to "cover art still
+ * works" instead of a blank tile.
+ *
+ * It is no longer the main answer for `.chd`. It used to be, and that was the bug: a CHD never
+ * yielded a serial, so covers came from this table — a couple of dozen curated USA titles — and
+ * every other CHD in a library got a placeholder. CHDs are now identified through the core's own
+ * disc reader, so this is back to being a genuine last resort.
  *
  * **Deliberately not fed into [com.armsx2.GameInfo.serial].** That field is the game's IDENTITY:
  * RetroAchievements hashes against it, per-game settings key off it, play time accrues under it.

@@ -311,8 +311,13 @@ data class GameInfo(
      * Separate from [serial] on purpose. [serial] is the game's identity: RetroAchievements hashes
      * against it, per-game settings and play time key off it, and a value guessed from a filename
      * has no business deciding any of those. Art is the one thing a guess can safely drive — the
-     * worst case is the wrong picture — so a disc the extractor cannot read (a .chd, a damaged
-     * image) degrades to "cover still works" rather than a blank tile.
+     * worst case is the wrong picture — so a disc that cannot be identified at all (a damaged
+     * image, a .zip) degrades to "cover still works" rather than a blank tile.
+     *
+     * A .chd used to land here for every single entry, and the dump-name table only covers a
+     * couple of dozen USA titles, so most CHD libraries got placeholder tiles. It is now read off
+     * the disc like any other container ([com.armsx2.core.Ps1DiscId]), so this is back to being
+     * the last resort it was meant to be.
      */
     val coverSerial: String? get() = serial?.takeIf { it.isNotBlank() }
         ?: com.armsx2.core.Ps1TitleSerials.coverSerialFor(title, uri.lastPathSegment)
@@ -482,9 +487,9 @@ fun regionFlagFor(region: String): String? = when (region) {
 }
 
 /**
- * Best-effort serial extractor — the FALLBACK for containers
- * [com.armsx2.core.Ps1DiscId] cannot read into (.chd/.zip/.exe). Recognized
- * dump conventions:
+ * Best-effort serial extractor — the FALLBACK for a disc that does not identify
+ * itself (a .zip, an .exe, a damaged image; a .chd now goes to the core's disc
+ * reader and normally answers for itself). Recognized dump conventions:
  *   "Game (USA) [SLUS-00594].bin"      → SLUS-00594
  *   "Game (USA) [SLUS_005.94].bin"     → SLUS-00594
  *   "SCUS_949.00 - Game.cue"           → SCUS-94900

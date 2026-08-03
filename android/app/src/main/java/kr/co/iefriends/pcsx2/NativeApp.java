@@ -1247,8 +1247,31 @@ public class NativeApp {
 	 * parses the BOOT2 line. Handles flat ISO/raw-sector images and CHDs;
 	 * CSO/ZSO/GZ still return null and the caller falls back to filename
 	 * parsing. fd is consumed (closed by native).
+	 *
+	 * ⚠ STILL A STUB on the PS1 port — it always answers "". The path-based
+	 * {@link #getDiscSerialForPath(String)} below is the real one; this
+	 * descriptor-based variant only exists for the `content://` launch path
+	 * (MainActivityRuntime.externalGameInfo), which therefore still falls back
+	 * to the filename stem for its per-game settings key.
 	 */
 	public static String getGameSerialFromFd(int fd) { return ""; }
+
+	/**
+	 * The disc serial an image reports about ITSELF — {@code "SLUS-00594"} — or {@code ""} when
+	 * it carries none. Never null.
+	 *
+	 * Implemented natively (psx/discid.c) against the same disc reader the emulated drive uses,
+	 * so every container the emulator can boot can also be identified: .cue/.bin/.iso/.pbp and,
+	 * the reason this exists, <b>.chd</b>. {@link com.armsx2.core.Ps1DiscId} reads SYSTEM.CNF in
+	 * Kotlin for the formats Java can seek inside of and only calls this for the ones it cannot —
+	 * CHD v5 Huffman-compresses its own hunk map, so reaching the filesystem means decompressing
+	 * it, and a second decoder that is slightly wrong would hand back a plausible WRONG serial
+	 * instead of failing. One decoder, one answer.
+	 *
+	 * [path] is an absolute POSIX path; a {@code content://} URI cannot be opened here. Blocking
+	 * IO (a CHD hunk is decompressed to reach the volume descriptor) — call it off the UI thread.
+	 */
+	public static native String getDiscSerialForPath(String path);
 
 	/**
 	 * PCSX2 game-database compatibility lookup. Returns the raw 0-6

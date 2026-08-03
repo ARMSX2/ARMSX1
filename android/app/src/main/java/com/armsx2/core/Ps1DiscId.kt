@@ -5,8 +5,7 @@ import java.io.RandomAccessFile
 import java.util.Locale
 
 /**
- * PS1 disc-serial extraction, entirely in Kotlin (no core/JNI needed — the launcher process
- * deliberately does not `System.loadLibrary` the 14 MB of SDL2 + libarmsx just to list games).
+ * PS1 disc-serial extraction.
  *
  * Every PS1 game disc carries a `SYSTEM.CNF` in the ISO9660 ROOT DIRECTORY with a line like
  * `BOOT = cdrom:\SLUS_005.94;1`, naming the boot executable — and that name IS the disc serial.
@@ -26,10 +25,25 @@ import java.util.Locale
  * costs a handful of 2 KB reads instead of 16 MB per game, and reports WHY it failed when it does.
  * The old byte scan is kept as a last-ditch fallback for images with no readable filesystem.
  *
- * Compressed containers (.chd/.zip) are still skipped (returns null → the cover falls back to
- * [Ps1TitleSerials]); decompressing them needs the native core.
+ * **Compressed containers go to the core.** A `.chd` cannot be read here at all: CHD v5 Huffman-
+ * compresses its own hunk map, so there is no reaching the filesystem without decompressing it,
+ * and every CHD in a library therefore used to come back with NO SERIAL — no cover, no per-game
+ * settings key, no play-time record, just a placeholder tile. Writing a second CHD decoder in
+ * Kotlin would have been the wrong fix twice over: a few hundred lines of bit-level decoding, and
+ * a decoder that is a bit wrong returns a plausible WRONG serial rather than failing, which
+ * silently attaches one game's art and settings to another. So the disc goes to the reader that
+ * already boots it — [kr.co.iefriends.pcsx2.NativeApp.getDiscSerialForPath], over psx/discid.c,
+ * through the same vtable the emulated drive reads through. One decoder, one answer.
  *
- * The serial is normalised to psx-covers' filename form: `SLUS_005.94` → `SLUS-00594`.
+ * That does mean identification can now touch native. It costs nothing: `Pasx2Application`'s
+ * warm-up thread already `System.loadLibrary`s SDL2 + libarmsx at process start (deliberately, to
+ * keep the dlopen off the UI thread), and `MainActivity.onCreate` calls `NativeApp.initializeOnce`
+ * regardless — so the library is up long before a game tile asks for its cover. Every call is
+ * guarded anyway: with no native binary the probe degrades to exactly what it did before.
+ *
+ * The serial is normalised to psx-covers' filename form: `SLUS_005.94` → `SLUS-00594`. The native
+ * reader normalises to the same shape, on purpose — the two are alternative routes to one
+ * identity, and a disagreement would split a game's settings in half.
  */
 object Ps1DiscId {
 
@@ -43,7 +57,7 @@ object Ps1DiscId {
      */
     data class Probe(
         val serial: String?,
-        /** "iso9660", "rawscan", "cache", or "" when nothing produced a serial. */
+        /** "iso9660", "rawscan", "pbp", "native", "cache", or "" when nothing produced a serial. */
         val method: String = "",
         val detail: String = "",
     )
@@ -170,13 +184,16 @@ object Ps1DiscId {
         // in 16-sector blocks and the generic reader below cannot see into it at all.
         if (rom.extension.lowercase(Locale.US) == "pbp") {
             probePbp(rom)?.let { return it }
-            return Probe(null, "", "${rom.name}: PBP container carried no readable disc serial")
+            return withNativeFallback(rom, "${rom.name}: PBP container carried no readable disc serial")
         }
 
         val candidates = runCatching { dataCandidates(rom) }.getOrDefault(emptyList())
         if (candidates.isEmpty()) {
-            return Probe(
-                null, "",
+            // .chd (and .zip): nothing here can see inside a compressed container. This is the
+            // common path for a CHD library, not an edge case — the native reader below is what
+            // identifies it.
+            return withNativeFallback(
+                rom,
                 "${rom.name}: no readable data track " +
                     "(compressed container, or the cue names a file that is not there)",
             )
@@ -186,7 +203,50 @@ object Ps1DiscId {
             val hit = probeFile(data, trace)
             if (hit != null) return Probe(hit.first, hit.second, trace.toString().trimEnd())
         }
-        return Probe(null, "", trace.toString().trimEnd())
+        // The Kotlin walk and its byte scan both came up empty. Before settling for a blank tile,
+        // ask the core's reader — it opens layouts this cannot (and this is free: a disc that
+        // identified above never reaches here).
+        return withNativeFallback(rom, trace.toString().trimEnd())
+    }
+
+    // ---- native reader (compressed containers, and last resort) ------------------------------
+
+    /**
+     * Hand [rom] to the core's own disc reader and take whatever it says, keeping [kotlinDetail]
+     * in the trace so `serial_probe.log` still records how the Kotlin attempt went.
+     *
+     * Never throws and never blocks on anything but the read. With no native binary loaded — the
+     * JVM unit tests, or a build whose `.so` failed to load — this degrades to the [Probe] the
+     * caller would have returned anyway, and says so rather than leaving "no cover" and no
+     * evidence.
+     */
+    private fun withNativeFallback(rom: File, kotlinDetail: String): Probe {
+        val detail = StringBuilder(kotlinDetail.trimEnd())
+        if (detail.isNotEmpty()) detail.append("; ")
+
+        val result = runCatching {
+            kr.co.iefriends.pcsx2.NativeApp.getDiscSerialForPath(rom.absolutePath)
+        }
+        val serial = result.getOrNull()?.trim()?.takeIf { it.isNotBlank() }
+
+        return when {
+            serial != null -> {
+                detail.append("core disc reader -> ").append(serial)
+                Probe(serial, "native", detail.toString())
+            }
+            result.isFailure -> {
+                // UnsatisfiedLinkError, i.e. no libarmsx in this process. Worth naming: it is the
+                // difference between "this disc has no serial" and "nothing ever looked".
+                detail.append("core disc reader unavailable (")
+                    .append(result.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")
+                    .append(')')
+                Probe(null, "", detail.toString())
+            }
+            else -> {
+                detail.append("core disc reader found no serial")
+                Probe(null, "", detail.toString())
+            }
+        }
     }
 
     // ---- data-track resolution ------------------------------------------------------------
