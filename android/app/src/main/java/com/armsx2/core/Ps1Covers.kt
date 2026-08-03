@@ -119,4 +119,81 @@ object Ps1Covers {
         }
         return null
     }
+
+    /* ---------------------------------------------------------------------------------------
+       Persistent, pre-fetched covers.
+
+       Coil already fetches a cover the moment a tile scrolls into view, and caches it — but that
+       is LAZY: nothing exists until the tile has been on screen, art never appears offline, and a
+       cache clear silently loses the lot. Downloading to `<DataRoot>/covers/<SERIAL>.jpg` makes
+       covers real files the user owns: visible in the data folder, survive a cache wipe, work
+       with no network, and can be hand-replaced.
+
+       `covers` is already in Ps1Library.BLOCKED_DIRS, so these never get scanned back in as games.
+       --------------------------------------------------------------------------------------- */
+
+    /** `<DataRoot>/covers`, created on demand. Null when no data root is configured yet. */
+    fun coversDir(): File? {
+        val root = com.armsx2.runtime.MainActivityRuntime.systemDirPosix() ?: return null
+        return File(root, "covers").apply { runCatching { mkdirs() } }
+    }
+
+    /** The downloaded cover for [serial], or null if it has not been fetched. */
+    fun downloadedCover(serial: String): File? =
+        coversDir()?.let { File(it, "${serial.uppercase(Locale.US)}.jpg") }?.takeIf { it.isFile && it.length() > 0 }
+
+    /**
+     * Fetch one cover into [coversDir]. Returns true if the file is present afterwards.
+     * Already-downloaded covers are a no-op, so this is safe to call repeatedly.
+     *
+     * **Blocking.** Call from an IO dispatcher.
+     */
+    fun downloadCover(serial: String): Boolean {
+        if (serial.isBlank()) return false
+        downloadedCover(serial)?.let { return true }
+        val dir = coversDir() ?: return false
+        val target = File(dir, "${serial.uppercase(Locale.US)}.jpg")
+        // Write to a temp name first: a half-written file that already has the final name would
+        // be treated as a valid cover forever after.
+        val temp = File(dir, ".${target.name}.part")
+        return runCatching {
+            val connection = (java.net.URL(coverUrl(serial)).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 15_000
+                instanceFollowRedirects = true
+            }
+            try {
+                if (connection.responseCode != 200) return false
+                connection.inputStream.use { input -> temp.outputStream().use(input::copyTo) }
+            } finally {
+                connection.disconnect()
+            }
+            if (temp.length() <= 0) {
+                temp.delete()
+                false
+            } else {
+                temp.renameTo(target) || run { temp.delete(); false }
+            }
+        }.getOrElse {
+            temp.delete()
+            false
+        }
+    }
+
+    /**
+     * Download every cover that is missing, one at a time. [serials] is deduplicated and blanks
+     * are dropped. [onProgress] fires after each attempt with (done, total) so a UI can show
+     * where it is. Returns how many covers were newly fetched.
+     *
+     * **Blocking.** Call from an IO dispatcher.
+     */
+    fun downloadMissing(serials: Collection<String>, onProgress: (Int, Int) -> Unit = { _, _ -> }): Int {
+        val wanted = serials.mapNotNull { it.takeIf(String::isNotBlank)?.uppercase(Locale.US) }.distinct()
+        var fetched = 0
+        wanted.forEachIndexed { index, serial ->
+            if (downloadedCover(serial) == null && downloadCover(serial)) fetched++
+            onProgress(index + 1, wanted.size)
+        }
+        return fetched
+    }
 }

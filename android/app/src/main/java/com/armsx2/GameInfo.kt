@@ -289,6 +289,12 @@ data class GameInfo(
     val coverUrl: String? get() {
         localCoverPath()?.let { return Uri.fromFile(File(it)).toString() }
         val s = coverSerial ?: return null
+        // A cover pre-fetched into <DataRoot>/covers beats the network: it renders instantly,
+        // works offline, and survives a cache clear. Only 2D art is stored this way, so the 3D
+        // style still goes to the network for its own URL.
+        if (!CoverArtStyle.use3d.value) {
+            com.armsx2.core.Ps1Covers.downloadedCover(s)?.let { return Uri.fromFile(it).toString() }
+        }
         // 3D cases live under covers/3d/*.png; flat 2D scans under
         // covers/default/*.jpg. Coil decodes by content, so the extension
         // mismatch on the cached file is fine.

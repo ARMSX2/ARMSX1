@@ -701,6 +701,44 @@ private fun BackupRestoreRows() {
     BackupActionRow("💾", "app.backup.export", "app.backup.export.desc", status, busy, doExport)
     BackupActionRow("📥", "app.backup.import", "app.backup.import.desc", "", busy, doImport)
 
+    /*
+        Fetch every missing cover up front, into <DataRoot>/covers.
+
+        Coil already pulls a cover when a tile scrolls into view, but that is lazy and lives in a
+        cache: art does not exist until you have looked at the game, never appears offline, and
+        vanishes on a cache clear. This walks the whole library once and writes real files, so the
+        grid is populated before it is scrolled and stays populated afterwards.
+    */
+    var coverStatus by remember { mutableStateOf("") }
+    val doCovers = {
+        if (!busy) {
+            busy = true
+            coverStatus = ""
+            scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    val games = runCatching { com.armsx2.core.Ps1Library.scan(context) }.getOrDefault(emptyList())
+                    val serials = games.mapNotNull { g ->
+                        runCatching { com.armsx2.core.Ps1Covers.serialForPath(g.path) }.getOrNull()
+                    }
+                    if (serials.isEmpty()) return@withContext -1
+                    com.armsx2.core.Ps1Covers.downloadMissing(serials) { done, total ->
+                        coverStatus = "$done / $total"
+                    }
+                }
+                coverStatus = when {
+                    // No serial anywhere usually means the library itself is empty — which on
+                    // Android 11+ is the all-files-access case, not a cover problem.
+                    result < 0 -> I18n.get("app.covers.none")
+                    result == 0 -> I18n.get("app.covers.upToDate")
+                    else -> I18n.get("app.covers.done").replace("%d", result.toString())
+                }
+                busy = false
+                com.armsx2.core.Ps1Library.rescan.intValue++
+            }
+        }
+    }
+    BackupActionRow("🖼️", "app.covers", "app.covers.desc", coverStatus, busy, doCovers)
+
     // Factory reset. Sits with Backup/Restore because Export is the thing to do first — the
     // prompt says so. Routed through GlobalConfirm rather than a local overlay: this row is
     // inside a scrolling tab, so a scrim drawn here would clip to the row's bounds.
