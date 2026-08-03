@@ -45,13 +45,22 @@ enum class ThemeMode { System, MaterialYou, Rgb, Custom, Light, Blue, Purple, Pi
 object ThemePreferences {
     private const val PreferenceKey = "ui.theme.mode"
 
+    /** First-run default. Material You (wallpaper-derived colour) wherever the platform has
+     *  it, which is Android 12+; below that the API does not exist and System is the closest
+     *  equivalent. `System` only follows light/dark — its palette is Material 3's BASELINE,
+     *  which is blue — so defaulting to it made every fresh install look blue regardless of
+     *  the user's wallpaper. */
+    private val firstRunDefault: ThemeMode
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) ThemeMode.MaterialYou
+                else ThemeMode.System
+
     val mode = mutableStateOf(ThemeMode.System)
 
     fun load() {
         // Name-matched rather than hand-enumerated, so adding a colour needs no change here.
         // Anything unrecognised — including the legacy "Dark" — resolves to Blue, which is
         // exactly what "Dark" used to render as.
-        val stored = MainActivityRuntime.prefs.getString(PreferenceKey, ThemeMode.System.name)
+        val stored = MainActivityRuntime.prefs.getString(PreferenceKey, firstRunDefault.name)
         mode.value = ThemeMode.entries.firstOrNull { it.name == stored } ?: ThemeMode.Blue
         loadCustomColor()
         loadOledBase()
