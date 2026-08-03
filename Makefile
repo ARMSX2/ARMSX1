@@ -681,7 +681,7 @@ endif
 SDL_LIBS := $(if $(filter 1,$(SDL_STATIC)),$(SDL_LIBS_STATIC),$(SDL_LIBS_DYNAMIC))
 SDL_LIBS_SHARED := $(SDL_LIBS_DYNAMIC)
 
-.PHONY: all clean shared wasm psvita-lib test test-cpu test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime disc-probe
+.PHONY: all clean shared wasm psvita-lib test test-cpu test-gte test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime disc-probe
 
 all: $(BIN)
 
@@ -710,6 +710,36 @@ $(TEST_CPU_BIN): tests/cpu_differential.c $(TEST_CORE_SOURCES)
 
 test-cpu: $(TEST_CPU_BIN)
 	./$(TEST_CPU_BIN)
+
+# GTE against psx-spx, independently recomputed (tests/gte_matrix.c).
+#
+# Separate from cpu_differential on purpose, for the same reason gpu_texrep_parity is
+# separate from test-gpu: every case above is DIFFERENTIAL (interpreter vs cached
+# interpreter -- both this project's code, written from one understanding), which is
+# structurally blind to a shared wrong rule. The GTE had NO gate of either kind. This one
+# recomputes the UNR divide (table rebuilt from the documented formula, swept over the
+# full 2^32 numerator x divisor space), RTPS/RTPT (per-step 44-bit sign-expansion, IR/SXY
+# saturation and FLAG bits, both FIFOs, the sf=0 IR3 quirk, the DQA/DQB depth queue),
+# NCLIP, AVSZ3/AVSZ4, MVMVA (including the documented CV=FC bug path) and the COP2
+# register-file access semantics from the psx-spx pseudocode INSIDE the test, then drives
+# the real emulator and compares full COP2 state. The three dispatch paths (interpreter
+# switch, decode-cache handler, fetched psx_cpu_cycle in both modes) are cross-checked so
+# a slip in any one of the duplicated GTE latch decoders is visible.
+#
+# psx/cpu.c is #include'd BY the test (unity-style) so the gate can reach the static
+# internals (gte_divide, gte_write_register, psx_cpu_decode) directly -- the exhaustive
+# divide sweep alone is ~4.3e9 calls, only affordable in-TU. It is therefore filtered OUT
+# of the linked core sources; listing it as a prerequisite keeps the mutation-test loop
+# honest (edit cpu.c -> relink -> gate must go red).
+TEST_GTE_BIN := build/tests/gte_matrix
+TEST_GTE_CORE_SOURCES := $(filter-out psx/cpu.c,$(TEST_CORE_SOURCES))
+
+$(TEST_GTE_BIN): tests/gte_matrix.c psx/cpu.c psx/cpu.h $(TEST_GTE_CORE_SOURCES)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx tests/gte_matrix.c $(TEST_GTE_CORE_SOURCES) -lm -lpthread -o $@
+
+test-gte: $(TEST_GTE_BIN)
+	./$(TEST_GTE_BIN)
 
 # Cheat engine (psx/cheats.c): the .cht parser, name-based arming, every implemented
 # GameShark code type, and the RetroAchievements hardcore interlock. Links the whole core

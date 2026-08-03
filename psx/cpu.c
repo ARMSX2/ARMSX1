@@ -1554,7 +1554,12 @@ uint32_t gte_read_register(psx_cpu_t* cpu, uint32_t r) {
         case 26: return cpu->cop2_dr.mac[2];
         case 27: return cpu->cop2_dr.mac[3];
         case 28: gte_handle_irgb_read(cpu); return cpu->cop2_dr.irgb;
-        case 29: return cpu->cop2_dr.irgb; // IRGB mirror
+        /* ORGB is a read-only MIRROR of the IRGB conversion — psx-spx: reading it performs the
+           IR1-3 -> 5:5:5 conversion, same as reading IRGB. Returning the stored word handed
+           back whatever was last WRITTEN to IRGB (or last read through reg 28), i.e. a stale
+           value whenever IR1-3 changed in between — a readback lying about live state, the
+           same defect class as the GPUINFO(5) echo. Gate: gte-regfile in tests/gte_matrix.c. */
+        case 29: gte_handle_irgb_read(cpu); return cpu->cop2_dr.irgb;
         case 30: return cpu->cop2_dr.lzcs;
         case 31: return cpu->cop2_dr.lzcr;
         case 32: return cpu->cop2_cr.rt.m[0].u32;

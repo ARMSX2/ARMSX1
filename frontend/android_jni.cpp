@@ -1512,12 +1512,32 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring pa
         argv.push_back("--bios");
         argv.push_back(bios_path.c_str());
     }
-    if (!game_path.empty()) {
-        argv.push_back(game_path.c_str());
-    }
+    /*
+        No game path means "Boot BIOS" from the library drawer (MainActivityRuntime.startBios
+        passes ""). That needs an EXPLICIT launch argument, not merely the absence of one:
+        `--bios <file>` only selects WHICH BIOS image to use, and with no positional argument
+        the core parses zero launch requests, falls through to "nothing to boot" and shows its
+        landing/game-list window — which on Android does not exist, because the JNI front end
+        replaced FSUI. The result was a session that initialised a renderer (phase=frontend-init
+        in armsx.log), emulated nothing, and returned 0 whenever the user backed out. Clicking
+        Boot BIOS looked like it did nothing because it did nothing.
+
+        There is no CLI flag for it — the launch URI is the only way in. It must use the
+        core's own scheme: LaunchForArgument() only routes to LaunchForUri() when the argument
+        starts with "armsx:", and LaunchForUri() accepts exactly "armsx:" or "web+armsx:" and
+        returns an empty request for anything else. `?kind=bios` is checked before any path
+        decoding, so it is the most direct spelling.
+
+        NOT `bios://boot`: that is what the core PRINTS for a BIOS session (a display path),
+        never something it parses. Passing it yields kind=none and "Invalid launch request."
+    */
+    static const char* const kBiosLaunchUri = "armsx:?kind=bios";
+
+    argv.push_back(game_path.empty() ? kBiosLaunchUri : game_path.c_str());
     argv.push_back(nullptr);
 
-    ARMSX_LOGI("runVMThread: booting %s", game_path.empty() ? "(no game)" : game_path.c_str());
+    ARMSX_LOGI("runVMThread: booting %s", game_path.empty() ? "BIOS (bios://boot)"
+                                                            : game_path.c_str());
     const int result = external_main_ex(static_cast<int>(argv.size()) - 1, argv.data(),
                                         g_sdl_window, g_sdl_renderer);
     ARMSX_LOGI("runVMThread: core returned %d", result);
