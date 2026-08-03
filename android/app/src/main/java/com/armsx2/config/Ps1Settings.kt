@@ -16,8 +16,12 @@ data class Ps1Settings(
     val cpuEngine: String = CPU_CACHED,          // cached | interpreter
     // Skip BIOS. Boots the game's executable directly at the BIOS shell entry, skipping the
     // startup animation. The [cpu] table owns it because it is the CPU's entry state that gets
-    // rewritten. Default true — the animation is not something anyone asks to sit through.
-    val fastBoot: Boolean = true,
+    // rewritten. Default FALSE: it is a shortcut, not a free speed-up — whatever the BIOS would
+    // have set up before handing over simply is not there, so the faithful boot is the right
+    // default and skipping it is the opt-in. MUST match config.c's template and
+    // psx/fastboot.c's g_fastboot_enabled; a disagreement here is how the switch stops matching
+    // what the core actually does.
+    val fastBoot: Boolean = false,
     // PGXP: full-precision GTE vertices + perspective-correct texturing in the hardware
     // rasteriser. Fixes the PS1's wobbling polygons / swimming textures. Default OFF — it
     // deliberately changes geometry, so the 1x parity gate only means anything with this off.

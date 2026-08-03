@@ -68,7 +68,7 @@ static const char g_default_settings[] =
     "# CPU settings\n"
     "[cpu]\n"
     "    execution_mode  = \"cached\" # cached | interpreter\n"
-    "    fast_boot       = true     # skip the BIOS startup animation and boot the game\n"
+    "    fast_boot       = false    # skip the BIOS startup animation and boot the game\n"
     "    overclock       = 100      # 10..1000 %; >100 lifts games that dip. Can upset timing\n"
     "\n"
     "# Runtime settings\n"

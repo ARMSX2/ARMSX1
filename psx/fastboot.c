@@ -35,13 +35,14 @@
 /* Root directory record, from the start of the PVD's user data. */
 #define FB_PVD_ROOT_DR      156
 
-/* Default ON, matching the documented default in the settings.toml template and the launcher's
-   own default. This must NOT be 0: an existing settings.toml written before the key existed has
-   no [cpu] fast_boot line at all, so config.c never calls the setter and whatever sits here is
-   what every upgrading install gets. Defaulting off would silently disable the feature for
-   exactly the people who already had the (previously inert) switch showing "on". */
-static int g_fastboot_enabled = 1;
-static int g_fastboot_armed = 1;
+/* Default OFF, matching the settings.toml template and Ps1Settings.fastBoot. All three must
+   agree: an existing settings.toml written before the key existed has no [cpu] fast_boot line,
+   so config.c never calls the setter and whatever sits here is what that install gets.
+   Skipping the BIOS is a shortcut, not a neutral speed-up — it boots the executable directly
+   at the shell entry, so anything the BIOS would have set up first is simply not there. That is
+   the wrong thing to hand someone by default; the authentic boot is. */
+static int g_fastboot_enabled = 0;
+static int g_fastboot_armed = 0;
 
 void psx_fastboot_set_enabled(int enabled) {
     g_fastboot_enabled = enabled ? 1 : 0;
