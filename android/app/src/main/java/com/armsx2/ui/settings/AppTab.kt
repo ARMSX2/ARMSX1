@@ -716,10 +716,16 @@ private fun BackupRestoreRows() {
             coverStatus = ""
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    val games = runCatching { com.armsx2.core.Ps1Library.scan(context) }.getOrDefault(emptyList())
-                    val serials = games.mapNotNull { g ->
-                        runCatching { com.armsx2.core.Ps1Covers.serialForPath(g.path) }.getOrNull()
+                    // The library rows, not a raw re-walk: their serials come from the disc for
+                    // POSIX and SAF alike (descriptor-lease probe), and coverSerial adds the same
+                    // filename fallbacks the grid itself renders with — so this fetches exactly
+                    // the covers the shelves will ask for.
+                    val repo = com.armsx2.data.library.GameLibraryRepository(context)
+                    val games = repo.loadCached().games.ifEmpty {
+                        runCatching { repo.scan(com.armsx2.runtime.MainActivityRuntime.romsDirs.value) }
+                            .getOrDefault(emptyList())
                     }
+                    val serials = games.mapNotNull { it.coverSerial }
                     if (serials.isEmpty()) return@withContext -1
                     com.armsx2.core.Ps1Covers.downloadMissing(serials) { done, total ->
                         coverStatus = "$done / $total"

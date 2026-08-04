@@ -99,6 +99,10 @@ object Ps1Covers {
         probeCache[romPath] = Ps1DiscId.Probe(serial, "cache", "seeded from the previous scan")
     }
 
+    /** The memoised probe for [key] ([prime]d or already probed this process), or null. No I/O.
+     *  SAF documents key the memo by their content URI string, since they have no POSIX path. */
+    fun cachedProbe(key: String): Ps1DiscId.Probe? = probeCache[key]
+
     /**
      * Absolute path of a user-supplied cover sitting next to the ROM (`<name>.jpg/png/webp`), or
      * null. Memoised so the cover getter — which runs during composition — costs at most one stat
