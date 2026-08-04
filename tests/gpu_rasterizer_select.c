@@ -13,7 +13,7 @@
     GL_EXT_shader_framebuffer_fetch with a trusted driver. The user's Adreno 740 reports
     exactly that, so the GLES rasterizer began serving a session with
     accurate_mask_bit = true — a path no confirmed fix had ever been validated against
-    (§0.5.12's mask-from-texel, §0.5.15's modulation truncation and §0.5.13's oversize cull
+    ( mask-from-texel,  modulation truncation and  oversize cull
     all live in the CPU rasterizer). The PS1 BIOS stopped being able to draw its own text,
     and all four gates stayed green through the whole thing, because output parity cannot
     see a selection change.
@@ -72,8 +72,8 @@ int main(void) {
     /* ---- 3. THE OPT-IN IS NOT A BYPASS ------------------------------------------------
        Opting in must not defeat the capability checks underneath it. Framebuffer fetch is
        the only GLES mechanism that gives a fragment shader the destination the mask CHECK
-       reads; without a trustworthy one the check silently does nothing, which is precisely
-       the §0.5.12 failure. MediaTek Mali advertises the extension and returns stale
+       reads; without a trustworthy one the check silently does nothing. MediaTek Mali
+       advertises the extension and returns stale
        destination colour, and ANGLE has been seen to crash the compiler on it. */
     check("optin-without-fbfetch-still-declines",
           armsx_hw_gl_mask_bit_supported(0, 1, 0, 1), 0);
@@ -139,6 +139,22 @@ int main(void) {
     check("env-empty-is-not-opted-in", armsx_hw_gl_mask_bit_opt_in(), 0);
 
     unsetenv("ARMSX_GL_MASK_BIT");
+
+    /* ---- 6. FALLBACK COST -------------------------------------------------------------
+       Auto hardware at 1x must not substitute the slow internal-resolution CPU backend
+       when GLES declines: it adds no resolution there and is the measured 60-70% path on
+       mobile. Higher scales still need it as the portable upscale fallback, while each
+       explicit backend token remains exact. */
+    check("auto-1x-falls-back-to-original-software",
+          armsx_hw_gl_use_cpu_fallback(1, 1), 0);
+    check("auto-2x-keeps-portable-upscale-fallback",
+          armsx_hw_gl_use_cpu_fallback(1, 2), 1);
+    check("explicit-cpu-1x-is-honoured",
+          armsx_hw_gl_use_cpu_fallback(2, 1), 1);
+    check("explicit-gl-never-substitutes-cpu",
+          armsx_hw_gl_use_cpu_fallback(3, 8), 0);
+    check("software-mode-never-substitutes-cpu",
+          armsx_hw_gl_use_cpu_fallback(0, 8), 0);
 
     if (g_failed)
         return 1;

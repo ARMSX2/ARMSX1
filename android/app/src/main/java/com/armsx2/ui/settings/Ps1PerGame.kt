@@ -81,9 +81,8 @@ internal val LocalPs1SettingsScope = compositionLocalOf<Ps1SettingsScope?> { nul
 /**
  * Provide the scope for one PS1 tab and render the honest header above it.
  *
- * Kept here rather than inside each tab so the three settings tabs other agents are actively adding
- * rows to need no edit at all to participate — a new row is overridable, resettable and listed the
- * moment it writes through the editor.
+ * Kept here rather than inside each tab so all settings rows share the same override, reset and
+ * listing behavior as soon as they write through the editor.
  */
 @Composable
 internal fun Ps1Scoped(

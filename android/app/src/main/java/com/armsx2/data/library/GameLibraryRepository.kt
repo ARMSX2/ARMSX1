@@ -12,7 +12,6 @@ import com.armsx2.core.Ps1DiscId
 import com.armsx2.core.Ps1Folders
 import com.armsx2.core.Ps1Game
 import com.armsx2.core.Ps1Library
-import com.armsx2.core.Ps1Storage
 import com.armsx2.runtime.MainActivityRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,24 +27,20 @@ import java.util.Locale
 /**
  * The library, backed by the PS1 core.
  *
- * This used to walk SAF document trees and ask PCSX2's GameDB (over JNI) for each disc's serial,
- * title, region and compatibility. None of that survives the PS1 port: there is no PCSX2 core to
- * ask (`NativeApp` is a shim whose native methods return null/0), and the ARMSX core boots games by
- * **absolute filesystem path** — it cannot open a `content://` document. So the whole scan now runs
- * through the PS1 helpers:
+ * SAF trees remain SAF trees on Android 11+: converting a persisted tree grant to `/storage/...`
+ * loses the grant at the POSIX boundary and produces an empty library under scoped storage. The
+ * scanner therefore enumerates DocumentsProvider directly; launch preparation later exposes the
+ * selected seekable document to the unchanged native core through a private descriptor symlink.
  *
  * ```
- *   MainActivityRuntime.romsDirs      (front-end's folders — SAF tree URIs and/or POSIX paths)
- *        └─ posixRoots()              resolve every entry down to /storage/…
- *             └─ Ps1Folders.syncFromLibrary()  persist + mirror into settings.toml [library].folders
- *                  └─ Ps1Library.scan()          walk for bootable PS1 files
- *                       └─ Ps1DiscId / Ps1Covers  serial from the disc's `cdrom:\SLUS_005.94`
- *                            └─ GameInfo(platform = PS1, uri = file://…)
+ *   MainActivityRuntime.romsDirs (persisted SAF trees and/or readable POSIX paths)
+ *        └─ Ps1Library.scan()     DocumentsProvider + java.io.File discovery
+ *             └─ GameInfo        content:// identity stays intact through cache and launch
  * ```
  *
- * The public API is byte-for-byte what the home screen and its view model already call — only the
- * source of the rows changed. Every [GameInfo.uri] is a `file://` URI, so `HomeViewModel.launch`'s
- * existing `uri.path` unwrap hands the core the absolute path it needs.
+ * POSIX games can still be identified immediately from their disc. SAF games use their filename
+ * identity until launch because probing the native disc reader requires the same descriptor lease
+ * as play; the running core supplies the definitive serial once booted.
  */
 class GameLibraryRepository(private val context: Context) {
 
@@ -54,10 +49,16 @@ class GameLibraryRepository(private val context: Context) {
     private val exportScope = CoroutineScope(Dispatchers.IO)
     private val exportLock = Any()
 
-    /** Identity of a scan, so a warm start can tell whether the cached list still applies.
-     *  Keyed on the RESOLVED roots, not the raw entries: the same folder reached as a tree URI
-     *  and as a POSIX path is one folder, and re-picking it must not force a full rescan. */
-    fun cacheKey(directories: List<String>): String = posixRoots(directories).joinToString("|")
+    /** Identity of a scan. SAF identity must remain the granted URI, not a guessed POSIX path. */
+    fun cacheKey(directories: List<String>): String = directories.asSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .map { raw ->
+            if (raw.startsWith("file:")) runCatching { raw.toUri().path }.getOrNull() ?: raw else raw
+        }
+        .distinct()
+        .sorted()
+        .joinToString("|")
 
     fun loadCached(): CachedLibrary {
         val cachedKey = MainActivityRuntime.prefs.getString("gamesCacheKey", null)
@@ -94,8 +95,8 @@ class GameLibraryRepository(private val context: Context) {
 
     suspend fun scan(directories: List<String>): List<GameInfo> = withContext(Dispatchers.IO) {
         val roots = posixRoots(directories)
-        // Push the resolved roots down to the PS1 side: Ps1Library scans them, and Ps1Folders
-        // mirrors them into settings.toml so the native core's own library agrees with ours.
+        // Mirror only genuine POSIX roots into settings.toml. SAF tree identity must stay as a
+        // content URI; the Compose scanner and per-session descriptor lease own those entries.
         runCatching { Ps1Folders.syncFromLibrary(roots) }
         // Serials are read out of the disc image itself (up to 16 MB per game). Re-seed the memo
         // from the previous scan so only genuinely new files pay that cost.
@@ -105,8 +106,9 @@ class GameLibraryRepository(private val context: Context) {
 
         val collected = linkedMapOf<String, GameInfo>()
         val probeLog = ArrayList<String>()
-        Ps1Library.scan(context).forEach { game ->
-            val uri = Uri.fromFile(File(game.path))
+        Ps1Library.scan(context, directories).forEach { game ->
+            val uri = if (game.path.startsWith("content:")) Uri.parse(game.path)
+                else Uri.fromFile(File(game.path))
             if (collected.containsKey(uri.toString())) return@forEach
             collected[uri.toString()] = createGame(uri, game, probeLog)
         }
@@ -250,16 +252,15 @@ class GameLibraryRepository(private val context: Context) {
     }
 
     /**
-     * Resolve whatever the front-end stored as a ROM folder — a SAF tree URI, a `file://` URI, or
-     * an already-absolute path — to the `/storage/…` path the PS1 core can open. Entries that
-     * can't be resolved are dropped rather than passed through, so we never hand the core a
-     * `content://` string it would fail to fopen.
+     * POSIX folders mirrored to settings.toml. SAF roots intentionally stay out of this list:
+     * the Compose library owns their persisted grants and the native library scanner cannot use
+     * a content URI without a per-session descriptor lease.
      */
     private fun posixRoots(directories: List<String>): List<String> = directories
         .mapNotNull { raw ->
             when {
                 raw.isBlank() -> null
-                raw.startsWith("content:") -> Ps1Storage.resolveTreeUriToPosix(raw)
+                raw.startsWith("content:") -> null
                 raw.startsWith("file:") -> runCatching { raw.toUri().path }.getOrNull()
                 else -> raw
             }
@@ -268,12 +269,12 @@ class GameLibraryRepository(private val context: Context) {
         .distinct()
         .sorted()
 
-    /** The absolute path behind a library URI (always `file://` since the PS1 rewrite). */
+    /** The absolute path behind a POSIX library URI; SAF documents deliberately return null. */
     private fun pathOf(uri: Uri): String? =
         if (uri.scheme == null || uri.scheme == "file") uri.path?.takeIf { it.isNotBlank() } else null
 
     private fun createGame(uri: Uri, game: Ps1Game, probeLog: MutableList<String>): GameInfo {
-        val name = File(game.path).name
+        val name = game.name
         val extension = name.substringAfterLast('.', "").lowercase()
         val (fileTitle, fileSerial) = FilenameParser.parse(name)
         // The disc's own boot line beats the filename: a renamed dump still boots the same disc,
@@ -282,12 +283,13 @@ class GameLibraryRepository(private val context: Context) {
         // still null is a .zip/.exe and an image whose filesystem is unreadable; those fall back
         // to a serial in the filename, then to a dump-name lookup for the cover only
         // (GameInfo.coverSerial), and failing that to a placeholder tile.
-        val probe = runCatching { Ps1Covers.probeForPath(game.path) }.getOrNull()
+        val posixPath = pathOf(uri)
+        val probe = posixPath?.let { runCatching { Ps1Covers.probeForPath(it) }.getOrNull() }
         probe?.let { probeLog += describe(name, it) }
         val serial = probe?.serial ?: fileSerial
         // Warm the sibling-cover probe here, on IO, so GameInfo.coverUrl is a pure map lookup
         // by the time the grid composes it.
-        runCatching { Ps1Covers.siblingCoverPath(game.path) }
+        posixPath?.let { runCatching { Ps1Covers.siblingCoverPath(it) } }
         return GameInfo(
             uri = uri,
             // FilenameParser strips dump cruft ("(USA) [!]"); Ps1Game.title is the raw stem and

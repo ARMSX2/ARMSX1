@@ -6,7 +6,7 @@
 
     This is the seam between psx/dev/gpu.c (the emulated GPU: command parsing, VRAM,
     CRTC timing) and whatever actually turns primitives into pixels. See
-    frontend/HW_RENDERER_DESIGN.md — the hook sites below are §5.2's table.
+    the backend — the hook sites below are's table.
 
     Layering contract
     -----------------
@@ -20,7 +20,7 @@
         draw_poly leaves the rest NULL and the core keeps doing those itself.
       * All coordinates crossing this boundary are NATIVE PlayStation VRAM coordinates
         (0..1023 x 0..511). The backend owns the internal-resolution scale and applies it
-        internally; the core never learns that upscaling exists. HW_RENDERER_DESIGN.md §3.1.
+        internally; the core never learns that upscaling exists. the backend.
 */
 
 #include <stdint.h>
@@ -38,10 +38,8 @@ struct rect_data_t;
     keeps working for texture fetches, GPUREAD drains (GP0(C0)) and the whole-VRAM debug
     view with no readback and no dirty-region tracking at all.
 
-    This is HW_RENDERER_DESIGN.md §4.6 option 3 ("render everything twice"), chosen
-    deliberately for the first stage: it costs CPU but it makes Stage 5's coherency work
-    (§4, the highest-variance part of the port) unnecessary to ship something correct.
-    A GPU backend that owns VRAM itself leaves this clear and implements §4 instead.
+    This "render everything twice" mode costs CPU but keeps the native VRAM authoritative.
+    A GPU backend that owns VRAM itself leaves this flag clear and implements coherency.
 
     Ordering note: when this is set the core calls the BACKEND FIRST and the software
     rasterizer second, so both sample exactly the same pre-write VRAM state for textures.
@@ -101,7 +99,7 @@ typedef struct psx_gpu_backend {
     /* GPU_EVENT_VBLANK (gpu.c:2152) — the only frame boundary this core exposes. */
     void (*end_frame)(struct psx_gpu_backend* be, struct psx_gpu_t* gpu);
 
-    /* ---- scanout (HW_RENDERER_DESIGN.md §4.4) ----
+    /* ---- scanout (the backend) ----
        Returns the upscaled render target, or NULL when the backend has nothing to
        present and the core should fall back to gpu->vram. `disp_x`/`disp_y` are the
        native scanout origin (gpu.c:2202); the returned pointer is already offset to it.

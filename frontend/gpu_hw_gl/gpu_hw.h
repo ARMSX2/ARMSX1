@@ -2,10 +2,10 @@
     ARMSX — hardware rasterizer backend ABI (DRAFT / INERT).
 
     This header is a DESIGN ARTIFACT. It is not referenced by the Makefile, not included
-    by anything, and no implementation exists. See frontend/HW_RENDERER_DESIGN.md.
+    by anything, and no implementation exists. See the backend.
 
     Note the basename collision with the existing frontend/gpu_hw.h — that file is the
-    vestigial SDL presentation shim (see HW_RENDERER_DESIGN.md §5.5) and is unrelated.
+    vestigial SDL presentation shim (see the backend) and is unrelated.
     This one uses a distinct include guard on purpose.
 
     Layering contract
@@ -17,7 +17,7 @@
         "use the software rasterizer", which must remain bit-identical to today.
       * All coordinates crossing this boundary are NATIVE PlayStation VRAM coordinates.
         The backend owns the resolution scale and applies it internally. The core never
-        learns that upscaling exists. (HW_RENDERER_DESIGN.md §3.1)
+        learns that upscaling exists. (the backend)
 */
 
 #ifndef ARMSX_GPU_HW_GL_H
@@ -36,15 +36,14 @@ struct psx_gpu_backend;
    Vertex format
 
    float x/y rather than int16_t is deliberate: it costs nothing now and is the seam a
-   later PGXP-style precision pass needs (HW_RENDERER_DESIGN.md §2.2, §7.6). Through
-   Stage 4 these always hold exact integers, and `w` is always 1.0.
+   later PGXP-style precision pass needs. They currently hold exact integers, and `w` is 1.0.
 
    `color` keeps psx/dev/gpu.c's own 0x00BBGGRR packing (gpu.c:1134-1137) so no
    conversion happens on the hot path.
 
    `texpage` and `clut` are the RAW 16-bit command words (gpu.c:1105-1106), decoded in
    the fragment shader. They are per-vertex, not per-draw, specifically so that a batch
-   can span texpage changes without a state break — see HW_RENDERER_DESIGN.md §7.3.
+   can span texpage changes without a state break — see the backend.
    ------------------------------------------------------------------------------------ */
 
 typedef struct psx_hw_vertex {
@@ -68,7 +67,7 @@ enum {
 };
 
 /* Semi-transparency modes, GPUSTAT bits 6:5 / texpage bits 6:5 (gpu.c:262-266).
-   See HW_RENDERER_DESIGN.md §2.5 for the fixed-function blend mapping. */
+   See the backend for the fixed-function blend mapping. */
 enum {
     PSX_HW_BLEND_HALF_B_HALF_F = 0,  /* 0.5*B + 0.5*F  gpu.c:411-415 */
     PSX_HW_BLEND_B_PLUS_F      = 1,  /* B + F          gpu.c:416-420 */
@@ -83,13 +82,13 @@ typedef struct psx_hw_primitive {
     uint8_t         blend_mode;  /* PSX_HW_BLEND_*; only meaningful with _TRANSP    */
     uint8_t         dither;      /* GPUSTAT bit 9. gpu.c latches it (1941) but never
                                     reads it — the HW path is where it starts to
-                                    matter. HW_RENDERER_DESIGN.md §1.6            */
+                                    matter. the backend            */
 } psx_hw_primitive_t;
 
 /* ------------------------------------------------------------------------------------
    Backend interface
 
-   Hook sites in psx/dev/gpu.c are tabulated in HW_RENDERER_DESIGN.md §5.2.
+   Hook sites in psx/dev/gpu.c are tabulated in the backend.
    ------------------------------------------------------------------------------------ */
 
 typedef struct psx_gpu_backend {
@@ -120,7 +119,7 @@ typedef struct psx_gpu_backend {
     /* GP0(80), gpu.c:1859-1891. Stays entirely GPU-side at scale; never round-trips.
        NOTE: gpu.c's own implementation neither wraps at 1024/512 nor handles overlapping
        rects. The backend should do it correctly and accept the divergence
-       (HW_RENDERER_DESIGN.md §7.4 item 9). */
+       (the backend). */
     void (*copy_vram)(struct psx_gpu_backend* be,
                       uint32_t sx, uint32_t sy,
                       uint32_t dx, uint32_t dy,
@@ -135,7 +134,7 @@ typedef struct psx_gpu_backend {
     /* GP0(C0), gpu.c:1776-1802. Called at SETUP time, before psx_gpu_read32() begins
        draining (gpu.c:98-118), so the drain sees valid host data. THIS IS THE STALL —
        it is the only entry point that forces a GPU->CPU readback. Downsamples from the
-       upscaled target to native. HW_RENDERER_DESIGN.md §4.3, §4.6. */
+       upscaled target to native. */
     void (*download_vram)(struct psx_gpu_backend* be,
                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                           uint16_t* dst, uint32_t dst_stride_px);
@@ -157,8 +156,7 @@ typedef struct psx_gpu_backend {
                                uint32_t mask_x, uint32_t mask_y,
                                uint32_t off_x,  uint32_t off_y);
 
-    /* GP0(E6), gpu.c:1965-1967 — currently an empty stub, so this is net-new behaviour
-       in this emulator. HW_RENDERER_DESIGN.md §2.6, §7.1. */
+    /* GP0(E6), gpu.c:1965-1967 — mask-bit state. */
     void (*set_mask_bits)(struct psx_gpu_backend* be, int set_on_draw, int check_before_draw);
 
     /* GP0(E1) and the texpage latch at gpu.c:1111-1117 change GPUSTAT bits 5-6 (blend
@@ -178,14 +176,14 @@ typedef struct psx_gpu_backend {
     void (*set_resolution_scale)(struct psx_gpu_backend* be, int scale);
     int  (*resolution_scale)(const struct psx_gpu_backend* be);
 
-    /* Scanout without a round trip (HW_RENDERER_DESIGN.md §4.4). Returns an opaque
+    /* Scanout without a round trip (the backend). Returns an opaque
        backend-native texture handle plus the subrect, in UPSCALED coordinates, that the
        present layer should sample. Returns 0 when the display is disabled
        (GPUSTAT bit 23, gpu.c:2199) or when 24bpp forces the native path. */
     uintptr_t (*display_texture)(struct psx_gpu_backend* be,
                                  int* out_x, int* out_y, int* out_w, int* out_h);
 
-    /* ---- diagnostics: feeds the readback-heavy auto-downgrade in §4.6 ---- */
+    /* ---- diagnostics for the readback-heavy automatic downgrade ---- */
     void (*frame_stats)(const struct psx_gpu_backend* be,
                         uint32_t* out_draw_calls,
                         uint32_t* out_readback_bytes,
@@ -196,18 +194,15 @@ typedef struct psx_gpu_backend {
    GLES 3.0 backend creation
 
    Requires a current GL context on the CALLING thread — which must be the emulation
-   thread, since psx_gpu_write32() drives every entry point above. See
-   HW_RENDERER_DESIGN.md §5.3 for why this needs coordinating with the code that owns
-   thread setup before any of this lands.
+   thread, since psx_gpu_write32() drives every entry point above.
    ------------------------------------------------------------------------------------ */
 
 typedef struct psx_hw_gl_config {
     int  resolution_scale;      /* 1..8                                                */
-    int  true_color;            /* skip the 5-bit truncation (§6 enhancement)          */
+    int  true_color;            /* skip the 5-bit truncation                          */
     int  dithering;             /* honour GPUSTAT bit 9; 0 disables entirely           */
-    int  bilinear_textures;     /* restore the software path's look (gpu.c:359, §7.4)  */
-    int  allow_framebuffer_fetch; /* programmable blend where supported; see §2.5 for
-                                     why this must be driver-gated, not just probed    */
+    int  bilinear_textures;     /* restore the software path's look (gpu.c:359)       */
+    int  allow_framebuffer_fetch; /* programmable blend; must be driver-gated          */
 } psx_hw_gl_config_t;
 
 /* proc_loader mirrors the pattern already used by frontend/render_gl.cpp (GlProcLoader)

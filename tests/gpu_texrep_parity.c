@@ -3,10 +3,9 @@
 
     WHY THIS FILE EXISTS AND WHY GPU_PARITY IS NOT ENOUGH
     ----------------------------------------------------
-    tests/gpu_renderer_parity.c compares the two CPU rasterizers against EACH OTHER. That is
-    structurally blind to a mistake both make: HW_RENDERER_DESIGN.md §0.5.12, §0.5.13 and
-    §0.5.15 were each one formula written identically wrong in all three rasterizers, and the
-    parity gate passed throughout every one of them.
+    tests/gpu_renderer_parity.c compares the two CPU rasterizers against each other, so it
+    cannot detect a shared mistake. These cases instead derive expected pixels directly from
+    the texture-replacement contract.
 
     So nothing here is a rasterizer-versus-rasterizer comparison. Every case pins output
     against a value derived from the FEATURE'S OWN CONTRACT (psx/texrep.h) and then checks

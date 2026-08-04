@@ -15,7 +15,7 @@
     exactly the operations the software path performs, in the same order, on the same
     values — that is what makes 1x byte-identical rather than merely similar.
 
-    The rules being applied (HW_RENDERER_DESIGN.md §3.1):
+    The rules being applied (the backend):
       scales by S      vertex positions, drawing area, fill/copy rectangles, scanout origin
       does NOT scale   texture UVs, texpage/CLUT addressing, the texture window, the
                        dither matrix index (divided back down to native), and every read
@@ -25,7 +25,7 @@
     the edge functions are evaluated at integer render-target corners, exactly as the
     software path evaluates them at integer native corners. Combined with the half-open
     loop bounds this makes a primitive spanning native [a, b) cover exactly (b-a)*S
-    columns, with no half-pixel term anywhere — §3.3 warns specifically against adding
+    columns, with no half-pixel term anywhere —  warns specifically against adding
     one, because it is invisible at S=1 and wrong at every other scale.
 */
 
@@ -193,7 +193,7 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
                 float cg = (z0 * ((a.c >>  8) & 0xff) + z1 * ((b.c >>  8) & 0xff) + z2 * ((c.c >>  8) & 0xff)) / area;
                 float cb = (z0 * ((a.c >> 16) & 0xff) + z1 * ((b.c >> 16) & 0xff) + z2 * ((c.c >> 16) & 0xff)) / area;
 
-                /* Dither is indexed in NATIVE pixels (§2.7): dividing the render-target
+                /* Dither is indexed in NATIVE pixels (): dividing the render-target
                    coordinate back down makes each dither cell an SxS block instead of
                    high-frequency noise that gets worse as S grows. Both x and y are >= 0
                    here because the clip test above already rejected everything outside the
@@ -323,7 +323,7 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
                 color = BGR555(rgb);
             }
 
-            /* `force_mask || texel_bit15` (HW_RENDERER_DESIGN.md §2.6); mask_from_texel
+            /* `force_mask || texel_bit15` (the backend); mask_from_texel
                is 0 unless the accuracy flag is on, so the default path is unchanged. */
             rt->rt[x + (y * rt->rt_w)] = color | mask_set | (stp & mask_from_texel);
         }
@@ -420,7 +420,7 @@ static void rt_draw_rect(psx_gpu_backend_t* be, psx_gpu_t* gpu, const rect_data_
             if (textured) {
                 /* Texel offsets advance once per NATIVE pixel, so an SxS block samples a
                    single texel — that is what keeps 2D art and UI crisp rather than
-                   resampled (§3.4). In gpu.c the equivalent counter is xc/yc, which
+                   resampled (). In gpu.c the equivalent counter is xc/yc, which
                    increments even on skipped pixels and is therefore just x - x0. */
                 int xc = (x - (x0 * s)) / s;
                 int yc = (y - (y0 * s)) / s;
@@ -524,7 +524,7 @@ static void rt_draw_rect(psx_gpu_backend_t* be, psx_gpu_t* gpu, const rect_data_
                 color = BGR555(rgb);
             }
 
-            /* `force_mask || texel_bit15` (HW_RENDERER_DESIGN.md §2.6); mask_from_texel
+            /* `force_mask || texel_bit15` (the backend); mask_from_texel
                is 0 unless the accuracy flag is on, so the default path is unchanged. */
             rt->rt[x + (y * rt->rt_w)] = color | mask_set | (stp & mask_from_texel);
         }
@@ -536,7 +536,7 @@ static void rt_draw_rect(psx_gpu_backend_t* be, psx_gpu_t* gpu, const rect_data_
 
    Bresenham is stepped in NATIVE space and each step fills an SxS block, so the line
    keeps its native thickness as S grows and the pixel set at S=1 is exactly the software
-   one. §2.8 suggests expanding to a quad instead; that is the right answer for a GPU
+   one.  suggests expanding to a quad instead; that is the right answer for a GPU
    backend but would not reproduce Bresenham's exact diagonals at 1x.
    ------------------------------------------------------------------------------------ */
 
@@ -686,7 +686,7 @@ static void rt_copy_vram(psx_gpu_backend_t* be, uint32_t sx, uint32_t sy,
 
 /* GP0(A0), gpu.c:1286-1314. `src` is the whole native VRAM; the wrap masks match the
    software path's. Each native texel becomes an SxS block — upload data is native and
-   never gains detail from a higher internal resolution (§3.1). */
+   never gains detail from a higher internal resolution (). */
 static void rt_upload_vram(psx_gpu_backend_t* be, uint32_t x, uint32_t y,
                            uint32_t w, uint32_t h,
                            const uint16_t* src, uint32_t src_stride_px) {
@@ -725,7 +725,7 @@ static const void* rt_display_buffer(psx_gpu_backend_t* be, uint32_t disp_x, uin
     if (out_stride_bytes)
         *out_stride_bytes = (uint32_t)rt->rt_w * sizeof(uint16_t);
 
-    /* The scanout origin is a screen position, so it scales (§3.1). */
+    /* The scanout origin is a screen position, so it scales (). */
     return rt->rt + ((int)disp_x * s) + ((int)disp_y * s * rt->rt_w);
 }
 

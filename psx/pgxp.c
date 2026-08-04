@@ -7,7 +7,7 @@
 
 /*
     Implementation notes — see pgxp.h for the contract and
-    frontend/HW_RENDERER_DESIGN.md §PGXP for the end-to-end design.
+    the backend for the end-to-end design.
 
     The address cache is a direct table over the whole guest address space that
     vertices can live in, not a hash: 2 MiB of RAM (mirrors folded down) plus

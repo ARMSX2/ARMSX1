@@ -164,7 +164,7 @@ class XmbGlView(context: Context) : TextureView(context), TextureView.SurfaceTex
             GLES30.glUniform1f(u("flowSpeed"), FLOW_SPEED)
             GLES30.glUniform1f(u("tension"), TENSION)
             GLES30.glUniform1f(u("damping"), DAMPING)
-            GLES30.glUniform1f(u("length"), LENGTH)
+            GLES30.glUniform1f(u("waveLength"), LENGTH)
             GLES30.glUniform1f(u("spacing"), SPACING)
             GLES30.glUniform1f(u("perturbation"), PERTURBATION)
             GLES30.glUniform1f(u("perturbationScale"), PERTURBATION_SCALE)
@@ -452,7 +452,7 @@ uniform float uTime;
 uniform float flowSpeed;
 uniform float tension;
 uniform float damping;
-uniform float length;
+uniform float waveLength;
 uniform float spacing;
 uniform float perturbation;
 uniform float perturbationScale;
@@ -478,10 +478,10 @@ void main() {
   p.z += cos(ffd2.z + uTime * flowSpeed) * ffdZAmp;
   float baseWave = cos(p.x * 2.0 - uTime * 0.5 * timeStep) * waveCosAmp + waveBias;
   baseWave *= (1.0 - damping);
-  baseWave += tension * sin(p.x * length + uTime * flowSpeed * timeStep * 0.25);
+  baseWave += tension * sin(p.x * waveLength + uTime * flowSpeed * timeStep * 0.25);
   float structured = perturbation * perturbationScale * (
-    sin((p.x * length * 6.0 + p.z * 0.5) * spacing * 0.01 + uTime * flowSpeed * timeStep * 0.7) * 0.5 +
-    sin((p.x * length * 10.0 - p.z * 0.8) * spacing * 0.005 - uTime * flowSpeed * timeStep * 0.35) * 0.25
+    sin((p.x * waveLength * 6.0 + p.z * 0.5) * spacing * 0.01 + uTime * flowSpeed * timeStep * 0.7) * 0.5 +
+    sin((p.x * waveLength * 10.0 - p.z * 0.8) * spacing * 0.005 - uTime * flowSpeed * timeStep * 0.35) * 0.25
   );
   float totalWave = (baseWave + structured) * waveHeightScale;
   totalWave = waveSoftClip * tanh(totalWave / max(waveSoftClip, 1e-4));

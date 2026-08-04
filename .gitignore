@@ -1,6 +1,8 @@
 bin/
 build/
 android/app/build/
+android/app/build
+android/build
 android/.gradle/
 android/app/src/main/jniLibs/
 android/native-deps/
@@ -11,3 +13,5 @@ android/native-deps/
 *.keystore
 files/logs/
 .DS_Store
+/armsx.app/
+/test/

@@ -64,6 +64,29 @@ int main(void) {
     check("fbfetch vk off", p->fbfetch_vk_roaa, 0);
     check("driverInfo kept", strcmp(p->driver_info, "r44p1"), 0);
 
+    /* Android knows MediaTek from Build.SOC_* before EGL exists. The later GL strings supply
+       Mali. This is the real SDL-present + GLES-rasterizer discovery order. */
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_host_hint("OPPO CPHxxxx MediaTek MT6877");
+    armsx_gpu_profile_note_gl("ARM", "Mali-G610 MC4", "OpenGL ES 3.2");
+    p = armsx_gpu_profile_get();
+    printf("mediatek-host-then-gl\n");
+    check("host hint retained", p->is_mediatek, 1);
+    check("later GL sees Mali", p->vendor, ARMSX_GPU_VENDOR_MALI);
+    check("host+GL fbfetch off", p->fbfetch_gl, 0);
+
+    /* A software-only Android session has no renderer context of its own. The startup pbuffer
+       probe still provides a real system GL_RENDERER, which must identify the physical GPU
+       without inventing a driver. */
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_host_hint("Mali-G715");
+    p = armsx_gpu_profile_get();
+    printf("software-host-gpu-probe\n");
+    check("probe sees Mali", p->vendor, ARMSX_GPU_VENDOR_MALI);
+    check("probe sees model", p->model, 715);
+    check("probe leaves driver unknown", p->driver, ARMSX_GPU_DRIVER_UNKNOWN);
+    check("Mali dual-source disabled", p->dual_source_blend, 0);
+
     /* 6. THE OVERRIDE MUST NOT DISCARD FACTS: force "mali" on a MediaTek device. */
     armsx_gpu_profile_reset();
     armsx_gpu_profile_override("mali");

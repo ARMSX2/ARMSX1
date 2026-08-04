@@ -1,34 +1,31 @@
 ARMSX1
 ======
 
-ARMSX1 is a PlayStation 1 emulator for Android.
+Copyright (c) 2026 Moon. All rights reserved.
 
-Licensed under the GNU Lesser General Public License, version 3 (LGPL-3.0).
-See COPYING.LESSER (LGPL-3.0) and COPYING (GPL-3.0, which LGPL-3.0 incorporates).
-
-Relicensing
------------
-ARMSX1 was previously distributed under a proprietary licence (ARMSX PROPRIETARY
-LICENSE, Copyright (c) 2026 Moon, all rights reserved). It was relicensed to
-LGPL-3.0 with the permission of the copyright holder.
+Moon-owned ARMSX material is proprietary and governed by LICENSE. That license
+applies only to material Moon owns or is authorized to license. It does not
+relicense or supersede upstream code, contributor-owned work, bundled
+frameworks, or third-party dependencies.
 
 Credits
 -------
 allkern     Original PlayStation 1 emulator core, psxe (Lisandro Alarcon) --
             the foundation this project is built on.
             https://github.com/allkern/psxe
-            Distributed under the MIT licence; see LICENSES/UPSTREAM-MIT.txt.
-            That notice is retained and continues to apply to the upstream code.
+            Distributed under the MIT license; see LICENSES/UPSTREAM-MIT.txt.
 
 Moonpower   Cached interpreter and cross-platform compatibility work.
 
-jpolo1224   Everything else — Android frontend and UI, JNI platform layer, hardware
-            rasteriser and GLES/Vulkan present paths, RetroAchievements, shader
-            support, save states, input, audio, and emulation-accuracy fixes.
+jpolo1224   Android frontend and UI, JNI platform layer, renderer work,
+            RetroAchievements, shader support, save states, input, audio, and
+            emulation-accuracy fixes. Contributor notices and file-level
+            licenses continue to apply.
 
 Third-party components
 ----------------------
-Each retains its own licence; the terms below are not superseded by LGPL-3.0.
+Each component retains its own license. Relevant license files and notices
+must accompany distributions as required by those licenses.
 
   psxe (allkern)          MIT              LICENSES/UPSTREAM-MIT.txt
   librashader             MPL-2.0          LICENSES/MPL-2.0.txt
@@ -38,10 +35,11 @@ Each retains its own licence; the terms below are not superseded by LGPL-3.0.
   adrenotools             BSD-2-Clause
   log.c (rxi)             MIT              see psx/log.h
   ANGLE                   BSD-3-Clause
-  Discord Partner SDK     Proprietary — redistributed under Discord's own terms,
-                          NOT under LGPL-3.0. It is a separate work, dynamically
-                          loaded, and is not a derivative of this program.
+  Discord Partner SDK     Proprietary; redistributed only under Discord's terms.
 
-Bundled assets are limited to freely redistributable licences (OFL / Apache / public
-domain). No PlayStation BIOS, game, or other copyrighted Sony material is included;
-a BIOS image must be supplied by the user.
+COPYING and COPYING.LESSER are retained for files and contributor-owned
+portions that identify GPL or LGPL terms. Bundled frameworks, files under
+third_party/, and files carrying their own notices remain under those terms.
+
+No PlayStation BIOS, game, or other copyrighted Sony material is included. A
+BIOS image and games must be supplied by the user.

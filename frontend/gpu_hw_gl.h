@@ -7,7 +7,7 @@
     Implements the psx/dev/gpu_backend.h ABI on the GPU. Same vtable as the CPU backend in
     frontend/gpu_hw_rt.c, so it inherits every hook site, the config plumbing and the
     coordinate model that tests/gpu_renderer_parity.c pins down — see
-    frontend/HW_RENDERER_DESIGN.md §0.5.2 for the decision record.
+    the backend for the decision record.
 
     WHY GLES AND NOT VULKAN
     -----------------------
@@ -33,7 +33,7 @@
         which is the whole reason upscaling was unusable;
       * GP0(C0) readback never stalls and never needs a fallback ladder;
       * textures come from a native-resolution mirror of gpu->vram, which is ALWAYS
-        correct, so HW_RENDERER_DESIGN.md §4 collapses from two-way ownership to a one-way
+        correct, so the backend collapses from two-way ownership to a one-way
         upload and dirty tracking becomes an optimisation, not a correctness requirement.
 
     The visible consequence, so nobody debugs it later: render-to-texture content is sampled
@@ -80,10 +80,9 @@ void armsx_hw_gl_destroy(psx_gpu_backend_t* backend);
     backend started attaching on a device where it had always declined, and the PS1 BIOS lost
     the ability to draw its own text. Output parity cannot see a selection bug; only this can.
 
-    `opt_in` is the ARMSX_GL_MASK_BIT escape hatch. The framebuffer-fetch mask path is real
-    but unproven on device, and every confirmed fix this session — §0.5.12's mask-from-texel
-    above all — was validated against the CPU rasterizer, so the default MUST be to decline
-    and let the CPU backend serve the session. Returns 1 only to attach.
+    `opt_in` is the ARMSX_GL_MASK_BIT escape hatch. The framebuffer-fetch mask path remains
+    opt-in because the mask-from-texel fixes were validated against the CPU rasterizer.
+    Returns 1 only when the GL path may attach.
 */
 int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_angle,
                                    int opt_in);
@@ -91,6 +90,17 @@ int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_
 /* Reads ARMSX_GL_MASK_BIT. Exact "1" enables; anything else (including unset) does not.
    Split out so the environment-to-decision chain is testable on the host. */
 int armsx_hw_gl_mask_bit_opt_in(void);
+
+/*
+    Whether an unavailable GLES rasterizer should fall back to the scaled CPU backend.
+
+    `hardware` (mode 1) at 1x must return to the original software rasterizer: the CPU
+    internal-resolution backend adds work without adding resolution there and can turn a
+    full-speed game into a 60-70% one. At 2x+ it remains the useful API-independent upscale
+    fallback. `hardware-cpu` (mode 2) is explicit and always honours the request;
+    `hardware-gl` (mode 3) never substitutes a different hardware backend.
+*/
+int armsx_hw_gl_use_cpu_fallback(int rasterizer_mode, int internal_scale);
 
 /*
     [video] texture_filter / downsample / line_detect — the three video options this backend
@@ -113,14 +123,14 @@ void armsx_hw_gl_set_video_options(int texture_filter, int downsample, int line_
 
 /* Non-zero once the backend has hit an unrecoverable GL error and disabled itself. The
    frontend polls this per frame and swaps back to a working rasterizer — see
-   HW_RENDERER_DESIGN.md §4.6: where the GPU path cannot serve a game, it falls back
+   the backend: where the GPU path cannot serve a game, it falls back
    explicitly and logged, never silently. */
 int armsx_hw_gl_failed(const psx_gpu_backend_t* backend);
 
 /* Human-readable one-liner describing the last create/teardown outcome. Never NULL. */
 const char* armsx_hw_gl_status(void);
 
-/* The brokered seam (HW_RENDERER_DESIGN.md §0.5.3/§0.5.5), caller side.
+/* The brokered seam (the backend), caller side.
 
    Resolves this frame's display region into the backend's packed-BGR555 scanout texture and
    hands THAT texture to the present layer through armsx_renderer_adopt_gl_texture(), so the

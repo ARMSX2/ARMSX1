@@ -223,9 +223,6 @@ public class MainActivity extends AppCompatActivity {
             } catch (InterruptedException ignored) {
             }
         }
-
-        int appPid = android.os.Process.myPid();
-        android.os.Process.killProcess(appPid);
     }
 
     /// ///////////////////////////////////////////////////////////////////////////////////////////

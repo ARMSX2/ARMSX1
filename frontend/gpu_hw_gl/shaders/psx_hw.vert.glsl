@@ -1,11 +1,11 @@
 #version 300 es
 // ARMSX — PS1 hardware rasterizer, vertex stage (DRAFT / INERT).
-// Not compiled by anything. See frontend/HW_RENDERER_DESIGN.md §2.3.
+// Not compiled by anything. See the backend.
 //
 // Positions arrive in NATIVE PlayStation VRAM pixel coordinates with the drawing offset
 // already applied CPU-side, exactly as psx/dev/gpu.c:279-284 does today. This stage's
 // only geometric job is to scale by u_resolution_scale and map into clip space over the
-// full 1024x512 VRAM. Texture coordinates are NEVER scaled (design doc §3.1).
+// full 1024x512 VRAM. Texture coordinates are NEVER scaled (backend ).
 
 precision highp float;
 precision highp int;
@@ -19,7 +19,7 @@ in uint  a_clut;      // raw CLUT word     (gpu.c:1105)
 
 // Per-primitive UV bounding box, replicated to every vertex of the primitive by the
 // batcher. Used to kill the 1-texel halo that magnification produces when an interpolated
-// UV drifts onto a neighbouring sprite in the same texture page (design doc §3.2 item 2).
+// UV drifts onto a neighbouring sprite in the same texture page (backend  item 2).
 // At S == 1 this clamp is a no-op; it only ever engages when upscaling.
 in uvec4 a_uv_limit;  // (min_u, min_v, max_u, max_v)
 
@@ -42,8 +42,7 @@ void main() {
     //
     // DO NOT add a half-pixel offset here. Adding +0.5*S is the classic upscaling bug: at
     // S == 1 it shifts everything by the same half pixel and most tests still look right,
-    // but at S == 2 and S == 3 it shows up as a half-native-pixel shear. Always verify at
-    // an odd scale (design doc §3.3, §6 Stage 4 risk).
+    // but at S == 2 and S == 3 it shows up as a half-native-pixel shear. Verify odd scales.
     vec2 scaled = a_pos.xy * s;
 
     // Clip space over the whole 1024x512 VRAM, scaled. Y is flipped because VRAM row 0 is

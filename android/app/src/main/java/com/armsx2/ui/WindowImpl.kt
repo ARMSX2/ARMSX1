@@ -110,7 +110,15 @@ object WindowImpl {
 
             if (showLibrary.value && MainActivityRuntime.eState.value == EmuState.RUNNING && !overlayVisible.value) {
                 Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.56f))) {
-                    com.armsx2.navigation.AppNavigation()
+                    // The stopped library is composed at MainActivityRuntime's root below.
+                    // During the STOPPED -> RUNNING + showLibrary transition, giving this
+                    // overlay a distinct slot identity prevents Compose from moving HomeScreen's
+                    // AndroidView (the XMB TextureView) into a second AndroidViewHolder while
+                    // the first holder still owns it: Android then throws "child already has a
+                    // parent" on the main thread.
+                    androidx.compose.runtime.key("library-overlay") {
+                        com.armsx2.navigation.AppNavigation()
+                    }
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)

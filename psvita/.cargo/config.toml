@@ -1,0 +1,6 @@
+[target.armv7-sony-vita-newlibeabihf]
+linker = "arm-vita-eabi-g++"
+rustflags = ["-C", "link-arg=-Wl,-q", "-C", "target-feature=-thumb-mode"]
+
+[target.'cfg(target_os = "vita")']
+linker = "arm-vita-eabi-g++"

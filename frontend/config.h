@@ -35,7 +35,7 @@ typedef struct {
     /* ---- [video] display/video feature set. Every one of these is default OFF/neutral, so a
        settings.toml written before they existed (which is every existing on-device file) must
        parse to exactly these values — that is why each parse site seeds from cfg, never from a
-       bare literal. See HW_RENDERER_DESIGN.md §0.5.10. */
+       bare literal. See the backend. */
     int widescreen_hack;   // [video] widescreen_hack: GTE X-projection scale (psx/cpu.c), default off
     int texture_filter;    // [video] texture_filter: 0=nearest (default), 1=bilinear, 2=xBR-style
     int downsample;        // [video] downsample: 0=off (default), 2..8 box-average factor

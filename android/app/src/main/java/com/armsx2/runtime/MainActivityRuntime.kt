@@ -10,7 +10,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
-import android.os.Process
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.KeyCharacterMap
@@ -279,7 +278,7 @@ open class MainActivityRuntime : ComponentActivity() {
          *  SD systemDir): on Android 11+ the native FileSystem APIs can't reliably
          *  open a BIOS that sits on a removable volume or a SAF-picked folder, so a
          *  game booted with the data root on SD failed VM init (BIOS load) and
-         *  bounced back to the library. This mirrors the design documented in
+         *  bounced back to the library. This mirrors the backendumented in
          *  native-lib initialize() ("p_szbiosfolder is always externalFilesDir/bios").
          *  Memcards / saves / configs still follow the chosen data root. */
         fun internalBiosDir(context: Context): File =
@@ -330,6 +329,8 @@ open class MainActivityRuntime : ComponentActivity() {
             }
         }
 
+        private const val SURFACE_ASSIGN_TIMEOUT_MS = 5_000L
+        private const val SURFACE_READY_TIMEOUT_MS = 10_000L
         val surface = mutableStateOf<EmulationSurface?>(null)
 
         @JvmField
@@ -475,6 +476,77 @@ open class MainActivityRuntime : ComponentActivity() {
             eScope.launch {
                 task()
             }
+        }
+
+        /**
+         * Replace the SurfaceView before every native session.
+         *
+         * Android's public ANativeWindow software path connects a BufferQueue to the CPU producer
+         * on its first lock and does not expose a matching NDK disconnect. EGL correctly refuses
+         * that same queue later. A fresh SurfaceView is therefore the public, lifecycle-safe handoff
+         * between software and EGL sessions; the Activity and VM process remain alive.
+         */
+        private fun freshSessionSurface(): EmulationSurface? {
+            val activity = instance ?: return null
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                println("@@ARMSX_SURFACE_ERROR@@ session surface requested on UI thread")
+                return null
+            }
+
+            val assigned = java.util.concurrent.CountDownLatch(1)
+            val result = java.util.concurrent.atomic.AtomicReference<EmulationSurface?>()
+            activity.runOnUiThread {
+                val replacement = EmulationSurface(activity)
+                result.set(replacement)
+                surface.value = replacement
+                assigned.countDown()
+            }
+            if (!assigned.await(SURFACE_ASSIGN_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                println("@@ARMSX_SURFACE_ERROR@@ timed out assigning session surface")
+                return null
+            }
+            return result.get()
+        }
+
+        /** Run the blocking native session and make a rejected launch visible to the user.
+         *  A clean game exit returns true; false means surface, native initialization, or boot failed. */
+        private fun runVmThreadChecked(path: String, kind: String): Boolean {
+            val sessionSurface = freshSessionSurface()
+            val surfaceReady = sessionSurface != null && runCatching {
+                sessionSurface.awaitInitialSurface(SURFACE_READY_TIMEOUT_MS)
+            }.getOrDefault(false)
+            if (!surfaceReady) {
+                println("@@ARMSX_SURFACE_ERROR@@ timed out waiting for $kind surface")
+            }
+            val launchSession = if (surfaceReady) runCatching {
+                val context = instance?.applicationContext
+                    ?: throw IllegalStateException("No Android context is active")
+                com.armsx2.core.Ps1SafAccess.prepare(context, path)
+            }.onFailure { failure ->
+                println("@@ARMSX_SAF_LAUNCH_FAILED@@ kind=$kind error=${failure.message}")
+            }.getOrNull() else null
+            val launched = launchSession?.use { prepared ->
+                if (prepared.launchPath != path) {
+                    println(
+                        "@@ARMSX_SAF_LAUNCH@@ kind=$kind uri=${path.take(160)} " +
+                            "bridge=${prepared.launchPath.take(160)}",
+                    )
+                }
+                NativeApp.runVMThread(prepared.launchPath)
+            } ?: false
+            if (!launched) {
+                println("@@ARMSX_VM_LAUNCH_FAILED@@ kind=$kind path=${path.take(240)}")
+                instance?.let { activity ->
+                    activity.runOnUiThread {
+                        android.widget.Toast.makeText(
+                            activity,
+                            "Unable to start $kind. Open Diagnostics for the native launch error.",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }
+            return launched
         }
 
         private val vmLifecycleLock = Any()
@@ -690,7 +762,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     // The hold itself waits for the VM to come up. BIOS boots skip it.
                     if (bootCfg.autoProgressiveScan)
                         startAutoProgressiveScanHold()
-                    NativeApp.runVMThread(m_szGamefile)
+                    runVmThreadChecked(m_szGamefile, "game")
                 } finally {
                     // runVMThread blocks until the VM exits (Stopping/Shutdown
                     // observed). Drop back to STOPPED only after native has
@@ -1017,8 +1089,20 @@ open class MainActivityRuntime : ComponentActivity() {
                         com.armsx2.CustomDriver.applyToNative(driverCtx, picked)
                     }
                 }
-                if (kr.co.iefriends.pcsx2.NativeApp.hasActiveVM()) {
-                    runCatching { kr.co.iefriends.pcsx2.NativeApp.shutdown() }
+                val launchNow = synchronized(vmLifecycleLock) {
+                    if (vmStopInProgress || vmRunLoopActive || eState.value != EmuState.STOPPED ||
+                        kr.co.iefriends.pcsx2.NativeApp.hasActiveVM()
+                    ) {
+                        vmRestartAfterStop = true
+                        false
+                    } else {
+                        vmRunLoopActive = true
+                        true
+                    }
+                }
+                if (!launchNow) {
+                    stop(restartAfterStop = true)
+                    return
                 }
                 eState.value = EmuState.RUNNING
                 scheduleVmRunningCallback()
@@ -1027,7 +1111,7 @@ open class MainActivityRuntime : ComponentActivity() {
                         // The core reads BIOS + resources from disk during boot; make sure the
                         // background prepare has finished before handing it a path.
                         awaitAssetsReady()
-                        kr.co.iefriends.pcsx2.NativeApp.runVMThread(bootPath)
+                        runVmThreadChecked(bootPath, "game")
                     } catch (t: Throwable) {
                         println("@@ARMSX_VM_ERROR@@ ${t.message}")
                     } finally {
@@ -1053,7 +1137,8 @@ open class MainActivityRuntime : ComponentActivity() {
                             // cleared for the same reason it was stranded — the stop it was latched
                             // for has now definitively finished.
                             val relaunch = synchronized(vmLifecycleLock) {
-                                val pending = vmRestartAfterStop && !vmRunLoopActive
+                                vmRunLoopActive = false
+                                val pending = vmRestartAfterStop
                                 if (pending) vmRestartAfterStop = false
                                 vmStopInProgress = false
                                 pending
@@ -1194,6 +1279,21 @@ open class MainActivityRuntime : ComponentActivity() {
                 // handed back in the finally below / on background.
                 runCatching { com.armsx2.EmuAudioFocus.setForeground(true) }
                 runCatching { com.armsx2.EmuAudioFocus.acquire(ctx) }
+                val launchNow = synchronized(vmLifecycleLock) {
+                    if (vmStopInProgress || vmRunLoopActive || eState.value != EmuState.STOPPED ||
+                        kr.co.iefriends.pcsx2.NativeApp.hasActiveVM()
+                    ) {
+                        vmRestartAfterStop = true
+                        false
+                    } else {
+                        vmRunLoopActive = true
+                        true
+                    }
+                }
+                if (!launchNow) {
+                    stop(restartAfterStop = true)
+                    return
+                }
                 eState.value = EmuState.RUNNING
                 scheduleVmRunningCallback()
                 Thread({
@@ -1201,14 +1301,28 @@ open class MainActivityRuntime : ComponentActivity() {
                         // The core reads BIOS + resources from disk during boot; make sure the
                         // background prepare has finished before handing it a path.
                         awaitAssetsReady()
-                        kr.co.iefriends.pcsx2.NativeApp.runVMThread("")
+                        runVmThreadChecked("", "BIOS")
                     } catch (t: Throwable) {
                         println("@@ARMSX_VM_ERROR@@ ${t.message}")
                     } finally {
                         instance?.runOnUiThread {
                             eState.value = EmuState.STOPPED
-                            runCatching { com.armsx2.EmuAudioFocus.release(ctx) }
-                            runCatching { com.armsx2.LibraryMusic.start(ctx) }
+                            val restartNow = synchronized(vmLifecycleLock) {
+                                vmRunLoopActive = false
+                                vmStopInProgress = false
+                                if (vmRestartAfterStop) {
+                                    vmRestartAfterStop = false
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            if (restartNow) {
+                                startBios()
+                            } else {
+                                runCatching { com.armsx2.EmuAudioFocus.release(ctx) }
+                                runCatching { com.armsx2.LibraryMusic.start(ctx) }
+                            }
                         }
                     }
                 }, "armsx-vm-bios").start()
@@ -1240,7 +1354,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     // Renderer page (global, since there is no game) instead of the launcher's.
                     emulationOwnsOrientation = true
                     applyRendererPrefs()
-                    NativeApp.runVMThread(m_szGamefile)
+                    runVmThreadChecked(m_szGamefile, "BIOS")
                 } finally {
                     eState.value = EmuState.STOPPED
                     // Game over: release everything the pad layer thinks is held so a
@@ -1896,10 +2010,10 @@ open class MainActivityRuntime : ComponentActivity() {
         fun romsAccessible(context: Context, romsDirs: List<String>): Boolean {
             if (romsDirs.isEmpty()) return false
             // content://: still hold the EXACT persisted SAF read grant (string-prefix
-            // matching is unsafe — "…ROMs" prefixes "…ROMs2"). The all-files build can
-            // ALSO reach a content:// folder by resolving it to a POSIX path under
-            // MANAGE_EXTERNAL_STORAGE, so honor that too (checking the grant itself, not
-            // raw canRead, so a temporarily-unmounted SD isn't misread as lost access).
+            // matching is unsafe — "…ROMs" prefixes "…ROMs2"). Do not treat
+            // MANAGE_EXTERNAL_STORAGE as a substitute: the scanner intentionally keeps SAF
+            // roots as content URIs, so a restored URI without its grant is not reachable even
+            // when a guessed `/storage/...` path happens to be readable.
             val persisted = runCatching { context.contentResolver.persistedUriPermissions }
                 .getOrDefault(emptyList())
                 .filter { it.isReadPermission }
@@ -1921,8 +2035,7 @@ open class MainActivityRuntime : ComponentActivity() {
             }
             return romsDirs.any { raw ->
                 when {
-                    raw.startsWith("content:") ->
-                        raw in persisted || (allFiles && resolveTreeUriToPosix(raw) != null)
+                    raw.startsWith("content:") -> raw in persisted
                     raw.startsWith("file:") -> posixReadable(raw.toUri().path)
                     else -> posixReadable(raw)
                 }
@@ -1962,8 +2075,16 @@ open class MainActivityRuntime : ComponentActivity() {
             // is real: DriverManagerSection reads GpuInfo.rendererName() inside a remember{} during
             // composition, so warming the cache here is what stops THAT screen stalling too.
             runCatching {
+                val systemRenderer = com.armsx2.GpuInfo.rendererName()
+                // The native software and SDL-present paths deliberately create no GLES context,
+                // but compatibility gates and bug-report diagnostics still need the physical GPU.
+                // GpuInfo already performed a real system-driver probe on this worker; pass that
+                // result through before any VM launch instead of guessing from the phone model.
+                if (!systemRenderer.isNullOrBlank()) {
+                    kr.co.iefriends.pcsx2.NativeApp.setGpuHostHint(systemRenderer)
+                }
                 kr.co.iefriends.pcsx2.NativeApp.setPreferVulkan(
-                    com.armsx2.GpuInfo.rendererName()?.contains("Adreno", ignoreCase = true) == true
+                    systemRenderer?.contains("Adreno", ignoreCase = true) == true
                 )
             }
 
@@ -3020,7 +3141,9 @@ open class MainActivityRuntime : ComponentActivity() {
                                 resume()
                             }
                         }
-                        AndroidView(factory = { surface.value!! }, modifier = Modifier
+                        val displayedSurface = surface.value!!
+                        androidx.compose.runtime.key(displayedSurface.ownerToken) {
+                        AndroidView(factory = { displayedSurface }, modifier = Modifier
                             // Drop the surface from the focus system while ANY
                             // Compose frontend surface (pause overlay, in-game
                             // manager/Save-Load screen, memcard dialog, library) is
@@ -3058,6 +3181,7 @@ open class MainActivityRuntime : ComponentActivity() {
                                     },
                                 )
                             })
+                        }
                     }
 
                     if (eState.value == EmuState.STOPPED || eState.value == EmuState.RENDER_UNSUPPORTED || eState.value == EmuState.EMULATOR_UNSUPPORTED) {
@@ -3088,7 +3212,9 @@ open class MainActivityRuntime : ComponentActivity() {
                                 // The tests still run automatically on first composition
                                 // (above); their results are now available via the bug
                                 // toolbar button instead of taking up the main screen.
-                                com.armsx2.navigation.AppNavigation()
+                                androidx.compose.runtime.key("library-root") {
+                                    com.armsx2.navigation.AppNavigation()
+                                }
                             }
                         }
                     }
@@ -5518,69 +5644,17 @@ open class MainActivityRuntime : ComponentActivity() {
         }
         NativeApp.shutdown()
         super.onDestroy()
-
-        val appPid = Process.myPid()
-        Process.killProcess(appPid)
     }
 
     private fun handleExternalLaunchIntent(intent: Intent?) {
         val raw = extractLaunchUri(intent) ?: return
         persistReadGrant(intent, raw)
-        // Frontends (Cocoon/Daijisho/ES-DE) list the .cue, since that's the canonical disc
-        // descriptor for a cue+bin rip — but the core has no cue parser and .cue isn't in its
-        // disc whitelist (VMManager::IsDiscFileName), so booting one fails outright. Resolve
-        // the cue's first FILE "<name>" BINARY entry to its sibling track and launch that.
-        // Falls back to the original URI whenever anything fails, so a launch that already
-        // worked (.iso/.bin/.chd) can never be made worse by this.
-        val uri = resolveCueToTrack(raw) ?: raw
         currentGame.value = null
-        pendingExternalLaunch.value = uri.toString()
+        // CUE is a first-class disc descriptor in the native core. Preserve it so the parser
+        // sees track layout and audio metadata instead of silently replacing it with one BIN.
+        pendingExternalLaunch.value = raw.toString()
         launchPendingExternalGameIfReady()
     }
-
-    /** Maps a `.cue` sheet to the track file it points at. Returns null for anything that
-     *  isn't a resolvable cue, so the caller keeps the original URI. */
-    private fun resolveCueToTrack(cue: Uri): Uri? = runCatching {
-        val label = (cue.lastPathSegment ?: cue.path).orEmpty()
-        if (!label.endsWith(".cue", ignoreCase = true)) return null
-        val text = readBounded(cue) ?: return null
-        // FILE "Game.bin" BINARY  — the name may also be unquoted. Strip any directory part;
-        // a cue always references tracks sitting beside it.
-        val m = Regex("""(?im)^\s*FILE\s+(?:"([^"]+)"|(\S+))""").find(text) ?: return null
-        val track = (m.groupValues[1].takeIf(String::isNotBlank) ?: m.groupValues[2])
-            .trim().substringAfterLast('/').substringAfterLast('\\')
-        if (track.isBlank()) return null
-        siblingOf(cue, track)
-    }.getOrNull()
-
-    /** Bounded read — cue sheets are a few hundred bytes, so never slurp an arbitrary file. */
-    private fun readBounded(uri: Uri, limit: Int = 65536): String? = runCatching {
-        val stream = if (uri.scheme == "content") contentResolver.openInputStream(uri)
-        else uri.path?.let { java.io.File(it).takeIf(java.io.File::isFile)?.inputStream() }
-        stream?.use { s ->
-            val buf = ByteArray(limit)
-            var n = 0
-            while (n < limit) {
-                val r = s.read(buf, n, limit - n)
-                if (r <= 0) break
-                n += r
-            }
-            String(buf, 0, n)
-        }
-    }.getOrNull()
-
-    /** Sibling file alongside [origin]. Raw/file paths resolve directly (we hold all-files
-     *  access on the sideload build); a content:// URI only resolves when it carries a parent
-     *  — a single-document grant from a frontend does not, so we return null and fall back. */
-    private fun siblingOf(origin: Uri, fileName: String): Uri? = runCatching {
-        if (origin.scheme == null || origin.scheme == "file") {
-            val parent = origin.path?.let { java.io.File(it).parentFile } ?: return null
-            java.io.File(parent, fileName).takeIf { it.isFile }?.absolutePath?.toUri()
-        } else {
-            androidx.documentfile.provider.DocumentFile.fromSingleUri(this, origin)
-                ?.parentFile?.findFile(fileName)?.takeIf { it.isFile }?.uri
-        }
-    }.getOrNull()
 
     private fun extractLaunchUri(intent: Intent?): Uri? {
         if (intent == null)

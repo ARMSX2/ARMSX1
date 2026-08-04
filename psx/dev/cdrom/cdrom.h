@@ -38,12 +38,8 @@
 #define CD_DELAY_READ_SS (33868800 / 75)
 #define CD_DELAY_READ_DS (33868800 / (2*75))
 #define CD_DELAY_START_READ (cdrom_get_read_delay(cdrom) + cdrom_get_seek_delay(cdrom, ts))
-/* REVERTED 2026-08-01. I removed the +4ms here on the theory that the drive was capped at ~94
-   sectors/s vs hardware 150. The theory was arithmetically right and the fix did NOT work: MGS's
-   refill gaps went 3 -> 5, and Xenogears then looped its first FMV forever — exactly the failure
-   this file already warns about ("games that stream XA audio or FMV expect data to arrive at the
-   drive's real rate"). MGS's actual bug was the SPU never being cycle-ticked (see psx/psx.c).
-   Any future attempt at real sector pacing must be tested against an FMV, not just a codec call. */
+/* The ongoing-read cadence must preserve the drive's real streaming rate. Slower pacing causes
+   XA refill gaps and can loop FMVs; validate timing changes against streaming games. */
 #define CD_DELAY_ONGOING_READ (cdrom_get_read_delay(cdrom) + (CD_DELAY_1MS * 4))
 
 /* How far short of its target the coarse (audio) seek lands. CdlSeekP does not position the

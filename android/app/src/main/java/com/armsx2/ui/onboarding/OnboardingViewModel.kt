@@ -262,11 +262,20 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
 
     fun addGameFolder(uri: Uri) {
         val context = getApplication<Application>()
-        runCatching {
+        val granted = runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
+            true
+        }.getOrElse {
+            context.contentResolver.persistedUriPermissions.any { permission ->
+                permission.isReadPermission && permission.uri == uri
+            }
+        }
+        if (!granted) {
+            state.value = state.value.copy(error = "Android did not grant persistent read access to that folder.")
+            return
         }
         val updated = (state.value.gameFolders + uri.toString()).distinct()
         MainActivityRuntime.setRomsDirs(updated)
@@ -305,4 +314,3 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         NativeApp.getBiosInfoFromFd(descriptor.detachFd())
     }.getOrNull()
 }
-

@@ -334,10 +334,17 @@ fun GameOsdOverlay() {
         }
     }
 
-    // The active backend is fixed for the life of a VM, so this is read once per session instead
-    // of polled. Keyed on the game as well so a restart into a different renderer re-reads it.
+    // The active backend is fixed for the life of a VM, but the Compose surface becomes visible
+    // slightly before the VM thread finishes EGL/SDL setup. Poll only through that startup race;
+    // caching the host-hint-only "Unknown" profile made screenshots lie for the whole session.
     LaunchedEffect(inGame, settingsKey, showRenderer) {
-        if (inGame && showRenderer && GameOsd.renderer.value.isEmpty()) GameOsd.refreshRenderer()
+        if (inGame && showRenderer && GameOsd.renderer.value.isEmpty()) {
+            repeat(50) {
+                GameOsd.refreshRenderer()
+                if (GameOsd.renderer.value.isNotEmpty()) return@LaunchedEffect
+                delay(100)
+            }
+        }
     }
 
     // Expire notes. One ticker for the whole list rather than a coroutine per note.

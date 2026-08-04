@@ -104,6 +104,14 @@
 #include <string>
 #include <vector>
 
+/* The Vulkan presenter serializes queue recording with the shader seam even when
+   librashader is compiled out. Keep the guard available to the always-built
+   armsx_shader_vk_queue_lock/unlock entry points below; defining it only inside
+   ARMSX_ENABLE_SHADERS leaves Vulkan/no-shader builds with an undefined symbol. */
+namespace {
+std::mutex g_vk_queue_lock;
+}
+
 #if defined(ARMSX_ENABLE_SHADERS)
 
 #include <dlfcn.h>
@@ -300,8 +308,6 @@ bool g_backend_warned = false;
     builder thread across chain_create(), which uploads librashader's lookup textures through
     that same queue. A VkDevice is safe to use from several threads; a VkQueue is not.
 */
-std::mutex g_vk_queue_lock;
-
 /*
     Off-thread chain build.
 

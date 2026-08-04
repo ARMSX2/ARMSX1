@@ -32,7 +32,7 @@ int armsx_hw_gl_mask_bit_opt_in(void) {
     The opt-in is checked FIRST and on its own line because it is the whole point: without it
     this must return 0 for every hardware combination, including the one that reports perfect
     support. That is what keeps a session with accurate_mask_bit on the CPU rasterizer, which
-    is the only rasterizer §0.5.12's mask-from-texel has ever been validated against.
+    is the rasterizer against which mask-from-texel was validated.
 */
 int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_angle,
                                    int opt_in) {
@@ -42,8 +42,12 @@ int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_
     /* Framebuffer fetch is the only mechanism in GLES that hands a fragment shader the
        destination, which the mask CHECK needs. MediaTek Mali advertises it and returns zero
        or stale destination colour, and ANGLE has been seen to crash the compiler on it —
-       either way the check would silently do nothing, which is the §0.5.12 bug again. */
+       either way the mask check would silently do nothing. */
     return have_fbfetch && driver_trusted && !is_angle;
+}
+
+int armsx_hw_gl_use_cpu_fallback(int rasterizer_mode, int internal_scale) {
+    return rasterizer_mode == 2 || (rasterizer_mode == 1 && internal_scale > 1);
 }
 #endif
 
@@ -93,13 +97,13 @@ int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_
         (gpu.c:320-321) are evaluated in the shader too, so coverage matches by
         construction instead of by trusting the GPU's fill rule to agree;
       * gpu_fetch_texel_bilinear (gpu.c:225), which polygons use unconditionally, is ported
-        verbatim as four texelFetches. HW_RENDERER_DESIGN.md §7.4 deviation #1 is therefore
+        verbatim as four texelFetches. the backend deviation #1 is therefore
         REPRODUCED, not "fixed" — parity first.
 
     That costs ~10 extra ALU ops per fragment, which no GPU notices, and it is what makes
     "1x is pixel-identical" a design property rather than a hope.
 
-    Blending (HW_RENDERER_DESIGN.md §2.5, refined). With blending permanently enabled as
+    Blending (the backend, refined). With blending permanently enabled as
     (ONE, SRC_ALPHA) + FUNC_ADD:
 
         opaque fragment      rgb = F,        a = 0    ->  F*1 + B*0 = F   (a plain write)
@@ -128,9 +132,9 @@ int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_
     destination. The arithmetic is the same four modes with the same `a`, plus the 5-bit
     re-truncation the paragraph above says is missing, so multi-layer transparency becomes
     exact there for free. Without the extension the backend declines and the CPU rasterizer
-    takes the session. HW_RENDERER_DESIGN.md §0.5.16.
+    takes the session. the backend.
 
-    VRAM coherency (HW_RENDERER_DESIGN.md §4) is one-way here, because
+    VRAM coherency (the backend) is one-way here, because
     PSX_GPU_BACKEND_SOFTWARE_SHADOW is set and gpu->vram is therefore always correct. The
     only job is keeping the native-resolution vram texture in sync with host VRAM, which is
     a pure upload problem with a known-good source. See the dirty-tile block below.
@@ -206,6 +210,7 @@ typedef intptr_t      GLsizeiptr;
 #define GL_MAX_TEXTURE_SIZE             0x0D33
 #define GL_IMPLEMENTATION_COLOR_READ_TYPE   0x8B9A
 #define GL_IMPLEMENTATION_COLOR_READ_FORMAT 0x8B9B
+#define GL_VENDOR                       0x1F00
 #define GL_VERSION                      0x1F02
 #define GL_RENDERER                     0x1F01
 #define GL_EXTENSIONS                   0x1F03
@@ -285,7 +290,7 @@ typedef struct {
 /* 72 bytes. Every triangle's three vertices carry the whole primitive, because the
    fragment shader does its own barycentric evaluation (see the file header). PS1 frames
    are a few thousand triangles at most, so ~200 bytes per triangle is not the constraint;
-   draw-call count is (HW_RENDERER_DESIGN.md §7.3). */
+   draw-call count is. */
 typedef struct {
     float    pos[2];     /* this vertex, native coords, drawing offset already applied */
     float    tri0[4];    /* x0,y0,x1,y1 -- post-winding-swap, offset applied            */
@@ -308,7 +313,7 @@ typedef struct {
 
         S == 0 means "no replacement", which is what every vertex carries unless the feature
         is on AND a pack file matched THIS primitive. It is per-VERTEX for the same reason
-        GLF_MASK_CHECK is (§0.5.16): a uniform would be per-DRAW and would break the batch at
+        GLF_MASK_CHECK is per vertex: a uniform would be per-DRAW and would break the batch at
         every primitive, and PS1 games change texture page constantly.
     */
     uint32_t repl[4];
@@ -327,10 +332,10 @@ enum {
     /*
         GP0(E6), resolved per PRIMITIVE by psx_gpu_mask_check()/psx_gpu_mask_set() and carried
         per VERTEX rather than as a uniform — which is the one design decision that makes the
-        mask bit free here. HW_RENDERER_DESIGN.md §2.6 maps it to the stencil test, whose
+        mask bit free here. the backend maps it to the stencil test, whose
         reference value is per-DRAW; that would break the batch at every GP0(E6), and PS1 games
         toggle it between primitives (Silent Hill's fog does it per object). In the vertex it
-        costs nothing and never splits a range. See §0.5.16.
+        costs nothing and never splits a range.
     */
     GLF_MASK_CHECK = 0x0400,
     GLF_MASK_SET   = 0x0800
@@ -352,7 +357,7 @@ typedef struct {
 /* 16x16 native texels per tile -> 64 x 32 tiles over VRAM, one uint64 per tile row.
    A bounding rectangle alone is not enough: a game with its framebuffer at the top-left
    and its textures at the bottom-right would produce a box covering all of VRAM and force
-   a full 1 MB upload every frame (HW_RENDERER_DESIGN.md §4.2). */
+   a full 1 MB upload every frame (the backend). */
 #define TILE_SHIFT 4
 #define TILES_X    64
 #define TILES_Y    32
@@ -381,7 +386,7 @@ typedef struct {
 
     GLuint rt_tex, rt_fbo;
     GLuint vram_tex;
-    GLuint vram_fbo;                   /* vram_tex as a TARGET: §4.3 row 1's GPU->GPU resolve */
+    GLuint vram_fbo;                   /* vram_tex as a TARGET:  row 1's GPU->GPU resolve */
     int    vram_fbo_state;             /* 0 untried, 1 complete, -1 unusable */
     GLuint scratch_tex, scratch_fbo;   /* GP0(80) needs a bounce; GL forbids self-blit */
     int    scratch_w, scratch_h;
@@ -428,11 +433,11 @@ typedef struct {
     /*
         PSX_GPU_ACCURACY_MASK_BIT is on AND this backend can serve it, i.e. the draw shader was
         compiled with its mask stage and the render target's ALPHA CHANNEL now carries VRAM bit
-        15 (HW_RENDERER_DESIGN.md §0.5.16). Everything the flag switches:
+        15 (the backend). Everything the flag switches:
 
           * the fragment shader does its own blending (framebuffer fetch) instead of the
             fixed-function unit, because alpha can only be the blend factor or the mask bit and
-            not both — §2.6's "alpha-channel conflict", resolved in favour of the mask bit;
+            not both —  "alpha-channel conflict", resolved in favour of the mask bit;
           * GL_BLEND is therefore OFF for the draw program;
           * both resolve shaders reconstruct bit 15 from alpha instead of writing 0.
 
@@ -451,7 +456,7 @@ typedef struct {
     int       any_dirty, any_sampled;
 
     /*
-        §4.3 row 1 / §4.2's `gpu_dirty`: regions the RASTERIZER wrote, which therefore exist
+         row 1 /  `gpu_dirty`: regions the RASTERIZER wrote, which therefore exist
         ONLY in the render target. A textured draw that samples one of these must not be fed
         from host VRAM — that is stale the moment the software shadow stops running — so
         those tiles are resolved render target -> vram_tex on the GPU, with no CPU round trip.
@@ -468,7 +473,7 @@ typedef struct {
         dirty and gl_note_sample() resolves from the render target. Implied by !shadow;
         forceable by `hwgl_gpu_resolve` WHILE the shadow is still on, which is the whole
         point — the 1x parity gate then becomes a direct oracle for the resolve, with the
-        software shadow still installed as the reference. See §0.5.7.
+        software shadow still installed as the reference. See .
     */
     int       gpu_own;
     int       dbg_gpu_resolve;
@@ -484,7 +489,7 @@ typedef struct {
 
     /* Set from base.flags at create(). While it is on, gpu->vram is authoritative (the core
        runs the software rasterizer too) and every GPU->host read below is diagnostic rather
-       than load-bearing. Clearing it is what §4 proper means; every path is already written
+       than load-bearing. Clearing it is what  proper means; every path is already written
        for both worlds so that switch stays a one-liner. */
     int      shadow;
 
@@ -497,7 +502,7 @@ typedef struct {
        so a single build can be A/B'd from adb (`run-as <pkg> touch files/logs/<name>`)
        without a rebuild or a settings-schema change. Both default ON — the ON state is the
        shipping behaviour and the OFF state exists only to reproduce the pre-fix build as a
-       control. See HW_RENDERER_DESIGN.md §0.5.4. */
+       control. See the backend. */
     int dbg_tri_bbox;     /* off: submit the triangle itself, i.e. the coverage bug */
     int dbg_upscale_parity; /* `hwgl_upscale_parity`: one upscaled-vs-shadow report */
     int dbg_paint;          /* `hwgl_paint_reject`: paint coverage-rejected fragments magenta */
@@ -506,7 +511,7 @@ typedef struct {
 
     /* `hwgl_vram_diff`: run the whole-VRAM readback-vs-shadow diff every kVramDiffPeriod
        frames instead of only on the downgrade path, so it can be taken at a BUSY frame and
-       at more than one moment. §0.5.6's single 0/524288 was real but was one sample, and
+       at more than one moment.  single 0/524288 was real but was one sample, and
        the second copy of it landed on a black CD-load screen (softnonzero=0) and is
        vacuous. Only meaningful while the shadow is on — it IS the reference. */
     int dbg_vram_diff;
@@ -520,16 +525,16 @@ typedef struct {
     int geom_draw_left;
 
     /*
-        §4.6's automatic downgrade, and the two markers that make it TESTABLE.
+         automatic downgrade, and the two markers that make it TESTABLE.
 
-        The rule itself is §4.6 option 1: a running average of GP0(C0) readback bytes over
+        The rule itself is  option 1: a running average of GP0(C0) readback bytes over
         the last 60 frames above `c0_limit` means this game reads VRAM faster than a GPU
         rasterizer can serve it, so seed host VRAM from the render target, say so in the log,
         and hand the session back to a CPU rasterizer for good.
 
         The markers exist because the trigger CANNOT fire on its own here: with the software
         shadow in place GP0(C0) costs nothing, and a whole Crash Bandicoot session moves 96
-        bytes through it (§0.5.3). A fallback that has never executed is not a fallback, so:
+        bytes through it (). A fallback that has never executed is not a fallback, so:
 
           * hwgl_c0_trip       — c0_limit = 0, i.e. ANY GP0(C0) traffic inside the 60-frame
                                  window trips it. Fires from REAL game traffic, so it proves
@@ -550,14 +555,14 @@ typedef struct {
     int      downgraded;        /* the ladder has already been walked; never twice */
 
     /* Diagnostics. Reported every kStatsPeriod frames; this is the only instrumentation
-       that exists for "is the GPU path actually batching", which §7.3 says is the whole
+       that exists for "is the GPU path actually batching", which  says is the whole
        difference between 60 fps and 12 on a tiler. */
     uint64_t frames;
     uint32_t stat_draws, stat_ranges, stat_prims, stat_syncs, stat_sync_px;
     uint32_t stat_adopted;           /* frames presented straight off the GPU, no readback */
-    uint32_t stat_reads, stat_read_px;  /* gl_readback_rect(): §4.3's stall, when it happens */
-    uint32_t stat_gres, stat_gres_px;   /* §4.3 row 1's GPU->GPU resolve; NOT a stall */
-    uint64_t stat_readback_bytes;    /* GP0(C0), for §4.6's accounting */
+    uint32_t stat_reads, stat_read_px;  /* gl_readback_rect():  stall, when it happens */
+    uint32_t stat_gres, stat_gres_px;   /*  row 1's GPU->GPU resolve; NOT a stall */
+    uint64_t stat_readback_bytes;    /* GP0(C0), for  accounting */
 
     /* The brokered seam (armsx_hw_gl_present_texture). Sticky: a present backend that
        cannot take a GL texture is a property of the run, not of the frame, so it is asked
@@ -788,7 +793,7 @@ static const char* kDrawFS =
 /* GLF_MASK_CHECK / GLF_MASK_SET. */
 "const uint F_MASK_CHECK = 1024u, F_MASK_SET = 2048u;\n"
 /* gpu.c indexes VRAM linearly and does NOT wrap the texture page at x=1024
-   (HW_RENDERER_DESIGN.md §7.4 deviation #8). Reproducing that means addressing linearly
+   (the backend deviation #8). Reproducing that means addressing linearly
    here too; the row mask only keeps a pathological page from reading past the surface,
    which is a latent overrun in the software path itself. */
 "uint vram_at(int lin) {\n"
@@ -825,7 +830,7 @@ static const char* kDrawFS =
 
    The atlas mapping and the RGBA8 -> BGR555 pack both come from PSX_TEXREP_GLSL, the same
    text psx_texrep_sample() implements in C for the two CPU rasterizers. One formula, one
-   place: three copies of a formula is how §0.5.12, §0.5.13 and §0.5.15 all happened.
+   place: three copies of a formula is how ,  and  all happened.
 
    fx/fy are the SUB-TEXEL, in 0..S-1. A replacement is S times finer than the native texel
    grid, and without this every SxS block would show one replacement pixel -- an upscaled pack
@@ -850,7 +855,7 @@ static const char* kDrawFS =
    the top-left tap and the OR of all four mask bits are both load-bearing for parity. */
 /* ---- [video] texture_filter ------------------------------------------------------------
    These run on the TEXTURE SAMPLE and nothing else. Coverage has already been decided by the
-   time control reaches them (§0.5.9: once per NATIVE pixel at pc = vec2(pn)), so no filter
+   time control reaches them (: once per NATIVE pixel at pc = vec2(pn)), so no filter
    mode can move an edge, open a seam or change which fragments survive. The only fragment
    any of them can kill is one whose nearest texel is 0 — the transparent-texel discard that
    was already there, kept deliberately so a filtered edge cannot bleed a cut-out shape.
@@ -943,7 +948,7 @@ static const char* kDrawFS =
    selects a different texel, and adjacent texels in a font atlas are "opaque" and
    "transparent", so the disagreement is not a rounding step, it is a whole pixel appearing
    or vanishing. That is what the residual far/blank/extra buckets in
-   HW_RENDERER_DESIGN.md §0.5.4 turned out to be, and why they show up as one-pixel-tall
+   the backend turned out to be, and why they show up as one-pixel-tall
    runs along scanlines.
 
    When the true quotient is the integer r, num == r*den exactly. Both sides of that test
@@ -1054,7 +1059,7 @@ static const char* kDrawFS =
    Placed after coverage and before the texture fetch, mirroring the order in gpu.c:1180 and
    gpu_hw_rt.c:170 — where it is also a `continue` before anything is sampled. Per FRAGMENT,
    not per native pixel: gpu_hw_rt.c tests the render-target pixel too, and at 1x the two are
-   the same pixel. §0.5.9's coverage contract is about GEOMETRY and is untouched by this. */
+   the same pixel.  coverage contract is about GEOMETRY and is untouched by this. */
 "#ifdef ARMSX_GL_MASK\n"
 "    if (PSX_GPU_MASK_SKIP((flags & F_MASK_CHECK) != 0u, o_color.a >= 0.5)) discard;\n"
 "#endif\n"
@@ -1076,7 +1081,7 @@ static const char* kDrawFS =
 "        md = vec3(v_col0.xyz);\n"
 "    }\n"
 "    bool transp = (flags & F_TRANSP) != 0u;\n"
-/* The SOURCE TEXEL's bit 15, which is the other half of GP0(E6) bit 0 and the half §0.5.12
+/* The SOURCE TEXEL's bit 15, which is the other half of GP0(E6) bit 0 and the half
    found missing. Untextured primitives leave it false and therefore write a 0 mask bit, which
    is what gpu.c does (its `stp` is initialised to 0 per pixel and only the textured branch
    assigns it). The filtered fetches return the OR of their taps' bit 15, exactly as
@@ -1158,7 +1163,7 @@ static const char* kDrawFS =
 "                          float(((texel >> 10) & 31u) << 3u));\n"
 /* Hardware divides by 128 with integer truncation (psx-spx). This shader rounded, which
    makes levels 1..8 fixed points and a frame-feedback trail permanent — see
-   psx_gpu_modulate_channel() in psx/dev/gpu.h and HW_RENDERER_DESIGN.md §0.5.15. t and md
+   psx_gpu_modulate_channel() in psx/dev/gpu.h and the backend. t and md
    are integer-valued and t*md <= 63240, so t*md/128.0 is EXACT in float (128 is a power of
    two) and floor() cannot land a level low. */
 "            vec3 c = (u_tex_trunc != 0) ? floor(clamp(t * md / 128.0, 0.0, 255.0))\n"
@@ -1181,7 +1186,7 @@ static const char* kDrawFS =
 "    }\n"
 "#ifdef ARMSX_GL_MASK\n"
 /* ---- mask SET, GP0(E6) bit 0 -- and, unavoidably, the blend --------------------------------
-   §2.6's "alpha-channel conflict", stated there and resolved here: `.a` is either the
+    "alpha-channel conflict", stated there and resolved here: `.a` is either the
    fixed-function SRC_ALPHA blend factor or the mask bit, and it cannot be both. The mask bit
    wins, so the blend moves into the shader — which framebuffer fetch already made possible,
    since o_color arrives holding the destination.
@@ -1251,7 +1256,7 @@ static const char* kXferFS =
      * NATIVE READBACK — u_step = S. One output texel per NATIVE VRAM texel, sampling the
        sub-texel at +S/2 (the centre-ish one; at S == 1 that is +0, so 1x is bit-for-bit the
        scanout path and the parity gate still measures the same pixels). This is what
-       GP0(C0), the save-state flush and §4.6's downgrade seed need: host VRAM is native, so
+       GP0(C0), the save-state flush and  downgrade seed need: host VRAM is native, so
        the downsample has to happen somewhere and doing it on the GPU keeps the transfer to
        2 bytes per native texel instead of 2·S².
 */
@@ -1274,7 +1279,7 @@ static const char* kResolveFS =
 /* [video] downsample. 1 = the historical single-tap behaviour, textually unchanged in the
    else-branch below so the scanout and the native readback are bit-identical to before the
    key existed. N > 1 box-averages the NxN render-target block whose top-left corner the step
-   landed on — the same average gl_parity_check_upscaled() computes on the CPU (§0.5.9's
+   landed on — the same average gl_parity_check_upscaled() computes on the CPU (
    instrument), which is why that harness is the reference for this resolve.
    The loop is bounded by a compile-time constant with a break, not by u_box directly: GLSL ES
    3.00 allows a dynamic bound, but drivers unroll a constant one and this shader runs once
@@ -1311,13 +1316,13 @@ static const char* kResolveFS =
 "}\n";
 
 /*
-    HW_RENDERER_DESIGN.md §4.3 row 1, the piece the shadow could not be dropped without.
+    GPU-to-GPU resolve needed before the software shadow can be dropped.
 
     Identical arithmetic to kResolveFS, but it writes a UINT rather than two normalised
     bytes, because its destination is vram_tex — the R16UI native VRAM mirror the draw
     shader samples. R16UI is colour-renderable in GLES 3.0, so this is an FBO and a draw:
     no glReadPixels, no CPU round trip, no pipeline stall. The 5-bit values recovered here
-    are exactly what a readback would produce (§2.5: the draw shader emits c5*8, every blend
+    are exactly what a readback would produce (: the draw shader emits c5*8, every blend
     result stays a multiple of 4, and >> 3 recovers the software's integer answer).
 
     Bit 15 comes from the target's ALPHA once the mask bit is on (u_mask), and is written as 0
@@ -1732,9 +1737,9 @@ static void gl_mark_dirty(hw_gl_t* g, int x, int y, int w, int h) {
     g->any_dirty = 1;
 }
 
-/* ---- §4.3 row 1: the GPU -> GPU resolve ------------------------------------------------ */
+/* ----  row 1: the GPU -> GPU resolve ------------------------------------------------ */
 
-/* §4.6's ladder, defined next to the seed it walks. A resolve that cannot be served is a
+/*  ladder, defined next to the seed it walks. A resolve that cannot be served is a
    correctness failure once the shadow is gone, so this is reachable from here. */
 static void gl_downgrade(hw_gl_t* g, const char* reason);
 
@@ -1759,7 +1764,7 @@ static int gl_ensure_vram_fbo(hw_gl_t* g) {
     g->rt_bound = 0;
 
     if (g->gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        psxe_diag_logf("hwgl", "vram_tex (R16UI) is not framebuffer-complete; §4.3 row 1's "
+        psxe_diag_logf("hwgl", "vram_tex (R16UI) is not framebuffer-complete;  row 1's "
                                "GPU->GPU resolve is unavailable");
         g->gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
         g->gl.DeleteFramebuffers(1, &g->vram_fbo);
@@ -1775,7 +1780,7 @@ static int gl_ensure_vram_fbo(hw_gl_t* g) {
 }
 
 /*
-    HW_RENDERER_DESIGN.md §4.3 row 1. The mirror image of gl_sync_vram(): same tile walk,
+    Mirror image of gl_sync_vram(): same tile walk,
     same "one span per tile row" collapse, but the source is the render target and the
     transfer never leaves the GPU.
 
@@ -1803,9 +1808,9 @@ static void gl_resolve_gpu_tiles(hw_gl_t* g, int x, int y, int w, int h) {
         /* Nothing correct can be done here. With the shadow on, host VRAM is still right
            and the caller's gl_sync_vram() has already produced the right texels, so this is
            only a lost optimisation. Without it, the picture would be silently wrong, which
-           is precisely what §4.6's ladder exists for. */
+           is precisely what  ladder exists for. */
         if (!g->shadow)
-            gl_downgrade(g, "vram_tex is not renderable, so §4.3 row 1 cannot be served");
+            gl_downgrade(g, "vram_tex is not renderable, so  row 1 cannot be served");
 
         g->any_gpu_dirty = 0;
         tiles_clear(&g->gpu_dirty);
@@ -1852,7 +1857,7 @@ static void gl_resolve_gpu_tiles(hw_gl_t* g, int x, int y, int w, int h) {
             STP flag and — far worse — a 4bpp texture word loses the high bit of one of its
             four PALETTE INDICES. Sampling a page whose untouched half had been laundered
             that way is how a 0.2 % whole-VRAM divergence turned into 4.92 % of the display
-            window disagreeing (measured, §0.5.7). A tile that the rasterizer did not write
+            window disagreeing (measured, ). A tile that the rasterizer did not write
             must never be touched.
         */
         lo = x0;
@@ -1940,7 +1945,7 @@ static void gl_mark_drawn(hw_gl_t* g, int x, int y, int w, int h) {
             the mark means "launder this tile through the render target": the RGBA8 target
             has no bit 15, so an untouched tile carrying a 4bpp TEXTURE loses the high bit
             of one palette index in four and an untouched 16-bit texel loses its STP flag.
-            That is what took the 1x parity window from 0.4708 % to 4.918 % (§0.5.7) — not
+            That is what took the 1x parity window from 0.4708 % to 4.918 % () — not
             a rasterization bug at all, a tilemap that claimed more than the rasterizer
             wrote.
         */
@@ -2348,7 +2353,7 @@ static void gl_note_sample(hw_gl_t* g, uint16_t texp, uint16_t clut) {
         gl_sync_vram(g, tpx, tpy, words, 256);
     }
 
-    /* §4.3 row 1, and the ORDER is load-bearing: the host upload above may have rewritten
+    /*  row 1, and the ORDER is load-bearing: the host upload above may have rewritten
        whole 16x16 tiles that the rasterizer also drew into, so the render target's copy has
        to land afterwards to win. gl_resolve_gpu_tiles() clears the CPU-dirty bit for every
        tile it serves, which is what stops the next upload from undoing it again. */
@@ -2431,7 +2436,7 @@ static void gl_fill_common(gl_vertex_t* v, const float tri[6], const float triw[
     the triangle while its centre is outside is a pixel the software rasterizer writes and
     the GPU silently leaves alone — which is precisely the `blank` bucket (a pixel nothing
     ever drew) and the `far` bucket (a pixel where an older primitive's colour survives),
-    64% and 32% of the 1x mismatches measured in HW_RENDERER_DESIGN.md §0.5.3.
+    64% and 32% of the 1x mismatches measured in the backend.
 
     Shifting the triangle by half a pixel would line the two sample grids up, but it makes
     correctness depend on GL's fill rule agreeing with gpu.c's TL() macro at samples that
@@ -2446,7 +2451,7 @@ static void gl_fill_common(gl_vertex_t* v, const float tri[6], const float triw[
     pixel — which is what the file header already claimed and what the code did not do.
 
     The cost is fragments discarded outside the triangle, ~2x the triangle's own area. The
-    §0.5.3 measurements say that is affordable: 1x and 2x both ran at ~153% uncapped with
+     measurements say that is affordable: 1x and 2x both ran at ~153% uncapped with
     emu ~10.8 ms, i.e. quadrupling the fragment count cost nothing measurable, so doubling
     it at 1x costs nothing either. Narrowing this back down later means offsetting the
     three edge lines outward and intersecting them, which is exact for fat triangles and
@@ -2639,7 +2644,7 @@ static void gl_triangle(hw_gl_t* g, psx_gpu_t* gpu, const poly_data_t* poly,
     /* PGXP gate, decided BEFORE the winding swap so the swap itself can honour it.
 
        All-or-nothing per triangle: mixing one precise vertex with two integer ones would crack
-       the shared edges §0.5.9 sealed. On top of precise_valid (core-validated source word,
+       the shared edges  sealed. On top of precise_valid (core-validated source word,
        psx/pgxp.c), each precise coordinate must agree with its own integer truncation within
        one pixel — a stale cache attach shows up as a vertex teleporting somewhere plausible,
        and the tolerance is what turns "bizarre geometry" into "falls back to integer".
@@ -2790,7 +2795,7 @@ static void gl_triangle(hw_gl_t* g, psx_gpu_t* gpu, const poly_data_t* poly,
     half-open, and gl_emit_tri() bails on `hi_y <= lo_y` to match it. That is the polygon
     that "disappears", and rescuing it is what this setting is for.
 
-    What it does NOT do is change the coverage RULE. §0.5.9's contract is that coverage is
+    What it does NOT do is change the coverage RULE.  contract is that coverage is
     decided once per native pixel from the triangle's own edges; this only moves the
     triangle's vertices before that, exactly as a game moving them itself would. Coverage
     stays watertight and stays equal to the software rasterizer's for the same geometry —
@@ -2986,7 +2991,7 @@ static void gl_draw_rect(psx_gpu_backend_t* be, psx_gpu_t* gpu, const rect_data_
 /*
     Lines. gpu_render_flat_line (gpu.c:704) is an integer Bresenham that writes raw BGR555
     with no dithering, no blending and no modulation. Rather than approximate it with a
-    widened quad — which HW_RENDERER_DESIGN.md §2.8 admits is "genuinely fiddly" and only
+    widened quad — which the backend admits is "genuinely fiddly" and only
     approximately right — the same Bresenham runs here and emits one S x S block per plotted
     pixel. That is exact by construction, and lines are rare enough (wireframe debug output
     and a few racing HUDs) that the vertex cost does not matter.
@@ -3173,7 +3178,7 @@ static void gl_copy_vram(psx_gpu_backend_t* be, uint32_t sx, uint32_t sy,
     gl_write_hazard(g, (int)dx, (int)dy, (int)w, (int)h);
 
     /*
-        §4.3 row 4, and the condition on `src` is NOT an optimisation — it is the whole
+         row 4, and the condition on `src` is NOT an optimisation — it is the whole
         correctness of the rule.
 
         gpu.c copies host VRAM -> host VRAM right after this returns. If the source was
@@ -3182,7 +3187,7 @@ static void gl_copy_vram(psx_gpu_backend_t* be, uint32_t sx, uint32_t sy,
         agree and host VRAM is the copy to prefer, because taking it through the render
         target is LOSSY: RGBA8 has no bit 15, and Crash animates 8bpp texture pages with
         GP0(80), where bit 15 is the top bit of a palette index. Marking unconditionally
-        cost 0.53 percentage points of 1x parity (0.4708 % -> 0.9986 %, §0.5.7) for exactly
+        cost 0.53 percentage points of 1x parity (0.4708 % -> 0.9986 %, ) for exactly
         that reason.
     */
     if (g->gpu_own && tiles_intersects(&g->gpu_dirty, (int)sx, (int)sy, (int)w, (int)h))
@@ -3324,8 +3329,8 @@ static void gl_upload_vram(psx_gpu_backend_t* be, uint32_t x, uint32_t y,
 }
 
 /*
-    GP0(C0), HW_RENDERER_DESIGN.md §4.3 — the only trigger that forces a GPU->CPU transfer,
-    and therefore the one §4.6's ladder is built around.
+    GP0(C0), the backend — the only trigger that forces a GPU->CPU transfer,
+    and therefore the one  ladder is built around.
 
     While PSX_GPU_BACKEND_SOFTWARE_SHADOW is set there is nothing to fetch: gpu->vram is
     authoritative, the GPUREAD drain already has correct data and there is no stall. The
@@ -3353,10 +3358,10 @@ static void gl_download_vram(psx_gpu_backend_t* be, uint32_t x, uint32_t y,
 
 #define GL_STATS_PERIOD 600
 
-/* §4.6's averaging window, in frames. Must match the size of hw_gl_t::c0_window. */
+/*  averaging window, in frames. Must match the size of hw_gl_t::c0_window. */
 #define kC0Window ((int)(sizeof(((hw_gl_t*)0)->c0_window) / sizeof(uint32_t)))
 
-/* §4.6's threshold: 256 KB/frame, "a quarter of VRAM". */
+/*  threshold: 256 KB/frame, "a quarter of VRAM". */
 #define kC0LimitDefault ((uint64_t)256 * 1024)
 
 /* `hwgl_vram_diff` period, in frames. 600 is ten seconds at 60 fps, which is short enough
@@ -3439,7 +3444,7 @@ static void gl_end_frame(psx_gpu_backend_t* be, psx_gpu_t* gpu) {
         gl_vram_diff(g, "periodic");
 
     /*
-        §4.6's automatic downgrade. The window is a plain ring so the average tracks the last
+         automatic downgrade. The window is a plain ring so the average tracks the last
         60 frames rather than a whole session — a game that reads VRAM hard for two seconds
         during a transition and then stops must NOT strand the session on the CPU, and a
         session-long total cannot tell those two apart.
@@ -3547,7 +3552,7 @@ static int gl_ensure_resolve(hw_gl_t* g, int w, int h) {
     return 1;
 }
 
-/* ---- GPU -> host VRAM readback (HW_RENDERER_DESIGN.md §4.3) ---------------------------- */
+/* ---- GPU -> host VRAM readback (the backend) ---------------------------- */
 
 /* An RG8 target at NATIVE VRAM size, i.e. one texel per PlayStation halfword. Separate from
    resolve_tex on purpose: that one is sized to the display region every frame and sharing it
@@ -3590,7 +3595,7 @@ static int gl_ensure_xfer(hw_gl_t* g, int w, int h) {
 
 /*
     Reads a NATIVE-coordinate rectangle of the render target back into host memory as packed
-    BGR555, downsampling by S on the GPU. This is §4.3's "the stall": it flushes the batch and
+    BGR555, downsampling by S on the GPU. This is  "the stall": it flushes the batch and
     then does a glReadPixels, which on a tiler is a full pipeline sync. Everything above it is
     written so that it happens as rarely as possible.
 
@@ -3652,7 +3657,7 @@ static int gl_readback_rect(hw_gl_t* g, int x, int y, int w, int h,
     g->gl.Uniform2i(g->u_res_limit, g->rt_w - 1, g->rt_h - 1);
     g->gl.Uniform1i(g->u_res_step, g->scale);
     g->gl.Uniform1i(g->u_res_box, 1);   /* native readback never downsamples a block */
-    /* Host VRAM is 16-bit and bit 15 is part of it: GP0(C0), §4.6's downgrade seed and the
+    /* Host VRAM is 16-bit and bit 15 is part of it: GP0(C0),  downgrade seed and the
        whole-VRAM diff all want the mask bit, not a 15-bit approximation of the pixel. */
     g->gl.Uniform1i(g->u_res_mask, g->mask_mode);
     g->gl.ActiveTexture(GL_TEXTURE0);
@@ -3690,13 +3695,13 @@ static int gl_readback_rect(hw_gl_t* g, int x, int y, int w, int h,
 }
 
 /*
-    §4.6's "downloading vram_rt once to seed gpu->vram" — the step that makes the downgrade
+     "downloading vram_rt once to seed gpu->vram" — the step that makes the downgrade
     transparent instead of a visible glitch, because whatever rasterizer takes over next reads
     host VRAM and would otherwise inherit whatever was last there.
 
     With the software shadow still installed gpu->vram is ALREADY authoritative and is the
     more accurate of the two copies (it has not been through the render target's 8-bit blend
-    precision, §2.5), so overwriting it would be a downgrade in the literal sense. The read is
+    precision, ), so overwriting it would be a downgrade in the literal sense. The read is
     still performed, into a scratch buffer, and the two copies are DIFFED — which turns the
     seed path from untested code into a whole-VRAM parity measurement, strictly stronger than
     gl_parity_check's display window, and exactly the number that says whether dropping the
@@ -3705,7 +3710,7 @@ static int gl_readback_rect(hw_gl_t* g, int x, int y, int w, int h,
 
 /*
     The measurement half of the seed, split out so it can be taken WITHOUT walking the
-    ladder. §0.5.6 quoted one 0/524288 at frame 256, which was real, and a second copy that
+    ladder.  quoted one 0/524288 at frame 256, which was real, and a second copy that
     landed on a black CD-load screen with softnonzero=0 and compared zeros to zeros. One
     sample of a number this load-bearing is not enough and a vacuous sample is worse than
     none, so `hwgl_vram_diff` repeats it on a period and every line carries its own frame
@@ -3743,7 +3748,7 @@ static void gl_vram_diff(hw_gl_t* g, const char* when) {
             diff++;
 
             /* The same buckets gl_parity_check() uses, and for the same reason: a raw count
-               is not actionable. "all within one 5-bit step" is §2.5's documented
+               is not actionable. "all within one 5-bit step" is  documented
                multi-blend precision divergence and is fine; a FAR count is the rasterization
                itself disagreeing and is not. */
             if (!a) {
@@ -3817,7 +3822,7 @@ static void gl_seed_host_vram(hw_gl_t* g) {
 }
 
 /*
-    §4.6 option 1, the whole ladder. Loud by contract: "explicitly and logged, never
+     option 1, the whole ladder. Loud by contract: "explicitly and logged, never
     silently". gl_status() is what frontend/main.cpp's checkRasterizerHealth() prints when it
     notices `failed`, so the reason reaches the user-visible log as well as the diag file.
 
@@ -3837,7 +3842,7 @@ static void gl_downgrade(hw_gl_t* g, const char* reason) {
     psxe_diag_logf("hwgl",
                    "AUTOMATIC DOWNGRADE at frame %llu: %s. GP0(C0) total=%llu bytes, "
                    "window=%llu bytes over %d frames (limit %llu bytes/frame). "
-                   "HW_RENDERER_DESIGN.md §4.6.",
+                   "the backend.",
                    (unsigned long long)g->frames, reason,
                    (unsigned long long)g->stat_readback_bytes,
                    (unsigned long long)g->c0_window_sum,
@@ -3872,7 +3877,7 @@ static void gl_downgrade(hw_gl_t* g, const char* reason) {
 
     Bit 15 is masked on both sides UNLESS the mask bit is on, in which case it is compared
     like every other bit and disagreements land in their own `mask` bucket. That comparison is
-    the standing GL-vs-CPU check for §0.5.16: a GL mask stage that silently disagreed with
+    the standing GL-vs-CPU check for : a GL mask stage that silently disagreed with
     psx/dev/gpu.c — a framebuffer fetch returning stale destination alpha, a flag that never
     reaches the shader, an inverted test — shows up here as a large `mask` count against an
     otherwise clean frame. With the mask bit off the render target has no mask channel at all
@@ -4111,7 +4116,7 @@ static void gl_parity_check(hw_gl_t* g, uint32_t disp_x, uint32_t disp_y, int w,
 
       * armsx_hw_gl_present_texture() hands the TEXTURE to the present layer through
         armsx_renderer_adopt_gl_texture(). The pixels never leave the GPU. This is the
-        brokered seam of HW_RENDERER_DESIGN.md §0.5.3/§0.5.5 and it removes BOTH S^2 scanout
+        brokered presentation seam, removing both S^2 scanout
         terms (the readback and the re-upload) plus the per-frame pipeline sync.
       * gl_display_buffer() reads it back at 2 bytes per pixel, for every caller that
         genuinely needs host pixels: a non-GL present backend, the screenshot path, and the
@@ -4439,7 +4444,7 @@ static const void* gl_display_buffer(psx_gpu_backend_t* be, uint32_t disp_x, uin
 }
 
 /*
-    The brokered seam, caller side. HW_RENDERER_DESIGN.md §0.5.3 specifies the renderer side
+    The brokered seam, caller side. the backend specifies the renderer side
     (armsx_renderer_adopt_gl_texture); this is the half that decides when it is legal.
 
     Returns 1 only when the present layer has adopted the resolved texture, in which case the
@@ -4486,7 +4491,7 @@ int armsx_hw_gl_present_texture(psx_gpu_backend_t* be, struct armsx_renderer* re
         exactly the kind of change that can break it silently, so while the gate is still
         running (it stops itself at frame 3600, and only ever runs at scale 1) the readback
         is kept — costing precisely what today's build costs — and only then does the seam
-        become free. HW_RENDERER_DESIGN.md §0.5.4's warning about g->readback.
+        become free. the backend's warning about g->readback.
     */
     if ((g->scale == 1) && !g->parity_done) {
         if (gl_scanout_read(g, sw, sh)) {
@@ -4812,8 +4817,8 @@ static void gl_setup_attribs(hw_gl_t* g) {
 /*
     The mask bit, PROVEN on this device before the backend is handed over.
 
-    HW_RENDERER_DESIGN.md's standing lesson is that comparing rasterizers against each other
-    is blind when they are wrong the same way, and the GL path has a second failure mode the
+    Comparing rasterizers against each other is blind when both share the same error, and the
+    GL path has a second failure mode the
     CPU ones do not: framebuffer fetch is a driver capability that can be advertised and then
     return stale or zero destination colour (see armsx_gpu_profile_t::fbfetch_gl — MediaTek
     Mali and ANGLE are the known cases). The mask CHECK is one `if` on that value, so a driver
@@ -4830,11 +4835,11 @@ static void gl_setup_attribs(hw_gl_t* g) {
          drawing anything.
 
     Read back through the ordinary resolve path, so it also proves that bit 15 survives the
-    render target -> host round trip that GP0(C0) and §4.6's downgrade seed depend on.
+    render target -> host round trip that GP0(C0) and the downgrade seed depend on.
 
     Runs before the initial whole-surface seed, so the four pixels it dirties are overwritten
     a moment later and never reach a frame. Returns 0 to REFUSE the attach: the software
-    rasterizer is right, and a GL path that renders the §0.5.12 bug back is not an acceptable
+    rasterizer is right, and a GL path that reintroduces the mask-check bug is not an acceptable
     fallback for it.
 */
 static int gl_mask_selftest(hw_gl_t* g) {
@@ -4877,7 +4882,7 @@ static int gl_mask_selftest(hw_gl_t* g) {
     gpu->draw_x2 = save_x2; gpu->draw_y2 = save_y2;
 
     /* Checked pixel: colour 1 survived AND kept its mask bit. Control: colour 2 landed AND
-       its own mask bit is CLEAR — which is the other half of §0.5.12's control, since a
+       its own mask bit is CLEAR — which is the other half of  control, since a
        backend that simply forced bit 15 on every write would pass the first half. */
     ok = (probe[0] == (uint16_t)(0x001f | 0x8000)) && (probe[1] == 0x7c00u);
 
@@ -4924,7 +4929,7 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
     g->gles_library = lib;
 
     /* Default ON = the shipping behaviour; the markers only exist to reproduce the pre-fix
-       build as a control on the same binary. HW_RENDERER_DESIGN.md §0.5.4. */
+       build as a control on the same binary. the backend. */
     g->dbg_tri_bbox = !gl_debug_marker("hwgl_no_bbox");
     g->dbg_upscale_parity = gl_debug_marker("hwgl_upscale_parity");
     g->dbg_paint = gl_debug_marker("hwgl_paint_reject");
@@ -4933,16 +4938,16 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
 
     /* `hwgl_no_adopt` forces the readback scanout path even when the seam is available, so
        the zero-copy present can be A/B'd against its own binary on the same scene — which is
-       the only way §0.5.5's numbers are comparable at all (§0.5.4's methodology). */
+       the only way  numbers are comparable at all ( methodology). */
     g->adopt_disabled = gl_debug_marker("hwgl_no_adopt");
 
-    /* §4.6's two test markers. See the hw_gl_t comment: the trigger cannot fire on its own
+    /*  two test markers. See the hw_gl_t comment: the trigger cannot fire on its own
        while the software shadow makes GP0(C0) free, so it has to be armed deliberately. */
     g->dbg_c0_trip = gl_debug_marker("hwgl_c0_trip");
     g->dbg_force_downgrade = gl_debug_marker("hwgl_force_downgrade");
     g->c0_limit = g->dbg_c0_trip ? 0u : kC0LimitDefault;
 
-    /* §4.3 row 1 and its measurement, both off by default while the shadow is on. */
+    /*  row 1 and its measurement, both off by default while the shadow is on. */
     g->dbg_gpu_resolve = gl_debug_marker("hwgl_gpu_resolve");
     g->dbg_vram_diff = gl_debug_marker("hwgl_vram_diff");
     g->dbg_geom = gl_debug_marker("hwgl_geom");
@@ -4977,10 +4982,23 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
 
     g->have_context = 1;
 
-    /*
-        The mask bit, and the one capability it needs. HW_RENDERER_DESIGN.md §0.5.16.
+    /* The presentation backend normally records these strings first. SDL acceleration does
+       not use render_gl.cpp, however, and the rasterizer may also own an independent pbuffer
+       context. Record the context we are actually about to compile against before consulting
+       any per-driver gate below. This is particularly important on MediaTek Mali: the host hint
+       marks the SoC and these strings supply the Mali identity, together disabling the known-bad
+       framebuffer-fetch path instead of leaving an "unknown" profile to opt into it. */
+    {
+        const unsigned char* vendor = g->gl.GetString(GL_VENDOR);
+        const unsigned char* renderer = g->gl.GetString(GL_RENDERER);
+        armsx_gpu_profile_note_gl((const char*)vendor, (const char*)renderer,
+                                  (const char*)version);
+    }
 
-        §2.6 planned this as stencil work. It is not: the mask CHECK is a read-modify-write
+    /*
+        The mask bit, and the one capability it needs. the backend.
+
+         planned this as stencil work. It is not: the mask CHECK is a read-modify-write
         against the destination, and the only mechanism in GLES that gives a fragment shader
         the destination is framebuffer fetch. (Stencil can express the check, but its
         reference value is per-DRAW while "set mask" varies per FRAGMENT, and nothing in
@@ -4993,7 +5011,7 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
         profile veto matters as much as the extension string: MediaTek Mali advertises
         framebuffer fetch and returns zero or stale destination colour, and under ANGLE it has
         been seen to crash the compiler outright (armsx_gpu_profile_t::fbfetch_gl). Either way
-        the mask CHECK would silently do nothing, which is the §0.5.12 bug all over again.
+        the mask CHECK would silently do nothing.
     */
     if (psx_gpu_accuracy_flags(gpu) & PSX_GPU_ACCURACY_MASK_BIT) {
         const armsx_gpu_profile_t* profile = armsx_gpu_profile_get();
@@ -5003,7 +5021,7 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
         /* The framebuffer-fetch mask path is NEW and unverified on device: it landed the same
            evening a regression appeared where the BIOS could not draw its own text, on an
            Adreno 740 that reports have_ext=yes/trusted=yes and therefore took this branch.
-           Declining is the behaviour every confirmed fix was validated against (§0.5.12's
+           Declining is the behaviour every confirmed fix was validated against (
            mask-from-texel lives in the CPU rasterizer), so the safe default is to keep
            declining until the GL path is proven against a real boot. Set ARMSX_GL_MASK_BIT=1
            to opt in and test it.
@@ -5045,14 +5063,14 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
 
     g->base.impl = g;
     /* The shadow stays on deliberately — see the header. It is what makes GP0(C0) free and
-       turns §4's two-way coherency into a one-way upload. */
+       turns  two-way coherency into a one-way upload. */
     /*
-        `hwgl_no_shadow` is §4 step 3 — g->shadow = 0 — behind a marker instead of in the
-        default, and it exists for ONE reason: the economic case for the whole of §4 is the
+        `hwgl_no_shadow` is  step 3 — g->shadow = 0 — behind a marker instead of in the
+        default, and it exists for ONE reason: the economic case for the whole of  is the
         claim that most of the ~9 ms `emu` phase is the software shadow, and that claim
         cannot be tested without turning the shadow off.
 
-        It is NOT the flip. §4.3 row 1 is measurably not correct yet (§0.5.7: arming
+        It is NOT the flip.  row 1 is measurably not correct yet (: arming
         `hwgl_gpu_resolve` moves the 1x parity window from 0.4708 % to 0.9986 %), so a
         session run this way renders a picture that may be wrong and MUST NOT be used to
         save a state — psx_gpu_save_state() serialises gpu->vram, which nothing refreshes
@@ -5064,7 +5082,7 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
                                                       : PSX_GPU_BACKEND_SOFTWARE_SHADOW;
     g->shadow = (g->base.flags & PSX_GPU_BACKEND_SOFTWARE_SHADOW) ? 1 : 0;
     /* Without the shadow the render target is the only copy of anything the rasterizer drew,
-       so §4.3 row 1 is mandatory. `hwgl_gpu_resolve` turns it on while the shadow is still
+       so  row 1 is mandatory. `hwgl_gpu_resolve` turns it on while the shadow is still
        there, which is how it gets an oracle. */
     g->gpu_own = !g->shadow || g->dbg_gpu_resolve;
     g->base.destroy = NULL;   /* owned by armsx_hw_gl_destroy(), not by the core */
@@ -5163,7 +5181,7 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
 
     /* Native-resolution VRAM mirror. R16UI so the shader does exact integer bit extraction
        with no float round trip — RGBA5551 sampled as normalized float could not index a
-       CLUT exactly (HW_RENDERER_DESIGN.md §2.1). */
+       CLUT exactly (the backend). */
     g->gl.GenTextures(1, &g->vram_tex);
     g->gl.BindTexture(GL_TEXTURE_2D, g->vram_tex);
     g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -5212,7 +5230,7 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
         return NULL;
     }
 
-    /* Every state this line reports is settings- or marker-driven, and §0.5.5 records that a
+    /* Every state this line reports is settings- or marker-driven, and  records that a
        pushed settings.toml does not reliably survive to the core. This line is the proof that
        what is running is what was asked for; nothing downstream should be believed without
        it. */

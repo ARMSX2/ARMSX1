@@ -193,7 +193,7 @@ struct psx_gpu_t {
        be captured by the arming in flight; 0/1 is the original one-shot behaviour. In
        summary mode the per-primitive lines are replaced by ONE census line per frame, which
        is what makes a 240-frame capture affordable — a per-frame OSCILLATION is invisible in
-       a single frame no matter how detailed it is. See HW_RENDERER_DESIGN.md §0.5.14. */
+       a single frame no matter how detailed it is. See the backend. */
     int dbg_frames;      /* frames left in this arming */
     int dbg_summary;     /* 1 = census only, no per-primitive lines */
     int dbg_quiet;       /* 1 = gpu_dumpf() drops everything (summary uses its own writer) */
@@ -344,7 +344,7 @@ extern int g_psx_gpu_dither_kernel[];
 /*
     Opt-in accuracy fixes. Both of these are behaviours real hardware has and this core
     has never had, so turning them on CHANGES OUTPUT in games that rely on them — see
-    HW_RENDERER_DESIGN.md §7.1, which ranks the mask bit as the highest-regression item in
+    the backend, which ranks the mask bit as the highest-regression item in
     the whole port. They therefore default to 0, which reproduces the historical behaviour
     exactly, and both rasterizers (software and any backend) read the same flags so the 1x
     parity gate holds in either state.
@@ -386,7 +386,7 @@ uint32_t psx_gpu_accuracy_flags(const psx_gpu_t*);
     With rounding, `round(t5 * 7.9375)` lands back on `t5 * 8` for every t5 <= 8, so levels
     1..8 are FIXED POINTS. The trail decays to 8/31 and then sticks there forever — a
     permanent 26%-brightness ghost of every pose the character has ever been in. See
-    HW_RENDERER_DESIGN.md §0.5.15.
+    the backend.
 
     tex5 is 0..31, mod8 is 0..255; the result is the 8-bit channel the framebuffer packer
     then shifts down to 5 bits.
@@ -428,7 +428,7 @@ static inline unsigned int psx_gpu_modulate_channel(const psx_gpu_t* gpu,
    Measured in Silent Hill (SLUS-00707), one frame of the foggy-street scene
    (gpu_prim_dump_capture.txt): 16 of 1540 rasterized triangles exceed the hardware limit,
    14 vertices sit exactly at the saturation value, and 2 of the oversized triangles overlap
-   the visible draw area. See HW_RENDERER_DESIGN.md §0.5.13.
+   the visible draw area. See the backend.
 
    Spans are taken on the integer bounding box AFTER the drawing offset, which is a pure
    translation and so cannot change them. */
@@ -470,7 +470,7 @@ static inline int psx_gpu_mask_set(const psx_gpu_t* gpu) {
 
     "Set mask while drawing" is 0=TextureBit15, 1=ForceBit15=1. psx_gpu_mask_set() above is
     only the force case; when the bit is CLEAR hardware still writes a mask bit — the source
-    texel's bit 15 — and untextured primitives write 0. HW_RENDERER_DESIGN.md §2.6 states the
+    texel's bit 15 — and untextured primitives write 0. the backend states the
     rule as `force_mask || texel_bit15`.
 
     Dropping the texel half is what put a lighter rectangle around every character in Silent
@@ -492,9 +492,8 @@ static inline uint16_t psx_gpu_mask_from_texel(const psx_gpu_t* gpu) {
     The mask stage as two expressions, in a form BOTH C and GLSL accept verbatim.
 
     The GLES rasterizer (frontend/gpu_hw_gl.c) cannot call the helpers above: its mask stage
-    runs per fragment inside a shader. Writing the same rule out a fourth time, in a second
-    language, is exactly how the four bugs of 2026-08-01 happened — all three rasterizers
-    were wrong IDENTICALLY, which makes any comparison between them blind. So the rule is
+    runs per fragment inside a shader. Duplicating the rule can make all rasterizers wrong in
+    the same way, which makes comparisons between them blind. So the rule is
     written ONCE here and the GL shader is COMPILED FROM THIS TEXT: PSX_GPU_MASK_GLSL below
     stringifies these same macro bodies into two `#define`s that are prepended to the
     fragment shader source. `||` and `&&` mean the same thing in C and in GLSL ES, and
@@ -505,7 +504,7 @@ static inline uint16_t psx_gpu_mask_from_texel(const psx_gpu_t* gpu) {
         force       psx_gpu_mask_set()        "set mask while drawing"
         from_texel  psx_gpu_mask_from_texel() non-zero once the accuracy flag is on
         texel_stp   bit 15 of the source texel; 0 for untextured primitives
-      i.e. `force || texel_bit15`, HW_RENDERER_DESIGN.md §2.6 and §0.5.12.
+      i.e. `force || texel_bit15`.
 
     SKIP — whether the write happens at all, GP0(E6) bit 1:
         check       psx_gpu_mask_check()      "check mask before draw"
@@ -553,7 +552,7 @@ int psx_gpu_backend_owns_display(psx_gpu_t*);
 
 /* Scanout source. Hands back the backend's upscaled target when one is installed, and
    gpu->vram at native resolution otherwise or when `want_native` is set (the whole-VRAM
-   debug view and 24bpp scanout both have to stay native — HW_RENDERER_DESIGN.md §4.4).
+   debug view and 24bpp scanout both have to stay native — the backend).
    *out_scale and *out_stride_bytes describe the buffer that was returned. */
 const void* psx_gpu_get_display_surface(psx_gpu_t*, int want_native,
                                         int* out_scale, uint32_t* out_stride_bytes);

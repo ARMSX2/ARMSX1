@@ -428,14 +428,14 @@ void armsx_gpu_profile_note_host_hint(const char* hint)
     if (lowered[0] == '\0') {
         return;
     }
-    if (strstr(lowered, "mediatek") != NULL || strstr(lowered, "mtk") != NULL) {
-        g_profile.is_mediatek = 1;
-    } else {
-        const char* mt = strstr(lowered, "mt");
-        if (mt != NULL && isdigit((unsigned char)mt[2])) {
-            g_profile.is_mediatek = 1;
-        }
-    }
+
+    /* Android supplies two kinds of pre-renderer facts through this entry point:
+       Build.SOC_* identifies the host/MediaTek combination, while GpuInfo's worker-thread
+       pbuffer probe supplies the system GL_RENDERER (for example Mali-G715). Feed both through
+       the same fact collector used by real GL contexts so a software-only session can report and
+       apply the correct physical-GPU profile before its first frame. This does not guess a driver:
+       the pbuffer result has no GL_VERSION, so that remains unknown until a real renderer sees it. */
+    identify_from_text(lowered);
     apply_known_behaviour();
 }
 

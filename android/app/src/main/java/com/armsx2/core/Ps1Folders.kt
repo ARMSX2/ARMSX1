@@ -5,14 +5,16 @@ import androidx.core.content.edit
 import com.armsx2.runtime.MainActivityRuntime
 
 /**
- * The user's game library folders (absolute paths). Persisted in prefs AND mirrored into
- * settings.toml `[library].folders` so the native core sees the same list. Requires all-files
- * access (see [Ps1Storage]) for the paths to be readable/launchable.
+ * POSIX game-library folders mirrored into `settings.toml` for the native front-end.
+ *
+ * Android SAF trees deliberately do not enter this object: their `content://` identity stays in
+ * [MainActivityRuntime.romsDirs], [Ps1Library] enumerates them through DocumentsProvider, and
+ * [Ps1SafAccess] leases the selected document to the native core only for the running session.
  */
 object Ps1Folders {
     private const val KEY = "library.folders"
 
-    /** Observable folder set (absolute paths). */
+    /** Observable POSIX folder set. */
     val folders = mutableStateOf<List<String>>(emptyList())
 
     @Volatile
@@ -50,21 +52,15 @@ object Ps1Folders {
     }
 
     /**
-     * Adopt [paths] as THE folder set, without touching `romsDirs`.
+     * Adopt [paths] as the complete POSIX folder set, without touching `romsDirs`.
      *
-     * The library repository's direction of travel is romsDirs → here: it resolves the front-end's
-     * ROM folders (SAF tree URIs included) down to absolute paths the PS1 core can fopen and hands
-     * them over, so mirroring back would be a loop. Authoritative rather than additive so removing
-     * a folder in the front-end actually stops it being scanned — but an EMPTY list is ignored,
-     * because "nothing resolved this pass" (no all-files grant yet, SD card unmounted) must not
-     * silently wipe the user's library folders out of settings.toml.
-     *
-     * No-ops when nothing changes, so a rescan doesn't rewrite settings.toml every time.
+     * An empty list is meaningful: it clears stale native-library paths after the user removes the
+     * last raw folder or migrates entirely to SAF. SAF access is never inferred from this mirror.
      */
     fun syncFromLibrary(paths: List<String>) {
         ensureLoaded()
         val next = paths.filter { it.isNotBlank() }.distinct().sorted()
-        if (next.isEmpty() || next == folders.value) return
+        if (next == folders.value) return
         folders.value = next
         persist(next)
     }

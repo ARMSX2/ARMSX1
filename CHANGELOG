@@ -87,7 +87,8 @@ Known issues
     see missing geometry at the left and right edges. It is off by default.
 
 Licence
-  ARMSX1 is now free and open source under the LGPL-3.0. See LICENSE and NOTICE.
+  Moon-owned ARMSX1 material is proprietary. Upstream, contributor-owned and
+  third-party material retains its existing licenses. See LICENSE and NOTICE.
 
 Credits
   allkern (Lisandro Alarcon)  Original PlayStation 1 emulator core, psxe.

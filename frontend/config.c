@@ -103,9 +103,9 @@ static const char g_default_settings[] =
 #endif
     "\n"
 #ifdef USE_HARDWARE
-    "    gpu_backend = \"opengl\"   # software | sdl-accelerated | opengl | angle | vulkan\n"
+    "    gpu_backend = \"software\" # software | sdl-accelerated | opengl | angle | vulkan\n"
     "    gl_driver = \"system\"     # GLES implementation for the opengl backend: system | angle\n"
-    "    renderer = \"hardware\"    # rasterizer: software | hardware | hardware-cpu | hardware-gl\n"
+    "    renderer = \"software\"    # rasterizer: software | hardware | hardware-cpu | hardware-gl\n"
     "    internal_scale = 1        # 1..8; internal resolution, hardware rasterizer only\n"
     "    gpu_profile = \"auto\"     # auto | adreno | mali | powervr | xclipse\n"
     "    force_fbfetch = \"auto\"   # auto | on | off; overrule the GPU profile's fbfetch default\n"
@@ -165,7 +165,7 @@ static const char g_default_settings[] =
     "    mute_fast_forward = false\n"
     "    swap_channels = false\n"
     "    skip_reverb = false       # bypass the SPU reverb network (saves CPU, loses echo)\n"
-    "    buffer_ms = 13            # 2..100; device buffer, 13 ms is the historical 588 frames\n"
+    "    buffer_ms = 20            # 20..100; one PAL frame keeps Android audio callbacks cadence-safe\n"
     "    driver = \"opensles\"       # Android only: opensles | aaudio | default\n"
     "    background_playback = false # keep running with the app off-screen / the screen off\n"
     "\n"
@@ -491,17 +491,15 @@ void psxe_cfg_load_defaults(psxe_config_t* cfg) {
     cfg->vsync_enabled = 1;
 #endif
 #ifdef USE_HARDWARE
-    /* 2 = opengl. GLES binds EGL straight to the Compose Surface's ANativeWindow, which drops
-       the full-resolution CPU blit the software present path does — so it is both faster and
-       the path the hardware rasteriser expects. MUST match Ps1Settings.gpuBackend's default;
-       a Kotlin default that disagrees is how a setting looks set while the core runs the
-       other path. */
-    cfg->gpu_backend = 2;
+    /* 0 = SDL software presentation. GPU presentation is opt-in so the deterministic SDL path
+       remains the default on every platform, including Android surfaces that cannot be adopted
+       by SDL_CreateWindowFrom(). MUST match Ps1Settings.gpuBackend's default. */
+    cfg->gpu_backend = 0;
     cfg->gl_driver = 0;
-    /* 1 = hardware (GLES when a GL context exists, CPU otherwise). Upscaling is impossible
-       without it. Matches Ps1Settings.hwRasterizer's default; the two must not disagree, or a
-       setting looks enabled while the core runs the other path. */
-    cfg->renderer = 1;
+    /* 0 = the native, accuracy-authoritative rasterizer. The scale-aware hardware rasterizer
+       is opt-in: its CPU fallback is materially slower on SDL-only Android surfaces, and a
+       default that silently selects it turns a BIOS boot into a frame-rate regression. */
+    cfg->renderer = 0;
     cfg->internal_scale = 1;
 #endif
     /* Hardware truth, and FREE for games that do not use the features: mask check/set
@@ -550,7 +548,7 @@ void psxe_cfg_load_defaults(psxe_config_t* cfg) {
     cfg->audio_mute_fast_forward = 0;
     cfg->audio_swap_channels = 0;
     cfg->audio_skip_reverb = 0;
-    cfg->audio_buffer_ms = 13;
+    cfg->audio_buffer_ms = 20;
     cfg->audio_driver = 1; /* openslES: the only Android backend that needs no SDLActivity */
     /* Off: with the app off-screen the VM parks and the platform audio stream is stopped, not
        just SDL-paused. Leaving it running is the "quiet, distorted audio out of a sleeping
@@ -1023,7 +1021,7 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
             }
 
             /* The RASTERIZER, deliberately not folded into gpu_backend above, which
-               selects the *presentation* path. HW_RENDERER_DESIGN.md §5.4. */
+               selects the *presentation* path. the backend. */
             toml_datum_t s_renderer = toml_string_in(s_video_table, "renderer");
 
             if (s_renderer.ok && s_renderer.u.s) {
@@ -1094,7 +1092,7 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
             /* Accuracy fixes. Both default ON — see psxe_cfg_load_defaults() for why (hardware
                truth, and free for games that never raise the GPUSTAT bits). They do change what
                games look like relative to the releases before they existed, which is the risk
-               HW_RENDERER_DESIGN.md §7.1 ranks. */
+               the backend ranks. */
             toml_datum_t s_mask_bit = toml_bool_in(s_video_table, "accurate_mask_bit");
 
             if (s_mask_bit.ok)
@@ -1108,7 +1106,7 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
             /* Hardware drops any polygon whose vertices are more than 1023 apart
                horizontally or 511 vertically (psx-spx). This core rejected at 2048x1024,
                so primitives hardware throws away were drawn as huge stretched triangles.
-               See psx_gpu_prim_oversize() and HW_RENDERER_DESIGN.md §0.5.13. Off restores
+               See psx_gpu_prim_oversize() and the backend. Off restores
                the historical 2048x1024 for an A/B. */
             toml_datum_t s_prim_size = toml_bool_in(s_video_table, "accurate_prim_size");
 
@@ -1118,7 +1116,7 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
             /* Texture blending divides by 128 with integer truncation on hardware; this core
                rounded. Invisible on ordinary art (<=1 level, 4.9% of inputs) but it makes a
                frame-feedback trail permanent instead of fading — Silent Hill's loading
-               screen. psx_gpu_modulate_channel(), HW_RENDERER_DESIGN.md §0.5.15. */
+               screen. psx_gpu_modulate_channel(), the backend. */
             toml_datum_t s_tex_mod = toml_bool_in(s_video_table, "accurate_tex_modulate");
 
             if (s_tex_mod.ok)
@@ -1132,7 +1130,7 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
             if (s_pgxp.ok)
                 pgxp = s_pgxp.u.b;
 
-            /* ---- display / video feature set (HW_RENDERER_DESIGN.md §0.5.10) --------------
+            /* ---- display / video feature set (the backend) --------------
                Every one of these is default off/neutral and every parse below only ever
                ASSIGNS on a successful read, so a file without the key keeps the seeded
                default. An unrecognised string token also keeps the default rather than
@@ -1146,7 +1144,7 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
                 widescreen_hack = s_widescreen.u.b;
 
             /* Texture filtering, GLES rasterizer only. Operates on the TEXTURE SAMPLE, never
-               on the coverage decision (§0.5.9). */
+               on the coverage decision (). */
             toml_datum_t s_texture_filter = toml_string_in(s_video_table, "texture_filter");
 
             if (s_texture_filter.ok && s_texture_filter.u.s) {
@@ -1515,7 +1513,7 @@ void psxe_cfg_load(psxe_config_t* cfg, int argc, const char* argv[]) {
     cfg->audio_mute_fast_forward = audio_mute_fast_forward;
     cfg->audio_swap_channels = audio_swap_channels;
     cfg->audio_skip_reverb = audio_skip_reverb;
-    cfg->audio_buffer_ms = audio_buffer_ms < 2 ? 2 : (audio_buffer_ms > 100 ? 100 : audio_buffer_ms);
+    cfg->audio_buffer_ms = audio_buffer_ms < 20 ? 20 : (audio_buffer_ms > 100 ? 100 : audio_buffer_ms);
     cfg->audio_driver = (audio_driver < 0 || audio_driver > 2) ? 1 : audio_driver;
     cfg->audio_background_playback = audio_background_playback ? 1 : 0;
     cfg->quiet = quiet;

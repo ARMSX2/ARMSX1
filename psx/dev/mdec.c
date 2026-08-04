@@ -70,56 +70,89 @@ void real_idct(int16_t* blk, int16_t* scale) {
 
 #define IDCT_FUNC(blk, scale) real_idct(blk, scale)
 
-uint16_t* rl_decode_block(int16_t* blk, uint16_t* src, uint8_t* quant, int16_t* scale) {
-    PSX_PERF_INC(mdec_blocks);
+typedef struct {
+    const uint32_t* words;
+    size_t halfword_index;
+    size_t halfword_count;
+} mdec_input_cursor_t;
 
+/* MDEC parameter words are PSX bus values, not a host-endian byte buffer. Extracting the
+   low halfword first keeps this correct on big-endian hosts and, more importantly, gives
+   every RLE fetch one exact bounds check. */
+static int mdec_read_halfword(mdec_input_cursor_t* cursor, uint16_t* value) {
+    size_t index;
+    uint32_t word;
+
+    if (!cursor || !value || cursor->halfword_index >= cursor->halfword_count)
+        return 0;
+
+    index = cursor->halfword_index++;
+    word = cursor->words[index >> 1];
+    *value = (uint16_t)(word >> ((index & 1u) * 16u));
+
+    return 1;
+}
+
+static uint8_t mdec_input_byte(const psx_mdec_t* mdec, size_t index) {
+    uint32_t word = mdec->input[index >> 2];
+
+    return (uint8_t)(word >> ((index & 3u) * 8u));
+}
+
+static int rl_decode_block(int16_t* blk, mdec_input_cursor_t* cursor,
+                           const uint8_t* quant, int16_t* scale) {
+    uint16_t n;
+    int q_scale;
     int k = 0;
+    int val;
 
-    for (int i = 0; i < 64; i++)
-        blk[i] = 0;
-    
-    uint16_t n = *src;
+    memset(blk, 0, 64 * sizeof(*blk));
 
-    ++src;
+    /* FE00 before a block is command padding. It is also the ordinary end marker after a
+       coefficient, where its run advances past coefficient 63. An all-padding tail is an
+       incomplete block, not permission to read beyond the command buffer. */
+    do {
+        if (!mdec_read_halfword(cursor, &n))
+            return 0;
+    } while (n == 0xfe00);
 
-    while (n == 0xfe00) {
-        n = *src;
+    q_scale = (n >> 10) & 0x3f;
+    val = EXTS10(n & 0x3ff) * quant[0];
 
-        ++src;
+    if (!q_scale)
+        val = EXTS10(n & 0x3ff) * 2;
+
+    val = CLAMP(val, -0x400, 0x3ff);
+    blk[q_scale ? zagzig[0] : 0] = (int16_t)val;
+
+    for (;;) {
+        unsigned int next_k;
+
+        if (!mdec_read_halfword(cursor, &n))
+            return 0;
+
+        next_k = (unsigned int)k + ((n >> 10) & 0x3f) + 1u;
+
+        /* The hardware finishes a block once the run reaches/passes its last coefficient.
+           Do this check before quant[next_k] or zagzig[next_k]: FE00 from k=0 advances to
+           64, and the old ordering was the Pixel tombstone's out-of-bounds read. */
+        if (next_k < 64u) {
+            k = (int)next_k;
+            val = (EXTS10(n & 0x3ff) * quant[k] * q_scale + 4) / 8;
+
+            if (!q_scale)
+                val = EXTS10(n & 0x3ff) * 2;
+
+            val = CLAMP(val, -0x400, 0x3ff);
+            blk[q_scale ? zagzig[k] : k] = (int16_t)val;
+        }
+
+        if (next_k >= 63u) {
+            IDCT_FUNC(blk, scale);
+            PSX_PERF_INC(mdec_blocks);
+            return 1;
+        }
     }
-
-    int q_scale = (n >> 10) & 0x3f;
-
-    int16_t val = EXTS10(n & 0x3ff) * quant[k];
-
-    while (k < 64) {
-        if (!q_scale)
-            val = EXTS10(n & 0x3ff) * 2;
-
-        val = CLAMP(val, -0x400, 0x3ff);
-        // val *= scalezag[k]; // For fast IDCT
-
-        if (q_scale > 0)
-            blk[zagzig[k]] = val;
-        
-        if (!q_scale)
-            blk[k] = val;
-
-        n = *src;
-
-        if (k == 63)
-            break;
-
-        ++src;
-
-        k += ((n >> 10) & 0x3f) + 1;
-
-        val = (EXTS10(n & 0x3ff) * quant[k] * q_scale + 4) / 8;
-    }
-
-    IDCT_FUNC(blk, scale);
-
-    return src;
 }
 
 //   for y=0 to 7
@@ -180,89 +213,144 @@ void yuv_to_rgb(psx_mdec_t* mdec, uint8_t* buf, int xx, int yy) {
 
 void mdec_nop(psx_mdec_t* mdec) { /* Do nothing */ }
 
+static int mdec_grow_output(uint8_t** output, size_t old_size, size_t extra_size) {
+    uint8_t* grown;
+
+    if (extra_size > SIZE_MAX - old_size)
+        return 0;
+
+    grown = (uint8_t*)realloc(*output, old_size + extra_size);
+
+    if (!grown)
+        return 0;
+
+    *output = grown;
+    return 1;
+}
+
+static void mdec_write_mono_block(const psx_mdec_t* mdec, uint8_t* output) {
+    if (mdec->output_depth == 1) {
+        for (int i = 0; i < 64; i++) {
+            int value = CLAMP(mdec->yblk[i], -128, 127);
+
+            output[i] = (uint8_t)(value + (mdec->output_signed ? 0 : 0x80));
+        }
+    } else {
+        for (int i = 0; i < 64; i += 2) {
+            int lo = CLAMP(mdec->yblk[i], -128, 127) + (mdec->output_signed ? 0 : 0x80);
+            int hi = CLAMP(mdec->yblk[i + 1], -128, 127) + (mdec->output_signed ? 0 : 0x80);
+
+            output[i >> 1] = (uint8_t)(((lo >> 4) & 0x0f) | (hi & 0xf0));
+        }
+    }
+}
+
 void mdec_decode_macroblock(psx_mdec_t* mdec) {
-    PSX_PERF_INC(mdec_macroblocks);
+    mdec_input_cursor_t cursor = {
+        mdec->input,
+        0,
+        mdec->input_size / sizeof(uint16_t)
+    };
+    uint8_t* decoded = NULL;
+    size_t decoded_size = 0;
+    size_t block_size = (mdec->output_depth == 0) ? 32u :
+                        (mdec->output_depth == 1) ? 64u :
+                        (mdec->output_depth == 3) ? 512u : 768u;
+    int allocation_failed = 0;
+
+    free(mdec->output);
+    mdec->output = NULL;
+    mdec->output_index = 0;
+    mdec->output_words_remaining = 0;
+    mdec->output_empty = 1;
+    mdec->output_request = 0;
+
+    if (!mdec->input || !mdec->input_size)
+        return;
 
     if (mdec->output_depth < 2) {
-        size_t block_size = (mdec->output_depth == 3) ? 512 : 768;
-        size_t size = block_size;
+        while (cursor.halfword_index < cursor.halfword_count) {
+            if (!rl_decode_block(mdec->yblk, &cursor, mdec->y_quant_table, mdec->scale_table))
+                break;
 
-        mdec->output = malloc(size);
-
-        rl_decode_block(mdec->yblk, (uint16_t*)mdec->input, mdec->y_quant_table, mdec->scale_table);
-
-        for (int i = 0; i < 64; i++) {
-            int16_t y = mdec->yblk[i] & 0xff;
-
-            if (mdec->output_depth == 1) {
-                mdec->output[i] = y;
-            } else {
-                // To-do
-                mdec->output[i] = 0;
+            if (!mdec_grow_output(&decoded, decoded_size, block_size)) {
+                allocation_failed = 1;
+                break;
             }
-        }
 
-        mdec->output_words_remaining = ((mdec->output_depth == 1) ? 64 : 32) >> 2;
-        mdec->output_empty = 0;
-        mdec->output_index = 0;
+            mdec_write_mono_block(mdec, decoded + decoded_size);
+            decoded_size += block_size;
+            PSX_PERF_INC(mdec_macroblocks);
+        }
     } else {
-        uint16_t* in = (uint16_t*)mdec->input;
+        while (cursor.halfword_index < cursor.halfword_count) {
+            uint8_t* block;
 
-        size_t block_size = (mdec->output_depth == 3) ? 512 : 768;
-        size_t size = block_size;
+            if (!rl_decode_block(mdec->crblk, &cursor, mdec->uv_quant_table, mdec->scale_table) ||
+                !rl_decode_block(mdec->cbblk, &cursor, mdec->uv_quant_table, mdec->scale_table) ||
+                !rl_decode_block(mdec->yblk, &cursor, mdec->y_quant_table, mdec->scale_table))
+                break;
 
-        unsigned long bytes_processed = 0;
-
-        int block_count = 1;
-
-        while (bytes_processed < mdec->input_size) {
-            if (!mdec->output) {
-                mdec->output = malloc(block_count * size);
-            } else {
-                mdec->output = realloc(mdec->output, block_count * size);
+            if (!mdec_grow_output(&decoded, decoded_size, block_size)) {
+                allocation_failed = 1;
+                break;
             }
 
-            in = rl_decode_block(mdec->crblk, in, mdec->uv_quant_table, mdec->scale_table);
-            in = rl_decode_block(mdec->cbblk, in, mdec->uv_quant_table, mdec->scale_table);
-            in = rl_decode_block(mdec->yblk, in, mdec->y_quant_table, mdec->scale_table);
-            yuv_to_rgb(mdec, &mdec->output[(block_count * size) - block_size], 0, 0);
-            in = rl_decode_block(mdec->yblk, in, mdec->y_quant_table, mdec->scale_table);
-            yuv_to_rgb(mdec, &mdec->output[(block_count * size) - block_size], 8, 0);
-            in = rl_decode_block(mdec->yblk, in, mdec->y_quant_table, mdec->scale_table);
-            yuv_to_rgb(mdec, &mdec->output[(block_count * size) - block_size], 0, 8);
-            in = rl_decode_block(mdec->yblk, in, mdec->y_quant_table, mdec->scale_table);
-            yuv_to_rgb(mdec, &mdec->output[(block_count * size) - block_size], 8, 8);
+            block = decoded + decoded_size;
+            yuv_to_rgb(mdec, block, 0, 0);
 
-            bytes_processed = (uintptr_t)in - (uintptr_t)mdec->input;
+            if (!rl_decode_block(mdec->yblk, &cursor, mdec->y_quant_table, mdec->scale_table))
+                break;
+            yuv_to_rgb(mdec, block, 8, 0);
 
-            ++block_count;
+            if (!rl_decode_block(mdec->yblk, &cursor, mdec->y_quant_table, mdec->scale_table))
+                break;
+            yuv_to_rgb(mdec, block, 0, 8);
+
+            if (!rl_decode_block(mdec->yblk, &cursor, mdec->y_quant_table, mdec->scale_table))
+                break;
+            yuv_to_rgb(mdec, block, 8, 8);
+
+            decoded_size += block_size;
+            PSX_PERF_INC(mdec_macroblocks);
         }
+    }
 
-        mdec->output_words_remaining = ((block_count - 1) * block_size) >> 2;
+    if (allocation_failed) {
+        log_error("MDEC output allocation failed while decoding %zu bytes", mdec->input_size);
+        free(decoded);
+        return;
+    }
+
+    /* A trailing partial macroblock is discarded. Earlier complete macroblocks remain
+       observable, matching the MDEC FIFO rather than exposing half-written RGB data. */
+    if (decoded_size) {
+        mdec->output = decoded;
+        mdec->output_words_remaining = (uint32_t)(decoded_size / sizeof(uint32_t));
         mdec->output_empty = 0;
-        mdec->output_index = 0;
-
-        // printf("output words remaining: %d (%x) count=%d block_size=%lld size=%lld\n", mdec->output_words_remaining, mdec->output_words_remaining, block_count, block_size, size);
-
-        // log_set_quiet(0);
-        // log_fatal("Finished decoding %u-bit MDEC data input=(%04x -> %08x)",
-        //     (mdec->output_depth == 3) ? 15 : 24,
-        //     mdec->input_size,
-        //     mdec->output_words_remaining
-        // );
-        // log_set_quiet(1);
+        mdec->output_request = mdec->enable_dma1;
+    } else {
+        free(decoded);
     }
 }
 
 void mdec_set_iqtab(psx_mdec_t* mdec) {
-    memcpy(mdec->y_quant_table, mdec->input, 64);
+    for (size_t i = 0; i < MDEC_QUANT_TABLE_SIZE; i++)
+        mdec->y_quant_table[i] = mdec_input_byte(mdec, i);
 
-    if (mdec->recv_color)
-        memcpy(mdec->uv_quant_table, &mdec->input[16], 64);
+    if (mdec->recv_color) {
+        for (size_t i = 0; i < MDEC_QUANT_TABLE_SIZE; i++)
+            mdec->uv_quant_table[i] = mdec_input_byte(mdec, MDEC_QUANT_TABLE_SIZE + i);
+    }
 }
 
 void mdec_set_scale(psx_mdec_t* mdec) {
-    memcpy(mdec->scale_table, mdec->input, 128);
+    for (size_t i = 0; i < MDEC_SCALE_TABLE_SIZE; i++) {
+        uint16_t value = (uint16_t)mdec_input_byte(mdec, i * 2u) |
+                         ((uint16_t)mdec_input_byte(mdec, i * 2u + 1u) << 8u);
+
+        mdec->scale_table[i] = (int16_t)value;
+    }
 }
 
 mdec_fn_t g_mdec_cmd_table[] = {
@@ -306,10 +394,17 @@ uint32_t psx_mdec_read32(psx_mdec_t* mdec, uint32_t offset) {
                 // log_fatal("output read %08x", 0);
                 // log_set_quiet(1);
 
-                return ((uint32_t*)mdec->output)[mdec->output_index++];
+                uint32_t value = ((uint32_t*)mdec->output)[mdec->output_index++];
+
+                if (!mdec->output_words_remaining) {
+                    mdec->output_empty = 1;
+                    mdec->output_request = 0;
+                }
+
+                return value;
             } else {
                 // printf("no read words remaining\n");
-                mdec->output_empty = 0;
+                mdec->output_empty = 1;
                 mdec->output_index = 0;
                 mdec->output_request = 0;
 
@@ -397,21 +492,27 @@ void psx_mdec_write32(psx_mdec_t* mdec, uint32_t offset, uint32_t value) {
 
                 if (!mdec->words_remaining) {
                     //printf("no words remaining\n");
-                    mdec->output_empty = 0;
+                    mdec->output_empty = 1;
                     mdec->input_full = 1;
                     mdec->input_request = 0;
                     mdec->busy = 0;
-                    mdec->output_request = mdec->enable_dma1;
+                    mdec->output_request = 0;
 
                     g_mdec_cmd_table[mdec->cmd >> 29](mdec);
 
                     free(mdec->input);
+                    mdec->input = NULL;
+                    mdec->input_size = 0;
                 }
 
                 break;
             }
 
             mdec->cmd = value;
+            free(mdec->output);
+            mdec->output = NULL;
+            mdec->output_index = 0;
+            mdec->output_words_remaining = 0;
             mdec->output_request = 0;
             mdec->output_empty = 1;
             mdec->output_bit15 = (value >> 25) & 1;
@@ -428,7 +529,7 @@ void psx_mdec_write32(psx_mdec_t* mdec, uint32_t offset, uint32_t value) {
                     mdec->busy = 0;
                     mdec->words_remaining = 0;
 
-                    log_fatal("MDEC %08x: NOP", mdec->cmd);
+                    log_debug("MDEC %08x: NOP", mdec->cmd);
                 } break;
 
                 case MDEC_CMD_DECODE: {
@@ -446,7 +547,7 @@ void psx_mdec_write32(psx_mdec_t* mdec, uint32_t offset, uint32_t value) {
                     mdec->recv_color = mdec->cmd & 1;
                     mdec->words_remaining = mdec->recv_color ? 32 : 16;
 
-                    log_fatal("MDEC %08x: set quant tables %04x",
+                    log_debug("MDEC %08x: set quant tables %04x",
                         mdec->cmd,
                         mdec->words_remaining
                     );
@@ -456,7 +557,7 @@ void psx_mdec_write32(psx_mdec_t* mdec, uint32_t offset, uint32_t value) {
                     //printf("mdec setst\n");
                     mdec->words_remaining = 32;
 
-                    log_fatal("MDEC %08x: set scale table %04x",
+                    log_debug("MDEC %08x: set scale table %04x",
                         mdec->cmd,
                         mdec->words_remaining
                     );
@@ -470,6 +571,19 @@ void psx_mdec_write32(psx_mdec_t* mdec, uint32_t offset, uint32_t value) {
                 mdec->input_full = 0;
                 mdec->input_index = 0;
                 mdec->input = malloc(mdec->input_size);
+
+                if (!mdec->input) {
+                    log_error("MDEC input allocation failed for %zu bytes", mdec->input_size);
+                    mdec->input_size = 0;
+                    mdec->words_remaining = 0;
+                    mdec->input_request = 0;
+                    mdec->busy = 0;
+                }
+            } else {
+                mdec->input = NULL;
+                mdec->input_size = 0;
+                mdec->input_request = 0;
+                mdec->busy = 0;
             }
         } break;
 
@@ -480,6 +594,14 @@ void psx_mdec_write32(psx_mdec_t* mdec, uint32_t offset, uint32_t value) {
 
             // Reset
             if (value & 0x80000000) {
+                free(mdec->input);
+                free(mdec->output);
+                mdec->input = NULL;
+                mdec->output = NULL;
+                mdec->input_index = 0;
+                mdec->input_size = 0;
+                mdec->output_index = 0;
+                mdec->output_words_remaining = 0;
                 // status = 80040000h
                 mdec->busy            = 0;
                 mdec->words_remaining = 0;
@@ -512,16 +634,10 @@ void psx_mdec_write8(psx_mdec_t* mdec, uint32_t offset, uint8_t value) {
 
    The two heap buffers need care, because neither is a plain fixed-size array:
 
-     mdec->input   Allocated (input_size bytes) when a command with a parameter
-                   count arrives, filled word by word, then consumed and
-                   free()d the instant words_remaining hits zero — WITHOUT the
-                   pointer being cleared. So it is only live while
-                   words_remaining != 0; at any other observable moment it is a
-                   dangling pointer that nothing reads. We therefore save it
-                   only in that window (input_index words, the part that has
-                   actually been written; the tail is uninitialised and will be
-                   overwritten before it is read), and on load we allocate a
-                   fresh buffer and NULL the pointer out otherwise.
+     mdec->input   Allocated (input_size bytes) while a command collects its
+                   parameters, then freed and cleared once the command runs. We
+                   save only the input_index words already written; the tail is
+                   uninitialised and will be overwritten before it is read.
 
      mdec->output  Allocated/realloc'd by the decoder and never resized down;
                    its byte size is not tracked anywhere. What the machine can
@@ -633,8 +749,8 @@ int psx_mdec_load_state(psx_mdec_t* mdec, psx_state_reader_t* r) {
     if (input_words > (0x10000u)) /* the parameter count is a 16-bit field */
         return PSX_STATE_ERR_TRUNCATED;
 
-    /* Reallocate rather than reuse: the previous buffer may already have been
-       free()d by the running machine, leaving a dangling pointer behind. */
+    /* Reallocate rather than reuse so the restored capacity exactly matches the state. */
+    free(mdec->input);
     mdec->input = NULL;
     mdec->input_size = input_size;
     mdec->input_index = 0;
@@ -683,6 +799,11 @@ int psx_mdec_load_state(psx_mdec_t* mdec, psx_state_reader_t* r) {
 }
 
 void psx_mdec_destroy(psx_mdec_t* mdec) {
+    if (!mdec)
+        return;
+
+    free(mdec->input);
+    free(mdec->output);
     free(mdec);
 }
 

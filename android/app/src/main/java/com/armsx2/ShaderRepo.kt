@@ -82,8 +82,7 @@ object ShaderRepo {
      *  the category dirs (crt/, handheld/, bezel/…) at the ZIP ROOT.
      *
      *  Only the one source. The GitHub `slang-shaders/archive/master.zip`
-     *  mirror used to sit alongside it and was dropped (2026-07-16) for not
-     *  installing reliably — the buildbot artifact is the one that works, and
+     *  mirror was dropped because it did not install reliably; the buildbot artifact works and
      *  it's also the one RetroArch itself ships, so a second entry bought
      *  nothing but a way to end up with a broken tree. [extract]'s
      *  single-common-root strip stays: it's what makes a hand-dropped GitHub

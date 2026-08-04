@@ -62,7 +62,7 @@ build_fsui_native() {
 
 build_fsui_wasm() {
     if ! command -v emcmake >/dev/null 2>&1 || ! command -v emcc >/dev/null 2>&1; then
-        for candidate in "${EMSCRIPTEN_ROOT:-}" "${EMSDK:-}" "$HOME/emsdk" "/opt/emsdk" "/Volumes/FastDrive/linkertools/emsdk"; do
+        for candidate in "${EMSCRIPTEN_ROOT:-}" "${EMSDK:-}" "$HOME/emsdk" "/opt/emsdk"; do
             if [ -z "${candidate}" ] || [ ! -d "${candidate}" ]; then
                 continue
             fi
@@ -206,6 +206,7 @@ elif [ "$MODE" = "shared" ]; then
 
 elif [ "$MODE" = "android" ]; then
 	    stage_android_runtime_icons
+	    ANDROID_MAKE="${MAKE:-make}"
 	    ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${NDK_HOME:-}}}"
     if [ -z "${ANDROID_NDK_ROOT}" ]; then
         echo "ANDROID_NDK_ROOT (or ANDROID_NDK_HOME / NDK_HOME) must be set to a valid NDK path."
@@ -271,6 +272,11 @@ elif [ "$MODE" = "android" ]; then
 
     echo "Using Android NDK at ${ANDROID_NDK_ROOT} (toolchain ${HOST_TAG}, ABI ${ANDROID_ABI}, API ${ANDROID_API})"
 
+    # Android 15 devices may use 16 KB system pages.  Every ELF shared object shipped by the
+    # APK must therefore advertise 16 KB PT_LOAD alignment; ZIP alignment alone is not enough.
+    # Keep this in the Android branch so desktop/iOS linkers retain their existing flags.
+    ANDROID_16K_PAGE_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
     ANDROID_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake"
     if [ ! -f "${ANDROID_TOOLCHAIN_FILE}" ]; then
         echo "Android toolchain file not found at ${ANDROID_TOOLCHAIN_FILE}"
@@ -293,6 +299,8 @@ elif [ "$MODE" = "android" ]; then
         -DBUILD_SHARED_LIBS=ON \
         -DSDL_STATIC=OFF \
         -DSDL_TEST=OFF \
+        -DCMAKE_SHARED_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
+        -DCMAKE_MODULE_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
         -DCMAKE_INSTALL_PREFIX="${SDL_INSTALL_DIR}"
 
     cmake --build "${SDL_BUILD_ROOT}" --config Release
@@ -367,7 +375,9 @@ elif [ "$MODE" = "android" ]; then
         -DANDROID_ABI="${ANDROID_ABI}" \
         -DANDROID_PLATFORM="android-${ANDROID_API}" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF
+        -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_SHARED_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
+        -DCMAKE_MODULE_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}"
     cmake --build "${ADRENOTOOLS_BUILD_DIR}" -j"${BUILD_JOBS}"
 
     # FSUI cut: the Jetpack Compose front-end owns all menus, so fsui-lib is no longer built or
@@ -380,8 +390,8 @@ elif [ "$MODE" = "android" ]; then
     # ${PGO_MAKE_ARGS} is intentionally unquoted: it is a list of make variable assignments and
     # has to word-split. It is "PGO=off" and nothing else unless PGO was asked for, so the normal
     # build is byte-identical to what it was before PGO existed.
-    make clean
-    make \
+    "${ANDROID_MAKE}" clean
+    "${ANDROID_MAKE}" \
         ${PGO_MAKE_ARGS} \
         SDL_STATIC=0 \
         ARMSX_ENABLE_GL="${ARMSX_ENABLE_GL}" \
@@ -398,7 +408,7 @@ elif [ "$MODE" = "android" ]; then
         LIBCHDR_BUILD_DIR="${REPO_ROOT}/build/libchdr/android/${ANDROID_ABI}" \
         PLATFORM=Android \
         OS_INFO=Android \
-        PLATFORM_EXTRA_LDFLAGS= \
+        PLATFORM_EXTRA_LDFLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
         PLATFORM_EXTRA_LIBS="${ADRENOTOOLS_BUILD_DIR}/libadrenotools.a ${ADRENOTOOLS_BUILD_DIR}/lib/linkernsbypass/liblinkernsbypass.a" \
         ADRENOTOOLS_FLAGS="-I${REPO_ROOT}/third_party/libadrenotools/include -DARMSX_HAVE_ADRENOTOOLS=1" \
         shared
@@ -500,7 +510,7 @@ elif [ "$MODE" = "android" ]; then
     # --exclude-libs,ALL keeps static-archive symbols out of the dynamic table; with it and
     # -fvisibility=hidden this .so exports 15 symbols, 11 of them the JNI entry points.
     DISCORD_CXXFLAGS="-std=c++20 -fPIC -O2 -g0 -fvisibility=hidden -fvisibility-inlines-hidden -Wall -ffunction-sections -fdata-sections"
-    DISCORD_LDFLAGS="-nostdlib++ ${TOOLCHAIN_DIR}/sysroot/usr/lib/${ANDROID_CXX_RUNTIME_TRIPLE}/libc++_shared.so -llog -Wl,--exclude-libs,ALL -Wl,--gc-sections"
+    DISCORD_LDFLAGS="-nostdlib++ ${TOOLCHAIN_DIR}/sysroot/usr/lib/${ANDROID_CXX_RUNTIME_TRIPLE}/libc++_shared.so -llog -Wl,--exclude-libs,ALL -Wl,--gc-sections ${ANDROID_16K_PAGE_LDFLAGS}"
     if [ -f "${DISCORD_AAR}" ] && [ -n "${DISCORD_APP_ID}" ]; then
         # The .aar carries a prefab module: headers AND a per-ABI .so, so nothing else has to be
         # vendored. Extracted for LINKING ONLY — the .so is deliberately not copied into jniLibs,

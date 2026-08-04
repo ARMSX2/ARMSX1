@@ -391,17 +391,19 @@ int armsx_render_active_name(char* buffer, int size) {
 
 void armsx_render_host_framebuffer_size(int surface_width,
                                         int surface_height,
-                                        int max_height,
+                                        int max_short_edge,
                                         int* out_width,
                                         int* out_height) {
     int width = surface_width > 1 ? surface_width : 1;
     int height = surface_height > 1 ? surface_height : 1;
 
-    const int cap = max_height > 0 ? max_height : ARMSX_RENDER_HOST_FB_MAX_HEIGHT;
-    if (height > cap) {
-        const long long scaled = ((long long)width * (long long)cap) / (long long)height;
-        width = scaled > 1 ? (int)scaled : 1;
-        height = cap;
+    const int cap = max_short_edge > 0 ? max_short_edge : ARMSX_RENDER_HOST_FB_MAX_SHORT_EDGE;
+    const int short_edge = width < height ? width : height;
+    if (short_edge > cap) {
+        const long long scaled_width = ((long long)width * (long long)cap) / short_edge;
+        const long long scaled_height = ((long long)height * (long long)cap) / short_edge;
+        width = scaled_width > 1 ? (int)scaled_width : 1;
+        height = scaled_height > 1 ? (int)scaled_height : 1;
     }
 
     /* Even dimensions keep the row copy and the compositor's scaler happy. */

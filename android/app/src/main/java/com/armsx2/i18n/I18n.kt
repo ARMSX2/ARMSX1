@@ -1603,8 +1603,8 @@ val EN: Map<String, String> = mapOf(
         "Mirror the stereo image. For headsets or wiring that came out reversed.",
     "audio.bufferMs.label" to "Audio buffer",
     "audio.bufferMs.description" to
-        "Bigger is more resistant to crackle and dropouts, at the cost of latency. 13 ms is the " +
-        "core's own default. Applies on next launch.",
+        "Bigger is more resistant to crackle and dropouts, at the cost of latency. 20 ms is the " +
+        "cadence-safe default. Applies on next launch.",
     "audio.skipReverb.label" to "Lightweight audio (skip reverb)",
     "audio.skipReverb.description" to
         "Bypass the SPU reverb network to save CPU on weak devices. Removes all echo and room " +
@@ -1755,11 +1755,11 @@ val EN: Map<String, String> = mapOf(
         "Required before the emulator can open games from your own folders.",
     "library.addFolder.label" to "Add folder…",
     "library.addFolder.description" to
-        "Pick a folder; its filesystem path is stored in settings.toml.",
+        "Pick a folder; Android remembers read access across app restarts.",
     "library.empty" to
         "No library folders yet. Add one above and your games appear on the home screen.",
     "library.folder" to "Folder",
     "library.scanSubfolders" to "Scan subfolders",
     "library.remove" to "Remove this folder",
-    "library.noPath" to "That location has no filesystem path the emulator can open.",
+    "library.noPath" to "Android did not grant persistent read access to that folder.",
 )

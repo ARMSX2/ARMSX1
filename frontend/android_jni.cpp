@@ -1,48 +1,8 @@
 /*
-    ARMSX — in-process Android JNI host.
-
-    The historical Android path runs the core inside its own SDL activity
-    (com.nanodata.armsx.EmulatorActivity extends org.libsdl.app.SDLActivity), which owns the
-    whole screen. That makes the Jetpack Compose front-end's touch overlay, hotkeys, pause
-    overlay, RetroAchievements and Discord presence impossible: they live in a different
-    process-visible Activity than the pixels.
-
-    This file adds the alternative: the core renders into a Surface that the Compose UI hosts,
-    inside the SAME process, driven from kr.co.iefriends.pcsx2.NativeApp. It is purely
-    additive — external_main / EmulatorActivity keep working untouched.
-
-    HOW THE SURFACE HAND-OFF WORKS
-    ------------------------------
-    1. The Compose SurfaceView calls NativeApp.onNativeSurfaceChanged(surface, w, h). We take
-       an ANativeWindow with ANativeWindow_fromSurface() and keep it (refcounted).
-    2. NativeApp.runVMThread(path) is called on a dedicated thread. It builds an SDL_Window +
-       SDL_Renderer for that surface and hands them to the core as
-       external_main_ex(argc, argv, window, renderer). The core's initializeWindowAndRenderer()
-       adopts them instead of creating its own (frontend/main.cpp, external_window_ /
-       external_renderer_).
-    3. We first try SDL_CreateWindowFrom(nativeWindow), which is the direct route. SDL's Android
-       video backend does NOT implement CreateSDLWindowFrom (see
-       third_party/SDL/src/video/android/SDL_androidvideo.c — only CreateSDLWindow is wired),
-       and it additionally resolves its window through org.libsdl.app.SDLActivity's static
-       JNI glue, which does not exist when Compose owns the Activity. So the realistic path
-       today is the fallback below; the SDL_CreateWindowFrom attempt is kept because it is the
-       correct thing to use the moment a backend supports it.
-    4. Fallback ("blit bridge"): SDL runs on its `dummy` video driver, we own an SDL_Surface
-       framebuffer and a software SDL_Renderer over it, and after every presented frame the
-       core calls back into PresentToSurface(), which copies the framebuffer into the
-       ANativeWindow with ANativeWindow_lock()/unlockAndPost(). ANativeWindow_setBuffersGeometry
-       lets SurfaceFlinger do the (free, GPU) upscale to the real surface size, so the
-       CPU-side blit stays at the framebuffer resolution.
-
-    THREADING
-    ---------
-    Every JNI entry point except runVMThread() is called from the Android UI thread while the
-    emulation loop runs on its own thread. None of them touch SDL or the psx_t directly: they
-    park requests through the mutex-guarded psxe_host_* API in frontend/main.cpp, which the
-    emulation loop drains once per frame (the same pattern as the pending-launch-argument
-    queue). The only shared object this file touches across threads is the ANativeWindow, and
-    that is refcounted and guarded by g_surface_mutex — never held across the blocking
-    ANativeWindow_lock().
+    In-process Android host for the Compose UI. The SurfaceView supplies a refcounted
+    ANativeWindow. Opt-in SDL acceleration adopts it with SDL_CreateWindowFrom; the default
+    software path copies an SDL surface into it. UI-thread requests are queued through the
+    psxe_host API, while the emulation loop and SDL ownership stay on the VM thread.
 */
 
 #if defined(__ANDROID__)
@@ -60,9 +20,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -85,6 +47,7 @@ extern "C" {
 // backend can bind EGL / a VkSurfaceKHR straight to it, and (b) stand the CPU blit bridge
 // down once one has.
 #include "render.h"
+#include "sdl_subsystem_lease.h"
 // Surface lifecycle goes to the on-device diag log as well as logcat: a black screen after a
 // task switch is diagnosed from armsx.log, which a tester can send, and never from logcat,
 // which needs adb. Transition events only — nothing here is per-frame.
@@ -178,6 +141,7 @@ std::mutex g_surface_mutex;
 ANativeWindow* g_native_window = nullptr;
 int g_surface_width = 0;
 int g_surface_height = 0;
+uint64_t g_surface_owner_token = 0;
 
 // What was last handed to the presentation backends (armsx_render_set_native_window). Kept so a
 // surfaceChanged that reports the SAME window at the SAME size does not bump the generation:
@@ -228,7 +192,8 @@ SDL_Window* g_sdl_window = nullptr;
 SDL_Renderer* g_sdl_renderer = nullptr;
 SDL_Surface* g_sdl_surface = nullptr;
 bool g_window_is_native = false; // SDL_CreateWindowFrom() succeeded: SDL presents on its own.
-bool g_owns_sdl_video = false;
+armsx::SdlSubsystemLease g_host_sdl_subsystems;
+bool g_sdl_accel_requested = false;
 
 // App files dir, resolved once per run in runVMThread(). Save states hang off it
 // (<files_dir>/savestates/), and those JNI calls arrive on the UI thread, so it is cached here
@@ -239,6 +204,66 @@ std::string g_files_dir;
 std::string CachedFilesDir() {
     std::lock_guard<std::mutex> lock(g_files_dir_mutex);
     return g_files_dir;
+}
+
+bool IsSdlAcceleratedToken(std::string value) {
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](unsigned char c) {
+        return !std::isspace(c);
+    }));
+    value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char c) {
+        return !std::isspace(c);
+    }).base(), value.end());
+    if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
+                              (value.front() == '\'' && value.back() == '\''))) {
+        value = value.substr(1, value.size() - 2);
+    }
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value == "sdl-accelerated" || value == "hardware" ||
+           value == "hardware (experimental)" || value == "hw" || value == "hw-renderer";
+}
+
+/* Read only the presentation choice needed before external_main_ex() parses the complete
+   settings file.  The Android Compose host must select its SDL video driver before SDL_Init;
+   the core remains the authority for the final renderer choice and still reports a software
+   fallback if this opt-in path cannot bind EGL. */
+bool SettingsRequestSdlAccelerated() {
+    const std::string files_dir = CachedFilesDir();
+    if (files_dir.empty()) {
+        return false;
+    }
+
+    for (const char* name : {"settings.toml", "settings.global.toml"}) {
+        std::ifstream stream(files_dir + "/" + name);
+        if (!stream) {
+            continue;
+        }
+
+        std::string line;
+        while (std::getline(stream, line)) {
+            const std::size_t comment = line.find('#');
+            if (comment != std::string::npos) {
+                line.resize(comment);
+            }
+            const std::size_t equals = line.find('=');
+            if (equals == std::string::npos) {
+                continue;
+            }
+
+            std::string key = line.substr(0, equals);
+            key.erase(key.begin(), std::find_if(key.begin(), key.end(), [](unsigned char c) {
+                return !std::isspace(c);
+            }));
+            key.erase(std::find_if(key.rbegin(), key.rend(), [](unsigned char c) {
+                return !std::isspace(c);
+            }).base(), key.end());
+            if (key == "gpu_backend") {
+                return IsSdlAcceleratedToken(line.substr(equals + 1));
+            }
+        }
+    }
+    return false;
 }
 
 // --- Custom Vulkan driver (adrenotools) ----------------------------------------------------
@@ -453,25 +478,30 @@ void* OpenCustomVulkanDriver(void* /*user*/) {
     return handle;
 }
 
-// Cap on the CPU-side framebuffer. A 1080p+ software blit twice per frame is the single most
-// expensive thing in this path, so the framebuffer is scaled down (aspect preserved) and the
-// compositor scales it back up. Override with ARMSX_ANDROID_FB_HEIGHT.
-constexpr int kDefaultMaxFramebufferHeight = 720;
+// Cap on the Android CPU presentation bridge. Scaling a PS1 frame to the physical display in
+// SDL's software renderer and then copying that full-size buffer into ANativeWindow needlessly
+// spends most of a 60 Hz frame on bandwidth. Keep the deterministic software rasterizer, but
+// present it with a 360-pixel short edge and let SurfaceFlinger do the final display scale. This
+// is still above the common 240/256-line PS1 output and keeps the Pixel 8 bridge near 0.29 M
+// pixels per frame in either orientation. A physical-height cap made portrait 160x360 and was
+// needlessly blurry; the short-edge rule rotates 800x360 to 360x800 instead. Keep the historical
+// environment variable name for developer-tool compatibility.
+constexpr int kDefaultMaxFramebufferShortEdge = 360;
 
-int MaxFramebufferHeight() {
+int MaxFramebufferShortEdge() {
     if (const char* override_value = std::getenv("ARMSX_ANDROID_FB_HEIGHT")) {
         const int parsed = std::atoi(override_value);
         if (parsed >= 120 && parsed <= 4320) {
             return parsed;
         }
     }
-    return kDefaultMaxFramebufferHeight;
+    return kDefaultMaxFramebufferShortEdge;
 }
 
 void ComputeFramebufferSize(int surface_width, int surface_height, int* out_width, int* out_height) {
     // The rule itself lives in render.cpp so a host-side gate can pin it against the buffer
     // geometry it has to agree with; see armsx_render_host_framebuffer_size().
-    armsx_render_host_framebuffer_size(surface_width, surface_height, MaxFramebufferHeight(),
+    armsx_render_host_framebuffer_size(surface_width, surface_height, MaxFramebufferShortEdge(),
                                        out_width, out_height);
 }
 
@@ -705,18 +735,118 @@ void EnsureSdlAudioJniGlue(JNIEnv* env) {
                context_ready ? "ok" : "unavailable (openslES only)");
 }
 
-bool EnsureSdlVideo() {
-    if (SDL_WasInit(SDL_INIT_VIDEO) != 0) {
-        return true;
+/* Register the small part of SDLActivity's JNI state that the Android video driver needs when
+   SDL is hosted inside Compose.  SDLActivity normally calls this from Activity.onCreate(), but
+   this app intentionally never instantiates SDLActivity.  Keeping this opt-in and one-shot is
+   important: the default dummy/software path does not touch SDLActivity's static state at all,
+   and repeated game launches must not allocate a second activity mutex/semaphore set. */
+bool EnsureSdlVideoJniGlue(JNIEnv* env, int surface_width, int surface_height) {
+    static bool setup_attempted = false;
+    static bool setup_ok = false;
+    if (!env) {
+        return false;
     }
 
-    // SDL's `android` video driver resolves its window (and its DPI, and its event pump)
-    // through org.libsdl.app.SDLActivity's static JNI glue, which is never set up when the
-    // Compose Activity owns the screen — initialising it would dereference a null jclass.
-    // The dummy driver gives us a valid SDL_Window handle with no display of its own, which
-    // is exactly what the blit bridge wants. setenv(..., 0) so an explicit
-    // SDL_VIDEODRIVER from the environment still wins.
-    setenv("SDL_VIDEODRIVER", "dummy", 0);
+    auto clear_exception = [env]() {
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    };
+
+    jclass activity = env->FindClass("org/libsdl/app/SDLActivity");
+    if (!activity) {
+        clear_exception();
+        ARMSX_LOGW("org.libsdl.app.SDLActivity not found; SDL Android video unavailable");
+        return false;
+    }
+
+    if (!setup_attempted) {
+        setup_attempted = true;
+        jmethodID setup = env->GetStaticMethodID(activity, "nativeSetupJNI", "()I");
+        if (!setup) {
+            clear_exception();
+            ARMSX_LOGW("SDLActivity.nativeSetupJNI missing; SDL Android video unavailable");
+        } else {
+            /* The SDL C implementation is void while SDLActivity declares the historical Java
+               method as returning int.  Call it with the Java signature and intentionally ignore
+               the unspecified return value; the native setup work is what matters. */
+            (void)env->CallStaticIntMethod(activity, setup);
+            if (env->ExceptionCheck()) {
+                clear_exception();
+                ARMSX_LOGW("SDLActivity.nativeSetupJNI threw; SDL Android video unavailable");
+            } else {
+                setup_ok = true;
+                ARMSX_LOGI("SDL Android video JNI glue registered");
+            }
+        }
+    }
+
+    if (setup_ok) {
+        jclass native_app = env->FindClass("kr/co/iefriends/pcsx2/NativeApp");
+        jmethodID get_context = native_app
+            ? env->GetStaticMethodID(native_app, "getContext", "()Landroid/content/Context;")
+            : nullptr;
+        jclass sdl = env->FindClass("org/libsdl/app/SDL");
+        jmethodID set_context = sdl
+            ? env->GetStaticMethodID(sdl, "setContext", "(Landroid/content/Context;)V")
+            : nullptr;
+        clear_exception();
+
+        if (get_context && set_context) {
+            jobject context = env->CallStaticObjectMethod(native_app, get_context);
+            if (env->ExceptionCheck()) {
+                clear_exception();
+                context = nullptr;
+            }
+            if (context) {
+                env->CallStaticVoidMethod(sdl, set_context, context);
+                clear_exception();
+                env->DeleteLocalRef(context);
+            }
+        }
+        if (native_app) {
+            env->DeleteLocalRef(native_app);
+        }
+        if (sdl) {
+            env->DeleteLocalRef(sdl);
+        }
+
+        if (surface_width > 0 && surface_height > 0) {
+            jmethodID set_resolution = env->GetStaticMethodID(
+                activity, "nativeSetScreenResolution", "(IIIIF)V");
+            if (set_resolution) {
+                env->CallStaticVoidMethod(activity, set_resolution,
+                                           surface_width, surface_height,
+                                           surface_width, surface_height, 60.0f);
+                clear_exception();
+            }
+        }
+    }
+
+    env->DeleteLocalRef(activity);
+    return setup_ok;
+}
+
+bool EnsureSdlVideo() {
+    const Uint32 stale = SDL_WasInit(0);
+    if (stale != 0) {
+        ARMSX_LOGE("SDL lifecycle failure: session began with live subsystems=0x%x driver=%s requested=%s",
+                   stale,
+                   SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "(none)",
+                   g_sdl_accel_requested ? "android" : "dummy");
+        return false;
+    }
+
+    // The default is the deterministic dummy + software bridge. The Android video driver is
+    // selected only after the settings preflight sees the explicit sdl-accelerated opt-in and
+    // SDLActivity's JNI glue has been registered by CreateHostWindowAndRenderer().
+    if (g_sdl_accel_requested) {
+        setenv("SDL_VIDEODRIVER", "android", 1);
+        SDL_SetHint(SDL_HINT_VIDEO_FOREIGN_WINDOW_OPENGL, "1");
+    } else {
+        setenv("SDL_VIDEODRIVER", "dummy", 1);
+        SDL_SetHint(SDL_HINT_VIDEO_FOREIGN_WINDOW_OPENGL, "0");
+    }
 
     // Audio driver: openslES unless the [audio] driver setting says otherwise, and the core
     // only honours that setting once EnsureSdlAudioJniGlue() has reported the Java side is
@@ -750,19 +880,39 @@ bool EnsureSdlVideo() {
     // thread died immediately and the UI snapped back to the library.
     SDL_SetMainReady();
 
-    if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
-        ARMSX_LOGE("SDL video init failed: %s", SDL_GetError());
-        return false;
+    if (!g_host_sdl_subsystems.acquire(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+        if (g_sdl_accel_requested) {
+            const std::string error = SDL_GetError() ? SDL_GetError() : "unknown error";
+            ARMSX_LOGW("SDL Android video init failed (%s); falling back to dummy software",
+                       error.c_str());
+            g_host_sdl_subsystems.release();
+            if (SDL_WasInit(0) != 0) {
+                ARMSX_LOGE("SDL lifecycle failure after Android video init: subsystems=0x%x",
+                           SDL_WasInit(0));
+                return false;
+            }
+            g_sdl_accel_requested = false;
+            setenv("SDL_VIDEODRIVER", "dummy", 1);
+            SDL_SetHint(SDL_HINT_VIDEO_FOREIGN_WINDOW_OPENGL, "0");
+            if (!g_host_sdl_subsystems.acquire(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+                ARMSX_LOGE("SDL video init failed after fallback: %s", SDL_GetError());
+                return false;
+            }
+        } else {
+            ARMSX_LOGE("SDL video init failed: %s", SDL_GetError());
+            return false;
+        }
     }
 
-    g_owns_sdl_video = true;
     ARMSX_LOGI("SDL video driver: %s", SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "(none)");
     return true;
 }
 
+bool DestroyHostWindowAndRenderer();
+
 // Build the SDL_Window / SDL_Renderer pair the core will adopt. Returns false when there is
 // no usable surface.
-bool CreateHostWindowAndRenderer() {
+bool CreateHostWindowAndRenderer(JNIEnv* env) {
     ANativeWindow* window = nullptr;
     int surface_width = 0;
     int surface_height = 0;
@@ -786,35 +936,77 @@ bool CreateHostWindowAndRenderer() {
         surface_height = ANativeWindow_getHeight(window);
     }
 
+    g_sdl_accel_requested = SettingsRequestSdlAccelerated();
+    if (g_sdl_accel_requested && !EnsureSdlVideoJniGlue(env, surface_width, surface_height)) {
+        ARMSX_LOGW("SDL accelerated requested but Android JNI glue is unavailable; using software");
+        g_sdl_accel_requested = false;
+    }
+
     if (!EnsureSdlVideo()) {
         ANativeWindow_release(window);
+        DestroyHostWindowAndRenderer();
         return false;
     }
 
-    // 1) The direct route, per the design: hand SDL the ANativeWindow. Unsupported by SDL's
-    //    Android/dummy backends today, so this is expected to fail — kept so the moment a
-    //    backend implements CreateSDLWindowFrom the accelerated path lights up for free.
+    // Publish before the direct route so renderer diagnostics and the SDL foreign-window path
+    // agree on the exact Surface generation. The bridge also uses this registration when the
+    // opt-in path falls back after an EGL/renderer failure.
+    armsx_render_set_native_window(window, surface_width, surface_height);
+
+    // 1) Explicit SDL acceleration: hand SDL the Compose-owned ANativeWindow. The Android SDL
+    // driver implements CreateSDLWindowFrom specifically for this in-process path; SDL's GLES2
+    // renderer then presents directly into SurfaceFlinger without the CPU row-copy bridge.
     g_window_is_native = false;
-    g_sdl_window = SDL_CreateWindowFrom(window);
-    if (g_sdl_window) {
-        g_window_is_native = true;
-        ARMSX_LOGI("Adopted ANativeWindow via SDL_CreateWindowFrom");
-        g_sdl_renderer = SDL_CreateRenderer(g_sdl_window, -1, SDL_RENDERER_ACCELERATED);
-        if (!g_sdl_renderer) {
-            ARMSX_LOGW("Accelerated renderer failed (%s), trying software", SDL_GetError());
-            g_sdl_renderer = SDL_CreateRenderer(g_sdl_window, -1, SDL_RENDERER_SOFTWARE);
-        }
-        if (g_sdl_renderer) {
-            ANativeWindow_release(window);
-            return true;
+    if (g_sdl_accel_requested) {
+        g_sdl_window = SDL_CreateWindowFrom(window);
+        if (g_sdl_window) {
+            g_window_is_native = true;
+            ARMSX_LOGI("Adopted ANativeWindow via SDL_CreateWindowFrom (Android SDL)");
+            g_sdl_renderer = SDL_CreateRenderer(
+                g_sdl_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+            if (g_sdl_renderer) {
+                SDL_RendererInfo info{};
+                if (SDL_GetRendererInfo(g_sdl_renderer, &info) == 0 &&
+                    (info.flags & SDL_RENDERER_ACCELERATED)) {
+                    ARMSX_LOGI("SDL Android renderer ready driver=%s accelerated=true",
+                               info.name ? info.name : "(unnamed)");
+                    ANativeWindow_release(window);
+                    return true;
+                }
+                ARMSX_LOGW("SDL foreign renderer did not report acceleration; falling back");
+                SDL_DestroyRenderer(g_sdl_renderer);
+                g_sdl_renderer = nullptr;
+            } else {
+                ARMSX_LOGW("SDL accelerated renderer failed (%s); falling back", SDL_GetError());
+            }
+
+            SDL_DestroyWindow(g_sdl_window);
+            g_sdl_window = nullptr;
+            g_window_is_native = false;
+        } else {
+            ARMSX_LOGW("SDL_CreateWindowFrom failed (%s); falling back", SDL_GetError());
         }
 
-        ARMSX_LOGW("No renderer for the adopted window (%s), falling back", SDL_GetError());
-        SDL_DestroyWindow(g_sdl_window);
-        g_sdl_window = nullptr;
-        g_window_is_native = false;
-    } else {
-        ARMSX_LOGI("SDL_CreateWindowFrom unsupported (%s), using the blit bridge", SDL_GetError());
+        /* SDL's Android driver cannot create the dummy offscreen window while it is active.
+           Reinitialise the video subsystem once, preserving the safe bridge used by the
+           default path on devices whose GLES/EGL stack rejects the foreign surface. */
+        g_host_sdl_subsystems.release();
+        if (SDL_WasInit(0) != 0) {
+            ARMSX_LOGE("SDL lifecycle failure before dummy fallback: subsystems=0x%x",
+                       SDL_WasInit(0));
+            ANativeWindow_release(window);
+            DestroyHostWindowAndRenderer();
+            return false;
+        }
+        g_sdl_accel_requested = false;
+        setenv("SDL_VIDEODRIVER", "dummy", 1);
+        SDL_SetHint(SDL_HINT_VIDEO_FOREIGN_WINDOW_OPENGL, "0");
+        if (!g_host_sdl_subsystems.acquire(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+            ARMSX_LOGE("SDL dummy fallback init failed: %s", SDL_GetError());
+            ANativeWindow_release(window);
+            DestroyHostWindowAndRenderer();
+            return false;
+        }
     }
 
     // 2) Publish the raw ANativeWindow for the GPU presentation backends. When settings.toml
@@ -822,8 +1014,6 @@ bool CreateHostWindowAndRenderer() {
     //    straight to it and never touches the software renderer built below; see
     //    ArmsxApp::initializeWindowAndRenderer(). The blit bridge is still constructed so the
     //    fallback ladder always has somewhere to land.
-    armsx_render_set_native_window(window, surface_width, surface_height);
-
     // 3) Blit bridge: offscreen framebuffer + software renderer, posted by PresentToSurface().
     ComputeFramebufferSize(surface_width, surface_height, &g_fb_width, &g_fb_height);
     // A new framebuffer size the window has not been told about yet. Re-armed here rather than
@@ -840,6 +1030,7 @@ bool CreateHostWindowAndRenderer() {
     if (!g_sdl_window) {
         ARMSX_LOGE("SDL_CreateWindow failed: %s", SDL_GetError());
         ANativeWindow_release(window);
+        DestroyHostWindowAndRenderer();
         return false;
     }
 
@@ -851,6 +1042,7 @@ bool CreateHostWindowAndRenderer() {
         SDL_DestroyWindow(g_sdl_window);
         g_sdl_window = nullptr;
         ANativeWindow_release(window);
+        DestroyHostWindowAndRenderer();
         return false;
     }
     SDL_FillRect(g_sdl_surface, nullptr, SDL_MapRGBA(g_sdl_surface->format, 0, 0, 0, 255));
@@ -863,6 +1055,7 @@ bool CreateHostWindowAndRenderer() {
         SDL_DestroyWindow(g_sdl_window);
         g_sdl_window = nullptr;
         ANativeWindow_release(window);
+        DestroyHostWindowAndRenderer();
         return false;
     }
 
@@ -875,12 +1068,13 @@ bool CreateHostWindowAndRenderer() {
     return true;
 }
 
-void DestroyHostWindowAndRenderer() {
+bool DestroyHostWindowAndRenderer() {
     // Stop the present callback before anything it reads goes away.
     psxe_host_set_present_callback(nullptr, nullptr);
 
     // The core has already torn its renderer down by the time we get here, so the
     // ANativeWindow must stop being advertised to the presentation backends.
+    armsx_render_set_native_window_claimed(false);
     armsx_render_set_native_window(nullptr, 0, 0);
 
     {
@@ -911,10 +1105,17 @@ void DestroyHostWindowAndRenderer() {
         g_fb_height = 0;
     }
 
-    if (g_owns_sdl_video) {
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
-        g_owns_sdl_video = false;
+    g_host_sdl_subsystems.release();
+    const Uint32 residual = SDL_WasInit(0);
+    if (residual != 0) {
+        ARMSX_LOGE("SDL lifecycle failure after Android session: subsystems=0x%x driver=%s",
+                   residual,
+                   SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "(none)");
+        return false;
+    } else {
+        ARMSX_LOGI("SDL lifecycle clean after Android session");
     }
+    return true;
 }
 
 // --- Small JNI helpers --------------------------------------------------------------------
@@ -1343,15 +1544,31 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
 // ------------------------------------------------------------------------------------------
 
 extern "C" JNIEXPORT void JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceCreated(JNIEnv*, jclass) {
-    ARMSX_LOGI("onNativeSurfaceCreated");
+Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceCreated(JNIEnv*, jclass, jlong owner_token) {
+    std::lock_guard<std::mutex> lock(g_surface_mutex);
+    const uint64_t token = static_cast<uint64_t>(owner_token);
+    if (token > g_surface_owner_token) {
+        g_surface_owner_token = token;
+    }
+    ARMSX_LOGI("onNativeSurfaceCreated owner=%lu", token);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceChanged(JNIEnv* env, jclass, jobject surface, jint w, jint h) {
+Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceChanged(JNIEnv* env, jclass, jobject surface,
+                                                            jint w, jint h, jlong owner_token) {
     ANativeWindow* window = (env && surface) ? ANativeWindow_fromSurface(env, surface) : nullptr;
 
     std::lock_guard<std::mutex> lock(g_surface_mutex);
+    const uint64_t token = static_cast<uint64_t>(owner_token);
+    if (token < g_surface_owner_token) {
+        ARMSX_LOGW("Ignoring stale surface change owner=%lu current=%lu", token,
+                   g_surface_owner_token);
+        if (window) {
+            ANativeWindow_release(window);
+        }
+        return;
+    }
+    g_surface_owner_token = token;
     if (g_native_window) {
         ANativeWindow_release(g_native_window);
     }
@@ -1396,9 +1613,9 @@ Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceChanged(JNIEnv* env, jclass,
         armsx_render_set_native_window(window, static_cast<int>(w), static_cast<int>(h));
     }
 
-    ARMSX_LOGI("onNativeSurfaceChanged %dx%d window=%p published=%s generation=%lu",
+    ARMSX_LOGI("onNativeSurfaceChanged %dx%d window=%p owner=%lu published=%s generation=%lu",
                static_cast<int>(w), static_cast<int>(h), static_cast<void*>(window),
-               republish ? "yes" : "unchanged", armsx_render_native_window_generation());
+               token, republish ? "yes" : "unchanged", armsx_render_native_window_generation());
     /* Also into the diag log: this is the lifecycle event that explains a black resume, and it
        is a once-per-transition line, not a per-frame one. */
     psxe_diag_logf("renderer", "host surface changed %dx%d window=%p published=%s generation=%lu",
@@ -1407,8 +1624,15 @@ Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceChanged(JNIEnv* env, jclass,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceDestroyed(JNIEnv*, jclass) {
+Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceDestroyed(JNIEnv*, jclass,
+                                                              jlong owner_token) {
     std::lock_guard<std::mutex> lock(g_surface_mutex);
+    const uint64_t token = static_cast<uint64_t>(owner_token);
+    if (token != g_surface_owner_token) {
+        ARMSX_LOGI("Ignoring stale surface destroy owner=%lu current=%lu", token,
+                   g_surface_owner_token);
+        return;
+    }
 
     /* Stop advertising the window BEFORE dropping our reference to it: a backend that reads
        the slot after this point gets null and holds off rebuilding until a real surface
@@ -1424,7 +1648,8 @@ Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceDestroyed(JNIEnv*, jclass) {
     }
     g_surface_width = 0;
     g_surface_height = 0;
-    ARMSX_LOGI("onNativeSurfaceDestroyed generation=%lu", armsx_render_native_window_generation());
+    ARMSX_LOGI("onNativeSurfaceDestroyed owner=%lu generation=%lu", token,
+               armsx_render_native_window_generation());
     psxe_diag_logf("renderer", "host surface destroyed generation=%lu",
                    armsx_render_native_window_generation());
 }
@@ -1472,7 +1697,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring pa
     psxe_host_set_embedded(1);
     psxe_host_reset_pad_state();
 
-    if (!CreateHostWindowAndRenderer()) {
+    if (!CreateHostWindowAndRenderer(env)) {
         psxe_host_set_embedded(0);
         g_run_active.store(false, std::memory_order_release);
         return JNI_FALSE;
@@ -1545,12 +1770,12 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring pa
                                         g_sdl_window, g_sdl_renderer);
     ARMSX_LOGI("runVMThread: core returned %d", result);
 
-    DestroyHostWindowAndRenderer();
+    const bool sdl_lifecycle_clean = DestroyHostWindowAndRenderer();
     psxe_host_set_embedded(0);
     psxe_host_reset_pad_state();
     g_run_active.store(false, std::memory_order_release);
 
-    return result == 0 ? JNI_TRUE : JNI_FALSE;
+    return (result == 0 && sdl_lifecycle_clean) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Pin a custom Vulkan driver for the next renderer init, or pass empty strings to revert to
@@ -1598,6 +1823,16 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getGlDriver(JNIEnv* env, jclass) {
     return env->NewStringUTF(armsx_render_gl_driver_token(armsx_render_gl_driver()));
 }
 
+/* Board/SoC identity is available before any EGL context exists. It supplements rather than
+   replaces GL_RENDERER: on MediaTek the board string identifies the SoC while the GL string
+   identifies Mali, and the profile needs both facts to avoid the broken framebuffer-fetch path. */
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setGpuHostHint(JNIEnv* env, jclass, jstring hint) {
+    const std::string value = JStringToUtf8(env, hint);
+    armsx_gpu_profile_note_host_hint(value.c_str());
+    ARMSX_LOGI("Android GPU host hint recorded: %s", value.c_str());
+}
+
 // The backend that actually survived the fallback ladder, never the one that was requested.
 // Empty string (never null) when no renderer is up.
 extern "C" JNIEXPORT jstring JNICALL
@@ -1608,6 +1843,12 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getActiveRenderer(JNIEnv* env, jclass) {
 
     name[0] = '\0';
     armsx_render_active_name(name, static_cast<int>(sizeof(name)));
+
+    /* The Compose OSD asks while the VM thread is still bringing the renderer up. Preserve the
+       JNI contract above: a profile inferred from the SoC is not an active renderer, and
+       returning " | Unknown ..." makes the UI cache a permanently stale answer. */
+    if (name[0] == '\0')
+        return env->NewStringUTF("");
 
     /* Append the identified GPU and driver.
        This row is what ends up in a screenshot attached to a bug report, and "OpenGL ES" alone

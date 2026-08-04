@@ -150,9 +150,10 @@ int main(void) {
     armsx_render_host_framebuffer_size(2400, 1080, 0, &fb_w, &fb_h);
     check_size("ultrawide-caps-preserving-aspect", fb_w, fb_h, 1600, 720);
 
-    /* Portrait. 1080*720/1920 = 405, rounded DOWN to even. */
+    /* Portrait uses the same short-edge cap as landscape. Rotating the host must rotate the
+       framebuffer instead of collapsing it to a narrow 404x720 strip. */
     armsx_render_host_framebuffer_size(1080, 1920, 0, &fb_w, &fb_h);
-    check_size("portrait-caps-and-rounds-even", fb_w, fb_h, 404, 720);
+    check_size("portrait-short-edge-cap", fb_w, fb_h, 720, 1280);
 
     armsx_render_host_framebuffer_size(800, 480, 0, &fb_w, &fb_h);
     check_size("small-surface-is-untouched", fb_w, fb_h, 800, 480);
@@ -171,6 +172,18 @@ int main(void) {
 
     armsx_render_host_framebuffer_size(1920, 1080, 480, &fb_w, &fb_h);
     check_size("explicit-cap-480", fb_w, fb_h, 852, 480);
+
+    /* Android's CPU bridge deliberately uses a lower explicit cap than the portable default.
+       SurfaceFlinger performs the last scale, avoiding a full-display software RenderCopy plus
+       ANativeWindow row copy while preserving the exact two-sided geometry contract above. */
+    armsx_render_host_framebuffer_size(2400, 1080, 360, &fb_w, &fb_h);
+    check_size("android-software-cap-360", fb_w, fb_h, 800, 360);
+
+    armsx_render_host_framebuffer_size(1008, 2244, 360, &fb_w, &fb_h);
+    check_size("android-portrait-cap-360", fb_w, fb_h, 360, 800);
+
+    armsx_render_host_framebuffer_size(2244, 1008, 360, &fb_w, &fb_h);
+    check_size("android-landscape-cap-360", fb_w, fb_h, 800, 360);
 
     /* ---- 3. THE DESTINATION RECT, PER ASPECT MODE -------------------------------------
        Letterbox/pillarbox against a 1280x720 output, which is the geometry the reported

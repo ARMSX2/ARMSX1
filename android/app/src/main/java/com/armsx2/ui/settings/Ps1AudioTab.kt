@@ -83,13 +83,13 @@ fun Ps1AudioTab() {
         ) { v -> editor.update { it.copy(audioSwapChannels = v) } }
         SettingsDivider()
 
-        // desired.samples in ArmsxSession::create(); 13 ms reproduces the core's historical
-        // 588-frame (one CD sector) buffer.
+        // desired.samples in ArmsxSession::create(); 20 ms is one PAL frame and the native
+        // cadence-safe floor.
         SegmentedRow(
             label = str("audio.bufferMs.label"),
             options = Ps1Settings.AUDIO_BUFFER_MS.map { "$it ms" },
             // Falls back to the core default's slot rather than slot 0 when settings.toml holds a
-            // hand-edited value that is not on the list — slot 0 would silently read as "5 ms".
+            // hand-edited value that is not on the list — fall back to the native default.
             selectedIndex = Ps1Settings.AUDIO_BUFFER_MS.indexOf(s.audioBufferMs)
                 .takeIf { it >= 0 } ?: Ps1Settings.AUDIO_BUFFER_MS.indexOf(Ps1Settings().audioBufferMs),
             description = str("audio.bufferMs.description"),

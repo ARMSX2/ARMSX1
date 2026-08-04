@@ -681,7 +681,7 @@ endif
 SDL_LIBS := $(if $(filter 1,$(SDL_STATIC)),$(SDL_LIBS_STATIC),$(SDL_LIBS_DYNAMIC))
 SDL_LIBS_SHARED := $(SDL_LIBS_DYNAMIC)
 
-.PHONY: all clean shared wasm psvita-lib test test-cpu test-cpu-spec test-gte test-cheats test-gpu test-texrep test-raster-select test-present-dst test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime test-disc-serial disc-probe
+.PHONY: all clean shared wasm psvita-lib test test-cpu test-cpu-spec test-gte test-cheats test-gpu test-texrep test-gpu-profile test-raster-select test-present-dst test-audio-queue test-mdec-bounds test-spu-width test-mcard-diverge test-cdrom-getlocp test-chd test-zip test-sdl-runtime test-sdl-lifecycle test-disc-serial disc-probe
 
 all: $(BIN)
 
@@ -712,7 +712,9 @@ TEST_GPU_BIN := build/tests/gpu_renderer_parity
 TEST_CHD_BIN := build/tests/chd_logic
 TEST_ZIP_BIN := build/tests/zip_integration
 TEST_SDL_BIN := build/tests/sdl_renderer_smoke
+TEST_SDL_LIFECYCLE_BIN := build/tests/sdl_subsystem_lease
 TEST_DISC_SERIAL_BIN := build/tests/disc_serial
+TEST_MDEC_BOUNDS_BIN := build/tests/mdec_bounds
 DISC_PROBE_BIN := build/tests/disc_probe
 
 $(TEST_CPU_BIN): tests/cpu_differential.c $(TEST_CORE_SOURCES) | $(TEST_CORE_DEPS)
@@ -879,6 +881,28 @@ $(TEST_PRESENT_DST_BIN): tests/present_dst_rect.c frontend/render.cpp frontend/r
 test-present-dst: $(TEST_PRESENT_DST_BIN)
 	./$(TEST_PRESENT_DST_BIN)
 
+# A callback that consumes a short tail and then writes silence tears an audio frame and can stay
+# phase-locked at the device floor. Pin the callback side of the pause/re-prime hand-off here.
+TEST_AUDIO_QUEUE_BIN := build/tests/audio_queue_policy
+
+$(TEST_AUDIO_QUEUE_BIN): tests/audio_queue_policy.cpp frontend/audio_queue_policy.h
+	mkdir -p $(dir $@)
+	$(CXX) -std=c++17 -O2 -g -Wall -I. $< -o $@
+
+test-audio-queue: $(TEST_AUDIO_QUEUE_BIN)
+	./$(TEST_AUDIO_QUEUE_BIN)
+
+# MDEC streams are game-controlled RLE. Exercise the public command path with exact, truncated,
+# padding-only and coefficient-overflow inputs so the decoder cannot regress to indexing before
+# validating a run.
+$(TEST_MDEC_BOUNDS_BIN): tests/mdec_bounds.c $(TEST_CORE_SOURCES) | $(TEST_CORE_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) \
+		$^ $(TEST_CORE_LIBS) -lm -o $@
+
+test-mdec-bounds: $(TEST_MDEC_BOUNDS_BIN)
+	./$(TEST_MDEC_BOUNDS_BIN)
+
 # SPU register access WIDTH (psx/dev/spu.c): 8/16/32-bit against a 16-bit-wide register file.
 #
 # The file implemented 16- and 32-bit access only. An 8-bit read logged at FATAL and returned
@@ -975,6 +999,13 @@ $(TEST_SDL_BIN): tests/sdl_renderer_smoke.c
 
 test-sdl-runtime: $(TEST_SDL_BIN)
 	./$(TEST_SDL_BIN)
+
+$(TEST_SDL_LIFECYCLE_BIN): tests/sdl_subsystem_lease.cpp frontend/sdl_subsystem_lease.h
+	mkdir -p $(dir $@)
+	$(CXX) -std=c++17 -O2 -g $(SDL_CFLAGS) $< $(SDL_LIBS) -o $@
+
+test-sdl-lifecycle: $(TEST_SDL_LIFECYCLE_BIN)
+	./$(TEST_SDL_LIFECYCLE_BIN)
 
 # Disc serial identification (psx/discid.c), which is what gives a .chd its cover art, its
 # per-game settings key and its achievements identity. Built with USE_CHD and the real disc

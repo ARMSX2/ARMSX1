@@ -40,8 +40,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_root/android"
 
-# The updater builds its own native libs via build.sh; leave that to the caller so two concurrent
-# native builds cannot clobber each other's bin/obj (see ARMSX1_STATUS.md).
+# Leave native compilation to the caller so concurrent builds cannot share bin/obj.
 export ARMSX_SKIP_NATIVE_PREPARE="${ARMSX_SKIP_NATIVE_PREPARE:-1}"
 
 echo "==> Building play release bundle (:app:bundlePlayRelease)"

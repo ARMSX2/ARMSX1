@@ -82,9 +82,9 @@ android {
         versionCode armsxVersionCode
         versionName armsxVersionName
         vectorDrawables.useSupportLibrary = true
-        // ARMSX is sideloaded (not Play/GPL-limited) → always all-files storage (matches ARMSX2's
-        // github flavor). The lifted onboarding reads BuildConfig.STORAGE_ALL_FILES.
-        buildConfigField "boolean", "STORAGE_ALL_FILES", "true"
+        // STORAGE_ALL_FILES is declared per flavor below. Game libraries never need it: they use
+        // persisted SAF grants. Only the sideload build exposes an optional arbitrary writable
+        // DATA root; Play remains scoped-storage clean.
         // IN_APP_UPDATER is declared PER-FLAVOR (see productFlavors below), deliberately not here:
         // it must be true for github and false for play, and a defaultConfig value would silently
         // apply to any future flavor that forgot to set it — which for this flag means shipping a
@@ -129,10 +129,12 @@ android {
         github {
             dimension 'store'
             buildConfigField "boolean", "IN_APP_UPDATER", "true"
+            buildConfigField "boolean", "STORAGE_ALL_FILES", "true"
         }
         play {
             dimension 'store'
             buildConfigField "boolean", "IN_APP_UPDATER", "false"
+            buildConfigField "boolean", "STORAGE_ALL_FILES", "false"
         }
     }
 
@@ -212,7 +214,9 @@ android {
 
 dependencies {
     implementation 'androidx.browser:browser:1.8.0'
-    implementation 'androidx.core:core-ktx:1.19.0'
+    // Last stable lines built against the installed API 36 platform. Core 1.19 and
+    // Lifecycle 2.11 require API 37 even though the app does not use their new APIs.
+    implementation 'androidx.core:core-ktx:1.17.0'
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'com.google.android.material:material:1.14.0'
     implementation 'androidx.activity:activity-compose:1.13.0'
@@ -232,8 +236,8 @@ dependencies {
     implementation 'androidx.documentfile:documentfile:1.1.0'
     implementation 'io.coil-kt:coil-compose:2.7.0'
     implementation 'io.coil-kt:coil-gif:2.7.0'
-    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0'
-    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.11.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.10.0'
 
     debugImplementation 'androidx.compose.ui:ui-tooling'
 
@@ -276,6 +280,9 @@ def sdkCmakeBinDirs = new File(androidSdkDir, "cmake").listFiles()
 // replacement and has to be injected, which means a real task class rather than a closure.
 abstract class BuildNativeLibraries extends DefaultTask {
     @InputFile abstract RegularFileProperty getBuildScript()
+    @InputFiles
+    @PathSensitive(PathSensitivity.RELATIVE)
+    abstract ConfigurableFileCollection getNativeSources()
     @OutputFile abstract RegularFileProperty getNativeLibrary()
     @Internal abstract DirectoryProperty getRepoRoot()
     @Internal abstract ListProperty<String> getExtraPathEntries()
@@ -299,6 +306,20 @@ tasks.register("prepareNativeBinaries", BuildNativeLibraries) {
     group = "native"
     description = "Build SDL2/libarmsx via build.sh android."
     buildScript.set(new File(repoRootDir, "build.sh"))
+    // The native task used to declare only build.sh as an input. Gradle therefore reused a
+    // stale libarmsx.so after C/C++ edits and could package an APK that did not contain the
+    // source being tested. Track the native source/configuration surface while excluding build
+    // products and submodule metadata.
+    nativeSources.from(fileTree(repoRootDir) {
+        include "Makefile"
+        include "frontend/**"
+        include "psx/**"
+        include "third_party/**"
+        exclude "**/.git/**"
+        exclude "**/build/**"
+        exclude "**/*.o"
+        exclude "**/*.a"
+    })
     nativeLibrary.set(nativeOutput)
     repoRoot.set(repoRootDir)
     extraPathEntries.set(sdkCmakeBinDirs)

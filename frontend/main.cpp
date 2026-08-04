@@ -96,6 +96,7 @@ extern "C" {
 
 #include "achievements.h"
 #include "archive.h"
+#include "audio_queue_policy.h"
 #include "host_stats.h"
 #include "host_usage.h"
 // ADPF CPU clock hint + emulation-thread affinity. Both are host scheduling levers, both are
@@ -103,6 +104,7 @@ extern "C" {
 #include "perf_hint.h"
 #include "pgo.h"
 #include "render.h"
+#include "sdl_subsystem_lease.h"
 // IconsFontAwesome5.h (from fsui-lib's imgui) removed with the FSUI cut — the ICON_FA_* glyphs were
 // used only by the deleted native menus.
 #ifdef USE_HARDWARE
@@ -116,6 +118,9 @@ extern "C" {
 namespace {
 
 constexpr Uint32 kPauseChordGraceMs = 120;
+// One PAL frame is ~20 ms.  OpenSL ES periods below this cadence are prone to draining the
+// queue between frame pushes on Android; callers may request more, never less.
+constexpr int kAudioMinimumBufferMs = 20;
 
 constexpr bool SupportsManagedWindowSizing() {
 #if defined(__ANDROID__) || defined(IOS_TARGET) || defined(__EMSCRIPTEN__) || defined(UWP_TARGET) || defined(PSVITA_TARGET)
@@ -728,7 +733,7 @@ struct FrontendSettings {
     bool audio_mute_fast_forward = false;
     bool audio_swap_channels = false;
     bool audio_skip_reverb = false;
-    int audio_buffer_ms = 13;
+    int audio_buffer_ms = 20;
     int audio_driver = 1; // 0=SDL default, 1=openslES, 2=aaudio (Android only)
     // Opt-in: keep emulating and playing while the app is off-screen. Off means the host's
     // background notification parks the VM and stops the platform audio stream.
@@ -1219,7 +1224,12 @@ std::optional<GpuBackend> ParseGpuBackendOverride(const char* value) {
         return GpuBackend::SDLAccelerated;
     }
 
-    if (lowered == "opengl" || lowered == "gl" || lowered == "gles" || lowered == "gles3" || lowered == "opengl-es") {
+    if (lowered == "opengl" || lowered == "gl" || lowered == "gles" || lowered == "gles3" ||
+        lowered == "opengl-es" || lowered == "angle") {
+        /* `angle` is the flat UI token for OpenGL presentation with the ANGLE provider.
+           config.c has already selected gl_driver=ANGLE for it. LoadExtraSettings() parses
+           the same file a second time, so treating the token as unknown here used to undo
+           that first pass and silently replace ANGLE with SDL software. */
         return GpuBackend::OpenGL;
     }
 
@@ -2118,7 +2128,7 @@ FrontendSettings BuildSettings(const psxe_config_t* cfg, const CliFlags& cli) {
     settings.audio_mute_fast_forward = cfg ? (cfg->audio_mute_fast_forward != 0) : false;
     settings.audio_swap_channels = cfg ? (cfg->audio_swap_channels != 0) : false;
     settings.audio_skip_reverb = cfg ? (cfg->audio_skip_reverb != 0) : false;
-    settings.audio_buffer_ms = cfg ? cfg->audio_buffer_ms : 13;
+    settings.audio_buffer_ms = cfg ? cfg->audio_buffer_ms : 20;
     settings.audio_driver = cfg ? cfg->audio_driver : 1;
     settings.audio_background_playback = cfg ? (cfg->audio_background_playback != 0) : false;
     settings.ui_state.show_settings_overlay = settings.debug_panel;
@@ -2157,7 +2167,7 @@ FrontendSettings BuildSettings(const psxe_config_t* cfg, const CliFlags& cli) {
     settings.frame_skip = std::clamp(settings.frame_skip, -1, kMaxFrameSkip);
     settings.audio_volume = std::clamp(settings.audio_volume, 0, 200);
     settings.audio_ff_volume = std::clamp(settings.audio_ff_volume, 0, 200);
-    settings.audio_buffer_ms = std::clamp(settings.audio_buffer_ms, 2, 100);
+    settings.audio_buffer_ms = std::clamp(settings.audio_buffer_ms, kAudioMinimumBufferMs, 100);
     settings.audio_driver = std::clamp(settings.audio_driver, 0, 2);
     settings.ui_state.show_settings_overlay = settings.debug_panel;
     settings.ui_state.show_performance_overlay = settings.debug_panel;
@@ -2537,6 +2547,7 @@ class ArmsxSession {
 
         psx_cpu_set_execution_mode(psx_get_cpu(psx_), settings.cpu_engine);
         psxe_diag_logf("cpu", "execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
+        ARMSX_BOOTLOG("core: CPU execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
 
         psx_gpu_t* gpu = psx_get_gpu(psx_);
 
@@ -2655,10 +2666,14 @@ class ArmsxSession {
                     // Never silent: armsx_hw_gl_status() says which of the availability
                     // gates rejected it.
                     log_info("GLES rasterizer not used: %s", armsx_hw_gl_status());
+                    psxe_diag_logf("renderer", "GLES rasterizer not used: %s",
+                                   armsx_hw_gl_status());
+                    ARMSX_BOOTLOG("core: GLES rasterizer not used: %s", armsx_hw_gl_status());
                 }
             }
 
-            if (!hw_rt_backend_ && (mode != 3)) {
+            if (!hw_rt_backend_ &&
+                armsx_hw_gl_use_cpu_fallback(mode, settings.internal_scale)) {
                 hw_rt_backend_ = armsx_hw_rt_create(gpu, settings.internal_scale);
                 hw_rt_is_gl_ = false;
             }
@@ -2668,9 +2683,20 @@ class ArmsxSession {
                 log_info("Rasterizer: %s at %dx internal resolution",
                          hw_rt_is_gl_ ? "GLES (GPU)" : "internal-resolution (CPU)",
                          psx_gpu_resolution_scale(gpu));
+                psxe_diag_logf("renderer", "Rasterizer selected=%s scale=%dx",
+                               hw_rt_is_gl_ ? "GLES3 GPU" : "internal-resolution CPU",
+                               psx_gpu_resolution_scale(gpu));
+                ARMSX_BOOTLOG("core: rasterizer selected=%s scale=%dx",
+                              hw_rt_is_gl_ ? "GLES3 GPU" : "internal-resolution CPU",
+                              psx_gpu_resolution_scale(gpu));
             } else {
                 log_error("Hardware rasterizer unavailable at %dx; staying on the software path",
                           settings.internal_scale);
+                psxe_diag_logf("renderer",
+                               "Hardware rasterizer unavailable at %dx; using software",
+                               settings.internal_scale);
+                ARMSX_BOOTLOG("core: hardware rasterizer unavailable at %dx; using software",
+                              settings.internal_scale);
             }
         }
 #endif
@@ -2829,10 +2855,14 @@ class ArmsxSession {
         audio_desired_.freq = kAudioMixRate;
         audio_desired_.format = AUDIO_S16SYS;
         audio_desired_.channels = 2;
-        // [audio] buffer_ms. The historical value was CD_SECTOR_SIZE >> 2 = 588 frames
-        // (13.3 ms at 44.1 kHz), which the 13 ms default reproduces to within a millisecond.
+        // [audio] buffer_ms. A PS1 PAL frame contributes about 20 ms of stereo samples. A smaller OpenSL ES
+        // callback period lets the device drain the queue between two emulated frames, which
+        // is audible as a crackle even when the mixer itself is perfectly healthy.  Keep the
+        // user setting, but never request a sub-frame period; the queue prebuffer below absorbs
+        // ordinary Android scheduler jitter on top of that cadence-safe floor.
         audio_desired_.samples = static_cast<Uint16>(std::clamp(
-            (kAudioMixRate * std::clamp(settings.audio_buffer_ms, 2, 100)) / 1000, 64, 8192));
+            (kAudioMixRate * std::clamp(settings.audio_buffer_ms, kAudioMinimumBufferMs, 100)) / 1000,
+            64, 8192));
         audio_desired_.callback = AudioUpdate;
         audio_desired_.userdata = this;
 
@@ -2870,6 +2900,8 @@ class ArmsxSession {
 
         audio_reopen_failed_ = false;
         audio_device_ever_opened_ = true;
+        audio_playback_started_ = false;
+        audio_rebuffer_requested_ = false;
         audio_sample_accumulator_ = 0.0;
         audio_queue_.clear();
         audio_queue_read_offset_ = 0;
@@ -2921,15 +2953,18 @@ class ArmsxSession {
     // semaphore the thread is parked on until it notices the shutdown flag.
     void closeAudioDevice() {
         if (!audio_dev_) {
+            audio_playback_started_ = false;
             return;
         }
 
         SDL_LockAudioDevice(audio_dev_);
         resetAudioQueueLocked();
+        audio_rebuffer_requested_ = false;
         SDL_UnlockAudioDevice(audio_dev_);
         SDL_PauseAudioDevice(audio_dev_, 1);
         SDL_CloseAudioDevice(audio_dev_);
         audio_dev_ = 0;
+        audio_playback_started_ = false;
     }
 
     // Push the [audio] table at the live session. Called at create() and again whenever the
@@ -3081,7 +3116,9 @@ class ArmsxSession {
             if (paused) {
                 SDL_LockAudioDevice(audio_dev_);
                 resetAudioQueueLocked();
+                audio_rebuffer_requested_ = false;
                 SDL_UnlockAudioDevice(audio_dev_);
+                audio_playback_started_ = false;
             }
             updateAudioPlaybackState();
         }
@@ -3545,7 +3582,7 @@ class ArmsxSession {
     // settingsOverlayLines / performanceOverlayLines removed with the FSUI cut (imgui overlays).
 
 #ifdef USE_HARDWARE
-    // HW_RENDERER_DESIGN.md §4.6: where the GPU path cannot serve a game it falls back
+    // the backend: where the GPU path cannot serve a game it falls back
     // EXPLICITLY AND LOGGED, never silently. The GLES backend disables itself on a
     // persistent GL error rather than presenting an empty render target that looks like a
     // black screen with no clue attached; this is the frontend half of that contract.
@@ -3574,7 +3611,7 @@ class ArmsxSession {
         hw_rt_backend_ = nullptr;
         hw_rt_is_gl_ = false;
 
-        if (gpu && (rasterizer_mode_ != 3)) {
+        if (gpu && armsx_hw_gl_use_cpu_fallback(rasterizer_mode_, internal_scale_)) {
             hw_rt_backend_ = armsx_hw_rt_create(gpu, internal_scale_);
 
             if (hw_rt_backend_) {
@@ -3771,7 +3808,7 @@ class ArmsxSession {
 
         // Internal-resolution scanout. The whole-VRAM debug view and 24bpp playback both
         // have to stay native: 24bpp reinterprets VRAM bytes as packed RGB888, which the
-        // upscaled target does not contain (HW_RENDERER_DESIGN.md §4.4). Everything else
+        // upscaled target does not contain (the backend). Everything else
         // reads the backend's render target directly, so the upscaled pixels reach the
         // present layer without a downsample.
         int display_scale = 1;
@@ -3780,7 +3817,7 @@ class ArmsxSession {
 #ifdef USE_HARDWARE
         const bool want_native_scanout = use_vram_source || (next_format != SDL_PIXELFORMAT_BGR555);
 
-        // The brokered seam (HW_RENDERER_DESIGN.md §0.5.3/§0.5.5). When the GLES rasterizer
+        // The brokered seam (the backend). When the GLES rasterizer
         // and the GL present backend share a context, the frame the rasterizer just produced
         // is already a texture in the presenter's namespace: hand it over instead of reading
         // it back and uploading it again. Both of those are S^2 in the internal scale, and on
@@ -3788,7 +3825,7 @@ class ArmsxSession {
         // remaining cost in the upscaled path.
         //
         // Every condition here is a fallback to the readback path, not an error. The debug
-        // VRAM view and 24bpp playback need native pixels (§4.4), and armsx_hw_gl_present_texture()
+        // VRAM view and 24bpp playback need native pixels (), and armsx_hw_gl_present_texture()
         // refuses on its own side whenever the texture would be meaningless to the presenter.
         //
         // Deinterlacing also declines the seam: it is a CPU pass over the finished frame, so
@@ -4239,10 +4276,10 @@ class ArmsxSession {
 
     // Whether the emulated stream needs rate-converting to reach the device.
     //
-    // False for a plain, limited, 100% session — and there the audio path is byte-for-byte
-    // what it was before any of this existed. True whenever the emulation is deliberately
-    // running at something other than realtime: fast-forward, the limiter switched off, or a
-    // speed percentage / fps cap that is not the game's own rate.
+    // This answers only whether the user DELIBERATELY requested a non-realtime rate:
+    // fast-forward, limiter off, speed percentage, or an fps cap. Plain 100% sessions use the
+    // separate wall-clock elasticity controller in queueAudioForFrame(); it stays at ratio 1.0
+    // while the core meets its deadline and stretches host output only after measured lateness.
     bool audioRateConversionActive() const {
         if (fast_forward_enabled_ || !frame_limit_) {
             return true;
@@ -4342,7 +4379,7 @@ class ArmsxSession {
         // normally has no device to act on. It matters only if a future path leaves one open
         // while the app is off-screen — a setPaused(false) landing then must not hand the
         // callback back its real samples.
-        SDL_PauseAudioDevice(audio_dev_, (paused_ || audio_suspended_) ? 1 : 0);
+        SDL_PauseAudioDevice(audio_dev_, (paused_ || audio_suspended_ || !audio_playback_started_) ? 1 : 0);
     }
 
     /*
@@ -4408,14 +4445,17 @@ class ArmsxSession {
         size_t queued = 0;
         uint32_t underruns = 0;
         uint64_t underrun_bytes = 0;
+        uint32_t rebuffers = 0;
         uint32_t overflows = 0;
         SDL_LockAudioDevice(audio_dev_);
         queued = audio_queue_.size() - audio_queue_read_offset_;
         underruns = audio_underruns_;
         underrun_bytes = audio_underrun_bytes_;
+        rebuffers = audio_rebuffer_events_;
         overflows = audio_overflow_resets_;
         audio_underruns_ = 0;
         audio_underrun_bytes_ = 0;
+        audio_rebuffer_events_ = 0;
         audio_overflow_resets_ = 0;
         SDL_UnlockAudioDevice(audio_dev_);
 
@@ -4423,7 +4463,7 @@ class ArmsxSession {
 
         audioDiagLine("");
         audioDiagLine("[t=%.1fs] host: fps_target=%.2f queued=%zu bytes (%.1f ms) "
-                      "underruns=%u short=%llu bytes overflow_resets=%u rate_ratio=%.4f "
+                      "underruns=%u short=%llu bytes rebuffer=%u overflow_resets=%u rate_ratio=%.4f "
                       "ff=%d paused=%d",
             static_cast<double>(audio_diag_snapshots_) *
                 (static_cast<double>(kAudioDiagSnapshotFrames) / frameRate()),
@@ -4433,6 +4473,7 @@ class ArmsxSession {
                 1000.0 / static_cast<double>(kAudioMixRate),
             underruns,
             static_cast<unsigned long long>(underrun_bytes),
+            rebuffers,
             overflows,
             audio_rate_ratio_,
             fast_forward_enabled_ ? 1 : 0,
@@ -4684,6 +4725,7 @@ class ArmsxSession {
         SDL_LockAudioDevice(audio_dev_);
         audio_underruns_ = 0;
         audio_underrun_bytes_ = 0;
+        audio_rebuffer_events_ = 0;
         audio_overflow_resets_ = 0;
         SDL_UnlockAudioDevice(audio_dev_);
 
@@ -4813,6 +4855,8 @@ class ArmsxSession {
             return;
         }
 
+        recoverAudioUnderrunIfNeeded();
+
         const int sample_count = audio_frame_samples_;
         if (sample_count <= 0) {
             return;
@@ -4829,18 +4873,30 @@ class ArmsxSession {
 
         size_t queued_samples = 0;
         size_t drained_samples = 0;
-        if (audioRateConversionActive()) {
+        bool start_audio = false;
+        const bool deliberate_rate_conversion = audioRateConversionActive();
+        const bool realtime_elasticity = !deliberate_rate_conversion && audio_playback_started_;
+        if (deliberate_rate_conversion || realtime_elasticity) {
             SDL_LockAudioDevice(audio_dev_);
             queued_samples = (audio_queue_.size() - audio_queue_read_offset_) / kAudioBytesPerSample;
             drained_samples = audio_consumed_bytes_ / kAudioBytesPerSample;
             audio_consumed_bytes_ = 0;
             SDL_UnlockAudioDevice(audio_dev_);
 
-            updateAudioRateRatio(sample_count, queued_samples, drained_samples);
+            if (deliberate_rate_conversion) {
+                updateAudioRateRatio(sample_count, queued_samples, drained_samples);
+            } else {
+                updateRealtimeAudioRatio(sample_count, queued_samples);
+            }
             frame_audio = resampleToDeviceRate(frame_audio.data(), static_cast<size_t>(sample_count));
             if (frame_audio.empty()) {
                 return;
             }
+        } else {
+            // Do not let time spent building the startup/rebuffer cushion look like a slow
+            // emulation frame when playback resumes. The exact SPU samples are queued unchanged
+            // until the device starts; elasticity begins with the first real output interval.
+            resetRealtimeAudioClock();
         }
 
         SDL_LockAudioDevice(audio_dev_);
@@ -4855,7 +4911,20 @@ class ArmsxSession {
         }
         audio_queue_.insert(audio_queue_.end(), frame_audio.begin(), frame_audio.end());
         const size_t queue_after = audio_queue_.size() - audio_queue_read_offset_;
+        if (!audio_playback_started_ &&
+            queue_after >= static_cast<size_t>(kAudioPrebufferSamples) * kAudioBytesPerSample) {
+            // Start only after several complete frames are queued.  This keeps OpenSL ES from
+            // consuming the first frame while the emulation thread is still bootstrapping and
+            // gives the normal frame loop a real jitter cushion rather than relying on luck at
+            // the first callback.
+            audio_playback_started_ = true;
+            start_audio = true;
+        }
         SDL_UnlockAudioDevice(audio_dev_);
+
+        if (start_audio) {
+            updateAudioPlaybackState();
+        }
 
         // Only read by the HW_DEBUG trace below.
         (void)queue_before;
@@ -4948,6 +5017,68 @@ class ArmsxSession {
             static_cast<double>(input_samples) / audio_rate_output_estimate_, kAudioRateMinRatio, kAudioRateMaxRatio);
     }
 
+    void resetRealtimeAudioClock() {
+        audio_realtime_last_counter_ = 0;
+        audio_realtime_elapsed_seconds_ = 0.0;
+        audio_realtime_input_samples_ = 0;
+        audio_realtime_window_frames_ = 0;
+        audio_rate_ratio_ = 1.0;
+        audio_stretch_initialized_ = false;
+    }
+
+    /* Normal-speed elasticity is intentionally separate from fast-forward conversion above.
+       The SPU still produces exactly the samples its emulated clock owes. Every four frames we
+       compare those samples with real elapsed output time and gently lengthen only the HOST
+       stream when thermal throttling or a scheduler stall made the core late. This is the
+       difference between slower audio and a crack: without it the device consumes the queue at
+       44.1 kHz while a 75%-speed core can replenish only 33 kHz, so silence is mathematically
+       inevitable no matter how carefully the callback is locked. */
+    void updateRealtimeAudioRatio(int input_samples, size_t queued_samples) {
+        const Uint64 now = SDL_GetPerformanceCounter();
+        const Uint64 frequency = SDL_GetPerformanceFrequency();
+        if (audio_realtime_last_counter_ == 0 || frequency == 0) {
+            audio_realtime_last_counter_ = now;
+            return;
+        }
+
+        const double elapsed = static_cast<double>(now - audio_realtime_last_counter_) /
+                               static_cast<double>(frequency);
+        audio_realtime_last_counter_ = now;
+
+        // A background/pause transition is not a slow frame. Its queue is rebuilt through the
+        // normal prebuffer path, so discard the discontinuous wall-clock sample here.
+        if (!(elapsed > 0.0) || elapsed > 0.25) {
+            audio_realtime_elapsed_seconds_ = 0.0;
+            audio_realtime_input_samples_ = 0;
+            audio_realtime_window_frames_ = 0;
+            audio_rate_ratio_ = 1.0;
+            audio_stretch_initialized_ = false;
+            return;
+        }
+
+        audio_realtime_elapsed_seconds_ += elapsed;
+        audio_realtime_input_samples_ += static_cast<size_t>(input_samples);
+        if (++audio_realtime_window_frames_ < kAudioRealtimeWindowFrames) {
+            return;
+        }
+
+        const double wanted = armsx_audio_realtime_ratio(
+            audio_realtime_input_samples_, audio_realtime_elapsed_seconds_, kAudioMixRate,
+            queued_samples, kAudioRateTargetQueueSamples);
+        // Four frames already reject callback-size lumpiness. Attack a real slowdown quickly so
+        // the 120 ms cushion survives, but release toward normal speed slowly; the reverse would
+        // replace crackle with a high-pitch catch-up chirp after every scheduler stall.
+        const double response = wanted < audio_rate_ratio_ ? 0.75 : 0.25;
+        audio_rate_ratio_ += (wanted - audio_rate_ratio_) * response;
+        if (std::abs(audio_rate_ratio_ - 1.0) < 0.003) {
+            audio_rate_ratio_ = 1.0;
+        }
+
+        audio_realtime_elapsed_seconds_ = 0.0;
+        audio_realtime_input_samples_ = 0;
+        audio_realtime_window_frames_ = 0;
+    }
+
     // Convert the frame to the device rate. `audio_rate_ratio_` is input samples per output
     // sample, so above 1 the stream is compressed (fast-forward, limiter off, speed > 100%)
     // and below 1 it is stretched (speed < 100%, or an fps cap under the game's own rate).
@@ -4974,6 +5105,51 @@ class ArmsxSession {
             out.insert(out.end(), left_bytes, left_bytes + sizeof(int16_t));
             out.insert(out.end(), right_bytes, right_bytes + sizeof(int16_t));
         };
+
+        if (input_samples == 0) {
+            return out;
+        }
+
+        if (audio_rate_ratio_ < 1.0) {
+            // Linear interpolation for the normal-speed slowdown path. Repeating the previous
+            // sample (the old ratio<1 behaviour) turns a sustained 70% run into a buzzy staircase.
+            // The virtual frame at index zero is the final input from the previous chunk, which
+            // keeps interpolation continuous across PS1 frame boundaries.
+            if (!audio_stretch_initialized_) {
+                audio_stretch_previous_left_ = samples[0];
+                audio_stretch_previous_right_ = samples[1];
+                audio_stretch_phase_ = 1.0;
+                audio_stretch_initialized_ = true;
+            }
+
+            while (audio_stretch_phase_ < static_cast<double>(input_samples)) {
+                const size_t upper = static_cast<size_t>(audio_stretch_phase_);
+                const double fraction = audio_stretch_phase_ - static_cast<double>(upper);
+                const int16_t left0 = upper == 0
+                    ? audio_stretch_previous_left_
+                    : samples[((upper - 1u) << 1) + 0u];
+                const int16_t right0 = upper == 0
+                    ? audio_stretch_previous_right_
+                    : samples[((upper - 1u) << 1) + 1u];
+                const int16_t left1 = samples[(upper << 1) + 0u];
+                const int16_t right1 = samples[(upper << 1) + 1u];
+                const int16_t left = static_cast<int16_t>(std::lround(
+                    static_cast<double>(left0) +
+                    (static_cast<double>(left1) - static_cast<double>(left0)) * fraction));
+                const int16_t right = static_cast<int16_t>(std::lround(
+                    static_cast<double>(right0) +
+                    (static_cast<double>(right1) - static_cast<double>(right0)) * fraction));
+                emit(left, right);
+                audio_stretch_phase_ += audio_rate_ratio_;
+            }
+
+            audio_stretch_phase_ -= static_cast<double>(input_samples);
+            audio_stretch_previous_left_ = samples[((input_samples - 1u) << 1) + 0u];
+            audio_stretch_previous_right_ = samples[((input_samples - 1u) << 1) + 1u];
+            return out;
+        }
+
+        audio_stretch_initialized_ = false;
 
         for (size_t index = 0; index < input_samples; index++) {
             audio_rate_accumulator_left_ += samples[(index << 1) + 0];
@@ -5013,20 +5189,30 @@ class ArmsxSession {
         audio_rate_last_left_ = 0;
         audio_rate_last_right_ = 0;
         audio_consumed_bytes_ = 0;
+        resetRealtimeAudioClock();
+        audio_stretch_phase_ = 1.0;
+        audio_stretch_previous_left_ = 0;
+        audio_stretch_previous_right_ = 0;
     }
 
     void consumeQueuedAudio(uint8_t* buffer, size_t size) {
         const size_t available = audio_queue_.size() - audio_queue_read_offset_;
-        const size_t to_copy = std::min(size, available);
+        const ArmsxAudioQueueReadDecision decision =
+            armsx_audio_queue_read_decision(available, size, audio_rebuffer_requested_);
+        const size_t to_copy = decision.copy_bytes;
 
-        // `audio_diag`. THE discriminator: a short read here means the emulation did not
-        // produce a frame's worth of audio in time and the device is playing the silence
-        // AudioUpdate() memset in. That sounds like a broken mixer to a player, but the fix
-        // is speed, not arithmetic. Counted on SDL's audio thread, read by the emulation
-        // thread under SDL_LockAudioDevice() — the same discipline audio_consumed_bytes_ uses.
-        if (to_copy < size) {
+        // `audio_diag`. A short read means the producer missed a device deadline. Do not tear
+        // the queued tail by copying only part of it: AudioUpdate() already zeroed this callback,
+        // and the emulation thread will pause/re-prime on its next frame. Counted on SDL's audio
+        // thread and read under SDL_LockAudioDevice(), like audio_consumed_bytes_.
+        if (decision.request_rebuffer) {
             audio_underruns_++;
-            audio_underrun_bytes_ += (size - to_copy);
+            audio_underrun_bytes_ += size;
+            if (!audio_rebuffer_requested_) {
+                audio_rebuffer_requested_ = true;
+                audio_rebuffer_events_++;
+            }
+            return;
         }
 
         if (to_copy > 0) {
@@ -5038,7 +5224,9 @@ class ArmsxSession {
         }
 
         if (audio_queue_read_offset_ >= audio_queue_.size()) {
-            resetAudioQueueLocked();
+            // The callback owns only the queue storage.  The fractional sample accumulator is
+            // emulation-thread state and must survive a normal device drain.
+            resetAudioQueueStorageLocked();
         } else if (audio_queue_read_offset_ >= kAudioQueueCompactThreshold) {
             compactAudioQueueLocked();
         }
@@ -5047,18 +5235,48 @@ class ArmsxSession {
     void clearQueuedAudio() {
         if (!audio_dev_) {
             resetAudioQueueLocked();
+            audio_playback_started_ = false;
+            audio_rebuffer_requested_ = false;
             return;
         }
 
         SDL_LockAudioDevice(audio_dev_);
         resetAudioQueueLocked();
+        audio_rebuffer_requested_ = false;
+        SDL_UnlockAudioDevice(audio_dev_);
+        audio_playback_started_ = false;
+    }
+
+    void recoverAudioUnderrunIfNeeded() {
+        SDL_LockAudioDevice(audio_dev_);
+        const bool requested = audio_rebuffer_requested_;
+        SDL_UnlockAudioDevice(audio_dev_);
+        if (!requested) {
+            return;
+        }
+
+        // SDL waits for an in-flight callback here. Calling this from AudioUpdate itself would
+        // deadlock; queueAudioForFrame() is the emulation-thread rendezvous. Keep the unread tail
+        // intact, mark playback unprimed, and let the existing startup threshold resume it only
+        // after the jitter cushion is full again.
+        SDL_PauseAudioDevice(audio_dev_, 1);
+        SDL_LockAudioDevice(audio_dev_);
+        audio_rebuffer_requested_ = false;
+        audio_playback_started_ = false;
         SDL_UnlockAudioDevice(audio_dev_);
     }
 
-    void resetAudioQueueLocked() {
-        audio_sample_accumulator_ = 0.0;
+    void resetAudioQueueStorageLocked() {
         audio_queue_.clear();
         audio_queue_read_offset_ = 0;
+    }
+
+    void resetAudioQueueLocked() {
+        // The fractional sample accumulator belongs to the emulation thread.  Do not touch it
+        // from the SDL callback when the device happens to drain the queue: that was a data race
+        // and periodically discarded the fractional part of the next frame's sample budget.
+        audio_sample_accumulator_ = 0.0;
+        resetAudioQueueStorageLocked();
     }
 
     void compactAudioQueueLocked() {
@@ -5067,7 +5285,7 @@ class ArmsxSession {
         }
 
         if (audio_queue_read_offset_ >= audio_queue_.size()) {
-            resetAudioQueueLocked();
+            resetAudioQueueStorageLocked();
             return;
         }
 
@@ -5076,6 +5294,11 @@ class ArmsxSession {
     }
 
     static constexpr int kAudioMixRate = 44100;
+    // Android can pause the emulation thread for several scheduler quanta while the app is
+    // still foregrounded (surface callbacks, Compose work, or a CD read).  Keep enough queued
+    // audio to cover that without changing the emulated sample clock.  This is a startup/jitter
+    // cushion only; the authoritative mixer still produces exactly one frame's samples.
+    static constexpr int kAudioPrebufferSamples = kAudioMixRate * 120 / 1000;
     // `audio_diag`: ~10 s of capture, sampled five times a second, four arms per process.
     static constexpr int kAudioDiagFrames = 1800;
     static constexpr int kAudioDiagSnapshotFrames = 30;
@@ -5085,9 +5308,10 @@ class ArmsxSession {
     static constexpr size_t kMaxQueuedAudioBytes = static_cast<size_t>(kAudioMixRate * sizeof(int16_t) * 2 / 2);
     static constexpr size_t kAudioQueueCompactThreshold = 4096;
     static constexpr std::uint32_t kMaxFrameSteps = PSX_CPU_CPS / 8u;
-    // Queue depth the rate converter aims for: ~46 ms, long enough that the device never runs
-    // dry between two emulated frames, short enough to stay responsive.
-    static constexpr int kAudioRateTargetQueueSamples = 2048;
+    // The normal-speed elasticity controller holds the same 120 ms depth used to start/re-prime
+    // playback. It changes host sample duration, never the emulated SPU clock or CPU schedule.
+    static constexpr int kAudioRateTargetQueueSamples = kAudioPrebufferSamples;
+    static constexpr int kAudioRealtimeWindowFrames = 4;
     // Frames the queue-depth correction is spread over, and how hard the whole estimate is
     // smoothed. Both slow on purpose — see updateAudioRateRatio().
     static constexpr double kAudioRateQueueCorrectionFrames = 16.0;
@@ -5125,6 +5349,10 @@ class ArmsxSession {
     int internal_scale_ = 1;
 #endif
     SDL_AudioDeviceID audio_dev_ = 0;
+    bool audio_playback_started_ = false;
+    // Set by the SDL callback under the device lock; consumed by the emulation thread, which
+    // performs the pause/re-prime outside the callback.
+    bool audio_rebuffer_requested_ = false;
     std::vector<uint8_t> audio_queue_;
     size_t audio_queue_read_offset_ = 0;
     double audio_sample_accumulator_ = 0.0;
@@ -5138,6 +5366,7 @@ class ArmsxSession {
     // `audio_diag` only. Same locking discipline as audio_consumed_bytes_.
     uint32_t audio_underruns_ = 0;
     uint64_t audio_underrun_bytes_ = 0;
+    uint32_t audio_rebuffer_events_ = 0;
     uint32_t audio_overflow_resets_ = 0;
     // One-shot capture state; see runAudioDiag(). All emulation thread.
     FILE* audio_diag_file_ = nullptr;
@@ -5161,6 +5390,14 @@ class ArmsxSession {
     int audio_rate_accumulator_count_ = 0;
     int16_t audio_rate_last_left_ = 0;
     int16_t audio_rate_last_right_ = 0;
+    Uint64 audio_realtime_last_counter_ = 0;
+    double audio_realtime_elapsed_seconds_ = 0.0;
+    size_t audio_realtime_input_samples_ = 0;
+    int audio_realtime_window_frames_ = 0;
+    bool audio_stretch_initialized_ = false;
+    double audio_stretch_phase_ = 1.0;
+    int16_t audio_stretch_previous_left_ = 0;
+    int16_t audio_stretch_previous_right_ = 0;
     std::filesystem::path disc_path_;
     std::filesystem::path exe_path_;
     std::string title_;
@@ -5689,9 +5926,19 @@ class ArmsxApp {
                               launched ? "ok" : "FAILED",
                               launched ? "" : " error=",
                               launched ? "" : (pending_error_dialog_.has_value() ? pending_error_dialog_->c_str() : "(none)"));
+                if (!launched) {
+                    armsx_ach_shutdown();
+                    shutdown();
+                    g_active_app = nullptr;
+                    return 1;
+                }
             } else if (!pending_cli_argument_.empty()) {
                 pending_error_dialog_ = "Unsupported launch path or URI.";
                 ARMSX_BOOTERR("core: unsupported launch path or URI: %s", pending_cli_argument_.c_str());
+                armsx_ach_shutdown();
+                shutdown();
+                g_active_app = nullptr;
+                return 1;
             }
         }
 
@@ -6050,6 +6297,15 @@ class ArmsxApp {
     }
 
     void installCrashHandlers() {
+#if defined(__ANDROID__)
+        // Android's debuggerd owns native fatal signals and writes the tombstone/backtrace that
+        // can identify the faulting thread and instruction. Replacing those handlers with
+        // ReportNativeCrash() ended in _Exit(1), so logcat only said "exited cleanly (1)" and
+        // erased the evidence needed to fix intermittent lifecycle crashes. The platform handler
+        // is both more complete and async-signal-safe; leave std::terminate at its default too so
+        // its SIGABRT reaches debuggerd.
+        return;
+#else
         static bool installed = false;
         if (installed) {
             return;
@@ -6088,6 +6344,7 @@ class ArmsxApp {
 
 #if defined(_WIN32) && !defined(UWP_TARGET)
         SetUnhandledExceptionFilter(&WindowsUnhandledExceptionFilter);
+#endif
 #endif
     }
 
@@ -6534,14 +6791,7 @@ class ArmsxApp {
         const Uint32 mandatory = required & ~static_cast<Uint32>(SDL_INIT_AUDIO);
         const bool wants_audio = (required & SDL_INIT_AUDIO) != 0;
 
-        if (SDL_WasInit(0) == 0) {
-            owns_sdl_ = true;
-            if (SDL_Init(mandatory) != 0) {
-                ARMSX_BOOTERR("core: SDL_Init(0x%x) failed: %s", mandatory, SDL_GetError());
-                psxe_diag_logf("sdl", "SDL_Init failed: %s", SDL_GetError());
-                return false;
-            }
-        } else if (SDL_InitSubSystem(mandatory) != 0) {
+        if (!sdl_subsystems_.acquire(mandatory)) {
             ARMSX_BOOTERR("core: SDL_InitSubSystem(0x%x) failed: %s", mandatory, SDL_GetError());
             psxe_diag_logf("sdl", "SDL_InitSubSystem failed: %s", SDL_GetError());
             return false;
@@ -6551,7 +6801,7 @@ class ArmsxApp {
             applyAudioDriverSetting();
         }
 
-        if (wants_audio && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        if (wants_audio && !sdl_subsystems_.acquire(SDL_INIT_AUDIO)) {
             ARMSX_BOOTERR("core: audio init failed (continuing silently): %s", SDL_GetError());
             psxe_diag_logf("sdl", "Audio init failed (continuing without audio): %s", SDL_GetError());
         } else if (wants_audio) {
@@ -6728,9 +6978,7 @@ class ArmsxApp {
         render_ = nullptr;
         window_ = nullptr;
 
-        if (owns_sdl_) {
-            SDL_Quit();
-        }
+        sdl_subsystems_.release();
 
         psxe_diag_shutdown();
     }
@@ -6825,7 +7073,7 @@ class ArmsxApp {
 
         // `touch files/logs/perf_log` sends the overlay's own snapshot to the diag log as well
         // as to the UI. The numbers otherwise exist only inside Compose, which makes every
-        // measurement a screenshot read by eye — and HW_RENDERER_DESIGN.md §0.5.3 records a
+        // measurement a screenshot read by eye — and the backend records a
         // sweep that produced six screenshots OF THE LIBRARY because of exactly that. With the
         // marker present two runs are matched on the primitive counters as numbers. Re-armed
         // rather than armed once, so a UI that switches the overlay off cannot silence it.
@@ -7170,7 +7418,7 @@ class ArmsxApp {
         }
 
         /* Read from the GPU rather than from settings.internal_scale: the requested scale and
-           the live one differ whenever the rasterizer fell back (no GL context, or the §4.6
+           the live one differ whenever the rasterizer fell back (no GL context, or the
            downgrade fired). The OSD must show what is running, not what was asked for. */
         {
             psx_gpu_t* scale_gpu = machine ? psx_get_gpu(machine) : nullptr;
@@ -7772,7 +8020,7 @@ class ArmsxApp {
     CliFlags cli_{};
     FrontendSettings settings_{};
     bool running_ = true;
-    bool owns_sdl_ = false;
+    armsx::SdlSubsystemLease sdl_subsystems_{};
     bool owns_window_ = false;
     bool owns_renderer_ = false;
     SDL_Window* window_ = nullptr;

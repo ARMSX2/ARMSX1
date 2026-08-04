@@ -300,8 +300,8 @@ object Ps1SettingsStore {
      * does nothing", because it worked until the first save and then reverted.
      *
      * It also erased keys written by the CORE. `SaveSettings()` in frontend/main.cpp writes the
-     * same file, and a library scan calls straight through here (Ps1Folders.syncFromLibrary →
-     * persist → save), so a core-written key could vanish on startup with no user action at
+     * same file, and a POSIX-library sync calls straight through here (Ps1Folders.syncFromLibrary
+     * → persist → save), so a core-written key could vanish on startup with no user action at
      * all. That is what made settings pushed before launch fail to reach the core.
      *
      * Unknown keys are copied verbatim, so formatting and any trailing comment survive.

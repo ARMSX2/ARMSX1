@@ -103,7 +103,7 @@ static int run_case(const char* name, vertex_t a, vertex_t b, vertex_t c, poly_d
                     N^2, so coverage, the top-left fill rule, barycentric ratios, UVs and
                     the native-indexed dither are all supposed to be scale-invariant at
                     those sample points. This catches the half-pixel class of bug that
-                    HW_RENDERER_DESIGN.md §3.3 warns is invisible at 1x.
+                    the backend warns is invisible at 1x.
    ------------------------------------------------------------------------------------ */
 
 static void seed_vram(psx_gpu_t* gpu) {
@@ -602,8 +602,8 @@ static int check_mask_from_texel(const char* name, uint32_t accuracy,
    PSX_GPU_MASK_WRITE / PSX_GPU_MASK_SKIP (psx/dev/gpu.h) are not a tidier way to spell what
    gpu.c already does — they are the text the GLES rasterizer's shader is COMPILED FROM
    (frontend/gpu_hw_gl.c stringifies them into GLSL, which accepts `||` and `&&` unchanged).
-   A fourth hand-written copy of the rule, in a second language, is exactly how §0.5.12,
-   §0.5.13, §0.5.15 and the nearest-filter bug all happened: every rasterizer wrong the same
+   A fourth hand-written copy of the rule, in a second language, is exactly how ,
+   ,  and the nearest-filter bug all happened: every rasterizer wrong the same
    way, so every comparison between them passed.
 
    This pins the two expressions to psx/dev/gpu.c's OBSERVED output over all sixteen
@@ -1155,7 +1155,7 @@ static void draw_axis_aligned_corpus(psx_gpu_t* gpu) {
         emit_rect(gpu, &rect);
     }
 
-    /* A 1x1 sprite has to become a solid NxN block (HW_RENDERER_DESIGN.md §3.4). */
+    /* A 1x1 sprite has to become a solid NxN block (the backend). */
     rect_data_t tiny = {0};
     tiny.attrib = (uint8_t)(RS_1X1 << 3);
     tiny.v0 = (vertex_t){.x = 200, .y = 120, .c = 0xf0308f};
@@ -1280,9 +1280,9 @@ static int run_block_uniformity_case(const char* name, int scale) {
 
    WHAT IS PINNED, AND AGAINST WHAT
 
-   Not against the other rasterizer. §0.5.12, §0.5.13 and §0.5.15 were each one formula
-   written identically wrong in all three rasterizers, and comparative gates passed
-   through every one of them. Expected VRAM here is computed from the CONTRACT:
+   Not against the other rasterizer: shared formulas can be identically wrong in every
+   implementation while comparative gates still pass. Expected VRAM is computed from the
+   contract:
 
      * a RAW sprite writes the texel unmodified, so the expectation is the texel this
        test itself placed in the texture page — no emulator code participates in it;
@@ -1660,7 +1660,7 @@ static int run_gp0_rect_intake_case(void) {
     /* ---- 2. GP0(64) at the identity modulator: hardware's blend returns the texel
        unchanged at 0x80 per channel, so the SAME expectation must hold through the
        modulate path. A modulation formula that stops being the identity at 0x80 fails
-       here, which is the §0.5.15 class of defect. ---- */
+       here, which catches modulation defects shared by multiple rasterizers. ---- */
     gp0(gpu, 0x64808080u);
     gp0(gpu, (60u << 16) | 20u);
     gp0(gpu, 0u);
@@ -1810,7 +1810,7 @@ static int run_mask_bit_textured_sprite_case(void) {
 
         /* Bits 0-14 only. Bit 15 is EXPECTED to differ: with the flag on, a textured write
            carries the texel's bit 15 into the destination, which is what hardware does and
-           what §0.5.12's mask-from-texel exists to restore. Bit 15 is not displayed, so the
+           what  mask-from-texel exists to restore. Bit 15 is not displayed, so the
            picture must be identical even though the halfwords are not — and "the picture is
            identical" is precisely the claim the field failure disproved. */
         for (size_t i = 0; i < PSX_GPU_VRAM_SIZE / sizeof(uint16_t); i++) {
@@ -1946,7 +1946,7 @@ static int run_mask_bit_textured_sprite_case(void) {
                 if ((x + y) & 1)
                     gpu->vram[(GP0_TEX_PAGE_X + x) + (y * 1024)] |= 0x8000u;
 
-        /* set + check, the combination §0.5.12's Silent Hill fog uses. */
+        /* set + check, the combination  Silent Hill fog uses. */
         gp0(gpu, 0xe6000003u);
 
         for (int frame = 0; frame < 8; frame++) {
@@ -2006,7 +2006,7 @@ static int run_mask_bit_textured_sprite_case(void) {
    fade primitive. When the reported symptom is a whole-screen colour that strobes, the
    blend rule is the first thing that has to be either convicted or cleared, and comparing
    the three rasterizers cannot do it: they were all cloned from the same expression, so a
-   wrong rule reads green in every comparative case (the same blindness §0.5.13's size cull
+   wrong rule reads green in every comparative case (the same blindness  size cull
    and the mask-from-texel bug were found through).
 
    So this asserts the rule itself, from psx-spx, per 5-bit channel with saturation:

@@ -104,21 +104,10 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
                 ?.let(viewModel::selectCustomStorage)
         }
     }
-    /*
-        All-files access is not optional for the LIBRARY, only for the data root.
-
-        Ps1Library.scan() walks folders with java.io.File. On R+ a /storage path is only
-        genuinely listable with MANAGE_EXTERNAL_STORAGE (see romsAccessible(), which says
-        exactly this) — the ONE exception being an app-specific directory, which needs no
-        grant at all. Requesting the permission was wired solely to the "custom app folder"
-        button, so anyone who skipped that step got a POSIX scan that could read nothing but
-        app-specific dirs, i.e. an empty library no matter where their ROMs were. That is the
-        reported "games only show up if you use a custom app folder".
-
-        So the game-folder picker now goes through the same gate. Whatever the user was about
-        to do is held in `pendingAfterAllFiles` and resumed when they come back from the
-        system screen, instead of the old hard-coded "always continue into customFolderPicker".
-    */
+    /* Broad storage access belongs only to the optional writable DATA root. Game folders stay
+       behind their persisted SAF grants: Ps1Library enumerates DocumentsProvider directly and
+       Ps1SafAccess gives the native core a seekable descriptor for the selected game. Requiring
+       MANAGE_EXTERNAL_STORAGE here was the Oppo/Samsung empty-library bug on Android 14+. */
     var pendingAfterAllFiles by remember { mutableStateOf<(() -> Unit)?>(null) }
     val allFilesLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val granted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R ||
@@ -126,7 +115,8 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
         val resume = pendingAfterAllFiles
         pendingAfterAllFiles = null
         // Declining is a valid answer: carry on to the picker anyway rather than dead-ending.
-        // A SAF grant still lets the file land; only the POSIX library scan needs all-files.
+        // A SAF grant can select the folder, but only a directly writable POSIX path is valid as
+        // the native core's data root. Game-library folders do not use this broad permission.
         resume?.invoke()
         if (!granted) Unit
     }
@@ -210,7 +200,7 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
                             PageViewport(compact = false) {
                                 WizardPage(page, state, viewModel, biosPicker = {
                                     biosPicker.launch(null)
-                                }, folderPicker = { requireAllFiles { folderPicker.launch(null) } }, onCustomStorage = onCustomStorage)
+                                }, folderPicker = { folderPicker.launch(null) }, onCustomStorage = onCustomStorage)
                             }
                         }
                         NavigationBar(
@@ -250,7 +240,7 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
                         PageViewport(compact = true) {
                             WizardPage(page, state, viewModel, biosPicker = {
                                 biosPicker.launch(null)
-                            }, folderPicker = { requireAllFiles { folderPicker.launch(null) } }, onCustomStorage = onCustomStorage)
+                            }, folderPicker = { folderPicker.launch(null) }, onCustomStorage = onCustomStorage)
                         }
                     }
                     NavigationBar(

@@ -9,9 +9,9 @@ import java.util.Locale
 /**
  * The single seam between the ported Compose front-end and the ARMSX (PS1) native core.
  *
- * ARMSX2 talked to its PS2 core through ~134 in-process JNI methods (`NativeApp.java`) because the
- * game ran inside the same activity. ARMSX's launcher-shell model needs far less: the core runs in
- * a separate SDL2 activity, so this object only has to do two things —
+ * This object is the small, legacy launch seam retained for callers that start the SDL activity.
+ * The Compose runtime otherwise hosts the core in-process through `NativeApp.runVMThread()`. It
+ * only has to do two things —
  *
  *  1. **Launch** a game by starting [EmulatorActivity] with the native `argv` it already parses
  *     (`getArguments()` reads [EXTRA_NATIVE_ARGS]). The core accepts a bare positional path as the
@@ -79,7 +79,14 @@ object Ps1Native {
     /** True if [file] looks like something the core can boot (disc image, zip, or PS-X exe). */
     fun isBootable(file: File): Boolean {
         if (!file.isFile) return false
-        val ext = file.name.substringAfterLast('.', "").lowercase(Locale.US)
+        return isBootableName(file.name)
+    }
+
+    /** Name-only variant for Android's Storage Access Framework. A DocumentFile is not a
+     *  java.io.File and must not be converted to a guessed /storage path on scoped-storage
+     *  devices; its display name still provides the same format discriminator. */
+    fun isBootableName(name: String): Boolean {
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
         return ext in DISC_EXTS || ext in EXE_EXTS || ext == "zip"
     }
 }

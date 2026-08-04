@@ -18,9 +18,9 @@ plugins {
 
 ext {
     minSdkVersion = 26
-    // Bumped to match the ARMSX2 UI source (Compose BOM 2026.06.01 needs a recent platform).
-    targetSdkVersion = 37
-    compileSdkVersion = 37
+    // API 36 is the installed stable platform used by the reproducible offline Android build.
+    targetSdkVersion = 36
+    compileSdkVersion = 36
     ndkVersion = '27.0.12077973'
     // Bumped to 2.x so the Compose compiler plugin is available and the lifted Compose code
     // (authored against Kotlin 2.4.0) compiles unchanged.

@@ -47,6 +47,8 @@ def main() -> int:
             "SDL acceleration must be opt-in and default off")
     require("SDL_RENDERER_ACCELERATED" in frontend and "SDL_RENDERER_SOFTWARE" in frontend,
             "both SDL presentation modes must remain selectable")
+    require('lowered == "angle"' in frontend and '!strcasecmp(backend, "angle")' in config,
+            "ANGLE must map to OpenGL in both settings parsing passes")
     require("USE_CONNECTIVITY" not in makefile and "FTP" not in frontend and "ftp" not in frontend,
             "FTP connectivity code is still present")
     require("showOpenFilePicker" in web and "showDirectoryPicker" in web,

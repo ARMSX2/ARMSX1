@@ -8,19 +8,15 @@
     into a render target of 1024*S x 512*S BGR555 pixels, S being the internal-resolution
     multiplier from [video] internal_scale. The emulated console's own 1024x512 VRAM stays
     authoritative and untouched (PSX_GPU_BACKEND_SOFTWARE_SHADOW), so texture fetches,
-    GPUREAD drains and save states all keep working with no coherency layer and no
-    readback stall — see frontend/HW_RENDERER_DESIGN.md §4.6 option 3.
+    GPUREAD drains and save states all keep working with no coherency layer or readback stall.
 
     At S == 1 the render target is required to be BYTE-IDENTICAL to gpu->vram. That is the
-    correctness gate for the whole coordinate model: every rule in §3.1 about what scales
-    and what does not is exercised at S == 1 as a no-op, so if 1x diverges the geometry
-    math is wrong and every higher multiplier is wrong with it. tests/gpu_renderer_parity.c
-    enforces it.
+    correctness gate for the coordinate model: scaling must be a no-op at 1x.
+    tests/gpu_renderer_parity.c enforces it.
 
     This backend is deliberately graphics-API-independent: it validates the ABI, the
     scaling contract and the setting plumbing without needing a GL context on the
-    emulation thread. A GLES/Vulkan backend replaces the rasterizing half behind the same
-    ABI; see HW_RENDERER_DESIGN.md §2 and §5.3.
+    emulation thread. A GLES/Vulkan backend replaces the rasterizing half behind the same ABI.
 */
 
 #include <stdint.h>

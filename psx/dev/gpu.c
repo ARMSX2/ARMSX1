@@ -17,7 +17,7 @@
 
 /* Every backend hook below is guarded by this. A NULL backend is the default and leaves
    the software rasterizer byte-identical to the pre-backend behaviour.
-   HW_RENDERER_DESIGN.md §5.2 tabulates the hook sites. */
+   the backend tabulates the hook sites. */
 #define GPU_BACKEND_HAS(gpu, fn) ((gpu)->backend && (gpu)->backend->fn)
 
 /* A backend with PSX_GPU_BACKEND_SOFTWARE_SHADOW set draws into its own upscaled target
@@ -131,7 +131,7 @@ int max3(int a, int b, int c) {
 #define GPU_DUMP_MAX_LINES   8000  /* per captured frame; a PS1 frame is ~1k primitives */
 #define GPU_DUMP_BUDGET      4     /* captures per process, each needing its own `touch` */
 
-/* ---- multi-frame arming (HW_RENDERER_DESIGN.md §0.5.14) -----------------------------------
+/* ---- multi-frame arming (the backend) -----------------------------------
 
    A one-frame capture cannot see an OSCILLATION. Xenogears flashes a whole-screen colour that
    swings between consecutive frames and shows a vertically offset duplicate of the frame that
@@ -372,7 +372,7 @@ static void gpu_dump_census(psx_gpu_t* gpu, const char* kind, unsigned attrib, i
                 usual generator of an OVERSIZE primitive, and the pair together is the
                 signature of a triangle stretched to a point at the screen edge.
 
-    See HW_RENDERER_DESIGN.md §0.5.13.
+    See the backend.
 */
 static const char* gpu_dump_poly_size(psx_gpu_t* gpu, const poly_data_t* poly, char* out,
                                       size_t cap) {
@@ -1423,7 +1423,7 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
                 color = BGR555(rgb);
             }
 
-            /* `force_mask || texel_bit15` (HW_RENDERER_DESIGN.md §2.6). With the accuracy
+            /* `force_mask || texel_bit15` (the backend). With the accuracy
                flag off mask_from_texel is 0 and this is byte-identical to `color | mask_set`,
                which is what keeps the shipping default path untouched. */
             gpu->vram[x + (y * 1024)] = color | mask_set | (stp & mask_from_texel);
@@ -2360,7 +2360,7 @@ void gpu_line(psx_gpu_t* gpu) {
             } else if (!gpu->cmd_args_remaining) {
                 vertex_t v0, v1;
 
-                /* PGXP: lines stay integer in v1 (see design doc §PGXP). */
+                /* PGXP: lines stay integer in v1 (see backend ). */
                 v0.precise_valid = 0;
                 v0.px = 0.0f; v0.py = 0.0f; v0.pw = 1.0f;
                 v1.precise_valid = 0;
@@ -3580,7 +3580,7 @@ void gpu_hblank_event(psx_gpu_t* gpu) {
             gpu->off_y
         );
 #ifdef USE_HARDWARE
-        /* The only frame boundary this core exposes (HW_RENDERER_DESIGN.md §4.5). */
+        /* The only frame boundary this core exposes (the backend). */
         if (GPU_BACKEND_HAS(gpu, end_frame))
             gpu->backend->end_frame(gpu->backend, gpu);
 #endif

@@ -261,7 +261,7 @@ void psx_texrep_fold_axis(unsigned lo_raw, unsigned count, unsigned mask, unsign
 
 static uint16_t texrep_vram_at(const psx_gpu_t* gpu, uint32_t lin) {
     /* gpu_fetch_texel() indexes VRAM linearly and does NOT wrap the page at x=1024
-       (HW_RENDERER_DESIGN.md §7.4 deviation #8); the GLES shader masks to keep a
+       (the backend deviation #8); the GLES shader masks to keep a
        pathological page from reading past the surface. Same mask here so the hash covers
        exactly the halfwords the rasterizers can reach. */
     return gpu->vram[lin & 0x7ffffu];
@@ -994,7 +994,7 @@ void psx_texrep_bind_prim(psx_gpu_t* gpu, const uint16_t* u, const uint16_t* v, 
 
    The C half of the mapping PSX_TEXREP_GLSL states for the shader. Both must agree, which is
    why the shader compiles from a string in the header rather than from a second hand-written
-   copy -- §0.5.12, §0.5.13 and §0.5.15 were all one formula written three times. */
+   copy -- ,  and  were all one formula written three times. */
 
 uint16_t psx_texrep_sample(const psx_gpu_t* gpu, float tx, float ty) {
     const psx_texrep_image_t* im = gpu->texrep_bind.img;

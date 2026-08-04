@@ -201,9 +201,13 @@ bool armsx_render_native_window_size(int* width, int* height);
    CPU blit bridge must stop posting frames while this is true. */
 bool armsx_render_native_window_claimed(void);
 
+/* Clear presentation ownership after the active backend has been destroyed. The Android host
+   calls this immediately before it releases the borrowed ANativeWindow. */
+void armsx_render_set_native_window_claimed(bool claimed);
+
 /* The size the host's CPU blit bridge renders at, for a Surface of `surface_width` x
-   `surface_height`, capped to `max_height` on the short axis (aspect preserved, both axes
-   rounded down to even). `max_height <= 0` means the default cap.
+   `surface_height`, capped to `max_short_edge` on the short axis (aspect preserved, both axes
+   rounded down to even). `max_short_edge <= 0` means the default cap.
 
    Lives here rather than in android_jni.cpp because it is half of a TWO-SIDED contract and
    the other half is the ANativeWindow's buffer geometry. The bridge blits its framebuffer
@@ -214,14 +218,14 @@ bool armsx_render_native_window_claimed(void);
    code that can only be checked by shipping it. */
 void armsx_render_host_framebuffer_size(int surface_width,
                                         int surface_height,
-                                        int max_height,
+                                        int max_short_edge,
                                         int* out_width,
                                         int* out_height);
 
-/* Default cap for armsx_render_host_framebuffer_size(). 1080p costs the software rasterizer
-   and the per-frame row copy 2.25x what 720p does for no visible gain at PS1 source
-   resolutions, so the bridge renders at 720p and lets SurfaceFlinger scale. */
-#define ARMSX_RENDER_HOST_FB_MAX_HEIGHT 720
+/* Default short-edge cap for armsx_render_host_framebuffer_size(). 1080p costs the software
+   rasterizer and the per-frame row copy 2.25x what 720p does for no visible gain at PS1 source
+   resolutions, so the bridge renders at a 720-pixel short edge and lets SurfaceFlinger scale. */
+#define ARMSX_RENDER_HOST_FB_MAX_SHORT_EDGE 720
 
 /* ---- OpenGL driver selection --------------------------------------------------------- */
 

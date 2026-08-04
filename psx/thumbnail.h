@@ -32,7 +32,7 @@
         psx_gpu_get_display_surface() hands back the already-offset pointer).
       - 24bpp scanout (FMV playback) reinterprets the same bytes as packed
         RGB888 and therefore always reads native VRAM: the upscaled target does
-        not contain those bytes (HW_RENDERER_DESIGN.md 4.4).
+        not contain those bytes (the backend 4.4).
       - A display window that would run off the bottom of VRAM falls back to the
         VRAM origin, exactly as saveScreenshot() does.
 

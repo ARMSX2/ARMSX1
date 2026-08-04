@@ -13,6 +13,9 @@ import android.view.Window
 import android.view.WindowManager
 import com.armsx2.config.ConfigStore
 import kr.co.iefriends.pcsx2.NativeApp
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -20,6 +23,8 @@ class EmulationSurface(context: Context) :
     SurfaceView(context),
     SurfaceHolder.Callback,
     DisplayManager.DisplayListener {
+    val ownerToken: Long = nextOwnerToken.getAndIncrement()
+    private val initialSurfaceReady = CountDownLatch(1)
     private var viewWidth = 0
     private var viewHeight = 0
     private var gameActive = false
@@ -69,13 +74,15 @@ class EmulationSurface(context: Context) :
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         requestFocus()
+        NativeApp.onNativeSurfaceCreated(ownerToken)
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         reportActualDisplayRefreshRate()
         applyFrameRatePreference()
         pushDisplayCutoutInset(width, height)
-        NativeApp.onNativeSurfaceChanged(holder.surface, width, height)
+        NativeApp.onNativeSurfaceChanged(holder.surface, width, height, ownerToken)
+        initialSurfaceReady.countDown()
     }
 
     /**
@@ -107,8 +114,12 @@ class EmulationSurface(context: Context) :
         // only code that could rebuild the swapchain was queued behind the CPU thread that the GS
         // thread was blocking. Nothing times out — that is the "sometimes it never unpauses" case.
         // The correct entry point existed and was fully implemented; it just had no caller.
-        NativeApp.onNativeSurfaceDestroyed()
+        NativeApp.onNativeSurfaceDestroyed(ownerToken)
     }
+
+    /** Wait off the UI thread until this view has published its first real Surface. */
+    fun awaitInitialSurface(timeoutMs: Long): Boolean =
+        initialSurfaceReady.await(timeoutMs, TimeUnit.MILLISECONDS)
 
     override fun onDisplayAdded(displayId: Int) = Unit
 
@@ -309,6 +320,7 @@ class EmulationSurface(context: Context) :
         runCatching { currentDisplay()?.refreshRate ?: 0f }.getOrDefault(0f)
 
     private companion object {
+        val nextOwnerToken = AtomicLong(1L)
         /** PlayStation native frame height. The HW-scaler steps are multiples of this. */
         const val PS1_NATIVE_HEIGHT = 240
         const val DEFAULT_GAME_RATE = 59.94f

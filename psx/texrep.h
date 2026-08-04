@@ -94,7 +94,7 @@
     S in 1..PSX_TEXREP_MAX_SCALE. Anything else is rejected with a log line naming the file
     and both sizes.
 
-    * Modulation (HW_RENDERER_DESIGN.md §0.5.15). The sampler returns a BGR555 texel, so a
+    * Modulation (the backend). The sampler returns a BGR555 texel, so a
       replacement re-enters gpu.c at exactly the point a VRAM texel would have, and
       psx_gpu_modulate_channel() truncates it the same way. A higher-resolution replacement
       therefore does NOT get more colour precision: it gets more TEXELS, each of which is
@@ -201,7 +201,7 @@ void psx_texrep_invalidate(struct psx_gpu_t* gpu);
    rasterizers. The GLES rasterizer cannot call it, so the arithmetic is ALSO written once as
    PSX_TEXREP_GLSL below and frontend/gpu_hw_gl.c compiles that text -- the same construction
    psx/dev/gpu.h uses for PSX_GPU_MASK_GLSL, and for the same reason: three copies of a
-   formula is how §0.5.12, §0.5.13 and §0.5.15 all happened.
+   formula is how ,  and  all happened.
 
    tx/ty are the un-windowed float UVs the rasterizer interpolated. The fractional part
    selects the sub-texel when scale > 1; a rasterizer running at native resolution passes
@@ -239,7 +239,7 @@ static inline const psx_texrep_image_t* psx_texrep_bound_image(const psx_texrep_
     side: it transcribes the text below into C by hand and asserts psx_texrep_sample() agrees
     with it over a matrix of scales, texture windows, rectangles and sub-texel positions. Two
     independent transcriptions of one text is the strongest check available without a GPU, and
-    it is strictly better than the situation §0.5.12/§0.5.13/§0.5.15 were found in, where the
+    it is strictly better than the situation / were found in, where the
     formula existed three times and no test compared any two of them.
 
     The precision statements are repeated here because this text is prepended to the draw

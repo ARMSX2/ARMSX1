@@ -71,6 +71,21 @@ public class NativeApp {
 	public static void initializeOnce(Context context) {
 		mContext = new WeakReference<>(context);
 
+		// This is only an identification hint. The renderer still trusts GL/Vulkan's own GPU
+		// strings for the vendor/model; the Android properties add the MediaTek/board fact that
+		// those strings commonly omit, before any renderer or rasterizer is created.
+		StringBuilder gpuHostHint = new StringBuilder()
+			.append(Build.MANUFACTURER).append(' ')
+			.append(Build.BRAND).append(' ')
+			.append(Build.HARDWARE).append(' ')
+			.append(Build.BOARD).append(' ')
+			.append(Build.DEVICE);
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+			gpuHostHint.append(' ').append(Build.SOC_MANUFACTURER)
+				.append(' ').append(Build.SOC_MODEL);
+		}
+		setGpuHostHint(gpuHostHint.toString());
+
 		// Compute the app's externalFilesDir up front — it's the BIOS
 		// folder (always app-owned + writable, where the setup wizard's
 		// finishBiosStep deposits the BIOS file) and the fallback for
@@ -443,6 +458,7 @@ public class NativeApp {
 	/** The GLES implementation currently selected ("system" / "angle"). This is
 	 *  the REQUEST; use {@link #getActiveRenderer()} to see what actually loaded. */
 	public static native String getGlDriver();
+	public static native void setGpuHostHint(String hint);
 
 	/** Human-readable name of the presentation backend that is genuinely running —
 	 *  the one that survived the fallback ladder, not the one that was asked for.
@@ -1121,9 +1137,9 @@ public class NativeApp {
 	// into it from this same process, so the touch overlay / pause overlay / hotkeys /
 	// RetroAchievements / Discord presence all work. Call onNativeSurfaceChanged BEFORE
 	// runVMThread.
-	public static native void onNativeSurfaceCreated();
-	public static native void onNativeSurfaceChanged(Surface surface, int w, int h);
-	public static native void onNativeSurfaceDestroyed();
+	public static native void onNativeSurfaceCreated(long ownerToken);
+	public static native void onNativeSurfaceChanged(Surface surface, int w, int h, long ownerToken);
+	public static native void onNativeSurfaceDestroyed(long ownerToken);
 	public static void setDisplayRefreshRate(float hz) {  }
 
 	/** Implemented natively. BLOCKING: boots [path] and runs the emulation loop until

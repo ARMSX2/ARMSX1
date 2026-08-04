@@ -1,6 +1,6 @@
 #version 300 es
 // ARMSX — PS1 hardware rasterizer, fragment stage (DRAFT / INERT).
-// Not compiled by anything. See frontend/HW_RENDERER_DESIGN.md §2.4 - §2.7.
+// Not compiled by anything; the runtime shader is embedded in frontend/gpu_hw_gl.c.
 //
 // Covers the hard case: textured + Gouraud + semi-transparent, with a 4bpp/8bpp CLUT
 // lookup out of a VRAM-as-texture. Every step below cites the software rasterizer line in
@@ -11,7 +11,7 @@
 //   -> dither -> 5-bit truncate -> semi-transparency scaling -> mask bit
 //
 // This shader does NOT implement the blend equations itself. Three of the four map onto
-// fixed-function blending; see the u_blend_mode block near the bottom and design doc §2.5.
+// fixed-function blending; see the u_blend_mode block near the bottom and backend .
 
 precision highp float;
 precision highp int;
@@ -27,7 +27,7 @@ flat in uint  v_clut;
 // ---- resources ----------------------------------------------------------------------
 // Native-resolution VRAM, 1024x512, R16UI. NOT the render target — GLES3 forbids sampling
 // what you render to, and PS1 textures live in the same memory as the framebuffer, so a
-// separate read copy is mandatory (design doc §2.1). R16UI rather than RGBA5551 because
+// separate read copy is mandatory (backend ). R16UI rather than RGBA5551 because
 // CLUT indexing needs exact integer bits, not a normalized float round-trip.
 uniform usampler2D u_vram;
 
@@ -40,7 +40,7 @@ uniform bool u_semi_transparent;    // PA_TRANSP,   gpu.c:259
 uniform int  u_blend_mode;          // 0..3, gpu.c:410-431
 uniform bool u_dither;              // GPUSTAT bit 9 (latched gpu.c:1941, never read there)
 uniform bool u_true_color;          // enhancement: skip the 5-bit truncation
-uniform bool u_clamp_uv;            // §3.2 halo fix; only meaningful when S > 1
+uniform bool u_clamp_uv;            //  halo fix; only meaningful when S > 1
 
 // Texture window, GP0(E2). Arrives PRE-SHIFTED by 3 exactly as gpu.c:1948-1951 stores it,
 // so the masking below is gpu.c:176-177 verbatim.
@@ -50,10 +50,10 @@ uniform uvec2 u_texwin_offset;
 // Mask bit, GP0(E6) — gpu.c:1965-1967 is an empty stub, so this is net-new behaviour.
 // "check before draw" is a stencil test on the host side, not a shader concern.
 // "set on draw" reaches the shader only because the written mask bit also has to land in
-// the render target's alpha channel for download fidelity (design doc §2.6).
+// the render target's alpha channel for download fidelity (backend ).
 uniform bool u_set_mask;
 
-// STP pass selector for the two-pass split that blend mode 2 requires (design doc §2.5).
+// STP pass selector for the two-pass split that blend mode 2 requires (backend ).
 //   0 = single pass (ADD-family, or untextured)
 //   1 = opaque pass  : discard fragments whose texel STP bit is set
 //   2 = blended pass : discard fragments whose texel STP bit is clear
@@ -76,7 +76,7 @@ uint vramLoad(uint x, uint y) {
     // The & 1023 / & 511 wrap is FREE here and incidentally fixes a real bug: gpu.c's
     // texel fetch (gpu.c:184, :193, :202) never wraps tpx + tx at 1024, so a 15bpp page
     // at x=960 with u=255 reads into the next VRAM row instead of wrapping.
-    // Design doc §1.3, §7.4 item 8.
+    // backend ,  item 8.
     return texelFetch(u_vram, ivec2(int(x & 1023u), int(y & 511u)), 0).r;
 }
 
@@ -131,14 +131,14 @@ void main() {
 
         // Clamp the interpolated UV into the primitive's own texel box. Prevents the
         // 1-texel halo that magnification pulls in from a neighbouring sprite sharing the
-        // texture page (design doc §3.2). No-op at S == 1.
+        // texture page (backend ). No-op at S == 1.
         if (u_clamp_uv) {
             uv = clamp(uv, vec2(v_uv_limit.xy), vec2(v_uv_limit.zw));
         }
 
         // Point sampling. Note this deliberately does NOT match the software renderer,
         // which bilinear-filters polygons unconditionally (gpu.c:359) while point-sampling
-        // sprites (gpu.c:498). Hardware point-samples both. Design doc §7.4 items 1-2 —
+        // sprites (gpu.c:498). Hardware point-samples both. backend  items 1-2 —
         // ship point sampling by default with a "smooth textures" toggle that restores
         // the old look.
         uint texel = fetchTexel(uvec2(floor(uv)));
@@ -150,7 +150,7 @@ void main() {
         stp = (texel & 0x8000u) != 0u;
 
         // Two-pass split for blend mode 2 (B - F), which has no alpha value that makes
-        // reverse-subtract an identity write for the opaque texels. Design doc §2.5.
+        // reverse-subtract an identity write for the opaque texels. backend .
         if (u_stp_pass == 1 && stp)  discard;
         if (u_stp_pass == 2 && !stp) discard;
 
@@ -177,13 +177,13 @@ void main() {
     // gl_FragCoord directly would give a 4-pixel pattern at every scale, which reads as
     // high-frequency noise that worsens with S and shimmers in motion. Dividing by S makes
     // each dither cell an SxS block, i.e. what native output looks like magnified.
-    // Design doc §2.7.
+    // backend .
     //
     // KNOWN INTENTIONAL DIVERGENCE: gpu.c indexes the kernel relative to the primitive's
     // bounding box (gpu.c:330-331), which makes the pattern move with the primitive and
     // breaks up gradients across adjacent primitives. That is a bug; this is correct.
     // Also, gpu.c only ever dithers Gouraud primitives (gpu.c:325) and never consults
-    // GPUSTAT bit 9. Design doc §1.6, §7.4 items 4-6.
+    // GPUSTAT bit 9. backend ,  items 4-6.
     if (u_dither && !u_raw) {
         ivec2 native = ivec2(gl_FragCoord.xy) / u_resolution_scale;
         float d = float(kDither[(native.x & 3) + ((native.y & 3) << 2)]) / 255.0;
@@ -207,7 +207,7 @@ void main() {
     //
     // giving result = src*1 + dst*src_alpha (or dst*src_alpha - src*1 for mode 2).
     // The separate alpha func (ONE, ZERO) is what lets the alpha channel store the mask
-    // bit instead of a blended alpha — see below and design doc §2.6.
+    // bit instead of a blended alpha — see below and backend .
     //
     //   mode 0: emit F*0.5, a=0.5 -> 0.5F + 0.5B   (gpu.c:411-415)
     //   mode 1: emit F,     a=1.0 -> F + B         (gpu.c:416-420)
@@ -240,7 +240,7 @@ void main() {
     // written here lands in the target unmodified.
     //
     // gpu.c never implements any of this (gpu.c:1965-1967), so enabling it WILL change
-    // output relative to the software renderer. Design doc §2.6, §7.1.
+    // output relative to the software renderer. backend , .
     float mask_out = (u_set_mask || stp) ? 1.0 : 0.0;
 
     // Fragments that participate in fixed-function blending need blend_alpha in .a, and

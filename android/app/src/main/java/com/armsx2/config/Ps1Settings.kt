@@ -61,7 +61,7 @@ data class Ps1Settings(
     val audioMuteFastForward: Boolean = false,
     val audioSwapChannels: Boolean = false,
     val audioSkipReverb: Boolean = false,
-    val audioBufferMs: Int = 13,                 // 2..100
+    val audioBufferMs: Int = 20,                 // 20..100; cadence-safe floor on Android
     val audioDriver: String = AUDIO_OPENSLES,    // opensles | aaudio | default
     // Keep emulating and playing with the app off-screen / the screen off. Default OFF, and the
     // native default in frontend/config.c matches — a mismatch here is how a native gate turns
@@ -72,12 +72,11 @@ data class Ps1Settings(
     val defaultPsxExe: String = "",
     // [video]
     val vsync: Boolean = true,
-    // GLES by default, not software: "opengl" binds EGL directly to the Compose Surface's
-    // ANativeWindow and removes the full-resolution CPU blit the software present path does.
-    // MUST match config.c's cfg->gpu_backend default (2 = opengl) — a Kotlin default that
-    // disagrees with the core's is how a setting ends up looking set while the core runs the
-    // other path.
-    val gpuBackend: String = GPU_OPENGL,         // software | sdl-accelerated | opengl | angle | vulkan
+    // SDL software presentation by default. GPU presentation is opt-in so the deterministic,
+    // portable path remains the default on every platform and does not depend on an adopted
+    // native window or a particular GLES/Vulkan driver.
+    // MUST match config.c's cfg->gpu_backend default (0 = software).
+    val gpuBackend: String = GPU_SOFTWARE,       // software | sdl-accelerated | opengl | angle | vulkan
     val textureScaleMode: Boolean = false,       // bilinear filtering
     val debugPanel: Boolean = false,
     val stretchMode: Boolean = false,
@@ -94,24 +93,17 @@ data class Ps1Settings(
     val wideUpscale: String = "480p",            // 480p | 720p | 1080p | 1440p | 2160p
     // Rasteriser, NOT presentation — orthogonal to gpuBackend above. `software` is the original
     // native-resolution rasteriser; `hardware` is the scale-aware one that can render above
-    // native. Default off: it costs roughly 2x the rasterisation CPU even at 1x, and more as the
-    // square of the scale.
-    // ON. It is the ONLY thing that makes upscaling possible, so defaulting it off meant the
-    // Upscale row silently did nothing until you found a second switch on another screen.
-    //
-    // It was briefly reverted while the GLES rasteriser had visible seams along polygon edges
-    // above 1x; that was a coverage-granularity bug in the fragment shader (the bounding box
-    // tested the native pixel index while the edge tests sampled subpixel positions) and is
-    // fixed. At 1x this path is pixel-identical to software for essentially no extra CPU.
+    // native. It is opt-in: the CPU fallback is materially slower on SDL-only Android surfaces,
+    // even at 1x, and must never make a fresh BIOS boot miss its timing target.
     //
     // MUST match config.c's cfg->renderer default; a Kotlin default that disagrees with the
     // core's is how a setting ends up looking enabled while the core runs the other path.
-    val hwRasterizer: Boolean = true,
+    val hwRasterizer: Boolean = false,
     // Internal render resolution multiplier for the hardware rasteriser, 1..8. Ignored entirely
     // while hwRasterizer is false. Deliberately NOT clamped against another range on the way in:
     // an over-eager coerceIn is exactly how a new value gets silently eaten here.
     val internalScale: Int = 1,
-    // GPU accuracy flags. Both CHANGE OUTPUT and both default off, matching frontend/config.c.
+    // GPU accuracy flags. Both change output and default on, matching frontend/config.c.
     // They MUST be mirrored here: Ps1SettingsStore rewrites [video] from an explicit key list,
     // so a native key with no Kotlin field is silently dropped from settings.toml the first
     // time anything is saved — and because these two alter what is drawn, that shows up as
@@ -389,9 +381,9 @@ data class Ps1Settings(
         const val AUDIO_AAUDIO = "aaudio"
         val AUDIO_DRIVERS = listOf(AUDIO_OPENSLES, AUDIO_AAUDIO)
 
-        /** Device buffer sizes offered by the Audio tab, in ms. 13 ms is the core's historical
-         *  588-frame buffer and stays the default. */
-        val AUDIO_BUFFER_MS = listOf(5, 8, 13, 20, 30, 50, 80)
+        /** Device buffer sizes offered by the Audio tab, in ms. One PAL frame is the safe floor
+         *  for Android callback cadence; smaller periods can drain between emulated frames. */
+        val AUDIO_BUFFER_MS = listOf(20, 30, 50, 80)
 
         /** Fast-forward multipliers, in the order the UI shows them. 0 = uncapped. */
         val FAST_FORWARD_SPEEDS = listOf(1.5f, 2f, 3f, 4f, 0f)
