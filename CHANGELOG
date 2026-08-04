@@ -1,6 +1,40 @@
 ARMSX1 — Changelog
 ==================
 
+0.1.2
+-----
+
+Game folders now really use Android's own folder picker
+  * Folders added through the system picker are scanned directly through Android's
+    DocumentsProvider, so the library fills without "All files access" — including on
+    Android 14+ devices (Oppo/Samsung) where even granting it left the library empty.
+  * Games in those folders launch through a per-session file descriptor instead of a
+    guessed /storage path, so folders on SD cards and USB drives work under scoped
+    storage.
+  * Games in those folders are identified off the disc itself at scan time, so they show
+    their real cover art and keep per-game settings, play-time tracking and
+    RetroAchievements identity — .chd, .pbp, cue+bin and multi-disc playlists included.
+  * "Download cover art" no longer silently skips games living in picker-added folders,
+    and fetches exactly the art the library grid shows.
+  * A game that failed to identify once is retried on a later start instead of keeping a
+    blank tile forever.
+  * "All files access" is now only about the optional custom data folder; the Play build
+    does not request it at all.
+
+Rendering
+  * Fixed rendering breaking when the emulator surface is recreated (rotation, leaving
+    and re-entering a game): surface callbacks carry an ownership token, so a stale
+    surface can no longer be presented into.
+  * The in-game renderer indicator no longer sticks on "Unknown" when it is read before
+    the renderer finishes starting.
+  * GPU identification also reads the board properties Android itself reports, which
+    matters on MediaTek devices whose GL strings omit the model.
+
+Audio
+  * The default audio buffer is one PAL frame (20 ms) instead of 13 ms, matching the
+    core's cadence; a hand-edited value that is not on the settings list now falls back
+    to the native default instead of 5 ms.
+
 0.1.1
 -----
 
