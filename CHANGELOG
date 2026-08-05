@@ -18,6 +18,11 @@ Crashes
     to the library, and a crash in the same window when the previous game was still
     shutting down.
 
+Library
+  * A game called "patches" no longer appears out of nowhere. ARMSX1 ships a patch
+    archive with its own files, and the library was listing it as a game — so even an
+    empty game folder showed one entry. The app's own folders are skipped now.
+
 In-game
   * Restart in the pause menu closes the menu again, so the reboot is visible instead of
     looking like nothing happened.

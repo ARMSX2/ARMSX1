@@ -99,7 +99,17 @@ object Ps1Library {
         return file.length() >= MIN_DISC_BYTES
     }
 
-    private val BLOCKED_DIRS = setOf("bios", "memcards", "savestates", "sstates", "covers", "cache")
+    /* The app's own folders, never a place a game lives.
+       `resources` earned its place the hard way: we SHIP `resources/patches.zip`, .zip counts as
+       bootable, and on an install with no custom data root the folder we copy assets into IS a
+       scan root — so the library listed our own patch archive as a game called "patches", even
+       when the user's chosen folder was empty. The rest are listed for the same reason: every
+       one of them is a directory this app creates and fills (see BackupManager.INCLUDED). */
+    private val BLOCKED_DIRS = setOf(
+        "bios", "memcards", "savestates", "sstates", "covers", "cache", "resources",
+        "patches", "cheats", "snaps", "inputprofiles", "gamesettings", "logs",
+        "shaders", "textures", "skins", "saf-launch",
+    )
 
     private data class SafCandidate(
         val game: Ps1Game,
