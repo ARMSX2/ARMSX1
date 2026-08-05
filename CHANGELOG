@@ -1,6 +1,35 @@
 ARMSX1 — Changelog
 ==================
 
+0.1.3
+-----
+
+PSP EBOOT (.PBP) games now boot
+  * A .pbp listed in the library but refused to start. It was rejected before the disc
+    was ever opened, and two bugs in the reader would have stopped it anyway: sectors
+    were reported the wrong way round, and the disc was read 150 sectors off. Single
+    and multi-disc EBOOTs now boot, with their cover art, serial and per-game settings.
+  * A .pbp inside a .zip is picked as the game to launch.
+
+Crashes
+  * Fixed the app dying silently when a game was started after another game failed to
+    boot. A failed boot left the emulator in a state that corrupted the next launch.
+  * Fixed a game closed and reopened quickly starting up and then immediately quitting
+    to the library, and a crash in the same window when the previous game was still
+    shutting down.
+
+In-game
+  * Restart in the pause menu closes the menu again, so the reboot is visible instead of
+    looking like nothing happened.
+  * Picking a game while another one is still closing now starts the game you picked
+    instead of restarting the previous one.
+
+Diagnostics
+  * New: Settings > App > "Generate log file" writes one report — emulator, interpreter
+    and renderer logs, crashes, and Android's own crash records with function names —
+    to a file you choose, refreshed every time the app starts. Send that file with a bug
+    report and the problem can be diagnosed without the device.
+
 0.1.2
 -----
 
