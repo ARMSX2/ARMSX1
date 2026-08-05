@@ -554,6 +554,13 @@ open class MainActivityRuntime : ComponentActivity() {
         @Volatile private var vmRestartAfterStop = false
         @Volatile private var vmRunLoopActive = false
 
+        /** The most recent launchGame() that was DEFERRED behind a stop of the running VM.
+         *  The old VM thread's relaunch used to reboot its own closure-captured game, so
+         *  tapping game B while game A ran booted A again. Guarded by [vmLifecycleLock];
+         *  null means "relaunch the same game" (the restart() contract). */
+        private data class DeferredLaunch(val uri: String, val info: GameInfo?, val external: Boolean)
+        private var vmNextLaunch: DeferredLaunch? = null
+
         // Quit-after-the-VM-stops latch — set by the "Close Game & Quit" hotkey, or by
         // a frontend-launched game's Close Game. One-shot: read+cleared by
         // finishToLauncherIfRequested in whichever terminal STOPPED branch fires first.
@@ -732,6 +739,10 @@ open class MainActivityRuntime : ComponentActivity() {
                     return
                 }
                 vmRunLoopActive = true
+                // start() boots m_szGamefile, which launchGame already switched to the newest
+                // request — a parked switch is satisfied here and must not fire again later
+                // from some future session's exit path.
+                vmNextLaunch = null
             }
 
             invoke {
@@ -1094,14 +1105,22 @@ open class MainActivityRuntime : ComponentActivity() {
                         kr.co.iefriends.pcsx2.NativeApp.hasActiveVM()
                     ) {
                         vmRestartAfterStop = true
+                        // Park THIS request so the relaunch boots the game the user just
+                        // picked, not whatever game the dying VM thread's closure captured.
+                        vmNextLaunch = DeferredLaunch(uri, info, external)
                         false
                     } else {
                         vmRunLoopActive = true
+                        // An actual boot supersedes any parked switch.
+                        vmNextLaunch = null
                         true
                     }
                 }
                 if (!launchNow) {
                     stop(restartAfterStop = true)
+                    // restart() arms this for the same racy gates; a deferred game switch
+                    // deserves the same safety net when every other relauncher loses.
+                    armRestartWatchdog()
                     return
                 }
                 eState.value = EmuState.RUNNING
@@ -1136,18 +1155,23 @@ open class MainActivityRuntime : ComponentActivity() {
                             // path did win the race the relaunch is left to it. vmStopInProgress is
                             // cleared for the same reason it was stranded — the stop it was latched
                             // for has now definitively finished.
-                            val relaunch = synchronized(vmLifecycleLock) {
+                            val (relaunch, next) = synchronized(vmLifecycleLock) {
                                 vmRunLoopActive = false
                                 val pending = vmRestartAfterStop
                                 if (pending) vmRestartAfterStop = false
                                 vmStopInProgress = false
-                                pending
+                                val parked = if (pending) vmNextLaunch else null
+                                if (pending) vmNextLaunch = null
+                                Pair(pending, parked)
                             }
                             if (relaunch) {
-                                // Straight back into the same disc. Audio focus is kept rather
-                                // than released and re-acquired — this is one session handing
-                                // over to the next, not a return to the library.
-                                launchGame(uri, info, external)
+                                // Straight back into the same disc — or into the game the user
+                                // picked while this one was still dying, if a switch was parked.
+                                // Audio focus is kept rather than released and re-acquired —
+                                // this is one session handing over to the next, not a return to
+                                // the library.
+                                if (next != null) launchGame(next.uri, next.info, next.external)
+                                else launchGame(uri, info, external)
                             } else {
                                 currentGame.value = null
                                 // Back to the library: settings.toml goes back to being the plain
@@ -1307,18 +1331,23 @@ open class MainActivityRuntime : ComponentActivity() {
                     } finally {
                         instance?.runOnUiThread {
                             eState.value = EmuState.STOPPED
-                            val restartNow = synchronized(vmLifecycleLock) {
+                            val (restartNow, nextGame) = synchronized(vmLifecycleLock) {
                                 vmRunLoopActive = false
                                 vmStopInProgress = false
                                 if (vmRestartAfterStop) {
                                     vmRestartAfterStop = false
-                                    true
+                                    val parked = vmNextLaunch
+                                    vmNextLaunch = null
+                                    Pair(true, parked)
                                 } else {
-                                    false
+                                    Pair(false, null)
                                 }
                             }
                             if (restartNow) {
-                                startBios()
+                                // A game launched while the BIOS session was dying wins over
+                                // rebooting the BIOS — dropping it stranded the user's tap.
+                                if (nextGame != null) launchGame(nextGame.uri, nextGame.info, nextGame.external)
+                                else startBios()
                             } else {
                                 runCatching { com.armsx2.EmuAudioFocus.release(ctx) }
                                 runCatching { com.armsx2.LibraryMusic.start(ctx) }
