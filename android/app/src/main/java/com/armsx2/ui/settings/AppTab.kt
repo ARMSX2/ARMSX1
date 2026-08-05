@@ -745,6 +745,43 @@ private fun BackupRestoreRows() {
     }
     BackupActionRow("🖼️", "app.covers", "app.covers.desc", coverStatus, busy, doCovers)
 
+    /*
+        Generate log file — the bug-report checkbox. Ticking it asks WHERE through the system
+        save dialog; from then on that one file is rewritten on every app start with the core's
+        armsx.log, the frontend session log, recent crashes, settings and this process's logcat
+        (DiagnosticsReport). Core logging is switched on when the box is ticked, so the next
+        session captures the full emulator/interpreter/renderer stream.
+    */
+    var logCapture by remember { mutableStateOf(com.armsx2.DiagnosticsReport.isEnabled(context)) }
+    val logPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri != null) {
+            com.armsx2.DiagnosticsReport.enable(context, uri)
+            logCapture = true
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) { com.armsx2.DiagnosticsReport.refresh(context) }
+                android.widget.Toast.makeText(
+                    context,
+                    I18n.get(if (ok) "app.logs.saved" else "app.logs.failed"),
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
+    ToggleRow(
+        label = str("app.logs"),
+        value = logCapture,
+        description = str("app.logs.desc"),
+    ) { v ->
+        if (v) {
+            logPicker.launch("armsx-report.txt")
+        } else {
+            com.armsx2.DiagnosticsReport.disable(context)
+            logCapture = false
+        }
+    }
+
     // Factory reset. Sits with Backup/Restore because Export is the thing to do first — the
     // prompt says so. Routed through GlobalConfirm rather than a local overlay: this row is
     // inside a scrolling tab, so a scrim drawn here would clip to the row's bounds.

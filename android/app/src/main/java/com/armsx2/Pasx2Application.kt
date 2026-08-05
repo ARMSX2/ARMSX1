@@ -34,6 +34,11 @@ class Pasx2Application : Application(), ImageLoaderFactory {
 		installCrashLogging()
 		StartupTrace.begin()
 		warmUpOffMainThread()
+		// "Generate log file" checkbox: rewrite the user's chosen report file with whatever the
+		// previous run left behind — crash files included, which is exactly when the user needs
+		// it. No-op when the box is off; best-effort and off the UI thread either way.
+		Thread({ runCatching { DiagnosticsReport.refresh(this) } }, "diag-report")
+			.apply { isDaemon = true }.start()
 	}
 
 	/**

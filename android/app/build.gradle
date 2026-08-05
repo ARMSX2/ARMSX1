@@ -191,6 +191,11 @@ android {
             // Set here rather than as android:extractNativeLibs in the manifest: AGP rejects the
             // manifest attribute outright and fails packaging with a message pointing here.
             useLegacyPackaging = true
+            // Ship the core's .symtab (and DWARF) instead of letting AGP strip it: debuggerd
+            // then writes SYMBOLIZED tombstones on-device, which is what makes the crash
+            // section of "Generate log file" readable. Costs a few MB of APK; worth it for a
+            // sideloaded emulator whose crash reports arrive from devices we cannot attach to.
+            keepDebugSymbols += ['**/*.so']
         }
     }
 
