@@ -111,6 +111,15 @@ static int read_kb_field(const char* path, const char* key, double* out_mb)
 */
 static int read_gpu_percent(double* out_percent)
 {
+    /* Latched once every node has been refused.
+
+       On retail Android these live under vendor_sysfs_kgsl and SELinux denies an untrusted app
+       outright, so retrying costs a kernel audit record per node per sample — twice a second,
+       forever, for a value we will never get. That noise lands in the very logcat a user sends
+       with a bug report, burying whatever actually went wrong. One round of attempts is enough
+       to learn the answer; the OSD keeps printing "n/a" exactly as before. */
+    static int nodes_unavailable = 0;
+
     static const char* const percent_nodes[] = {
         "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",
         "/sys/devices/platform/mali.0/utilisation",
@@ -120,6 +129,10 @@ static int read_gpu_percent(double* out_percent)
     char buffer[128];
     FILE* file;
     int i;
+
+    if (nodes_unavailable) {
+        return 0;
+    }
 
     /* Try the self-clearing busy/total counter FIRST. It reports occupancy over the interval
        since the previous read, which is exactly our sample window, whereas gpu_busy_percentage
@@ -157,6 +170,8 @@ static int read_gpu_percent(double* out_percent)
         }
         fclose(file);
     }
+
+    nodes_unavailable = 1;
 
     return 0;
 }
