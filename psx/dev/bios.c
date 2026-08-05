@@ -7,7 +7,7 @@
 #include <errno.h>
 
 psx_bios_t* psx_bios_create(void) {
-    return (psx_bios_t*)malloc(sizeof(psx_bios_t));
+    return (psx_bios_t*)calloc(1, sizeof(psx_bios_t));
 }
 
 void psx_bios_init(psx_bios_t* bios) {

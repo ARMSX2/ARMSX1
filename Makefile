@@ -1026,10 +1026,10 @@ $(TEST_DISC_SERIAL_BIN): tests/disc_serial.c psx/discid.c psx/discid.h psx/perf.
 test-disc-serial: $(TEST_DISC_SERIAL_BIN)
 	./$(TEST_DISC_SERIAL_BIN) $(dir $(TEST_DISC_SERIAL_BIN))
 
-$(DISC_PROBE_BIN): tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c $(CHD_BUILD_DEPS)
+$(DISC_PROBE_BIN): tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c psx/perf.c $(CHD_BUILD_DEPS)
 	mkdir -p $(dir $@)
 	$(CC) -std=c11 -O2 -g -DUSE_CHD -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(LIBCHDR_INCLUDE_FLAGS) \
-		tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c \
+		tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/chd.c psx/dev/cdrom/pbp.c psx/perf.c \
 		$(CHD_LINK_LIBS) -lm -o $@
 
 disc-probe: $(DISC_PROBE_BIN)

@@ -229,7 +229,7 @@ static const int16_t g_spu_gauss_table[] = {
 };
 
 psx_spu_t* psx_spu_create(void) {
-    return (psx_spu_t*)malloc(sizeof(psx_spu_t));
+    return (psx_spu_t*)calloc(1, sizeof(psx_spu_t));
 }
 
 void psx_spu_init(psx_spu_t* spu, psx_ic_t* ic) {

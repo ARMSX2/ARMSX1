@@ -7,7 +7,7 @@
 #include "../log.h"
 
 psx_ic_t* psx_ic_create(void) {
-    return (psx_ic_t*)malloc(sizeof(psx_ic_t));
+    return (psx_ic_t*)calloc(1, sizeof(psx_ic_t));
 }
 
 void psx_ic_init(psx_ic_t* ic, psx_cpu_t* cpu) {

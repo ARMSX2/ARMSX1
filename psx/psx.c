@@ -6,7 +6,7 @@
 #include "cheats.h"
 
 psx_t* psx_create(void) {
-    return (psx_t*)malloc(sizeof(psx_t));
+    return (psx_t*)calloc(1, sizeof(psx_t));
 }
 
 int psx_load_bios(psx_t* psx, const char* path) {

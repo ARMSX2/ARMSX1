@@ -125,7 +125,7 @@ void cdrom_write_vapp(psx_cdrom_t* cdrom, uint8_t data);
 static void cdrom_trace_flush(psx_cdrom_t* cdrom);
 
 psx_cdrom_t* psx_cdrom_create(void) {
-    return malloc(sizeof(psx_cdrom_t));
+    return calloc(1, sizeof(psx_cdrom_t));
 }
 
 void psx_cdrom_init(psx_cdrom_t* cdrom, psx_ic_t* ic) {
@@ -208,6 +208,13 @@ int psx_cdrom_open(psx_cdrom_t* cdrom, const char* path) {
     cdrom_cmd_reset(cdrom);
 
     cdrom->disc = psx_disc_create();
+
+    if (!cdrom->disc) {
+        log_error("Failed to allocate a disc reader for: %s", path);
+
+        return 0;
+    }
+
     /* Remember the image path: save states record disc identity (never the disc itself). */
     {
         size_t n = strlen(path);

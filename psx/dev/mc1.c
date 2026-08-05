@@ -42,7 +42,7 @@
 // #define COM_DLY(dev)
 
 psx_mc1_t* psx_mc1_create(void) {
-    return (psx_mc1_t*)malloc(sizeof(psx_mc1_t));
+    return (psx_mc1_t*)calloc(1, sizeof(psx_mc1_t));
 }
 
 /*

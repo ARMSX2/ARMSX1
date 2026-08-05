@@ -63,12 +63,16 @@ static int pbp_from_bcd(uint8_t v) {
     return ((v >> 4) & 0xf) * 10 + (v & 0xf);
 }
 
-static uint32_t pbp_msf_to_lba(uint8_t m, uint8_t s, uint8_t f) {
-    /* TOC positions are absolute MSF; LBA 0 is 00:02:00. */
-    int mm = pbp_from_bcd(m), ss = pbp_from_bcd(s), ff = pbp_from_bcd(f);
-    int lba = (mm * 60 + ss) * 75 + ff - 150;
+/* The core's disc LBA space is absolute: image sector 0 sits at LBA 150 (MSF 00:02:00),
+   exactly like cue.c and chd.c. Track tables are kept in that space; only the block fetch
+   converts down to PSISOIMG image sectors. */
+#define PBP_LBA_BIAS 150u
 
-    return lba < 0 ? 0 : (uint32_t)lba;
+static uint32_t pbp_msf_to_lba(uint8_t m, uint8_t s, uint8_t f) {
+    /* TOC positions are absolute MSF, which is the disc LBA space directly. */
+    int mm = pbp_from_bcd(m), ss = pbp_from_bcd(s), ff = pbp_from_bcd(f);
+
+    return (uint32_t)((mm * 60 + ss) * 75 + ff);
 }
 
 pbp_t* pbp_create(void) {
@@ -142,12 +146,12 @@ static void pbp_read_toc(pbp_t* pbp) {
         /* No usable TOC: present the whole image as one data track, which is what a
            single-track rip is anyway. */
         pbp->track_count = 1;
-        pbp->track_lba[1] = 0;
+        pbp->track_lba[1] = PBP_LBA_BIAS;
         pbp->track_audio[1] = 0;
     }
 
     if (!pbp->lead_out_lba)
-        pbp->lead_out_lba = pbp->sector_count;
+        pbp->lead_out_lba = pbp->sector_count + PBP_LBA_BIAS;
 
     (void)first;
 }
@@ -385,24 +389,39 @@ static int pbp_cache_block(pbp_t* pbp, uint32_t block) {
     return 0;
 }
 
+/* Returns the track-type TS_* on success and 0 (TS_FAR) on failure, the same contract as
+   cue_read/chd_read_sector — disc.c's type probe treats 0 as "unreadable", and the
+   achievements hasher requires a strict TS_DATA. */
 int pbp_read_sector(pbp_t* pbp, uint32_t lba, void* buf) {
-    if (!pbp || !buf || lba >= pbp->sector_count)
-        return 1;
+    if (!pbp || !buf || lba >= pbp->sector_count + PBP_LBA_BIAS)
+        return TS_FAR;
 
-    const uint32_t block = lba / PBP_BLOCK_SECTORS;
-    const uint32_t within = lba % PBP_BLOCK_SECTORS;
+    if (lba < PBP_LBA_BIAS) {
+        /* The track-1 pregap is not stored in a PSISOIMG. Hand back an empty raw sector
+           with a sync header, the shape cue/chd return for unstored pregap. */
+        memset(buf, 0, CD_SECTOR_SIZE);
+        memset((uint8_t*)buf + 1, 0xff, 10);
+        return TS_PREGAP;
+    }
+
+    const uint32_t img = lba - PBP_LBA_BIAS;
+    const uint32_t block = img / PBP_BLOCK_SECTORS;
+    const uint32_t within = img % PBP_BLOCK_SECTORS;
 
     if (pbp_cache_block(pbp, block))
-        return 1;
+        return TS_FAR;
 
     memcpy(buf, pbp->block + within * CD_SECTOR_SIZE, CD_SECTOR_SIZE);
 
-    return 0;
+    return pbp->track_audio[pbp_get_track_number(pbp, lba)] ? TS_AUDIO : TS_DATA;
 }
 
 int pbp_query(pbp_t* pbp, uint32_t lba) {
-    if (!pbp || lba >= pbp->sector_count)
+    if (!pbp || lba >= pbp->sector_count + PBP_LBA_BIAS)
         return TS_FAR;
+
+    if (lba < PBP_LBA_BIAS)
+        return TS_PREGAP;
 
     const int track = pbp_get_track_number(pbp, lba);
 
@@ -440,9 +459,11 @@ uint32_t pbp_get_track_lba(pbp_t* pbp, int track) {
     return pbp->track_lba[track];
 }
 
+/* Returns 1 on success and 0 on failure, matching chd_read_subchannel_q — impl.c treats a
+   nonzero return as a filled-in q. */
 int pbp_read_subchannel_q(pbp_t* pbp, uint32_t lba, uint8_t q[12]) {
     if (!pbp || !q)
-        return 1;
+        return 0;
 
     const int track = pbp_get_track_number(pbp, lba);
     const uint32_t start = pbp_get_track_lba(pbp, track);
@@ -454,8 +475,9 @@ int pbp_read_subchannel_q(pbp_t* pbp, uint32_t lba, uint8_t q[12]) {
     q[1] = (uint8_t)(((track / 10) << 4) | (track % 10));
     q[2] = 0x01;
 
+    /* lba is absolute (image sector 0 = LBA 150), so it IS the absolute MSF frame count. */
     const uint32_t rm = rel / (60 * 75), rs = (rel / 75) % 60, rf = rel % 75;
-    const uint32_t am = (lba + 150) / (60 * 75), as = ((lba + 150) / 75) % 60, af = (lba + 150) % 75;
+    const uint32_t am = lba / (60 * 75), as = (lba / 75) % 60, af = lba % 75;
 
     q[3] = (uint8_t)(((rm / 10) << 4) | (rm % 10));
     q[4] = (uint8_t)(((rs / 10) << 4) | (rs % 10));
@@ -464,7 +486,7 @@ int pbp_read_subchannel_q(pbp_t* pbp, uint32_t lba, uint8_t q[12]) {
     q[8] = (uint8_t)(((as / 10) << 4) | (as % 10));
     q[9] = (uint8_t)(((af / 10) << 4) | (af % 10));
 
-    return 0;
+    return 1;
 }
 
 void pbp_destroy(pbp_t* pbp) {

@@ -149,7 +149,7 @@ const char* g_psx_timer_reg_names[] = {
 };
 
 psx_timer_t* psx_timer_create(void) {
-    return (psx_timer_t*)malloc(sizeof(psx_timer_t));
+    return (psx_timer_t*)calloc(1, sizeof(psx_timer_t));
 }
 
 void psx_timer_init(psx_timer_t* timer, psx_ic_t* ic, psx_gpu_t* gpu) {

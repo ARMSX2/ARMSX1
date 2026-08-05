@@ -11,7 +11,7 @@
 #include <ctype.h>
 
 psx_dma_t* psx_dma_create(void) {
-    return (psx_dma_t*)malloc(sizeof(psx_dma_t));
+    return (psx_dma_t*)calloc(1, sizeof(psx_dma_t));
 }
 
 const uint32_t g_psx_dma_ctrl_hw_1_table[] = {

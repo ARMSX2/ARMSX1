@@ -6,7 +6,7 @@
 #include "scratchpad.h"
 
 psx_scratchpad_t* psx_scratchpad_create(void) {
-    return (psx_scratchpad_t*)malloc(sizeof(psx_scratchpad_t));
+    return (psx_scratchpad_t*)calloc(1, sizeof(psx_scratchpad_t));
 }
 
 void psx_scratchpad_init(psx_scratchpad_t* scratchpad) {

@@ -44,10 +44,11 @@ int LaunchCandidatePriority(const std::filesystem::path& path) {
     const std::string ext = ToLower(path.extension().string());
     if (ext == ".cue") return 0;
     if (ext == ".chd") return 1;
-    if (ext == ".iso") return 2;
-    if (ext == ".img") return 3;
-    if (ext == ".bin") return 4;
-    if (IsExePath(path)) return 5;
+    if (ext == ".pbp") return 2;
+    if (ext == ".iso") return 3;
+    if (ext == ".img") return 4;
+    if (ext == ".bin") return 5;
+    if (IsExePath(path)) return 6;
     return 100;
 }
 #endif

@@ -914,7 +914,7 @@ void psx_gpu_debug_set_log_dir(psx_gpu_t* gpu, const char* dir) {
 }
 
 psx_gpu_t* psx_gpu_create(void) {
-    return (psx_gpu_t*)malloc(sizeof(psx_gpu_t));
+    return (psx_gpu_t*)calloc(1, sizeof(psx_gpu_t));
 }
 
 void psx_gpu_init(psx_gpu_t* gpu, psx_ic_t* ic) {

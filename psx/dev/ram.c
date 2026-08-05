@@ -6,7 +6,7 @@
 #include <stdlib.h>
 
 psx_ram_t* psx_ram_create(void) {
-    return (psx_ram_t*)malloc(sizeof(psx_ram_t));
+    return (psx_ram_t*)calloc(1, sizeof(psx_ram_t));
 }
 
 void psx_ram_init(psx_ram_t* ram, psx_mc2_t* mc2, int size) {

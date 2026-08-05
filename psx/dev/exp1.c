@@ -6,7 +6,7 @@
 #include "exp1.h"
 
 psx_exp1_t* psx_exp1_create(void) {
-    return (psx_exp1_t*)malloc(sizeof(psx_exp1_t));
+    return (psx_exp1_t*)calloc(1, sizeof(psx_exp1_t));
 }
 
 int psx_exp1_init(psx_exp1_t* exp1, psx_mc1_t* mc1, const char* path) {

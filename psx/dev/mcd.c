@@ -65,7 +65,7 @@ static void psx_mcd_ensure_parent(const char* path) {
 }
 
 psx_mcd_t* psx_mcd_create(void) {
-    return (psx_mcd_t*)malloc(sizeof(psx_mcd_t));
+    return (psx_mcd_t*)calloc(1, sizeof(psx_mcd_t));
 }
 
 /*

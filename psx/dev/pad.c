@@ -304,7 +304,7 @@ void pad_handle_ctrl_write(psx_pad_t* pad, uint32_t value) {
 }
 
 psx_pad_t* psx_pad_create(void) {
-    return (psx_pad_t*)malloc(sizeof(psx_pad_t));
+    return (psx_pad_t*)calloc(1, sizeof(psx_pad_t));
 }
 
 void psx_pad_init(psx_pad_t* pad, psx_ic_t* ic) {

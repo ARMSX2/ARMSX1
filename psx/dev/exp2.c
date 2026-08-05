@@ -6,7 +6,7 @@
 #include "exp2.h"
 
 psx_exp2_t* psx_exp2_create(void) {
-    return (psx_exp2_t*)malloc(sizeof(psx_exp2_t));
+    return (psx_exp2_t*)calloc(1, sizeof(psx_exp2_t));
 }
 
 void psx_exp2_init(psx_exp2_t* exp2, exp2_tty_tx atcons_tx, exp2_tty_tx duart_tx) {

@@ -175,6 +175,11 @@ int psx_disc_open_as(psx_disc_t* disc, const char* path, int type) {
 
             raw_disc_t* raw = (raw_disc_t*)malloc(sizeof(raw_disc_t));
 
+            if (!raw) {
+                fclose(f);
+                return CDT_ERROR;
+            }
+
             raw->file = f;
             raw->sector_size = (type == CD_EXT_BIN) ? CD_SECTOR_SIZE : 2048;
             raw->sector_count = (uint32_t)(size / raw->sector_size);

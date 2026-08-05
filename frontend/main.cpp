@@ -1012,7 +1012,11 @@ std::string WithHiddenId(std::string_view label, std::string_view id) {
 
 bool IsDiscPath(const std::filesystem::path& path) {
     const std::string ext = ToLower(path.extension().string());
-    return ext == ".cue" || ext == ".bin" || ext == ".iso" || ext == ".img"
+    // .pbp is unconditional, matching the core's disc_cd_extensions[] — only CHD is
+    // build-gated. Omitting an extension here yields kind=none and "Invalid launch
+    // request." AFTER the library happily listed the game, so keep this in lockstep
+    // with psx/dev/cdrom/disc.c.
+    return ext == ".cue" || ext == ".bin" || ext == ".iso" || ext == ".img" || ext == ".pbp"
 #ifdef USE_CHD
         || ext == ".chd"
 #endif
@@ -5829,6 +5833,16 @@ class ArmsxApp {
             ARMSX_BOOTLOG("core: argv[%d]=%s", index, argv_ && argv_[index] ? argv_[index] : "(null)");
         }
 
+        // A shutdown requested between runs targeted the PREVIOUS session; with no loop
+        // alive to drain it, the flag survives here and would kill this run on its first
+        // applyHostControlRequests() ("game flashes and returns to the library"). Drop it —
+        // and only it: a stale pause/audio-suspend is legitimate lifecycle state (the app
+        // may be backgrounded right now) and must still apply to this session.
+        {
+            std::lock_guard<std::mutex> host_lock(g_host_control_lock);
+            g_host_shutdown_pending = false;
+        }
+
         psxe_diag_initialize(psxe_cfg_get_pref_path());
         psxe_diag_breadcrumbf("ARMSX startup argc=%d", argc_);
         psxe_diag_logf("diag", "Pref path: %s", psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "(none)");
@@ -5949,6 +5963,10 @@ class ArmsxApp {
         // (Jetpack Compose owns all menus). With nothing queued this simply shows a black window.
         ARMSX_BOOTLOG("core: entering main loop running_=%s session_valid=%s",
                       running_ ? "true" : "false", session_.valid() ? "true" : "false");
+        // SDL is never quit between in-process runs, so a quit event pushed for the PREVIOUS
+        // session can still sit in the queue and would end this run on its very first poll.
+        // A shutdown aimed at THIS run still lands via g_host_shutdown_pending.
+        SDL_FlushEvent(SDL_QUIT);
         g_host_loop_running.store(true, std::memory_order_release);
         uint64_t loop_frames = 0;
         while (running_) {
@@ -8452,10 +8470,17 @@ extern "C" PSXE_API void psxe_host_request_shutdown(void) {
         g_host_audio_suspend_value = false;
     }
 
-    // SDL_PushEvent is thread-safe; this also breaks a loop parked in SDL_PollEvent.
-    SDL_Event quit{};
-    quit.type = SDL_QUIT;
-    SDL_PushEvent(&quit);
+    // Wake a LIVE loop only. With no loop running there is nothing to wake, and SDL may be
+    // mid-teardown between sessions — SDL_StopEventLoop destroys the event-queue mutex, so a
+    // push from the VMStop thread in that window locks a destroyed mutex. The pending flag
+    // above is still drained by a live loop, and a loop that starts later deliberately drops
+    // it at run() entry (a stale shutdown targeted the previous session).
+    if (g_host_loop_running.load(std::memory_order_acquire)) {
+        // SDL_PushEvent is thread-safe; this also breaks a loop parked in SDL_PollEvent.
+        SDL_Event quit{};
+        quit.type = SDL_QUIT;
+        SDL_PushEvent(&quit);
+    }
 }
 
 extern "C" PSXE_API void psxe_host_request_reset(void) {
