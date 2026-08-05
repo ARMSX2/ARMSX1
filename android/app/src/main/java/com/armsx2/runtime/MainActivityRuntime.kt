@@ -1622,14 +1622,16 @@ open class MainActivityRuntime : ComponentActivity() {
          * Falls back to a full relaunch when there is no live VM to reset.
          */
         fun resetGame() {
-            if (eState.value == EmuState.STOPPED || !vmRunLoopActive) {
-                restart()
-                return
-            }
-            runCatching { NativeApp.resetGame() }
-            // The reset is serviced on the emulation thread, which only runs while unpaused —
-            // so leaving the overlay up would park the request and look like nothing happened.
-            resume()
+            // The in-place core reset (NativeApp.resetGame -> session_.reset) is broken twice
+            // over on device. First, nothing dismissed the pause menu — resume() only unpauses
+            // the VM — so the machine rebooted invisibly BEHIND the still-open menu and the
+            // button read as dead. Second, and worse: after the in-place reset the CD drive
+            // often never reads again ("CD 0 sec" on the OSD), so the BIOS waits on the Sony
+            // splash forever — the reported "restart freezes on boot". The full stop+relaunch
+            // re-opens the disc image every time, closes the overlay on the way (stop()), and
+            // armRestartWatchdog guarantees the relaunch half actually happens. Until the
+            // core's reset path re-mounts the disc, restart means relaunch.
+            restart()
         }
 
         /** Open a file picker to swap the mounted disc WITHOUT rebooting the VM.
