@@ -68,9 +68,16 @@
             </intent-filter>
         </activity>
 
+        <!-- singleTask, not singleTop: singleTop only dedupes within ONE task, so a game opened
+             from a file manager or a home-screen shortcut started a SECOND Main in the caller's
+             task while the launcher's copy was still alive. Both share one process-wide runtime
+             and one native VM, and two Activities driving that is a black screen at best. Seen
+             in a user's logcat: taskId=20 and taskId=4 both hosting com.armsx2.Main. External
+             launches still work — onNewIntent hands the URI to the live instance, which is what
+             handleExternalLaunchIntent already expects. -->
         <activity
             android:name=".Main"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|density"
             android:hardwareAccelerated="true"
             android:exported="true"
