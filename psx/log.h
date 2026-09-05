@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
 
@@ -52,6 +53,9 @@ int log_add_callback(log_LogFn fn, void *udata, int level);
 int log_add_fp(FILE *fp, int level);
 
 void log_log(int level, const char *file, int line, const char *fmt, ...);
+
+/* Returns true once for each address, direction, and width. */
+bool log_first_access(uint32_t address, bool write, unsigned width);
 
 #ifdef __cplusplus
 }

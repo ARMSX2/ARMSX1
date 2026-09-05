@@ -172,7 +172,8 @@ uint32_t psx_timer_read32(psx_timer_t* timer, uint32_t offset) {
         case 8: return timer->timer[index].target;
     }
 
-    printf("Unhandled 32-bit TIMER read at offset %08x\n", offset);
+    if (log_first_access(0x1f801100u + offset, false, 32))
+        printf("Unhandled 32-bit TIMER read at offset %08x\n", offset);
 
     return 0x0;
 }
@@ -187,13 +188,15 @@ uint16_t psx_timer_read16(psx_timer_t* timer, uint32_t offset) {
         case 8: return timer->timer[index].target;
     }
 
-    printf("Unhandled 16-bit TIMER read at offset %08x\n", offset);
+    if (log_first_access(0x1f801100u + offset, false, 16))
+        printf("Unhandled 16-bit TIMER read at offset %08x\n", offset);
 
     return 0x0;
 }
 
 uint8_t psx_timer_read8(psx_timer_t* timer, uint32_t offset) {
-    printf("Unhandled 8-bit TIMER read at offset %08x\n", offset);
+    if (log_first_access(0x1f801100u + offset, false, 8))
+        printf("Unhandled 8-bit TIMER read at offset %08x\n", offset);
 
     return 0x0;
 }
@@ -227,7 +230,8 @@ void psx_timer_write16(psx_timer_t* timer, uint32_t offset, uint16_t value) {
 }
 
 void psx_timer_write8(psx_timer_t* timer, uint32_t offset, uint8_t value) {
-    printf("Unhandled 8-bit TIMER write at offset %08x (%02x)\n", offset, value);
+    if (log_first_access(0x1f801100u + offset, true, 8))
+        printf("Unhandled 8-bit TIMER write at offset %08x (%02x)\n", offset, value);
 }
 
 void timer_handle_irq(psx_timer_t* timer, int i) {

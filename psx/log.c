@@ -20,7 +20,9 @@
  * IN THE SOFTWARE.
  */
 
+#ifndef PSXE_DIAG_STDIO_DISABLE
 #define PSXE_DIAG_STDIO_DISABLE
+#endif
 #include "log.h"
 
 #define MAX_CALLBACKS 32
@@ -142,6 +144,11 @@ static void init_event(log_Event *ev, void *udata) {
 
 
 void log_log(int level, const char *file, int line, const char *fmt, ...) {
+  /* Filter before acquiring the logger lock or invoking callbacks. */
+  if (level < L.level) {
+    return;
+  }
+
   log_Event ev = {
     .fmt   = fmt,
     .file  = file,
@@ -169,4 +176,59 @@ void log_log(int level, const char *file, int line, const char *fmt, ...) {
   }
 
   unlock();
+}
+
+/* Fixed-size key set for one-shot hot-path diagnostics. */
+
+#define LOG_ONCE_SLOTS 512
+
+static uint64_t log_once_keys[LOG_ONCE_SLOTS];
+static bool log_once_used[LOG_ONCE_SLOTS];
+
+static bool log_first_key(uint64_t key) {
+  int i;
+
+  lock();
+
+  for (i = 0; i < LOG_ONCE_SLOTS; i++) {
+    if (!log_once_used[i])
+      break;
+
+    if (log_once_keys[i] == key) {
+      unlock();
+      return false;
+    }
+  }
+
+  if (i >= LOG_ONCE_SLOTS) {
+    /* Saturation stays silent. */
+    unlock();
+    return false;
+  }
+
+  log_once_keys[i] = key;
+  log_once_used[i] = true;
+
+  unlock();
+
+  return true;
+}
+
+bool log_first_access(uint32_t address, bool write, unsigned width) {
+  unsigned width_key;
+
+  if (L.quiet || LOG_DEBUG < L.level) {
+    return false;
+  }
+
+  switch (width) {
+    case 8:  width_key = 0; break;
+    case 16: width_key = 1; break;
+    case 32: width_key = 2; break;
+    default: width_key = 3; break;
+  }
+
+  return log_first_key(((uint64_t)address << 3) |
+                       ((uint64_t)(write ? 1u : 0u) << 2) |
+                       width_key);
 }

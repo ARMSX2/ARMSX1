@@ -40,15 +40,25 @@ int psx_bios_load(psx_bios_t* bios, const char* path) {
 
     fseek(file, 0, SEEK_SET);
 
+    if (size != (512 * 1024) && size != (1024 * 1024)) {
+        log_error("BIOS at '%s' is %zu bytes - not a PS1 BIOS image (expected 512 KiB, or 1 MiB for SCPH-5903)",
+                  path, size);
+        fclose(file);
+        return 3;
+    }
+
     bios->buf = malloc(size);
     bios->io_size = size;
 
-    if (!fread(bios->buf, 1, size, file)) {
+    if (fread(bios->buf, 1, size, file) != size) {
         log_error("Failed to read BIOS at '%s': %s", path, strerror(errno));
+        fclose(file);
         return 2;
     }
 
     fclose(file);
+
+    log_info("Loaded BIOS '%s' (%zu bytes)", path, size);
 
     return 0;
 }

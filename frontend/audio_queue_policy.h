@@ -2,20 +2,31 @@
 
 #include <cstddef>
 
-/*
- * Decide what an SDL audio callback may consume.
- *
- * A partial callback is worse than a clean re-prime: it plays the tail of a frame followed by
- * silence, advances the queue into the next sample, and then repeats that torn boundary every
- * callback while the producer and device remain phase-locked. Preserve the short tail instead,
- * output one already-zeroed callback, and ask the emulation thread to pause the device until the
- * normal startup prebuffer has been rebuilt. SDL_PauseAudioDevice() is deliberately not called
- * from the callback itself.
- */
+/* Consume complete stereo frames and request a rebuffer after a short read. */
 struct ArmsxAudioQueueReadDecision {
     std::size_t copy_bytes;
     bool request_rebuffer;
 };
+
+/* Bound producer writes without clearing the queue. Values are aligned to stereo frames. */
+struct ArmsxAudioQueueWriteDecision {
+    std::size_t discard_queued_bytes;
+    std::size_t copy_incoming_bytes;
+};
+
+constexpr ArmsxAudioQueueWriteDecision armsx_audio_queue_write_decision(
+    std::size_t queued_bytes,
+    std::size_t incoming_bytes,
+    std::size_t maximum_bytes) {
+    constexpr std::size_t kStereoFrameMask = ~std::size_t{3};
+    const std::size_t queued = queued_bytes & kStereoFrameMask;
+    const std::size_t maximum = maximum_bytes & kStereoFrameMask;
+    const std::size_t incoming = incoming_bytes & kStereoFrameMask;
+    const std::size_t copy = incoming < maximum ? incoming : maximum;
+    const std::size_t room_for_queue = maximum - copy;
+    const std::size_t discard = queued > room_for_queue ? queued - room_for_queue : 0;
+    return {discard, copy};
+}
 
 constexpr ArmsxAudioQueueReadDecision armsx_audio_queue_read_decision(
     std::size_t available_bytes,
@@ -25,51 +36,160 @@ constexpr ArmsxAudioQueueReadDecision armsx_audio_queue_read_decision(
         return {0, false};
     }
 
-    if (rebuffer_pending || available_bytes < requested_bytes) {
+    if (rebuffer_pending) {
         return {0, true};
+    }
+
+    if (available_bytes < requested_bytes) {
+        // AUDIO_S16SYS stereo uses four bytes per frame.
+        return {available_bytes & ~std::size_t{3}, true};
     }
 
     return {requested_bytes, false};
 }
 
 /*
- * Ratio for the normal-speed host elasticity path.
- *
- * The emulated SPU clock remains authoritative: input_samples is exactly what the PS1 produced.
- * elapsed_seconds is how much real output time those samples have to cover.  A device which is
- * briefly slower than realtime therefore gets a longer host stream instead of a torn callback
- * followed by silence.  The small queue correction restores the jitter cushion over four
- * measurement windows without making one scheduler hiccup become an audible pitch jump.
- *
- * This is deliberately a pure policy function so every platform uses identical arithmetic and
- * the edge cases are covered without an audio device.
+ * Dynamic rate control for normal-speed playback. Queue depth absorbs short timing jitter;
+ * sustained deficits use a smoothed, slew-limited stretch ratio.
  */
-constexpr double armsx_audio_realtime_ratio(
-    std::size_t input_samples,
-    double elapsed_seconds,
+struct ArmsxAudioDrcState {
+    double ratio;         // input frames per output frame, 1.0 = neutral duration
+    double speed_est;     // smoothed guest/host speed, 1.0 = realtime
+    double deficit_base;  // integrator: the stretch the queue actually demands, 1.0 = none
+    bool deficit;         // sustained-slowdown regime engaged
+};
+
+// Maximum queue correction while the host keeps up.
+inline constexpr double kArmsxDrcMaxSkew = 0.005;
+// Approximately one second at the four-frame update cadence.
+inline constexpr double kArmsxDrcSpeedEmaAlpha = 0.08;
+// Adapt faster when less than one eighth of the target queue remains.
+inline constexpr double kArmsxDrcSpeedEmaAlphaStarved = 0.5;
+// Hysteresis for entering and leaving sustained-deficit mode.
+inline constexpr double kArmsxDrcDeficitEngageSpeed = 0.995;
+inline constexpr double kArmsxDrcDeficitExitSpeed = 0.998;
+// Absolute ratio change allowed per update.
+inline constexpr double kArmsxDrcSlewNormal = 0.002;
+inline constexpr double kArmsxDrcSlewDeficit = 0.005;
+inline constexpr double kArmsxDrcSlewEmergency = 0.02;
+inline constexpr double kArmsxDrcDeficitIntegral = 0.01;
+// Prevent a non-neutral ratio from becoming a zero-error equilibrium.
+inline constexpr double kArmsxDrcDeficitLeak = 0.001;
+inline constexpr double kArmsxDrcDeficitStarvedBoost = 10.0;
+// Preserve a small refill margin while limiting integrator windup.
+inline constexpr double kArmsxDrcDeficitRefillMargin = 0.02;
+inline constexpr double kArmsxDrcDeficitFloor = 0.5;
+// Discard a stale deficit estimate when queued latency exceeds this multiple of the target.
+inline constexpr std::size_t kArmsxDrcHighWaterTargets = 2;
+
+/* Preserve the learned deficit across a rebuffer. */
+constexpr ArmsxAudioDrcState armsx_audio_drc_after_rebuffer(ArmsxAudioDrcState state) {
+    if (!state.deficit) {
+        state.ratio = 1.0;
+        return state;
+    }
+
+    // An underrun indicates that the learned stretch may be too shallow.
+    const double measured = state.speed_est < kArmsxDrcDeficitFloor
+        ? kArmsxDrcDeficitFloor
+        : (state.speed_est > 1.0 ? 1.0 : state.speed_est);
+    if (measured < state.deficit_base) {
+        state.deficit_base = measured;
+    }
+    state.ratio = state.deficit_base;
+    return state;
+}
+
+/* Decay learned state toward realtime after a wall-clock discontinuity. */
+constexpr ArmsxAudioDrcState armsx_audio_drc_after_discontinuity(ArmsxAudioDrcState state) {
+    state.speed_est = (1.0 + state.speed_est) * 0.5;
+    state.deficit_base = (1.0 + state.deficit_base) * 0.5;
+    state.deficit = state.deficit && state.speed_est < kArmsxDrcDeficitExitSpeed;
+    return armsx_audio_drc_after_rebuffer(state);
+}
+
+constexpr ArmsxAudioDrcState armsx_audio_drc_step(
+    ArmsxAudioDrcState state,
+    std::size_t window_input_samples,
+    double window_elapsed_seconds,
     int mix_rate,
     std::size_t queued_samples,
     std::size_t target_queue_samples) {
-    if (input_samples == 0 || !(elapsed_seconds > 0.0) || mix_rate <= 0) {
-        return 1.0;
+    if (window_input_samples == 0 || !(window_elapsed_seconds > 0.0) || mix_rate <= 0 ||
+        target_queue_samples == 0) {
+        return state;
     }
 
-    double desired_output_samples = elapsed_seconds * static_cast<double>(mix_rate);
-    const double queue_error = static_cast<double>(target_queue_samples) -
-                               static_cast<double>(queued_samples);
-    desired_output_samples += queue_error * 0.25;
+    // Limit discontinuities before updating the smoothed speed estimate.
+    double instant_speed = (static_cast<double>(window_input_samples) /
+                            static_cast<double>(mix_rate)) /
+                           window_elapsed_seconds;
+    instant_speed = instant_speed < 0.25 ? 0.25 : (instant_speed > 4.0 ? 4.0 : instant_speed);
+    const double alpha = queued_samples < target_queue_samples / 8
+        ? kArmsxDrcSpeedEmaAlphaStarved
+        : kArmsxDrcSpeedEmaAlpha;
+    state.speed_est += alpha * (instant_speed - state.speed_est);
 
-    // Normal play may stretch as far as 2x when a thermally-limited host reaches 50%, but it
-    // may speed up by at most 5% while draining excess cushion. A catch-up frame must not turn
-    // into a conspicuous high-pitch burst.
-    const double minimum_output = static_cast<double>(input_samples) / 1.05;
-    const double maximum_output = static_cast<double>(input_samples) * 2.0;
-    if (desired_output_samples < minimum_output) {
-        desired_output_samples = minimum_output;
-    } else if (desired_output_samples > maximum_output) {
-        desired_output_samples = maximum_output;
+    const double fill_error =
+        (static_cast<double>(queued_samples) - static_cast<double>(target_queue_samples)) /
+        static_cast<double>(target_queue_samples);
+    // Bound queue feedback to one target in either direction.
+    const double saturated_fill = fill_error < -1.0 ? -1.0 : (fill_error > 1.0 ? 1.0 : fill_error);
+    const bool overfull = queued_samples / target_queue_samples >= kArmsxDrcHighWaterTargets;
+
+    // An overfull queue means the saved deficit estimate is stale.
+    if (overfull && state.deficit) {
+        state.deficit = false;
+        state.deficit_base = 1.0;
     }
 
-    const double ratio = static_cast<double>(input_samples) / desired_output_samples;
-    return ratio < 0.5 ? 0.5 : (ratio > 1.05 ? 1.05 : ratio);
+    if (state.deficit) {
+        // Leave deficit mode once either signal has recovered to realtime.
+        if (state.speed_est > kArmsxDrcDeficitExitSpeed || state.deficit_base >= 1.0) {
+            state.deficit = false;
+        }
+    } else if (state.speed_est < kArmsxDrcDeficitEngageSpeed && fill_error < -0.5) {
+        state.deficit = true;
+        // Seed the integrator from measured speed so it responds before the queue drains.
+        state.deficit_base = state.speed_est < kArmsxDrcDeficitFloor
+            ? kArmsxDrcDeficitFloor
+            : (state.speed_est > 1.0 ? 1.0 : state.speed_est);
+    }
+
+    // Queue feedback adjusts the deficit estimate and leaks it toward realtime.
+    double base = 1.0;
+    if (state.deficit) {
+        const double integral = queued_samples < target_queue_samples / 8
+            ? kArmsxDrcDeficitIntegral * kArmsxDrcDeficitStarvedBoost
+            : kArmsxDrcDeficitIntegral;
+        state.deficit_base += integral * saturated_fill +
+                              kArmsxDrcDeficitLeak * (1.0 - state.deficit_base);
+        // Do not stretch materially below measured speed.
+        const double useful_floor = state.speed_est * (1.0 - kArmsxDrcDeficitRefillMargin);
+        double lower = useful_floor > kArmsxDrcDeficitFloor ? useful_floor : kArmsxDrcDeficitFloor;
+        if (lower > 1.0) lower = 1.0;
+        if (state.deficit_base < lower) state.deficit_base = lower;
+        if (state.deficit_base > 1.0) state.deficit_base = 1.0;
+        base = state.deficit_base;
+    }
+
+    // Normal queue correction remains within the small skew band.
+    double wanted = base * (1.0 + kArmsxDrcMaxSkew * saturated_fill);
+
+    // Near either queue limit, close at least half the ratio gap per update.
+    const bool emergency =
+        (queued_samples < target_queue_samples / 8 && wanted < state.ratio) ||
+        (overfull && wanted > state.ratio);
+    const double gap = wanted > state.ratio ? wanted - state.ratio : state.ratio - wanted;
+    const double gap_half = gap * 0.5;
+    const double slew = emergency
+        ? (gap_half > kArmsxDrcSlewEmergency ? gap_half : kArmsxDrcSlewEmergency)
+        : (state.deficit ? kArmsxDrcSlewDeficit : kArmsxDrcSlewNormal);
+    const double step = wanted - state.ratio;
+    state.ratio += step < -slew ? -slew : (step > slew ? slew : step);
+
+    const double upper = 1.0 + kArmsxDrcMaxSkew;
+    state.ratio = state.ratio < 0.5 ? 0.5 : (state.ratio > upper ? upper : state.ratio);
+
+    return state;
 }

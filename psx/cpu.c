@@ -1004,8 +1004,6 @@ static inline void psx_cpu_i_sb(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -1023,8 +1021,6 @@ static inline void psx_cpu_i_sh(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -1049,8 +1045,6 @@ static inline void psx_cpu_i_swl(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -1079,8 +1073,6 @@ static inline void psx_cpu_i_sw(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -1108,8 +1100,6 @@ static inline void psx_cpu_i_swr(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -1717,8 +1707,6 @@ static inline void psx_cpu_i_swc2(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 

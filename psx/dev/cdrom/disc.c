@@ -20,6 +20,8 @@ const char* disc_cd_extensions[] = {
     "chd",
 #endif
     "pbp",
+    /* Raw image with 2048- or 2352-byte sectors. */
+    "img",
     0
 };
 
@@ -29,28 +31,44 @@ typedef struct {
     uint32_t sector_count;
 } raw_disc_t;
 
+/* Raw images omit the standard 150-sector pregap. */
+#define RAW_LBA_BIAS 150u
+
 static int raw_read(void* udata, uint32_t lba, void* buf) {
     raw_disc_t* raw = (raw_disc_t*)udata;
 
-    if (!raw || !raw->file)
+    if (!raw || !raw->file || !buf)
         return 0;
 
-    if (lba >= raw->sector_count)
+    if (lba >= raw->sector_count + RAW_LBA_BIAS)
         return 0;
 
-    if (fseek(raw->file, (long long)lba * raw->sector_size, SEEK_SET))
-        return 0;
-
-    size_t to_read = raw->sector_size;
     memset(buf, 0, CD_SECTOR_SIZE);
 
-    return fread(buf, 1, to_read, raw->file) == to_read ? TS_DATA : 0;
+    if (lba < RAW_LBA_BIAS) {
+        /* Synthesize the omitted track-one pregap. */
+        memset((uint8_t*)buf + 1, 0xff, 10);
+        return TS_PREGAP;
+    }
+
+    if (fseek(raw->file, (long long)(lba - RAW_LBA_BIAS) * raw->sector_size, SEEK_SET))
+        return 0;
+
+    uint8_t* dst = (uint8_t*)buf;
+
+    if (raw->sector_size == 2048)
+        dst += 24;
+
+    return fread(dst, 1, raw->sector_size, raw->file) == raw->sector_size ? TS_DATA : 0;
 }
 
 static int raw_query(void* udata, uint32_t lba) {
     raw_disc_t* raw = (raw_disc_t*)udata;
 
-    return (raw && (lba < raw->sector_count)) ? TS_DATA : TS_FAR;
+    if (!raw || lba >= raw->sector_count + RAW_LBA_BIAS)
+        return TS_FAR;
+
+    return (lba < RAW_LBA_BIAS) ? TS_PREGAP : TS_DATA;
 }
 
 static int raw_get_track_number(void* udata, uint32_t lba) {
@@ -64,8 +82,13 @@ static int raw_get_track_count(void* udata) {
 }
 
 static uint32_t raw_get_track_lba(void* udata, int track) {
-    (void)udata; (void)track;
-    return 0;
+    raw_disc_t* raw = (raw_disc_t*)udata;
+
+    /* Track zero reports lead-out. */
+    if (track == 0)
+        return raw ? raw->sector_count + RAW_LBA_BIAS : RAW_LBA_BIAS;
+
+    return (track == 1) ? RAW_LBA_BIAS : TS_FAR;
 }
 
 static void raw_destroy(void* udata) {
@@ -163,15 +186,57 @@ int psx_disc_open_as(psx_disc_t* disc, const char* path, int type) {
         } break;
 
         case CD_EXT_BIN:
-        case CD_EXT_ISO: {
+        case CD_EXT_ISO:
+        case CD_EXT_IMG: {
             FILE* f = fopen(path, "rb");
+            uint32_t sector_size;
 
             if (!f)
                 return CDT_ERROR;
 
-            fseek(f, 0, SEEK_END);
+            if (fseek(f, 0, SEEK_END)) {
+                fclose(f);
+                return CDT_ERROR;
+            }
+
             long long size = ftell(f);
-            fseek(f, 0, SEEK_SET);
+
+            if (size <= 0 || fseek(f, 0, SEEK_SET)) {
+                fclose(f);
+                return CDT_ERROR;
+            }
+
+            if (type == CD_EXT_BIN) {
+                sector_size = CD_SECTOR_SIZE;
+            } else if (type == CD_EXT_ISO) {
+                sector_size = 2048;
+            } else {
+                const int is_2048 = (size % 2048) == 0;
+                const int is_2352 = (size % CD_SECTOR_SIZE) == 0;
+
+                if (!is_2048 && !is_2352) {
+                    fclose(f);
+                    return CDT_ERROR;
+                }
+
+                if (is_2048 && is_2352) {
+                    static const uint8_t sync[12] = {
+                        0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+                        0xff, 0xff, 0xff, 0xff, 0xff, 0x00
+                    };
+                    uint8_t header[sizeof(sync)];
+
+                    if (fread(header, 1, sizeof(header), f) != sizeof(header) ||
+                        fseek(f, 0, SEEK_SET)) {
+                        fclose(f);
+                        return CDT_ERROR;
+                    }
+
+                    sector_size = !memcmp(header, sync, sizeof(sync)) ? CD_SECTOR_SIZE : 2048;
+                } else {
+                    sector_size = is_2352 ? CD_SECTOR_SIZE : 2048;
+                }
+            }
 
             raw_disc_t* raw = (raw_disc_t*)malloc(sizeof(raw_disc_t));
 
@@ -181,7 +246,7 @@ int psx_disc_open_as(psx_disc_t* disc, const char* path, int type) {
             }
 
             raw->file = f;
-            raw->sector_size = (type == CD_EXT_BIN) ? CD_SECTOR_SIZE : 2048;
+            raw->sector_size = sector_size;
             raw->sector_count = (uint32_t)(size / raw->sector_size);
 
             disc->udata = raw;
@@ -249,8 +314,9 @@ int psx_disc_open_as(psx_disc_t* disc, const char* path, int type) {
     return disc_get_cd_type(disc);
 }
 
+/* Opening may fail before the backend vtable is installed. */
 int psx_disc_read(psx_disc_t* disc, uint32_t lba, void* buf) {
-    if (!disc->read_sector)
+    if (!disc || !disc->read_sector)
         return 0;
 
     /* The single funnel every container goes through (cue/bin, CHD, raw), so one counter
@@ -261,18 +327,30 @@ int psx_disc_read(psx_disc_t* disc, uint32_t lba, void* buf) {
 }
 
 int psx_disc_query(psx_disc_t* disc, uint32_t lba) {
+    if (!disc || !disc->query_sector)
+        return TS_FAR;
+
     return disc->query_sector(disc->udata, lba);
 }
 
 int psx_disc_get_track_number(psx_disc_t* disc, uint32_t lba) {
+    if (!disc || !disc->get_track_number)
+        return 1;
+
     return disc->get_track_number(disc->udata, lba);
 }
 
 int psx_disc_get_track_count(psx_disc_t* disc) {
+    if (!disc || !disc->get_track_count)
+        return 0;
+
     return disc->get_track_count(disc->udata);
 }
 
 int psx_disc_get_track_lba(psx_disc_t* disc, int track) {
+    if (!disc || !disc->get_track_lba)
+        return 0;
+
     return disc->get_track_lba(disc->udata, track);
 }
 
@@ -284,7 +362,11 @@ int psx_disc_read_subchannel_q(psx_disc_t* disc, uint32_t lba, uint8_t q[12]) {
 }
 
 void psx_disc_destroy(psx_disc_t* disc) {
-    disc->destroy(disc->udata);
+    if (!disc)
+        return;
+
+    if (disc->destroy)
+        disc->destroy(disc->udata);
 
     free(disc);
 }

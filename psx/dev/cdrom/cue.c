@@ -223,7 +223,11 @@ cue_file_t* cue_parse_file(cue_t* cue, const char* p, const char* s) {
     if (cue->c != '\"')
         return NULL;
 
-    cue_file_t* file = malloc(sizeof(cue_file_t));
+    /* Keep partial-load cleanup fields zero-initialized. */
+    cue_file_t* file = calloc(1, sizeof(cue_file_t));
+
+    if (!file)
+        return NULL;
 
     file->tracks = list_create();
     file->name = malloc(512);
@@ -263,6 +267,8 @@ cue_t* cue_create(void) {
 void cue_init(cue_t* cue) {
     cue->files = list_create();
     cue->tracks = list_create();
+    cue->c = 0;
+    cue->file = NULL;
 }
 
 int cue_parse(cue_t* cue, const char* path) {
@@ -298,17 +304,23 @@ int cue_parse(cue_t* cue, const char* path) {
                 cue_parse_index(cue);
             } break;
 
+            /* Ignore unsupported cue directives. */
+            case CUE_TITLE: case CUE_PERFORMER: case CUE_SONGWRITER:
+            case CUE_CATALOG: case CUE_ISRC: case CUE_CDTEXTFILE:
             case CUE_REM: case CUE_PREGAP: case CUE_FLAGS: case CUE_POSTGAP: {
-                // Ignore everything until a newline (handle CRLF and LF)
-                while ((cue->c != '\n') && (cue->c != '\r'))
+                while ((cue->c != EOF) && (cue->c != '\n') && (cue->c != '\r'))
                     cue->c = fgetc(cue->file);
 
-                while ((cue->c == '\n') && (cue->c == '\r'))
+                while ((cue->c == '\n') || (cue->c == '\r'))
                     cue->c = fgetc(cue->file);
             } break;
 
             default: {
-                printf("Unknown keyword: %s (%u)\n", cue_keywords[kw], kw);
+                if (kw < 0) {
+                    printf("Unknown cue keyword\n");
+                } else {
+                    printf("Unknown keyword: %s (%u)\n", cue_keywords[kw], kw);
+                }
 
                 return 1;
             } break;
@@ -439,10 +451,18 @@ void cue_destroy(cue_t* cue) {
     while (node) {
         cue_file_t* file = node->data;
 
-        if (file->buf_mode == LD_BUFFERED) {
-            free(file->buf);
-        } else {
-            fclose((FILE*)file->buf);
+        if (!file) {
+            node = node->next;
+            continue;
+        }
+
+        /* A partially loaded entry may not own a buffer yet. */
+        if (file->buf) {
+            if (file->buf_mode == LD_BUFFERED) {
+                free(file->buf);
+            } else {
+                fclose((FILE*)file->buf);
+            }
         }
 
         list_destroy(file->tracks);
@@ -464,6 +484,12 @@ void cue_destroy(cue_t* cue) {
     }
 
     list_destroy(cue->tracks);
+
+    /* Close the cue sheet itself. */
+    if (cue->file) {
+        fclose(cue->file);
+        cue->file = NULL;
+    }
 
     free(cue);
 }

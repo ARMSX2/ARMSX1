@@ -3551,7 +3551,20 @@ void gpu_hblank_event(psx_gpu_t* gpu) {
 
     gpu->line++;
 
-    if (gpu->line == scans_per_vdraw) {
+    /* A mode switch can leave the line beyond a shorter frame. */
+    if (gpu->line >= scans_per_frame) {
+        GPU_HW_DEBUG(
+            "vblank-end line=%d mode=%s gpustat=0x%08x display_mode=0x%08x",
+            gpu->line,
+            psx_gpu_is_pal_mode(gpu) ? "PAL" : "NTSC",
+            gpu->gpustat,
+            gpu->display_mode
+        );
+        if (gpu->event_cb_table[GPU_EVENT_VBLANK_END])
+            gpu->event_cb_table[GPU_EVENT_VBLANK_END](gpu);
+
+        gpu->line = 0;
+    } else if (gpu->line == scans_per_vdraw) {
         /* The one frame boundary the core exposes, so it is also where the marker-armed
            primitive dump opens and closes its single-frame capture. */
         gpu_dump_vblank(gpu);
@@ -3599,18 +3612,6 @@ void gpu_hblank_event(psx_gpu_t* gpu) {
             gpu->event_cb_table[GPU_EVENT_VBLANK](gpu);
 
         psx_ic_irq(gpu->ic, IC_VBLANK);
-    } else if (gpu->line == scans_per_frame) {
-        GPU_HW_DEBUG(
-            "vblank-end line=%d mode=%s gpustat=0x%08x display_mode=0x%08x",
-            gpu->line,
-            psx_gpu_is_pal_mode(gpu) ? "PAL" : "NTSC",
-            gpu->gpustat,
-            gpu->display_mode
-        );
-        if (gpu->event_cb_table[GPU_EVENT_VBLANK_END])
-            gpu->event_cb_table[GPU_EVENT_VBLANK_END](gpu);
-
-        gpu->line = 0;
     }
 }
 

@@ -31,6 +31,8 @@ import java.util.concurrent.atomic.AtomicLong
 object Ps1SafAccess {
     private const val MAX_TEXT_BYTES = 512 * 1024
     private const val MAX_PLAYLIST_DEPTH = 4
+    private const val SIBLING_LIST_ATTEMPTS = 3
+    private const val SIBLING_LIST_RETRY_MS = 200L
     private val sessionIds = AtomicLong()
 
     class Session internal constructor(
@@ -100,6 +102,7 @@ object Ps1SafAccess {
             val requested = Ps1SafText.baseName(reference)
             val sibling = siblings[requested]
                 ?: siblings.entries.firstOrNull { it.key.equals(requested, ignoreCase = true) }?.value
+                ?: childByName(resolver, cueUri, requested)
                 ?: throw IOException("CUE track is not accessible: $requested")
             val extension = Ps1SafText.extension(requested).ifBlank { "bin" }
             val localName = "track-${index.toString().padStart(2, '0')}.$extension"
@@ -181,29 +184,48 @@ object Ps1SafAccess {
             ?: "game.bin"
     }
 
+    // Retry null or partial provider results before treating a CUE sibling as missing.
     private fun siblingDocuments(resolver: ContentResolver, documentUri: Uri): Map<String, Uri> {
         val parent = parentDocumentUri(resolver, documentUri)
             ?: throw IOException("The document provider did not expose the CUE/playlist folder")
         val parentId = DocumentsContract.getDocumentId(parent)
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(parent, parentId)
         val result = LinkedHashMap<String, Uri>()
-        resolver.query(
-            children,
-            arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            val idIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-            val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            while (cursor.moveToNext()) {
-                val id = cursor.getString(idIndex) ?: continue
-                val name = cursor.getString(nameIndex) ?: continue
-                result[name] = DocumentsContract.buildDocumentUriUsingTree(parent, id)
+        repeat(SIBLING_LIST_ATTEMPTS) { attempt ->
+            val listing = LinkedHashMap<String, Uri>()
+            var complete = false
+            resolver.query(
+                children,
+                arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                while (cursor.moveToNext()) {
+                    val id = cursor.getString(idIndex) ?: continue
+                    val name = cursor.getString(nameIndex) ?: continue
+                    listing[name] = DocumentsContract.buildDocumentUriUsingTree(parent, id)
+                }
+                complete = cursor.extras?.getBoolean(DocumentsContract.EXTRA_LOADING, false) != true
             }
+            result.putAll(listing)
+            if (complete && result.isNotEmpty()) return result
+            if (attempt < SIBLING_LIST_ATTEMPTS - 1) android.os.SystemClock.sleep(SIBLING_LIST_RETRY_MS)
         }
         return result
     }
+
+    // Path-based providers can resolve a child omitted from the folder listing.
+    private fun childByName(resolver: ContentResolver, documentUri: Uri, name: String): Uri? =
+        runCatching {
+            val parent = parentDocumentUri(resolver, documentUri) ?: return null
+            val childId = DocumentsContract.getDocumentId(parent) + "/" + name
+            val child = DocumentsContract.buildDocumentUriUsingTree(parent, childId)
+            resolver.query(child, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null)
+                ?.use { cursor -> if (cursor.moveToFirst()) child else null }
+        }.getOrNull()
 
     private fun parentDocumentUri(resolver: ContentResolver, uri: Uri): Uri? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

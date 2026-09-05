@@ -518,12 +518,16 @@ open class MainActivityRuntime : ComponentActivity() {
             if (!surfaceReady) {
                 println("@@ARMSX_SURFACE_ERROR@@ timed out waiting for $kind surface")
             }
+            var grantRevoked = false
             val launchSession = if (surfaceReady) runCatching {
                 val context = instance?.applicationContext
                     ?: throw IllegalStateException("No Android context is active")
                 com.armsx2.core.Ps1SafAccess.prepare(context, path)
             }.onFailure { failure ->
                 println("@@ARMSX_SAF_LAUNCH_FAILED@@ kind=$kind error=${failure.message}")
+                // A persisted grant can remain listed after its provider stops honoring it.
+                grantRevoked = failure is SecurityException ||
+                    failure.message?.contains("Permission Denial") == true
             }.getOrNull() else null
             val launched = launchSession?.use { prepared ->
                 if (prepared.launchPath != path) {
@@ -538,11 +542,16 @@ open class MainActivityRuntime : ComponentActivity() {
                 println("@@ARMSX_VM_LAUNCH_FAILED@@ kind=$kind path=${path.take(240)}")
                 instance?.let { activity ->
                     activity.runOnUiThread {
-                        android.widget.Toast.makeText(
-                            activity,
-                            "Unable to start $kind. Open Diagnostics for the native launch error.",
-                            android.widget.Toast.LENGTH_LONG,
-                        ).show()
+                        if (grantRevoked) {
+                            setupComplete.value = false
+                            setupRecoveryNeeded.value = true
+                        } else {
+                            android.widget.Toast.makeText(
+                                activity,
+                                "Unable to start $kind. Open Diagnostics for the native launch error.",
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                        }
                     }
                 }
             }

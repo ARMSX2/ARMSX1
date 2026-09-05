@@ -97,6 +97,7 @@ extern "C" {
 #include "achievements.h"
 #include "archive.h"
 #include "audio_queue_policy.h"
+#include "audio_time_stretcher.h"
 #include "host_stats.h"
 #include "host_usage.h"
 // ADPF CPU clock hint + emulation-thread affinity. Both are host scheduling levers, both are
@@ -4450,24 +4451,25 @@ class ArmsxSession {
         uint32_t underruns = 0;
         uint64_t underrun_bytes = 0;
         uint32_t rebuffers = 0;
-        uint32_t overflows = 0;
+        uint32_t overflow_trims = 0;
         SDL_LockAudioDevice(audio_dev_);
         queued = audio_queue_.size() - audio_queue_read_offset_;
         underruns = audio_underruns_;
         underrun_bytes = audio_underrun_bytes_;
         rebuffers = audio_rebuffer_events_;
-        overflows = audio_overflow_resets_;
+        overflow_trims = audio_overflow_trims_;
         audio_underruns_ = 0;
         audio_underrun_bytes_ = 0;
         audio_rebuffer_events_ = 0;
-        audio_overflow_resets_ = 0;
+        audio_overflow_trims_ = 0;
         SDL_UnlockAudioDevice(audio_dev_);
 
         audio_diag_snapshots_++;
 
         audioDiagLine("");
         audioDiagLine("[t=%.1fs] host: fps_target=%.2f queued=%zu bytes (%.1f ms) "
-                      "underruns=%u short=%llu bytes rebuffer=%u overflow_resets=%u rate_ratio=%.4f "
+                      "underruns=%u short=%llu bytes rebuffer=%u overflow_resets=0 "
+                      "overflow_trims=%u rate_ratio=%.4f "
                       "ff=%d paused=%d",
             static_cast<double>(audio_diag_snapshots_) *
                 (static_cast<double>(kAudioDiagSnapshotFrames) / frameRate()),
@@ -4478,7 +4480,7 @@ class ArmsxSession {
             underruns,
             static_cast<unsigned long long>(underrun_bytes),
             rebuffers,
-            overflows,
+            overflow_trims,
             audio_rate_ratio_,
             fast_forward_enabled_ ? 1 : 0,
             paused_ ? 1 : 0);
@@ -4730,7 +4732,7 @@ class ArmsxSession {
         audio_underruns_ = 0;
         audio_underrun_bytes_ = 0;
         audio_rebuffer_events_ = 0;
-        audio_overflow_resets_ = 0;
+        audio_overflow_trims_ = 0;
         SDL_UnlockAudioDevice(audio_dev_);
 
         psx_audio_diag_set_enabled(1);
@@ -4889,10 +4891,16 @@ class ArmsxSession {
 
             if (deliberate_rate_conversion) {
                 updateAudioRateRatio(sample_count, queued_samples, drained_samples);
+                // Explicit speed changes use the low-latency rate converter.
+                audio_time_stretcher_.reset();
+                frame_audio = resampleToDeviceRate(
+                    frame_audio.data(), static_cast<size_t>(sample_count));
             } else {
                 updateRealtimeAudioRatio(sample_count, queued_samples);
+                // Preserve pitch when normal-speed emulation falls behind.
+                frame_audio = audio_time_stretcher_.process(
+                    frame_audio.data(), static_cast<size_t>(sample_count), audio_rate_ratio_);
             }
-            frame_audio = resampleToDeviceRate(frame_audio.data(), static_cast<size_t>(sample_count));
             if (frame_audio.empty()) {
                 return;
             }
@@ -4906,12 +4914,16 @@ class ArmsxSession {
         SDL_LockAudioDevice(audio_dev_);
         const size_t queue_before = audio_queue_.size() - audio_queue_read_offset_;
         compactAudioQueueLocked();
-        if ((audio_queue_.size() - audio_queue_read_offset_) > kMaxQueuedAudioBytes) {
-            // The opposite failure to an underrun: audio was produced faster than the device
-            // took it and half a second of it is thrown away in one go, which is heard as a
-            // jump. `audio_diag` counts it so the two are never confused for each other.
-            audio_overflow_resets_++;
-            resetAudioQueueLocked();
+        const ArmsxAudioQueueWriteDecision write = armsx_audio_queue_write_decision(
+            audio_queue_.size() - audio_queue_read_offset_, frame_audio.size(),
+            kMaxQueuedAudioBytes);
+        if (write.discard_queued_bytes > 0) {
+            // Trim only the excess so overflow recovery does not empty the queue.
+            audio_overflow_trims_++;
+            trimQueuedAudioFrontLocked(write.discard_queued_bytes);
+        }
+        if (write.copy_incoming_bytes < frame_audio.size()) {
+            frame_audio.resize(write.copy_incoming_bytes);
         }
         audio_queue_.insert(audio_queue_.end(), frame_audio.begin(), frame_audio.end());
         const size_t queue_after = audio_queue_.size() - audio_queue_read_offset_;
@@ -5021,22 +5033,19 @@ class ArmsxSession {
             static_cast<double>(input_samples) / audio_rate_output_estimate_, kAudioRateMinRatio, kAudioRateMaxRatio);
     }
 
+    // Preserve the learned rate across an underrun while restarting its sample window.
     void resetRealtimeAudioClock() {
         audio_realtime_last_counter_ = 0;
         audio_realtime_elapsed_seconds_ = 0.0;
         audio_realtime_input_samples_ = 0;
         audio_realtime_window_frames_ = 0;
-        audio_rate_ratio_ = 1.0;
-        audio_stretch_initialized_ = false;
+        audio_drc_ = armsx_audio_drc_after_rebuffer(audio_drc_);
+        audio_rate_ratio_ = audio_drc_.ratio;
+        audio_time_stretcher_.reset();
     }
 
-    /* Normal-speed elasticity is intentionally separate from fast-forward conversion above.
-       The SPU still produces exactly the samples its emulated clock owes. Every four frames we
-       compare those samples with real elapsed output time and gently lengthen only the HOST
-       stream when thermal throttling or a scheduler stall made the core late. This is the
-       difference between slower audio and a crack: without it the device consumes the queue at
-       44.1 kHz while a 75%-speed core can replenish only 33 kHz, so silence is mathematically
-       inevitable no matter how carefully the callback is locked. */
+    /* Smooth normal-speed deficits over several frames. The SPU clock remains authoritative;
+       only the host stream duration changes. */
     void updateRealtimeAudioRatio(int input_samples, size_t queued_samples) {
         const Uint64 now = SDL_GetPerformanceCounter();
         const Uint64 frequency = SDL_GetPerformanceFrequency();
@@ -5049,14 +5058,14 @@ class ArmsxSession {
                                static_cast<double>(frequency);
         audio_realtime_last_counter_ = now;
 
-        // A background/pause transition is not a slow frame. Its queue is rebuilt through the
-        // normal prebuffer path, so discard the discontinuous wall-clock sample here.
+        // Ignore discontinuous timing across a pause or background transition.
         if (!(elapsed > 0.0) || elapsed > 0.25) {
             audio_realtime_elapsed_seconds_ = 0.0;
             audio_realtime_input_samples_ = 0;
             audio_realtime_window_frames_ = 0;
-            audio_rate_ratio_ = 1.0;
-            audio_stretch_initialized_ = false;
+            audio_drc_ = armsx_audio_drc_after_discontinuity(audio_drc_);
+            audio_rate_ratio_ = audio_drc_.ratio;
+            audio_time_stretcher_.reset();
             return;
         }
 
@@ -5066,32 +5075,22 @@ class ArmsxSession {
             return;
         }
 
-        const double wanted = armsx_audio_realtime_ratio(
-            audio_realtime_input_samples_, audio_realtime_elapsed_seconds_, kAudioMixRate,
-            queued_samples, kAudioRateTargetQueueSamples);
-        // Four frames already reject callback-size lumpiness. Attack a real slowdown quickly so
-        // the 120 ms cushion survives, but release toward normal speed slowly; the reverse would
-        // replace crackle with a high-pitch catch-up chirp after every scheduler stall.
-        const double response = wanted < audio_rate_ratio_ ? 0.75 : 0.25;
-        audio_rate_ratio_ += (wanted - audio_rate_ratio_) * response;
-        if (std::abs(audio_rate_ratio_ - 1.0) < 0.003) {
-            audio_rate_ratio_ = 1.0;
-        }
+        audio_drc_ = armsx_audio_drc_step(
+            audio_drc_, audio_realtime_input_samples_, audio_realtime_elapsed_seconds_,
+            kAudioMixRate, queued_samples, kAudioRateTargetQueueSamples);
+        audio_rate_ratio_ = audio_drc_.ratio;
 
         audio_realtime_elapsed_seconds_ = 0.0;
         audio_realtime_input_samples_ = 0;
         audio_realtime_window_frames_ = 0;
     }
 
-    // Convert the frame to the device rate. `audio_rate_ratio_` is input samples per output
-    // sample, so above 1 the stream is compressed (fast-forward, limiter off, speed > 100%)
-    // and below 1 it is stretched (speed < 100%, or an fps cap under the game's own rate).
+    // Convert explicit speed changes to the device rate. The ratio is input frames per output frame.
     //
     // Compressing uses a box average over the samples being collapsed rather than "keep every
     // Nth": plain decimation of a 44.1 kHz stream aliases badly — the SPU's own pitch
     // conversion leaves plenty of energy near Nyquist — and averaging the samples that would
-    // have been thrown away costs two adds each. Stretching holds the last output, which is
-    // rough but only ever reached below 100% speed.
+    // have been thrown away costs two adds each. Expansion uses cross-frame interpolation.
     //
     // Neither pitch is preserved: at 2x the audio comes out an octave up, which is what a
     // fast-forward without a time-stretcher sounds like everywhere else. Phase and the partial
@@ -5115,25 +5114,22 @@ class ArmsxSession {
         }
 
         if (audio_rate_ratio_ < 1.0) {
-            // Linear interpolation for the normal-speed slowdown path. Repeating the previous
-            // sample (the old ratio<1 behaviour) turns a sustained 70% run into a buzzy staircase.
-            // The virtual frame at index zero is the final input from the previous chunk, which
-            // keeps interpolation continuous across PS1 frame boundaries.
-            if (!audio_stretch_initialized_) {
-                audio_stretch_previous_left_ = samples[0];
-                audio_stretch_previous_right_ = samples[1];
-                audio_stretch_phase_ = 1.0;
-                audio_stretch_initialized_ = true;
+            if (!audio_rate_expand_initialized_) {
+                audio_rate_expand_previous_left_ = samples[0];
+                audio_rate_expand_previous_right_ = samples[1];
+                audio_rate_expand_phase_ = 1.0;
+                audio_rate_expand_initialized_ = true;
             }
 
-            while (audio_stretch_phase_ < static_cast<double>(input_samples)) {
-                const size_t upper = static_cast<size_t>(audio_stretch_phase_);
-                const double fraction = audio_stretch_phase_ - static_cast<double>(upper);
+            while (audio_rate_expand_phase_ < static_cast<double>(input_samples)) {
+                const size_t upper = static_cast<size_t>(audio_rate_expand_phase_);
+                const double fraction =
+                    audio_rate_expand_phase_ - static_cast<double>(upper);
                 const int16_t left0 = upper == 0
-                    ? audio_stretch_previous_left_
+                    ? audio_rate_expand_previous_left_
                     : samples[((upper - 1u) << 1) + 0u];
                 const int16_t right0 = upper == 0
-                    ? audio_stretch_previous_right_
+                    ? audio_rate_expand_previous_right_
                     : samples[((upper - 1u) << 1) + 1u];
                 const int16_t left1 = samples[(upper << 1) + 0u];
                 const int16_t right1 = samples[(upper << 1) + 1u];
@@ -5144,16 +5140,16 @@ class ArmsxSession {
                     static_cast<double>(right0) +
                     (static_cast<double>(right1) - static_cast<double>(right0)) * fraction));
                 emit(left, right);
-                audio_stretch_phase_ += audio_rate_ratio_;
+                audio_rate_expand_phase_ += audio_rate_ratio_;
             }
 
-            audio_stretch_phase_ -= static_cast<double>(input_samples);
-            audio_stretch_previous_left_ = samples[((input_samples - 1u) << 1) + 0u];
-            audio_stretch_previous_right_ = samples[((input_samples - 1u) << 1) + 1u];
+            audio_rate_expand_phase_ -= static_cast<double>(input_samples);
+            audio_rate_expand_previous_left_ = samples[((input_samples - 1u) << 1) + 0u];
+            audio_rate_expand_previous_right_ = samples[((input_samples - 1u) << 1) + 1u];
             return out;
         }
 
-        audio_stretch_initialized_ = false;
+        audio_rate_expand_initialized_ = false;
 
         for (size_t index = 0; index < input_samples; index++) {
             audio_rate_accumulator_left_ += samples[(index << 1) + 0];
@@ -5164,8 +5160,6 @@ class ArmsxSession {
             while (audio_rate_phase_ >= audio_rate_ratio_) {
                 audio_rate_phase_ -= audio_rate_ratio_;
 
-                // The inner iterations of this loop (ratio below 1) have no fresh input to
-                // average, so they repeat the last output rather than divide by zero.
                 if (audio_rate_accumulator_count_ > 0) {
                     audio_rate_last_left_ =
                         static_cast<int16_t>(audio_rate_accumulator_left_ / audio_rate_accumulator_count_);
@@ -5193,10 +5187,13 @@ class ArmsxSession {
         audio_rate_last_left_ = 0;
         audio_rate_last_right_ = 0;
         audio_consumed_bytes_ = 0;
+        audio_drc_ = {1.0, 1.0, 1.0, false};
         resetRealtimeAudioClock();
-        audio_stretch_phase_ = 1.0;
-        audio_stretch_previous_left_ = 0;
-        audio_stretch_previous_right_ = 0;
+        audio_rate_expand_initialized_ = false;
+        audio_rate_expand_phase_ = 1.0;
+        audio_rate_expand_previous_left_ = 0;
+        audio_rate_expand_previous_right_ = 0;
+        audio_time_stretcher_.reset();
     }
 
     void consumeQueuedAudio(uint8_t* buffer, size_t size) {
@@ -5205,18 +5202,14 @@ class ArmsxSession {
             armsx_audio_queue_read_decision(available, size, audio_rebuffer_requested_);
         const size_t to_copy = decision.copy_bytes;
 
-        // `audio_diag`. A short read means the producer missed a device deadline. Do not tear
-        // the queued tail by copying only part of it: AudioUpdate() already zeroed this callback,
-        // and the emulation thread will pause/re-prime on its next frame. Counted on SDL's audio
-        // thread and read under SDL_LockAudioDevice(), like audio_consumed_bytes_.
+        // Consume complete queued frames and fade a short tail before rebuffering.
         if (decision.request_rebuffer) {
             audio_underruns_++;
-            audio_underrun_bytes_ += size;
+            audio_underrun_bytes_ += size - to_copy;
             if (!audio_rebuffer_requested_) {
                 audio_rebuffer_requested_ = true;
                 audio_rebuffer_events_++;
             }
-            return;
         }
 
         if (to_copy > 0) {
@@ -5225,14 +5218,28 @@ class ArmsxSession {
             // Feeds the fast-forward rate estimate above. Only ever touched from here (inside
             // SDL's audio lock) and from the emulation thread under SDL_LockAudioDevice().
             audio_consumed_bytes_ += to_copy;
+
+            if (decision.request_rebuffer) {
+                auto* samples = reinterpret_cast<int16_t*>(buffer);
+                const size_t copied_frames = to_copy / kAudioBytesPerSample;
+                const size_t fade_frames = std::min<size_t>(copied_frames, 64);
+                const size_t fade_begin = copied_frames - fade_frames;
+                for (size_t frame = 0; frame < fade_frames; ++frame) {
+                    const int gain = static_cast<int>(fade_frames - frame);
+                    const int divisor = static_cast<int>(fade_frames + 1);
+                    for (size_t channel = 0; channel < 2; ++channel) {
+                        const size_t index = ((fade_begin + frame) << 1) + channel;
+                        samples[index] = static_cast<int16_t>(
+                            (static_cast<int>(samples[index]) * gain) / divisor);
+                    }
+                }
+            }
         }
 
         if (audio_queue_read_offset_ >= audio_queue_.size()) {
             // The callback owns only the queue storage.  The fractional sample accumulator is
             // emulation-thread state and must survive a normal device drain.
             resetAudioQueueStorageLocked();
-        } else if (audio_queue_read_offset_ >= kAudioQueueCompactThreshold) {
-            compactAudioQueueLocked();
         }
     }
 
@@ -5259,10 +5266,7 @@ class ArmsxSession {
             return;
         }
 
-        // SDL waits for an in-flight callback here. Calling this from AudioUpdate itself would
-        // deadlock; queueAudioForFrame() is the emulation-thread rendezvous. Keep the unread tail
-        // intact, mark playback unprimed, and let the existing startup threshold resume it only
-        // after the jitter cushion is full again.
+        // SDL may wait for an active callback, so pause from the emulation thread.
         SDL_PauseAudioDevice(audio_dev_, 1);
         SDL_LockAudioDevice(audio_dev_);
         audio_rebuffer_requested_ = false;
@@ -5281,6 +5285,47 @@ class ArmsxSession {
         // and periodically discarded the fractional part of the next frame's sample budget.
         audio_sample_accumulator_ = 0.0;
         resetAudioQueueStorageLocked();
+    }
+
+    void trimQueuedAudioFrontLocked(size_t discard_bytes) {
+        const size_t queued_bytes = audio_queue_.size() - audio_queue_read_offset_;
+        size_t discard = std::min(discard_bytes & ~size_t{3}, queued_bytes & ~size_t{3});
+        if (discard == 0) {
+            return;
+        }
+        if (discard >= queued_bytes) {
+            resetAudioQueueStorageLocked();
+            return;
+        }
+
+        // Cross-fade the retained head after dropping stale audio.
+        uint8_t* samples = audio_queue_.data() + audio_queue_read_offset_;
+        const size_t discard_frames = discard / kAudioBytesPerSample;
+        const size_t remaining_frames = (queued_bytes - discard) / kAudioBytesPerSample;
+        const size_t fade_frames = std::min<size_t>({64, discard_frames, remaining_frames});
+        for (size_t frame = 0; frame < fade_frames; ++frame) {
+            const int old_weight = static_cast<int>(fade_frames - frame);
+            const int new_weight = static_cast<int>(frame + 1);
+            const int divisor = old_weight + new_weight;
+            for (size_t channel = 0; channel < 2; ++channel) {
+                const size_t old_offset = frame * kAudioBytesPerSample + channel * sizeof(int16_t);
+                const size_t new_offset =
+                    (discard_frames + frame) * kAudioBytesPerSample + channel * sizeof(int16_t);
+                int16_t old_sample = 0;
+                int16_t new_sample = 0;
+                std::memcpy(&old_sample, samples + old_offset, sizeof(old_sample));
+                std::memcpy(&new_sample, samples + new_offset, sizeof(new_sample));
+                const int mixed = static_cast<int>(old_sample) * old_weight +
+                                  static_cast<int>(new_sample) * new_weight;
+                const int16_t blended = static_cast<int16_t>(mixed / divisor);
+                std::memcpy(samples + new_offset, &blended, sizeof(blended));
+            }
+        }
+
+        audio_queue_.erase(
+            audio_queue_.begin() + static_cast<std::ptrdiff_t>(audio_queue_read_offset_),
+            audio_queue_.begin() +
+                static_cast<std::ptrdiff_t>(audio_queue_read_offset_ + discard));
     }
 
     void compactAudioQueueLocked() {
@@ -5310,7 +5355,6 @@ class ArmsxSession {
     static constexpr int kAudioDiagBudget = 16;
     static constexpr size_t kAudioBytesPerSample = sizeof(int16_t) * 2;
     static constexpr size_t kMaxQueuedAudioBytes = static_cast<size_t>(kAudioMixRate * sizeof(int16_t) * 2 / 2);
-    static constexpr size_t kAudioQueueCompactThreshold = 4096;
     static constexpr std::uint32_t kMaxFrameSteps = PSX_CPU_CPS / 8u;
     // The normal-speed elasticity controller holds the same 120 ms depth used to start/re-prime
     // playback. It changes host sample duration, never the emulated SPU clock or CPU schedule.
@@ -5371,7 +5415,7 @@ class ArmsxSession {
     uint32_t audio_underruns_ = 0;
     uint64_t audio_underrun_bytes_ = 0;
     uint32_t audio_rebuffer_events_ = 0;
-    uint32_t audio_overflow_resets_ = 0;
+    uint32_t audio_overflow_trims_ = 0;
     // One-shot capture state; see runAudioDiag(). All emulation thread.
     FILE* audio_diag_file_ = nullptr;
     int audio_diag_frames_left_ = 0;
@@ -5394,14 +5438,16 @@ class ArmsxSession {
     int audio_rate_accumulator_count_ = 0;
     int16_t audio_rate_last_left_ = 0;
     int16_t audio_rate_last_right_ = 0;
+    bool audio_rate_expand_initialized_ = false;
+    double audio_rate_expand_phase_ = 1.0;
+    int16_t audio_rate_expand_previous_left_ = 0;
+    int16_t audio_rate_expand_previous_right_ = 0;
     Uint64 audio_realtime_last_counter_ = 0;
     double audio_realtime_elapsed_seconds_ = 0.0;
     size_t audio_realtime_input_samples_ = 0;
     int audio_realtime_window_frames_ = 0;
-    bool audio_stretch_initialized_ = false;
-    double audio_stretch_phase_ = 1.0;
-    int16_t audio_stretch_previous_left_ = 0;
-    int16_t audio_stretch_previous_right_ = 0;
+    ArmsxAudioDrcState audio_drc_{1.0, 1.0, 1.0, false};
+    ArmsxAudioTimeStretcher audio_time_stretcher_;
     std::filesystem::path disc_path_;
     std::filesystem::path exe_path_;
     std::string title_;

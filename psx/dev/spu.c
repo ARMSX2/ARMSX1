@@ -1526,8 +1526,11 @@ uint32_t psx_spu_get_sample(psx_spu_t* spu) {
     if ((spu->spucnt & 0x4000) == 0)
         return 0;
 
-    uint16_t clampl;
-    uint16_t clampr;
+    /* Keep intermediate samples signed and clamp after volume scaling. */
+    int mixl;
+    int mixr;
+    int16_t outl;
+    int16_t outr;
 
     if ((spu->spucnt & 0x0080) && !spu->reverb_disabled) {
         if (spu->even_cycle)
@@ -1547,14 +1550,17 @@ uint32_t psx_spu_get_sample(psx_spu_t* spu) {
                 g_psx_audio_diag.revsum_clip++;
         }
 
-        clampl = CLAMP((clampsl + spu->lrsl), INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainlvol);
-        clampr = CLAMP((clampsr + spu->lrsr), INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainrvol);
+        mixl = (int)(CLAMP((clampsl + spu->lrsl), INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainlvol));
+        mixr = (int)(CLAMP((clampsr + spu->lrsr), INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainrvol));
     } else {
-        clampl = CLAMP(clampsl, INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainlvol);
-        clampr = CLAMP(clampsr, INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainrvol);
+        mixl = (int)(CLAMP(clampsl, INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainlvol));
+        mixr = (int)(CLAMP(clampsr, INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainrvol));
     }
 
-    return clampl | (((uint32_t)clampr) << 16);
+    outl = (int16_t)CLAMP(mixl, INT16_MIN, INT16_MAX);
+    outr = (int16_t)CLAMP(mixr, INT16_MIN, INT16_MAX);
+
+    return ((uint32_t)(uint16_t)outl) | (((uint32_t)(uint16_t)outr) << 16);
 }
 
 /*

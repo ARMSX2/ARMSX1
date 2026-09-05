@@ -34,6 +34,8 @@ object DiagnosticsReport {
     /** Per-section cap so one chatty log cannot make the report unshareable. */
     private const val TAIL_LIMIT = 512 * 1024
     private const val CRASH_FILES = 3
+    private const val LOG_LEVEL_INFO = 2
+
     private const val KEY_ENABLED = "diagnostics.generateLog"
     private const val KEY_URI = "diagnostics.reportUri"
 
@@ -64,8 +66,13 @@ object DiagnosticsReport {
             .apply()
         runCatching {
             val s = Ps1SettingsStore.load(context)
-            if (!s.loggingEnabled) {
-                Ps1SettingsStore.save(context, s.copy(loggingEnabled = true, quiet = false))
+            // Report capture excludes high-frequency trace and debug events.
+            val level = if (s.logLevel < LOG_LEVEL_INFO) LOG_LEVEL_INFO else s.logLevel
+            if (!s.loggingEnabled || level != s.logLevel) {
+                Ps1SettingsStore.save(
+                    context,
+                    s.copy(loggingEnabled = true, quiet = false, logLevel = level),
+                )
             }
         }
     }
@@ -83,7 +90,9 @@ object DiagnosticsReport {
      */
     fun refresh(context: Context): Boolean {
         if (!isEnabled(context)) return false
+
         val uri = reportUri(context) ?: return false
+
         return runCatching {
             // "wt" truncates: a shorter rewrite must not leave the tail of the previous report.
             val stream = context.contentResolver.openOutputStream(uri, "wt") ?: return false

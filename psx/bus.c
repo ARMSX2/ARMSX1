@@ -70,8 +70,9 @@ uint32_t psx_bus_read32(psx_bus_t* bus, uint32_t addr) {
         log_fatal("Unaligned 32-bit read from %08x:%08x", vaddr, addr);
     }
 
-    HANDLE_READ(bios, 32);
+    /* Check the non-overlapping RAM range first on this hot path. */
     HANDLE_READ(ram, 32);
+    HANDLE_READ(bios, 32);
     HANDLE_READ(dma, 32);
     HANDLE_READ(exp1, 32);
     HANDLE_READ(exp2, 32);
@@ -107,8 +108,8 @@ uint16_t psx_bus_read16(psx_bus_t* bus, uint32_t addr) {
         log_fatal("Unaligned 16-bit read from %08x:%08x", vaddr, addr);
     }
 
-    HANDLE_READ(bios, 16);
     HANDLE_READ(ram, 16);
+    HANDLE_READ(bios, 16);
     HANDLE_READ(dma, 16);
     HANDLE_READ(exp1, 16);
     HANDLE_READ(exp2, 16);
@@ -136,7 +137,8 @@ uint16_t psx_bus_read16(psx_bus_t* bus, uint32_t addr) {
     if (addr == 0x1f400006)
         return 0x1fe0;
 
-    printf("Unhandled 16-bit read from %08x:%08x\n", vaddr, addr);
+    if (log_first_access(addr, false, 16))
+        printf("Unhandled 16-bit read from %08x:%08x\n", vaddr, addr);
 
     // exit(1);
 
@@ -150,8 +152,8 @@ uint8_t psx_bus_read8(psx_bus_t* bus, uint32_t addr) {
 
     addr = psx_bus_physical_address(addr);
 
-    HANDLE_READ(bios, 8);
     HANDLE_READ(ram, 8);
+    HANDLE_READ(bios, 8);
     HANDLE_READ(dma, 8);
     HANDLE_READ(exp1, 8);
     HANDLE_READ(exp2, 8);
@@ -185,8 +187,8 @@ void psx_bus_write32(psx_bus_t* bus, uint32_t addr, uint32_t value) {
         log_fatal("Unaligned 32-bit write to %08x:%08x (%08x)", vaddr, addr, value);
     }
 
-    HANDLE_WRITE(bios, 32);
     HANDLE_WRITE(ram, 32);
+    HANDLE_WRITE(bios, 32);
     HANDLE_WRITE(dma, 32);
     HANDLE_WRITE(exp1, 32);
     HANDLE_WRITE(exp2, 32);
@@ -202,7 +204,8 @@ void psx_bus_write32(psx_bus_t* bus, uint32_t addr, uint32_t value) {
     HANDLE_WRITE(pad, 32);
     HANDLE_WRITE(mdec, 32);
 
-    printf("Unhandled 32-bit write to %08x:%08x (%08x)\n", vaddr, addr, value);
+    if (log_first_access(addr, true, 32))
+        printf("Unhandled 32-bit write to %08x:%08x (%08x)\n", vaddr, addr, value);
 
     //exit(1);
 }
@@ -219,8 +222,8 @@ void psx_bus_write16(psx_bus_t* bus, uint32_t addr, uint32_t value) {
         log_fatal("Unaligned 16-bit write to %08x:%08x (%04x)", vaddr, addr, value);
     }
 
-    HANDLE_WRITE(bios, 16);
     HANDLE_WRITE(ram, 16);
+    HANDLE_WRITE(bios, 16);
     HANDLE_WRITE(dma, 16);
     HANDLE_WRITE(exp1, 16);
     HANDLE_WRITE(exp2, 16);
@@ -238,7 +241,8 @@ void psx_bus_write16(psx_bus_t* bus, uint32_t addr, uint32_t value) {
 
     // if (addr == 0x1f80105a) { sio_ctrl = value; return; }
 
-    printf("Unhandled 16-bit write to %08x:%08x (%04x)\n", vaddr, addr, value);
+    if (log_first_access(addr, true, 16))
+        printf("Unhandled 16-bit write to %08x:%08x (%04x)\n", vaddr, addr, value);
 
     //exit(1);
 }
@@ -250,8 +254,8 @@ void psx_bus_write8(psx_bus_t* bus, uint32_t addr, uint32_t value) {
 
     addr = psx_bus_physical_address(addr);
 
-    HANDLE_WRITE(bios, 8);
     HANDLE_WRITE(ram, 8);
+    HANDLE_WRITE(bios, 8);
     HANDLE_WRITE(dma, 8);
     HANDLE_WRITE(exp1, 8);
     HANDLE_WRITE(exp2, 8);
@@ -267,7 +271,8 @@ void psx_bus_write8(psx_bus_t* bus, uint32_t addr, uint32_t value) {
     HANDLE_WRITE(pad, 8);
     HANDLE_WRITE(mdec, 8);
 
-    printf("Unhandled 8-bit write to %08x:%08x (%02x)\n", vaddr, addr, value);
+    if (log_first_access(addr, true, 8))
+        printf("Unhandled 8-bit write to %08x:%08x (%02x)\n", vaddr, addr, value);
 
     //exit(1);
 }
