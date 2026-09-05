@@ -8,11 +8,7 @@
 #include <limits>
 #include <vector>
 
-/*
- * Streaming stereo WSOLA time stretcher. Ratio is input frames per output frame.
- * Candidate matching changes duration while keeping each segment at the original sample rate.
- * The expected analysis position remains the timing reference after correlation.
- */
+/* Streaming stereo WSOLA. Ratio is input frames per output frame. */
 class ArmsxAudioTimeStretcher {
   public:
     static constexpr std::size_t kChannels = 2;
@@ -43,7 +39,6 @@ class ArmsxAudioTimeStretcher {
             return {};
         }
 
-        // Keep the analysis cursor finite and advancing.
         if (!std::isfinite(ratio)) {
             ratio = 1.0;
         }
@@ -98,7 +93,7 @@ class ArmsxAudioTimeStretcher {
         const std::size_t frames = bufferedFrames();
         const std::size_t expected = static_cast<std::size_t>(std::llround(analysis_position_));
 
-        // Wait for both sides of the search interval.
+        // Wait until the forward half of the search window is buffered.
         return expected <= std::numeric_limits<std::size_t>::max() -
                                (kSearchFrames + kSegmentFrames) &&
                frames >= expected + kSearchFrames + kSegmentFrames;

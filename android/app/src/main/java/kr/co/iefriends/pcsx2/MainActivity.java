@@ -49,13 +49,6 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // Ask the governor to hold sustained clocks instead of boost-then-throttle.
-        // Device-dependent: only Pixel and a handful of others honor it, but it's a
-        // one-liner and never hurts on devices that ignore it.
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-            getWindow().setSustainedPerformanceMode(true);
-        }
-
         // Default resources
         copyAssetAll(getApplicationContext(), "bios");
         copyAssetAll(getApplicationContext(), "resources");

@@ -144,7 +144,7 @@ static void init_event(log_Event *ev, void *udata) {
 
 
 void log_log(int level, const char *file, int line, const char *fmt, ...) {
-  /* Filter before acquiring the logger lock or invoking callbacks. */
+  /* Reject filtered events before locking. */
   if (level < L.level) {
     return;
   }
@@ -178,7 +178,7 @@ void log_log(int level, const char *file, int line, const char *fmt, ...) {
   unlock();
 }
 
-/* Fixed-size key set for one-shot hot-path diagnostics. */
+/* Fixed-capacity one-shot key table. */
 
 #define LOG_ONCE_SLOTS 512
 
@@ -201,7 +201,6 @@ static bool log_first_key(uint64_t key) {
   }
 
   if (i >= LOG_ONCE_SLOTS) {
-    /* Saturation stays silent. */
     unlock();
     return false;
   }

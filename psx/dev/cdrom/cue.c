@@ -304,7 +304,6 @@ int cue_parse(cue_t* cue, const char* path) {
                 cue_parse_index(cue);
             } break;
 
-            /* Ignore unsupported cue directives. */
             case CUE_TITLE: case CUE_PERFORMER: case CUE_SONGWRITER:
             case CUE_CATALOG: case CUE_ISRC: case CUE_CDTEXTFILE:
             case CUE_REM: case CUE_PREGAP: case CUE_FLAGS: case CUE_POSTGAP: {
@@ -485,7 +484,6 @@ void cue_destroy(cue_t* cue) {
 
     list_destroy(cue->tracks);
 
-    /* Close the cue sheet itself. */
     if (cue->file) {
         fclose(cue->file);
         cue->file = NULL;

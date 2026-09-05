@@ -8,7 +8,7 @@ struct ArmsxAudioQueueReadDecision {
     bool request_rebuffer;
 };
 
-/* Bound producer writes without clearing the queue. Values are aligned to stereo frames. */
+/* Bound writes to complete stereo frames without clearing the queue. */
 struct ArmsxAudioQueueWriteDecision {
     std::size_t discard_queued_bytes;
     std::size_t copy_incoming_bytes;
@@ -59,19 +59,16 @@ struct ArmsxAudioDrcState {
     bool deficit;         // sustained-slowdown regime engaged
 };
 
-// Maximum queue correction while the host keeps up.
 inline constexpr double kArmsxDrcMaxSkew = 0.005;
-// Approximately one second at the four-frame update cadence.
 inline constexpr double kArmsxDrcSpeedEmaAlpha = 0.08;
-// Adapt faster when less than one eighth of the target queue remains.
-inline constexpr double kArmsxDrcSpeedEmaAlphaStarved = 0.5;
+inline constexpr double kArmsxDrcSpeedEmaAlphaLowWater = 0.5;
 // Hysteresis for entering and leaving sustained-deficit mode.
 inline constexpr double kArmsxDrcDeficitEngageSpeed = 0.995;
 inline constexpr double kArmsxDrcDeficitExitSpeed = 0.998;
-// Absolute ratio change allowed per update.
 inline constexpr double kArmsxDrcSlewNormal = 0.002;
 inline constexpr double kArmsxDrcSlewDeficit = 0.005;
-inline constexpr double kArmsxDrcSlewEmergency = 0.02;
+inline constexpr double kArmsxDrcSlewHighWater = 0.02;
+inline constexpr double kArmsxDrcSlewLowWater = 0.20;
 inline constexpr double kArmsxDrcDeficitIntegral = 0.01;
 // Prevent a non-neutral ratio from becoming a zero-error equilibrium.
 inline constexpr double kArmsxDrcDeficitLeak = 0.001;
@@ -94,9 +91,11 @@ constexpr ArmsxAudioDrcState armsx_audio_drc_after_rebuffer(ArmsxAudioDrcState s
         ? kArmsxDrcDeficitFloor
         : (state.speed_est > 1.0 ? 1.0 : state.speed_est);
     if (measured < state.deficit_base) {
-        state.deficit_base = measured;
+        const double floor = state.deficit_base - kArmsxDrcSlewLowWater;
+        state.deficit_base = measured < floor ? floor : measured;
     }
-    state.ratio = state.deficit_base;
+    const double ratio_floor = state.ratio - kArmsxDrcSlewLowWater;
+    state.ratio = state.deficit_base < ratio_floor ? ratio_floor : state.deficit_base;
     return state;
 }
 
@@ -120,45 +119,51 @@ constexpr ArmsxAudioDrcState armsx_audio_drc_step(
         return state;
     }
 
-    // Limit discontinuities before updating the smoothed speed estimate.
+    const double previous_deficit_base = state.deficit_base;
     double instant_speed = (static_cast<double>(window_input_samples) /
                             static_cast<double>(mix_rate)) /
                            window_elapsed_seconds;
     instant_speed = instant_speed < 0.25 ? 0.25 : (instant_speed > 4.0 ? 4.0 : instant_speed);
-    const double alpha = queued_samples < target_queue_samples / 8
-        ? kArmsxDrcSpeedEmaAlphaStarved
+    const bool low_water = queued_samples < target_queue_samples / 2;
+    const double alpha = low_water
+        ? kArmsxDrcSpeedEmaAlphaLowWater
         : kArmsxDrcSpeedEmaAlpha;
     state.speed_est += alpha * (instant_speed - state.speed_est);
 
     const double fill_error =
         (static_cast<double>(queued_samples) - static_cast<double>(target_queue_samples)) /
         static_cast<double>(target_queue_samples);
-    // Bound queue feedback to one target in either direction.
     const double saturated_fill = fill_error < -1.0 ? -1.0 : (fill_error > 1.0 ? 1.0 : fill_error);
     const bool overfull = queued_samples / target_queue_samples >= kArmsxDrcHighWaterTargets;
 
-    // An overfull queue means the saved deficit estimate is stale.
     if (overfull && state.deficit) {
         state.deficit = false;
         state.deficit_base = 1.0;
     }
 
+    bool entered_deficit = false;
     if (state.deficit) {
-        // Leave deficit mode once either signal has recovered to realtime.
         if (state.speed_est > kArmsxDrcDeficitExitSpeed || state.deficit_base >= 1.0) {
             state.deficit = false;
         }
-    } else if (state.speed_est < kArmsxDrcDeficitEngageSpeed && fill_error < -0.5) {
+    } else if (state.speed_est < kArmsxDrcDeficitEngageSpeed && low_water) {
         state.deficit = true;
-        // Seed the integrator from measured speed so it responds before the queue drains.
-        state.deficit_base = state.speed_est < kArmsxDrcDeficitFloor
+        entered_deficit = true;
+        const double measured = state.speed_est < kArmsxDrcDeficitFloor
             ? kArmsxDrcDeficitFloor
             : (state.speed_est > 1.0 ? 1.0 : state.speed_est);
+        const double floor = state.ratio - kArmsxDrcSlewLowWater;
+        state.deficit_base = measured < floor ? floor : measured;
     }
 
-    // Queue feedback adjusts the deficit estimate and leaks it toward realtime.
     double base = 1.0;
     if (state.deficit) {
+        const double measured_gap = state.deficit_base - state.speed_est;
+        if (low_water && !entered_deficit && measured_gap > 0.0) {
+            state.deficit_base -= measured_gap < kArmsxDrcSlewLowWater
+                ? measured_gap
+                : kArmsxDrcSlewLowWater;
+        }
         const double integral = queued_samples < target_queue_samples / 8
             ? kArmsxDrcDeficitIntegral * kArmsxDrcDeficitStarvedBoost
             : kArmsxDrcDeficitIntegral;
@@ -169,22 +174,23 @@ constexpr ArmsxAudioDrcState armsx_audio_drc_step(
         double lower = useful_floor > kArmsxDrcDeficitFloor ? useful_floor : kArmsxDrcDeficitFloor;
         if (lower > 1.0) lower = 1.0;
         if (state.deficit_base < lower) state.deficit_base = lower;
+        const double slew_floor = previous_deficit_base - kArmsxDrcSlewLowWater;
+        if (state.deficit_base < slew_floor) state.deficit_base = slew_floor;
         if (state.deficit_base > 1.0) state.deficit_base = 1.0;
         base = state.deficit_base;
     }
 
-    // Normal queue correction remains within the small skew band.
     double wanted = base * (1.0 + kArmsxDrcMaxSkew * saturated_fill);
 
-    // Near either queue limit, close at least half the ratio gap per update.
-    const bool emergency =
-        (queued_samples < target_queue_samples / 8 && wanted < state.ratio) ||
-        (overfull && wanted > state.ratio);
+    // Low water needs immediate downward correction; other changes remain slew-limited.
+    const bool high_water_recovery = overfull && wanted > state.ratio;
     const double gap = wanted > state.ratio ? wanted - state.ratio : state.ratio - wanted;
     const double gap_half = gap * 0.5;
-    const double slew = emergency
-        ? (gap_half > kArmsxDrcSlewEmergency ? gap_half : kArmsxDrcSlewEmergency)
-        : (state.deficit ? kArmsxDrcSlewDeficit : kArmsxDrcSlewNormal);
+    const double slew = low_water && wanted < state.ratio
+        ? (gap < kArmsxDrcSlewLowWater ? gap : kArmsxDrcSlewLowWater)
+        : (high_water_recovery
+            ? (gap_half > kArmsxDrcSlewHighWater ? gap_half : kArmsxDrcSlewHighWater)
+            : (state.deficit ? kArmsxDrcSlewDeficit : kArmsxDrcSlewNormal));
     const double step = wanted - state.ratio;
     state.ratio += step < -slew ? -slew : (step > slew ? slew : step);
 

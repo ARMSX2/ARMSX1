@@ -70,7 +70,6 @@ uint32_t psx_bus_read32(psx_bus_t* bus, uint32_t addr) {
         log_fatal("Unaligned 32-bit read from %08x:%08x", vaddr, addr);
     }
 
-    /* Check the non-overlapping RAM range first on this hot path. */
     HANDLE_READ(ram, 32);
     HANDLE_READ(bios, 32);
     HANDLE_READ(dma, 32);

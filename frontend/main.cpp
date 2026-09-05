@@ -4891,13 +4891,11 @@ class ArmsxSession {
 
             if (deliberate_rate_conversion) {
                 updateAudioRateRatio(sample_count, queued_samples, drained_samples);
-                // Explicit speed changes use the low-latency rate converter.
                 audio_time_stretcher_.reset();
                 frame_audio = resampleToDeviceRate(
                     frame_audio.data(), static_cast<size_t>(sample_count));
             } else {
                 updateRealtimeAudioRatio(sample_count, queued_samples);
-                // Preserve pitch when normal-speed emulation falls behind.
                 frame_audio = audio_time_stretcher_.process(
                     frame_audio.data(), static_cast<size_t>(sample_count), audio_rate_ratio_);
             }
@@ -4905,9 +4903,6 @@ class ArmsxSession {
                 return;
             }
         } else {
-            // Do not let time spent building the startup/rebuffer cushion look like a slow
-            // emulation frame when playback resumes. The exact SPU samples are queued unchanged
-            // until the device starts; elasticity begins with the first real output interval.
             resetRealtimeAudioClock();
         }
 
@@ -4918,7 +4913,6 @@ class ArmsxSession {
             audio_queue_.size() - audio_queue_read_offset_, frame_audio.size(),
             kMaxQueuedAudioBytes);
         if (write.discard_queued_bytes > 0) {
-            // Trim only the excess so overflow recovery does not empty the queue.
             audio_overflow_trims_++;
             trimQueuedAudioFrontLocked(write.discard_queued_bytes);
         }
@@ -5033,14 +5027,12 @@ class ArmsxSession {
             static_cast<double>(input_samples) / audio_rate_output_estimate_, kAudioRateMinRatio, kAudioRateMaxRatio);
     }
 
-    // Preserve the learned rate across an underrun while restarting its sample window.
+    // Reset timing windows without discarding learned DRC state.
     void resetRealtimeAudioClock() {
         audio_realtime_last_counter_ = 0;
         audio_realtime_elapsed_seconds_ = 0.0;
         audio_realtime_input_samples_ = 0;
         audio_realtime_window_frames_ = 0;
-        audio_drc_ = armsx_audio_drc_after_rebuffer(audio_drc_);
-        audio_rate_ratio_ = audio_drc_.ratio;
         audio_time_stretcher_.reset();
     }
 
@@ -5071,7 +5063,10 @@ class ArmsxSession {
 
         audio_realtime_elapsed_seconds_ += elapsed;
         audio_realtime_input_samples_ += static_cast<size_t>(input_samples);
-        if (++audio_realtime_window_frames_ < kAudioRealtimeWindowFrames) {
+        const bool low_water = queued_samples < kAudioRateTargetQueueSamples / 2;
+        const int window_frames = ++audio_realtime_window_frames_;
+        if (window_frames < kAudioRealtimeWindowFrames &&
+            (!low_water || window_frames < kAudioRealtimeLowWaterMinFrames)) {
             return;
         }
 
@@ -5272,6 +5267,9 @@ class ArmsxSession {
         audio_rebuffer_requested_ = false;
         audio_playback_started_ = false;
         SDL_UnlockAudioDevice(audio_dev_);
+        audio_drc_ = armsx_audio_drc_after_rebuffer(audio_drc_);
+        audio_rate_ratio_ = audio_drc_.ratio;
+        resetRealtimeAudioClock();
     }
 
     void resetAudioQueueStorageLocked() {
@@ -5360,6 +5358,7 @@ class ArmsxSession {
     // playback. It changes host sample duration, never the emulated SPU clock or CPU schedule.
     static constexpr int kAudioRateTargetQueueSamples = kAudioPrebufferSamples;
     static constexpr int kAudioRealtimeWindowFrames = 4;
+    static constexpr int kAudioRealtimeLowWaterMinFrames = 2;
     // Frames the queue-depth correction is spread over, and how hard the whole estimate is
     // smoothed. Both slow on purpose — see updateAudioRateRatio().
     static constexpr double kAudioRateQueueCorrectionFrames = 16.0;

@@ -1230,7 +1230,15 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
     if (psx_gpu_prim_oversize(gpu, xmax - xmin, ymax - ymin))
         return;
 
-    PSX_PERF_RASTER(PSX_PERF_PRIM_TRIANGLE, xmax - xmin, ymax - ymin);
+    const int x_begin = max(xmin, max((int)gpu->draw_x1, 0));
+    const int y_begin = max(ymin, max((int)gpu->draw_y1, 0));
+    const int x_end = min(xmax, min((int)gpu->draw_x2 + 1, PSX_GPU_FB_WIDTH));
+    const int y_end = min(ymax, min((int)gpu->draw_y2 + 1, PSX_GPU_FB_HEIGHT));
+
+    if (x_begin >= x_end || y_begin >= y_end)
+        return;
+
+    PSX_PERF_RASTER(PSX_PERF_PRIM_TRIANGLE, x_end - x_begin, y_end - y_begin);
 
     float area = EDGE(a, b, c);
 
@@ -1240,8 +1248,8 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
     const uint16_t mask_from_texel = psx_gpu_mask_from_texel(gpu);
     const int dither_on = psx_gpu_dither_enabled(gpu);
 
-    for (int y = ymin; y < ymax; y++) {
-        for (int x = xmin; x < xmax; x++) {
+    for (int y = y_begin; y < y_end; y++) {
+        for (int x = x_begin; x < x_end; x++) {
             /* PER-PIXEL, and this reset is the whole point.
 
                `transp` used to be declared once per primitive and then ASSIGNED inside this
@@ -1257,12 +1265,6 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
                write 0; see psx_gpu_mask_from_texel(). Per-pixel for the same reason `transp`
                is — latching it per primitive would reintroduce exactly the bug above. */
             uint16_t stp = 0;
-            int bc = (x >= gpu->draw_x1) && (x <= gpu->draw_x2) &&
-                     (y >= gpu->draw_y1) && (y <= gpu->draw_y2);
-
-            if (!bc)
-                continue;
-
             if (mask_check && (gpu->vram[x + (y * 1024)] & 0x8000))
                 continue;
 
@@ -1468,17 +1470,28 @@ void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
     data.v0.x = CLAMP(data.v0.x, -1024, 1024);
     data.v0.y = CLAMP(data.v0.y, -1024, 1024);
 
-    PSX_PERF_RASTER(PSX_PERF_PRIM_RECT, xmax - data.v0.x, ymax - data.v0.y);
+    const int x_begin = max(data.v0.x, max((int)gpu->draw_x1, 0));
+    const int y_begin = max(data.v0.y, max((int)gpu->draw_y1, 0));
+    const int x_end = min(xmax, min((int)gpu->draw_x2 + 1, PSX_GPU_FB_WIDTH));
+    const int y_end = min(ymax, min((int)gpu->draw_y2 + 1, PSX_GPU_FB_HEIGHT));
 
-    int32_t xc = 0, yc = 0;
+    if (x_begin >= x_end || y_begin >= y_end)
+        return;
+
+    PSX_PERF_RASTER(PSX_PERF_PRIM_RECT, x_end - x_begin, y_end - y_begin);
+
+    const int32_t x_offset = x_begin - data.v0.x;
+    int32_t yc = y_begin - data.v0.y;
 
     const int mask_check = psx_gpu_mask_check(gpu);
     const uint16_t mask_set = psx_gpu_mask_set(gpu) ? 0x8000 : 0x0000;
     /* GP0(E6) bit 0 == 0 means "take the written mask bit from the texel" (gpu.h). */
     const uint16_t mask_from_texel = psx_gpu_mask_from_texel(gpu);
 
-    for (int16_t y = data.v0.y; y < ymax; y++) {
-        for (int16_t x = data.v0.x; x < xmax; x++) {
+    for (int y = y_begin; y < y_end; y++) {
+        int32_t xc = x_offset;
+
+        for (int x = x_begin; x < x_end; x++) {
             /* PER-PIXEL, and this reset is the whole point.
 
                `transp` used to be declared once per primitive and then ASSIGNED inside this
@@ -1492,12 +1505,6 @@ void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
             int transp = transp_default;
             /* The source pixel's mask bit; see psx_gpu_mask_from_texel(). */
             uint16_t stp = 0;
-            int bc = (x >= gpu->draw_x1) && (x <= gpu->draw_x2) &&
-                     (y >= gpu->draw_y1) && (y <= gpu->draw_y2);
-
-            if (!bc)
-                goto skip;
-
             if (mask_check && (gpu->vram[x + (y * 1024)] & 0x8000))
                 goto skip;
 
@@ -1591,8 +1598,6 @@ void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
 
             ++xc;
         }
-
-        xc = 0;
 
         ++yc;
     }
