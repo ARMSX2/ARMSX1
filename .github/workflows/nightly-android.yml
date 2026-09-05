@@ -1,0 +1,92 @@
+name: Nightly Android
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-android
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    if: github.repository == 'ARMSX2/ARMSX1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      NDK_VERSION: 27.0.12077973
+      SIGNING_CERT_SHA256: bad1a0d3b2f42019599feb7e1a761b63b0ee12f8cc4e90717cf3559fd977ca80
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: android-compose
+          fetch-depth: 0
+
+      - name: Check out native dependencies
+        run: git submodule update --init --depth 1 third_party/SDL third_party/libchdr
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-36
+            build-tools;36.0.0
+            cmake;3.22.1
+            ndk;27.0.12077973
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ARMSX_ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/debug.keystore
+          keytool -list -keystore android/app/debug.keystore -storepass android -alias androiddebugkey >/dev/null
+
+      - name: Set version
+        id: version
+        run: |
+          build_date=$(date -u +%Y%m%d)
+          version_code=$(( $(date -u +%s) - 1700000000 ))
+          tag="nightly-${build_date}.${GITHUB_RUN_NUMBER}"
+          echo "code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/$NDK_VERSION"
+          ./gradlew --no-daemon :app:assembleGithubRelease "-Parmsx.versionCode=${{ steps.version.outputs.code }}" "-Parmsx.versionName=${{ steps.version.outputs.tag }}"
+
+      - name: Verify APK
+        id: apk
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          source_apk=android/app/build/outputs/apk/github/release/app-github-release.apk
+          release_apk="android/app/build/outputs/apk/github/release/ARMSX1-${TAG}-arm64-v8a.apk"
+          apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$apksigner" verify "$source_apk"
+          certificate_sha256=$("$apksigner" verify --print-certs "$source_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          test "$certificate_sha256" = "$SIGNING_CERT_SHA256"
+          cp "$source_apk" "$release_apk"
+          echo "path=$release_apk" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK: ${{ steps.apk.outputs.path }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" "$APK" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "ARMSX1 $TAG" --notes "Automated nightly build from $SOURCE_SHA." --prerelease
