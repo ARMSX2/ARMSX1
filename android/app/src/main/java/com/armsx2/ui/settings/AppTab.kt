@@ -337,6 +337,46 @@ fun AppTab() {
 
         BackupRestoreRows()
 
+        // Companion-app access to the recently-played list, over the RecentGamesContentProvider.
+        // Off by default and deliberately so: the provider is exported without a permission (it
+        // has to be, for a third-party companion to reach it), so the list — including the file
+        // URIs, which carry your folder layout — is only readable once you say so.
+        //
+        // The switch reads "is anything being shared right now", not just the share-with-everything
+        // flag, because an app can also be allowed on its own from its consent prompt. Were it
+        // wired to the flag alone it would sit at off while a companion was actively reading, and
+        // there would be no control left to turn that off with.
+        run {
+            val shareKey = com.armsx2.data.library.RecentGamesContentProvider.KEY_SHARE_ENABLED
+            val prefs = com.armsx2.runtime.MainActivityRuntime.prefs
+            val shareRecent = remember {
+                mutableStateOf(
+                    prefs.getBoolean(shareKey, false) ||
+                        com.armsx2.data.library.RecentGamesAccess.grantedPackages(prefs).isNotEmpty(),
+                )
+            }
+            ToggleRow(
+                label = str("app.shareRecentGames"),
+                value = shareRecent.value,
+                description = str("app.shareRecentGames.desc"),
+            ) { on ->
+                shareRecent.value = on
+                // commit(), not apply(): the reader is a DIFFERENT process that can be queried
+                // the moment this returns, and apply() only guarantees the in-memory value.
+                runCatching {
+                    prefs.edit().putBoolean(shareKey, on).commit()
+                }
+                if (!on) {
+                    // Off has to mean off. Leaving the per-app grants behind would keep whoever
+                    // already asked reading the library from a switch the user just turned off.
+                    com.armsx2.data.library.RecentGamesAccess.revokeAll(prefs)
+                }
+                // Either direction is the user revisiting the decision, so earlier refusals stop
+                // counting: a companion that was told no once can ask again.
+                com.armsx2.data.library.RecentGamesAccess.clearDeclined(prefs)
+            }
+        }
+
         ToggleRow(
             label = str("app.blockHome"),
             value = com.armsx2.ui.ScreenPinning.enabled.value,
