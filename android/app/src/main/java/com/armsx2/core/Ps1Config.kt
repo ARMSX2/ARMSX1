@@ -30,14 +30,33 @@ object Ps1Config {
     fun userBiosFile(context: Context): File = File(context.filesDir, "user_bios.bin")
 
     /** Copy a SAF-picked BIOS into app storage and return the imported file (or null on failure). */
-    fun importBios(context: Context, uri: Uri): File? = try {
+    fun importBios(context: Context, uri: Uri): File? {
         val target = userBiosFile(context)
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            target.outputStream().use { input.copyTo(it) }
+        val staging = File(target.parentFile, "${target.name}.importing")
+        return try {
+            val input = context.contentResolver.openInputStream(uri) ?: return null
+            input.use { source ->
+                staging.outputStream().use { output ->
+                    val buffer = ByteArray(8192)
+                    var bytes = 0L
+                    while (true) {
+                        val count = source.read(buffer)
+                        if (count < 0) break
+                        bytes += count
+                        if (bytes > 1024 * 1024) return null
+                        output.write(buffer, 0, count)
+                    }
+                    output.fd.sync()
+                }
+            }
+            if (staging.length() != 512L * 1024 && staging.length() != 1024L * 1024) return null
+            android.system.Os.rename(staging.absolutePath, target.absolutePath)
+            target
+        } catch (_: Exception) {
+            null
+        } finally {
+            staging.delete()
         }
-        if (target.length() > 0) target else null
-    } catch (_: Exception) {
-        null
     }
 
     /** A PS1 memory-card file (slot1.mcd / slot2.mcd) under the native pref path. */

@@ -86,14 +86,14 @@ fun Ps1VideoTab() {
         // rasteriser can render above native resolution.
         ToggleRow(
             str("renderer.hwRasterizer.label"),
-            s.hwRasterizer,
+            s.hwRasterizer || s.pgxp,
             // The old text warned that this "costs roughly twice the CPU even at 1x, and more as
             // the scale rises". That describes the CPU FALLBACK rasteriser, not the one that
             // normally runs: the GLES path draws on the GPU, so raising the scale costs GPU time
             // and essentially no extra CPU (measured: 2x was 90.9 fps against 91.4 at 1x). The
             // warning told users the opposite of the truth about the feature's whole point.
             description = str("renderer.hwRasterizer.description"),
-        ) { v -> editor.update { it.copy(hwRasterizer = v) } }
+        ) { v -> editor.update { it.copy(hwRasterizer = v, pgxp = it.pgxp && v) } }
         SettingsDivider()
 
         ToggleRow(
@@ -101,8 +101,7 @@ fun Ps1VideoTab() {
             s.pgxp,
             description = str("renderer.pgxp.description"),
         ) { v ->
-            editor.update { it.copy(pgxp = v) }
-            runCatching { kr.co.iefriends.pcsx2.NativeApp.setPgxpEnabled(v) }
+            editor.update { it.copy(pgxp = v, hwRasterizer = it.hwRasterizer || v) }
         }
         SettingsDivider()
 

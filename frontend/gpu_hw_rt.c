@@ -1,4 +1,5 @@
 #include "gpu_hw_rt.h"
+#include "gpu_pgxp.h"
 
 #ifdef USE_HARDWARE
 
@@ -102,9 +103,13 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
     }
 
     vertex_t a = v0, b, c;
+    const int pgxp = armsx_pgxp_triangle_valid(&v0, &v1, &v2);
+    const float winding = pgxp
+        ? RT_EDGE(v0.px, v0.py, v1.px, v1.py, v2.px, v2.py)
+        : (float)RT_EDGE(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y);
 
     /* Winding fix on the unscaled vertices, exactly as gpu.c:271-277. */
-    if (RT_EDGE(v0.x, v0.y, v1.x, v1.y, v2.x, v2.y) < 0) {
+    if (winding < 0) {
         b = v2;
         c = v1;
     } else {
@@ -134,6 +139,21 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
     int scx = cx * s, scy = cy * s;
 
     float area = (float)RT_EDGE(sax, say, sbx, sby, scx, scy);
+    float pax = 0.0f, pay = 0.0f, pbx = 0.0f, pby = 0.0f, pcx = 0.0f, pcy = 0.0f;
+    float iw0 = 1.0f, iw1 = 1.0f, iw2 = 1.0f;
+    const int perspective = pgxp && armsx_pgxp_depth_valid(&a, &b, &c);
+
+    if (pgxp) {
+        pax = (a.px + gpu->off_x) * s; pay = (a.py + gpu->off_y) * s;
+        pbx = (b.px + gpu->off_x) * s; pby = (b.py + gpu->off_y) * s;
+        pcx = (c.px + gpu->off_x) * s; pcy = (c.py + gpu->off_y) * s;
+        area = RT_EDGE(pax, pay, pbx, pby, pcx, pcy);
+        if (perspective) {
+            iw0 = 1.0f / a.pw; iw1 = 1.0f / b.pw; iw2 = 1.0f / c.pw;
+        }
+    }
+    if (area <= 0.0f)
+        return;
 
     /* Read from the same helpers the software path uses so the two cannot drift. */
     const int mask_check = psx_gpu_mask_check(gpu);
@@ -155,6 +175,13 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
     int y_begin = ymin * s, y_end = ymax * s;
     int x_begin = xmin * s, x_end = xmax * s;
 
+    if (pgxp) {
+        x_begin = (int)floorf(fminf(pax, fminf(pbx, pcx)));
+        y_begin = (int)floorf(fminf(pay, fminf(pby, pcy)));
+        x_end = (int)ceilf(fmaxf(pax, fmaxf(pbx, pcx)));
+        y_end = (int)ceilf(fmaxf(pay, fmaxf(pby, pcy)));
+    }
+
     if (y_begin < clip_y1) y_begin = clip_y1;
     if (y_end > (clip_y2 + 1)) y_end = clip_y2 + 1;
     if (x_begin < clip_x1) x_begin = clip_x1;
@@ -170,19 +197,22 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
             if (mask_check && (rt->rt[x + (y * rt->rt_w)] & 0x8000))
                 continue;
 
-            float z0 = (float)RT_EDGE(sbx, sby, scx, scy, x, y);
+            float z0 = pgxp ? RT_EDGE(pbx, pby, pcx, pcy, x, y)
+                            : (float)RT_EDGE(sbx, sby, scx, scy, x, y);
 
-            if (RT_TL(z0, sbx, sby, scx, scy))
+            if (pgxp ? RT_TL(z0, pbx, pby, pcx, pcy) : RT_TL(z0, sbx, sby, scx, scy))
                 continue;
 
-            float z1 = (float)RT_EDGE(scx, scy, sax, say, x, y);
+            float z1 = pgxp ? RT_EDGE(pcx, pcy, pax, pay, x, y)
+                            : (float)RT_EDGE(scx, scy, sax, say, x, y);
 
-            if (RT_TL(z1, scx, scy, sax, say))
+            if (pgxp ? RT_TL(z1, pcx, pcy, pax, pay) : RT_TL(z1, scx, scy, sax, say))
                 continue;
 
-            float z2 = (float)RT_EDGE(sax, say, sbx, sby, x, y);
+            float z2 = pgxp ? RT_EDGE(pax, pay, pbx, pby, x, y)
+                            : (float)RT_EDGE(sax, say, sbx, sby, x, y);
 
-            if (RT_TL(z2, sax, say, sbx, sby))
+            if (pgxp ? RT_TL(z2, pax, pay, pbx, pby) : RT_TL(z2, sax, say, sbx, sby))
                 continue;
 
             uint16_t color = 0;
@@ -227,6 +257,12 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
                 /* z/area is scale-invariant (both scale by S^2), so UVs stay native. */
                 float tx = ((z0 * a.tx) + (z1 * b.tx) + (z2 * c.tx)) / area;
                 float ty = ((z0 * a.ty) + (z1 * b.ty) + (z2 * c.ty)) / area;
+                if (perspective) {
+                    const float q0 = z0 * iw0, q1 = z1 * iw1, q2 = z2 * iw2;
+                    const float qsum = q0 + q1 + q2;
+                    tx = (q0 * a.tx + q1 * b.tx + q2 * c.tx) / qsum;
+                    ty = (q0 * a.ty + q1 * b.ty + q2 * c.ty) / qsum;
+                }
 
                 /* Sampled from gpu->vram, which is native and kept authoritative by the
                    software shadow. Polygons filter, sprites do not — gpu.c:359 vs :498. */

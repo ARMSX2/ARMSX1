@@ -498,13 +498,6 @@ public class NativeApp {
 	 *  {@link #setDisplayAspect(int)}. */
 	public static native void setStretchMode(boolean enabled);
 
-	/** PGXP: sub-pixel polygon precision captured from the GTE (psx/pgxp.c). Real
-	 *  native, safe to flip while a game runs; new geometry picks it up within a
-	 *  frame. Boot-time value comes from settings.toml ({@code [video] pgxp});
-	 *  persist UI changes there so they survive a relaunch. Only the hardware
-	 *  rasterizer consumes the precision — the software path stays integer. */
-	public static native void setPgxpEnabled(boolean enabled);
-
 	/** Widescreen hack: scales the GTE's X projection so 3D geometry fills a 16:9
 	 *  display instead of being stretched into it (psx/cpu.c). Real native, safe to
 	 *  flip while a game runs. 2D and UI are not projected through the GTE, so they

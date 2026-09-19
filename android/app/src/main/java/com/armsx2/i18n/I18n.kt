@@ -318,6 +318,8 @@ val EN: Map<String, String> = mapOf(
     "app.logs.desc" to "Capture emulator, interpreter, renderer and crash logs into a file you choose. The file is refreshed every time the app starts.",
     "app.logs.saved" to "Log file saved",
     "app.logs.failed" to "Could not write the log file",
+    "app.logs.export" to "Save diagnostic report now",
+    "app.logs.diagnostic" to "Diagnostic build: detailed boot, controller, audio and crash capture is active. Save a report after reproducing the problem. Logging can reduce performance.",
     "app.reset" to "Reset app",
     "app.reset.desc" to "Restore every setting to its default. Your games and saves are kept.",
     "app.reset.title" to "Reset the whole app?",
@@ -1328,17 +1330,15 @@ val EN: Map<String, String> = mapOf(
     "renderer.gpuBackend.vulkan" to "Vulkan",
     "renderer.hwRasterizer.label" to "Hardware rasterizer",
     "renderer.hwRasterizer.description" to
-        "Draws the PlayStation's graphics on the GPU so the internal resolution can be raised " +
-        "above native — this is what makes 2x and higher possible. Raising the scale costs GPU " +
-        "time, not CPU. At 1x it looks identical to the software rasteriser, so turn it on when " +
-        "you want to upscale. On a device with no usable GL context it falls back to a CPU " +
-        "rasteriser, which IS slower.",
+        "Enables resolution scaling and PGXP. Uses GPU acceleration when compatible with the " +
+        "device and accuracy settings; otherwise a CPU rasterizer handles scaling or PGXP. " +
+        "The CPU fallback can reduce speed, especially above 1x. Restart the game to apply.",
     "renderer.pgxp.label" to "PGXP geometry precision",
     "renderer.pgxp.description" to
-        "Uses the console's full-precision vertex math instead of the truncated coordinates games " +
-        "were forced to use — removes the PS1's characteristic wobbling polygons and swimming " +
-        "textures, and enables perspective-correct texturing. Hardware rasteriser only. Applies " +
-        "live; a fraction of a second of geometry re-transforms on enable.",
+        "Reduces polygon wobble and texture warping using tracked GTE vertices. Enables the " +
+        "hardware rasterizer, with a CPU fallback when the GPU path is unavailable. The CPU " +
+        "fallback can reduce speed; start at 1x resolution. Some games may have visual glitches. " +
+        "Off by default. Restart the game after changing this setting.",
     "renderer.maskBit.label" to "GPU mask bit",
     "renderer.maskBit.description" to
         "Honour the PlayStation's draw-mask exactly like real hardware. Games that use it (Silent " +

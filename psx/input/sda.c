@@ -30,6 +30,25 @@ void psxi_sda_init(psxi_sda_t* sda, uint16_t model) {
     sda->adc3 = 0x80;
 }
 
+void psxi_sda_reset_transfer(psxi_sda_t* sda) {
+    sda->state = SDA_STATE_TX_HIZ;
+    sda->tx_data = 0xff;
+    sda->tx_data_ready = 0;
+    if (sda->model == 0xf3)
+        sda->model = sda->prev_model;
+}
+
+uint16_t psxi_sda_button_state(const psxi_sda_t* sda) {
+    uint16_t buttons = sda->sw;
+    if (sda->sa_mode == SA_MODE_DIGITAL) {
+        if (sda->adc2 <= 64) buttons &= ~PSXI_SW_SDA_PAD_LEFT;
+        if (sda->adc2 >= 192) buttons &= ~PSXI_SW_SDA_PAD_RIGHT;
+        if (sda->adc3 <= 64) buttons &= ~PSXI_SW_SDA_PAD_UP;
+        if (sda->adc3 >= 192) buttons &= ~PSXI_SW_SDA_PAD_DOWN;
+    }
+    return buttons;
+}
+
 uint32_t psxi_sda_read(void* udata) {
     psxi_sda_t* sda = (psxi_sda_t*)udata;
 
@@ -37,7 +56,7 @@ uint32_t psxi_sda_read(void* udata) {
         case SDA_STATE_TX_HIZ: sda->tx_data = 0xff; break;
         case SDA_STATE_TX_IDL: sda->tx_data = sda->model; break;
         case SDA_STATE_TX_IDH: sda->tx_data = 0x5a; break;
-        case SDA_STATE_TX_SWL: sda->tx_data = sda->sw & 0xff; break;
+        case SDA_STATE_TX_SWL: sda->tx_data = psxi_sda_button_state(sda) & 0xff; break;
 
         // Digital pad stops sending data here
         case SDA_STATE_TX_SWH: {
@@ -49,7 +68,7 @@ uint32_t psxi_sda_read(void* udata) {
                 sda->state = SDA_STATE_TX_HIZ;
             }
 
-            return sda->sw >> 8;
+            return psxi_sda_button_state(sda) >> 8;
         } break;
 
         case SDA_STATE_TX_ADC0: sda->tx_data = sda->adc0; break;

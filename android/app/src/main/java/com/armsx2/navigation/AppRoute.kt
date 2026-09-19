@@ -33,6 +33,7 @@ enum class SettingsCategory {
     // Split out of Audio, which used to host the BIOS tab because there was no audio surface to
     // put there. There is one now ([audio] in settings.toml), so the two are separate chips.
     Bios,
+    MemoryCards,
     Controls,
     Hotkeys,
     Network,

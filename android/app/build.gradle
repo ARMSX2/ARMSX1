@@ -11,6 +11,7 @@ apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 
 def repoDebugKeystore = file("debug.keystore")
 def hasRepoDebugKeystore = repoDebugKeystore.exists()
+def diagnosticBuild = providers.gradleProperty('armsx.diagnostics').map { it.toBoolean() }.getOrElse(false)
 
 // ---- Discord rich presence ----------------------------------------------------------------
 //
@@ -81,6 +82,7 @@ android {
         targetSdk rootProject.ext.targetSdkVersion
         versionCode armsxVersionCode
         versionName armsxVersionName
+        buildConfigField "boolean", "DIAGNOSTIC_BUILD", diagnosticBuild.toString()
         vectorDrawables.useSupportLibrary = true
         // STORAGE_ALL_FILES is declared per flavor below. Game libraries never need it: they use
         // persisted SAF grants. Only the sideload build exposes an optional arbitrary writable
@@ -284,6 +286,7 @@ def sdkCmakeBinDirs = new File(androidSdkDir, "cmake").listFiles()
 // Gradle 9 removed Project.exec() from task actions; ExecOperations is the supported
 // replacement and has to be injected, which means a real task class rather than a closure.
 abstract class BuildNativeLibraries extends DefaultTask {
+    @Input abstract Property<Boolean> getDiagnosticBuild()
     @InputFile abstract RegularFileProperty getBuildScript()
     @InputFiles
     @PathSensitive(PathSensitivity.RELATIVE)
@@ -300,6 +303,7 @@ abstract class BuildNativeLibraries extends DefaultTask {
         execOperations.exec { spec ->
             spec.workingDir = repoRoot.get().asFile
             spec.commandLine "./build.sh", "android"
+            spec.environment "ARMSX_DIAGNOSTIC_BUILD", getDiagnosticBuild().get() ? "1" : "0"
             if (!extra.isEmpty()) {
                 spec.environment "PATH", (extra + [System.getenv("PATH") ?: ""]).join(File.pathSeparator)
             }
@@ -311,6 +315,7 @@ tasks.register("prepareNativeBinaries", BuildNativeLibraries) {
     group = "native"
     description = "Build SDL2/libarmsx via build.sh android."
     buildScript.set(new File(repoRootDir, "build.sh"))
+    getDiagnosticBuild().set(project.providers.gradleProperty('armsx.diagnostics').map { it.toBoolean() }.orElse(false))
     // The native task used to declare only build.sh as an input. Gradle therefore reused a
     // stale libarmsx.so after C/C++ edits and could package an APK that did not contain the
     // source being tested. Track the native source/configuration surface while excluding build

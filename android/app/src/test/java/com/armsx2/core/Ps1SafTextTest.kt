@@ -51,4 +51,17 @@ class Ps1SafTextTest {
         assertEquals("", Ps1SafText.extension("game.iso/../../outside"))
         assertEquals("", Ps1SafText.extension("game.extension-is-too-long"))
     }
+
+    @Test
+    fun bomAndNestedReferencesRemainResolvable() {
+        assertEquals(listOf("discs/Game.cue"), Ps1SafText.playlistEntries("\uFEFF#EXTM3U\ndiscs/Game.cue"))
+        assertEquals(listOf("tracks\\Game.bin"), Ps1SafText.cueReferences("\uFEFFFILE \"tracks\\Game.bin\" BINARY"))
+        assertEquals(listOf("tracks", "Game.bin"), Ps1SafText.relativeSegments(".\\tracks\\Game.bin"))
+        assertEquals(listOf("..", "Game.bin"), Ps1SafText.relativeSegments("../Game.bin"))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun absoluteReferencesAreRejected() {
+        Ps1SafText.relativeSegments("/storage/elsewhere/Game.bin")
+    }
 }

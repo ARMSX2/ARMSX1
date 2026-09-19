@@ -10,7 +10,7 @@
     authoritative and untouched (PSX_GPU_BACKEND_SOFTWARE_SHADOW), so texture fetches,
     GPUREAD drains and save states all keep working with no coherency layer or readback stall.
 
-    At S == 1 the render target is required to be BYTE-IDENTICAL to gpu->vram. That is the
+    With PGXP disabled, at S == 1 the render target must be byte-identical to gpu->vram. That is the
     correctness gate for the coordinate model: scaling must be a no-op at 1x.
     tests/gpu_renderer_parity.c enforces it.
 

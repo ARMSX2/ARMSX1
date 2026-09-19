@@ -35,6 +35,8 @@ static uint32_t psx_cpu_cache_index(uint32_t address) {
 
 static void psx_cpu_bus_write_observer(void* udata, uint32_t address, uint32_t size) {
     psx_cpu_invalidate_range((psx_cpu_t*)udata, address, size);
+    if (psx_pgxp_active())
+        psx_pgxp_memory_written(address, size);
 }
 
 static const uint32_t g_psx_cpu_cop0_write_mask_table[] = {
@@ -134,6 +136,8 @@ static inline void psx_gte_i_ncct(psx_cpu_t*);
 #define R_RA (cpu->r[31])
 
 #define DO_PENDING_LOAD { \
+    if (psx_pgxp_active()) \
+        psx_pgxp_cpu_load_commit(cpu->load_d, cpu->load_v); \
     cpu->r[cpu->load_d] = cpu->load_v; \
     R_R0 = 0; \
     cpu->load_v = 0xffffffff; \
@@ -624,6 +628,8 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
     int cyc = cpu->execution_mode == PSX_CPU_INTERPRETER
         ? psx_cpu_execute(cpu)
         : psx_cpu_execute_cached(cpu);
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_instruction(cpu->opcode);
 
     if (!cyc) {
         printf("psxe: Illegal instruction %08x at %08x (next=%08x, saved=%08x)\n", cpu->opcode, cpu->pc, cpu->next_pc, cpu->saved_pc);
@@ -934,6 +940,8 @@ static inline void psx_cpu_i_lw(psx_cpu_t* cpu) {
     } else {
         cpu->load_d = T;
         cpu->load_v = psx_bus_read32(cpu->bus, addr);
+        if (psx_pgxp_active())
+            psx_pgxp_cpu_lw(T, addr, cpu->load_v);
     }
 }
 
@@ -1069,6 +1077,8 @@ static inline void psx_cpu_i_sw(psx_cpu_t* cpu) {
     uint32_t t = cpu->r[T];
     uint32_t addr = s + IMM16S;
 
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_store_begin(T);
     DO_PENDING_LOAD;
 
     // Cache isolated
@@ -1079,12 +1089,12 @@ static inline void psx_cpu_i_sw(psx_cpu_t* cpu) {
     if (addr & 0x3) {
         psx_cpu_exception(cpu, CAUSE_ADES);
     } else {
+        psx_bus_write32(cpu->bus, addr, t);
         /* PGXP: attach precision when rt still holds a tracked SXY word, and
            invalidate any stale entry this store overwrites either way. */
         if (psx_pgxp_active())
             psx_pgxp_cpu_sw(addr, t, T);
 
-        psx_bus_write32(cpu->bus, addr, t);
     }
 }
 
@@ -1714,12 +1724,12 @@ static inline void psx_cpu_i_swc2(psx_cpu_t* cpu) {
         psx_cpu_exception(cpu, CAUSE_ADES);
     } else {
         uint32_t value = gte_read_register(cpu, T);
+        psx_bus_write32(cpu->bus, addr, value);
 
         /* PGXP: an SXY store is the main road a precise vertex takes into RAM. */
         if (psx_pgxp_active())
             psx_pgxp_cpu_swc2(addr, value, T);
 
-        psx_bus_write32(cpu->bus, addr, value);
     }
 }
 

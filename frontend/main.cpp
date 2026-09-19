@@ -2623,9 +2623,7 @@ class ArmsxSession {
             }
         }
 
-        // PGXP. Applied whether on or off so a settings change between runs
-        // always lands; the setter itself is idempotent and logs transitions.
-        psx_pgxp_set_enabled(settings.pgxp ? 1 : 0);
+        psx_pgxp_set_enabled(0);
 
         // Widescreen hack (psx/cpu.c GTE). Same reasoning as PGXP: core-global, applied
         // unconditionally so a change between runs always lands, and idempotent.
@@ -2653,7 +2651,7 @@ class ArmsxSession {
         // Internal-resolution rasterizer. Entirely opt-in: with [video] renderer =
         // "software" (the default) no backend is installed and psx/dev/gpu.c behaves
         // exactly as it always has. See frontend/gpu_hw_rt.h.
-        if (settings.hw_rasterizer) {
+        if (settings.hw_rasterizer || settings.pgxp) {
             // Two implementations of one ABI. The GLES one rasterizes on the GPU, so its
             // CPU cost does not grow with the internal scale at all; the CPU one is
             // graphics-API-independent and is the fallback when there is no GL context (a
@@ -2677,8 +2675,8 @@ class ArmsxSession {
                 }
             }
 
-            if (!hw_rt_backend_ &&
-                armsx_hw_gl_use_cpu_fallback(mode, settings.internal_scale)) {
+            if (!hw_rt_backend_ && ((settings.pgxp && mode != 3) ||
+                armsx_hw_gl_use_cpu_fallback(mode, settings.internal_scale))) {
                 hw_rt_backend_ = armsx_hw_rt_create(gpu, settings.internal_scale);
                 hw_rt_is_gl_ = false;
             }
@@ -2704,6 +2702,11 @@ class ArmsxSession {
                               settings.internal_scale);
             }
         }
+        psx_pgxp_set_enabled(settings.pgxp && hw_rt_backend_ ? 1 : 0);
+        psxe_diag_logf("renderer", "PGXP requested=%s active=%s rasterizer=%s",
+                       settings.pgxp ? "true" : "false",
+                       psx_pgxp_enabled() ? "true" : "false",
+                       hw_rt_backend_ ? (hw_rt_is_gl_ ? "GLES3" : "CPU") : "software");
 #endif
 
         psx_gpu_set_event_callback(gpu, GPU_EVENT_DMODE, nullptr);
@@ -2771,8 +2774,16 @@ class ArmsxSession {
 
         const std::string slot1 = std::string(psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "") + "slot1.mcd";
         const std::string slot2 = std::string(psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "") + "slot2.mcd";
-        psx_pad_attach_mcd(psx_->pad, 0, slot1.c_str());
-        psx_pad_attach_mcd(psx_->pad, 1, slot2.c_str());
+        const int card1 = psx_pad_attach_mcd(psx_->pad, 0, slot1.c_str());
+        const int card2 = psx_pad_attach_mcd(psx_->pad, 1, slot2.c_str());
+        psxe_diag_logf("memory-card", "attach slot1=%d slot2=%d directory=%s",
+                       card1, card2, psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "");
+        if (card1 || card2) {
+            error = "Unable to open memory card slot " + std::string(card1 ? "1" : "2") +
+                    ". Export the existing card from Settings > Memory Cards before replacing it.";
+            destroy();
+            return false;
+        }
 
         switch (request.kind) {
             case LaunchKind::Disc:
@@ -2786,15 +2797,31 @@ class ArmsxSession {
                 title_ = request.label.empty() ? StemToTitle(request.path) : request.label;
                 break;
 
-            case LaunchKind::Exe:
+            case LaunchKind::Exe: {
+                const Uint64 boot_started = SDL_GetTicks64();
+                unsigned boot_steps = 0;
                 while (psx_->cpu->pc != 0x80030000) {
                     psx_update(psx_);
+                    if ((++boot_steps & 0xffffu) == 0) {
+                        bool cancelled;
+                        {
+                            std::lock_guard<std::mutex> lock(g_host_control_lock);
+                            cancelled = g_host_shutdown_pending;
+                        }
+                        if (cancelled || SDL_GetTicks64() - boot_started >= 30'000) {
+                            error = cancelled ? "Executable boot cancelled." :
+                                    "The BIOS did not reach executable boot within 30 seconds. Check the BIOS image.";
+                            destroy();
+                            return false;
+                        }
+                    }
                 }
                 psx_load_exe(psx_, request.path.string().c_str());
                 exe_path_ = request.path;
                 disc_path_.clear();
                 title_ = request.label.empty() ? StemToTitle(request.path) : request.label;
                 break;
+            }
 
             case LaunchKind::Bios:
                 disc_path_.clear();
@@ -3616,7 +3643,8 @@ class ArmsxSession {
         hw_rt_backend_ = nullptr;
         hw_rt_is_gl_ = false;
 
-        if (gpu && armsx_hw_gl_use_cpu_fallback(rasterizer_mode_, internal_scale_)) {
+        if (gpu && ((psx_pgxp_enabled() && rasterizer_mode_ != 3) ||
+                    armsx_hw_gl_use_cpu_fallback(rasterizer_mode_, internal_scale_))) {
             hw_rt_backend_ = armsx_hw_rt_create(gpu, internal_scale_);
 
             if (hw_rt_backend_) {
@@ -3627,6 +3655,7 @@ class ArmsxSession {
             }
         }
 
+        psx_pgxp_set_enabled(0);
         log_info("Fell back to the software rasterizer.");
         texture_snapshot_.clear();
         frame_uploaded_ = false;
@@ -4701,6 +4730,13 @@ class ArmsxSession {
             return;
         }
 
+        std::error_code size_error;
+        const auto size = std::filesystem::file_size(path, size_error);
+        if (!size_error && size >= 2u * 1024u * 1024u) {
+            std::error_code rotate_error;
+            std::filesystem::rename(path, path + ".previous", rotate_error);
+            if (rotate_error) return;
+        }
         audio_diag_file_ = std::fopen(path.c_str(), "a");
         if (!audio_diag_file_) {
             return;
@@ -4774,6 +4810,14 @@ class ArmsxSession {
         }
 
         audio_diag_poll_ = kAudioDiagPollFrames;
+
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+        if (audio_diag_budget_ > 0 && audio_dev_) {
+            audio_diag_budget_--;
+            audioDiagBegin();
+            return;
+        }
+#endif
 
         std::string path;
         if (!audioDiagPath(path, "audio_diag")) {
@@ -6610,23 +6654,31 @@ class ArmsxApp {
     }
 
     void applyLoggingSettings(const char* reason) {
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+        const bool enable_logs = true;
+        const int effective_level = LOG_DEBUG;
+#else
         const bool enable_logs = settings_.logging_enabled;
+        const int effective_level = settings_.log_level;
+#endif
+#if !defined(ARMSX_DIAGNOSTIC_BUILD)
         settings_.quiet = !enable_logs;
+#endif
 
         if (!enable_logs && psxe_diag_is_enabled()) {
             psxe_diag_logf("diag", "Debug logging disabled reason=%s", reason ? reason : "(none)");
         }
 
         psxe_diag_set_enabled(enable_logs ? 1 : 0);
-        log_set_level(settings_.log_level);
-        log_set_quiet(settings_.quiet ? 1 : 0);
+        log_set_level(effective_level);
+        log_set_quiet(enable_logs ? 0 : 1);
 
         if (enable_logs) {
             psxe_diag_logf(
                 "diag",
                 "Debug logging enabled reason=%s level=%s path=%s",
                 reason ? reason : "(none)",
-                log_level_string(settings_.log_level),
+                log_level_string(effective_level),
                 diagnosticsLogPath().string().c_str()
             );
         }
@@ -7789,6 +7841,26 @@ class ArmsxApp {
                     stick == 0 ? PSXI_AX_SDA_LEFT_HORZ : PSXI_AX_SDA_RIGHT_HORZ, x);
                 psx_pad_analog_change_player(pad, 0, command.player,
                     stick == 0 ? PSXI_AX_SDA_LEFT_VERT : PSXI_AX_SDA_RIGHT_VERT, y);
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+                static uint64_t last_sample[kHostMaxPlayers][2] = {};
+                const int player = std::clamp(command.player, 0, kHostMaxPlayers - 1);
+                const uint64_t now = SDL_GetTicks64();
+                if (now - last_sample[player][stick] >= 250) {
+                    last_sample[player][stick] = now;
+                    const psx_input_t* input = pad->joy_slot[0];
+                    const psxi_sda_t* sda = nullptr;
+                    if (input && input->udata) {
+                        if (input->kind == PSX_INPUT_KIND_SDA && command.player == 0)
+                            sda = static_cast<const psxi_sda_t*>(input->udata);
+                        else if (input->kind == PSX_INPUT_KIND_MULTITAP && command.player >= 0 &&
+                                 command.player < PSXI_MULTITAP_SLOTS)
+                            sda = &static_cast<const psxi_multitap_t*>(input->udata)->sub[command.player];
+                    }
+                    psxe_diag_logf("input", "applied player=%d stick=%d x=%u y=%u connected=%d analog=%d buttons=%04x",
+                                   command.player, stick, x, y, sda != nullptr,
+                                   sda ? sda->sa_mode : -1, sda ? psxi_sda_button_state(sda) : 0xffff);
+                }
+#endif
                 continue;
             }
 

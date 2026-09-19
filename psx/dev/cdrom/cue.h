@@ -81,7 +81,7 @@ typedef struct {
     list_t* files;
     list_t* tracks;
 
-    char c;
+    int c;
     FILE* file;
 } cue_t;
 

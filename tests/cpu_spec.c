@@ -65,6 +65,7 @@
 #include <string.h>
 
 #include "psx/psx.h"
+#include "psx/pgxp.h"
 
 #define TEST_PC       0x80001000u
 #define TEST_OFFSET   0x00001000u
@@ -1629,6 +1630,56 @@ static int case_cache_isolation(pair_t* p) {
 
 /* ================================================================================== */
 
+static int case_pgxp_provenance(pair_t* p) {
+    const uint32_t word = (20u << 16) | 10u;
+    const uint32_t prog[] = {
+        (0x12u << 26) | (2u << 16) | (14u << 11),
+        enc_i(OP_SW, 1, 2, 0),
+        enc_i(OP_SW, 1, 2, 4),
+        enc_i(OP_LW, 1, 3, 4),
+        enc_i(OP_SW, 1, 3, 8),
+        enc_i(OP_SW, 1, 3, 12),
+        enc_i(OP_ADDIU, 3, 3, 0),
+        enc_i(OP_SW, 1, 3, 16),
+        enc_i(OP_SB, 1, 2, 4),
+        enc_i(0x3a, 1, 14, 20),
+        enc_i(OP_SH, 1, 2, 20),
+    };
+    const int offsets[] = {-1, 0, 4, -1, 8, 12, -1, 16, 4, 20, 20};
+    const int valid[] = {0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0};
+    int ok = 1;
+    psx_pgxp_set_enabled(1);
+    for (int mi = 0; mi < 2; ++mi) {
+        psx_t* m = p->m[mi];
+        cpu_reset(m->cpu);
+        psx_pgxp_reset();
+        write_prog(m, prog, sizeof(prog) / sizeof(prog[0]));
+        m->cpu->r[1] = DATA_VA;
+        m->cpu->r[2] = m->cpu->r[3] = word;
+        m->cpu->cop0_r[COP0_SR] |= 1u << 30;
+        m->cpu->cop2_dr.sxy[2].p[0] = 10;
+        m->cpu->cop2_dr.sxy[2].p[1] = 20;
+        psx_pgxp_gte_vertex(word, 10.25f, 20.5f, 10.0f);
+        for (unsigned i = 0; i < sizeof(prog) / sizeof(prog[0]); ++i) {
+            psx_cpu_cycle(m->cpu);
+            if (offsets[i] < 0) continue;
+            vertex_t v = {0};
+            psx_pgxp_note_gp0_word(DATA_PA + offsets[i]);
+            psx_pgxp_gp0_slot(1);
+            psx_pgxp_poly_vertex(&v, read_data(m, offsets[i]), 1);
+            ++g_checked;
+            if (v.precise_valid != valid[i] || (v.precise_valid && v.px != 10.25f)) {
+                fail("case=pgxp-provenance mode=%s step=%u valid=%d expected=%d",
+                     MODE_NAME[mi], i, v.precise_valid, valid[i]);
+                ok = 0;
+            }
+        }
+    }
+    psx_pgxp_set_enabled(0);
+    if (ok) puts("CPU_SPEC passed case=pgxp-provenance");
+    return ok;
+}
+
 int main(void) {
     const char* bios_path = "build/tests/blank-bios.bin";
     if (!write_blank_bios(bios_path)) {
@@ -1656,6 +1707,7 @@ int main(void) {
     ok &= case_exception_model(&p);
     ok &= case_cop0_masks(&p);
     ok &= case_cache_isolation(&p);
+    ok &= case_pgxp_provenance(&p);
 
     pair_destroy(&p);
 

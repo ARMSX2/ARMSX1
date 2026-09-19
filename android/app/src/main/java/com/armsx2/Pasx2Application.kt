@@ -32,6 +32,7 @@ class Pasx2Application : Application(), ImageLoaderFactory {
 	override fun onCreate() {
 		super.onCreate()
 		installCrashLogging()
+		DiagnosticCapture.start(this)
 		StartupTrace.begin()
 		warmUpOffMainThread()
 		// "Generate log file" checkbox: rewrite the user's chosen report file with whatever the

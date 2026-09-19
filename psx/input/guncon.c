@@ -39,6 +39,12 @@ void psxi_guncon_init(psxi_guncon_t* guncon) {
     guncon->sy = 240;
 }
 
+void psxi_guncon_reset_transfer(psxi_guncon_t* guncon) {
+    guncon->state = GUNCON_STATE_TX_HIZ;
+    guncon->tx_data = 0xff;
+    guncon->tx_data_ready = 0;
+}
+
 uint32_t psxi_guncon_read(void* udata) {
     psxi_guncon_t* guncon = (psxi_guncon_t*)udata;
 

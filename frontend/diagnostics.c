@@ -32,12 +32,23 @@ typedef struct {
 static FILE* g_diag_file = NULL;
 static char g_diag_log_path[1024] = {0};
 static char g_diag_run_tag[64] = {0};
-static int g_diag_enabled = 0;
+static SDL_atomic_t g_diag_enabled = {0};
+static SDL_SpinLock g_diag_mutex_guard;
+static SDL_mutex* g_diag_mutex;
+static size_t g_diag_file_size;
 static char g_diag_breadcrumbs[PSXE_DIAG_BREADCRUMB_CAPACITY][PSXE_DIAG_LINE_CAPACITY];
 static size_t g_diag_breadcrumb_count = 0;
 static size_t g_diag_breadcrumb_head = 0;
 static psxe_diag_stream_buffer_t g_stdout_buffer = {0};
 static psxe_diag_stream_buffer_t g_stderr_buffer = {0};
+
+static SDL_mutex* psxe_diag_mutex(void) {
+    SDL_AtomicLock(&g_diag_mutex_guard);
+    if (!g_diag_mutex) g_diag_mutex = SDL_CreateMutex();
+    SDL_mutex* mutex = g_diag_mutex;
+    SDL_AtomicUnlock(&g_diag_mutex_guard);
+    return mutex;
+}
 
 static void psxe_diag_load_run_tag(void) {
     g_diag_run_tag[0] = '\0';
@@ -116,11 +127,16 @@ static void psxe_diag_close_file(void) {
 static void psxe_diag_update_file_handle(void) {
     psxe_diag_close_file();
 
-    if (!g_diag_enabled || !g_diag_log_path[0]) {
+    if (!SDL_AtomicGet(&g_diag_enabled) || !g_diag_log_path[0]) {
         return;
     }
 
     g_diag_file = fopen(g_diag_log_path, "a");
+    g_diag_file_size = 0;
+    if (g_diag_file && fseek(g_diag_file, 0, SEEK_END) == 0) {
+        const long size = ftell(g_diag_file);
+        if (size > 0) g_diag_file_size = (size_t)size;
+    }
 }
 
 static void psxe_diag_timestamp(char* buffer, size_t capacity) {
@@ -141,7 +157,7 @@ static void psxe_diag_timestamp(char* buffer, size_t capacity) {
 }
 
 static void psxe_diag_emit_line(const char* source, const char* line) {
-    if (!g_diag_enabled || !line || !line[0]) {
+    if (!SDL_AtomicGet(&g_diag_enabled) || !line || !line[0]) {
         return;
     }
 
@@ -155,11 +171,30 @@ static void psxe_diag_emit_line(const char* source, const char* line) {
         SDL_snprintf(formatted, sizeof(formatted), "%s %s", timestamp, line);
     }
 
-    if (g_diag_file) {
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
+    if (g_diag_file && g_diag_file_size >= 4u * 1024u * 1024u) {
+        char previous[sizeof(g_diag_log_path) + 16];
+        SDL_snprintf(previous, sizeof(previous), "%s.previous", g_diag_log_path);
+        psxe_diag_close_file();
+#ifdef _WIN32
+        remove(previous);
+#endif
+        if (rename(g_diag_log_path, previous) == 0) {
+            psxe_diag_update_file_handle();
+        } else {
+            g_diag_file = fopen(g_diag_log_path, "w");
+            g_diag_file_size = 0;
+        }
+    }
+    if (g_diag_file && SDL_AtomicGet(&g_diag_enabled)) {
         fputs(formatted, g_diag_file);
         fputc('\n', g_diag_file);
         fflush(g_diag_file);
+        g_diag_file_size += strlen(formatted) + 1;
     }
+    SDL_UnlockMutex(mutex);
 
     psxe_diag_output_debug_string(formatted);
 }
@@ -186,7 +221,7 @@ static char* psxe_diag_vformat(const char* fmt, va_list args) {
 }
 
 static void psxe_diag_write_text(const char* source, const char* text) {
-    if (!g_diag_enabled || !text || !text[0]) {
+    if (!SDL_AtomicGet(&g_diag_enabled) || !text || !text[0]) {
         return;
     }
 
@@ -227,12 +262,16 @@ static void psxe_diag_stream_buffer_flush(psxe_diag_stream_buffer_t* buffer, con
 }
 
 static void psxe_diag_stream_buffer_append(psxe_diag_stream_buffer_t* buffer, const char* source, int ch) {
-    if (!g_diag_enabled || !buffer) {
+    if (!SDL_AtomicGet(&g_diag_enabled) || !buffer) {
         return;
     }
 
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
     if (ch == '\n' || ch == '\r') {
         psxe_diag_stream_buffer_flush(buffer, source);
+        SDL_UnlockMutex(mutex);
         return;
     }
 
@@ -241,9 +280,13 @@ static void psxe_diag_stream_buffer_append(psxe_diag_stream_buffer_t* buffer, co
     }
 
     buffer->buffer[buffer->length++] = (char)ch;
+    SDL_UnlockMutex(mutex);
 }
 
 void psxe_diag_initialize(const char* pref_path) {
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
     psxe_diag_close_file();
 
     g_diag_log_path[0] = '\0';
@@ -271,20 +314,25 @@ void psxe_diag_initialize(const char* pref_path) {
 
     psxe_diag_update_file_handle();
 
-    if (g_diag_enabled) {
+    if (SDL_AtomicGet(&g_diag_enabled)) {
         psxe_diag_logf("diag", "Diagnostics initialized%s%s%s%s",
             g_diag_run_tag[0] ? " tag=" : "",
             g_diag_run_tag[0] ? g_diag_run_tag : "",
             g_diag_log_path[0] ? " at " : "",
             g_diag_log_path[0] ? g_diag_log_path : "");
     }
+    SDL_UnlockMutex(mutex);
 }
 
 void psxe_diag_shutdown(void) {
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
     psxe_diag_stream_buffer_flush(&g_stdout_buffer, "stdout");
     psxe_diag_stream_buffer_flush(&g_stderr_buffer, "stderr");
 
     psxe_diag_close_file();
+    SDL_UnlockMutex(mutex);
 }
 
 const char* psxe_diag_log_path(void) {
@@ -293,7 +341,11 @@ const char* psxe_diag_log_path(void) {
 
 void psxe_diag_set_enabled(int enabled) {
     const int normalized = enabled ? 1 : 0;
-    if (g_diag_enabled == normalized) {
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
+    if (SDL_AtomicGet(&g_diag_enabled) == normalized) {
+        SDL_UnlockMutex(mutex);
         return;
     }
 
@@ -302,12 +354,13 @@ void psxe_diag_set_enabled(int enabled) {
         psxe_diag_stream_buffer_flush(&g_stderr_buffer, "stderr");
     }
 
-    g_diag_enabled = normalized;
+    SDL_AtomicSet(&g_diag_enabled, normalized);
     psxe_diag_update_file_handle();
+    SDL_UnlockMutex(mutex);
 }
 
 int psxe_diag_is_enabled(void) {
-    return g_diag_enabled;
+    return SDL_AtomicGet(&g_diag_enabled);
 }
 
 void psxe_diag_log_line(const char* source, const char* line) {
@@ -315,6 +368,7 @@ void psxe_diag_log_line(const char* source, const char* line) {
 }
 
 void psxe_diag_vlogf(const char* source, const char* fmt, va_list args) {
+    if (!SDL_AtomicGet(&g_diag_enabled)) return;
     char* message = psxe_diag_vformat(fmt, args);
     if (!message) {
         return;
@@ -339,6 +393,10 @@ void psxe_diag_breadcrumb_line(const char* line) {
     char timestamp[32] = {0};
     psxe_diag_timestamp(timestamp, sizeof(timestamp));
 
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
+
     SDL_snprintf(
         g_diag_breadcrumbs[g_diag_breadcrumb_head],
         sizeof(g_diag_breadcrumbs[g_diag_breadcrumb_head]),
@@ -350,6 +408,7 @@ void psxe_diag_breadcrumb_line(const char* line) {
     if (g_diag_breadcrumb_count < PSXE_DIAG_BREADCRUMB_CAPACITY) {
         g_diag_breadcrumb_count++;
     }
+    SDL_UnlockMutex(mutex);
 }
 
 void psxe_diag_breadcrumbf(const char* fmt, ...) {
@@ -367,8 +426,12 @@ void psxe_diag_breadcrumbf(const char* fmt, ...) {
 }
 
 void psxe_diag_dump_breadcrumbs(void) {
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
     if (g_diag_breadcrumb_count == 0) {
         psxe_diag_logf("crash", "No breadcrumbs recorded.");
+        SDL_UnlockMutex(mutex);
         return;
     }
 
@@ -382,6 +445,7 @@ void psxe_diag_dump_breadcrumbs(void) {
         const size_t slot = (start + index) % PSXE_DIAG_BREADCRUMB_CAPACITY;
         psxe_diag_logf("crash", "  %s", g_diag_breadcrumbs[slot]);
     }
+    SDL_UnlockMutex(mutex);
 }
 
 void psxe_diag_set_crash_context_callback(psxe_diag_crash_context_cb callback, void* userdata) {

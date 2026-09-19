@@ -46,7 +46,7 @@ object Ps1SafAccess {
         }
     }
 
-    fun prepare(context: Context, pathOrUri: String): Session {
+    fun prepare(context: Context, pathOrUri: String, cancelled: () -> Boolean = { false }): Session {
         if (!pathOrUri.startsWith("content://")) return Session(pathOrUri)
 
         val uri = Uri.parse(pathOrUri)
@@ -61,7 +61,7 @@ object Ps1SafAccess {
         val held = ArrayList<ParcelFileDescriptor>()
         return try {
             val name = displayName(context, uri)
-            val launch = materialize(context.contentResolver, uri, name, root, held, 0)
+            val launch = materialize(context.contentResolver, uri, name, root, held, 0, cancelled)
             Session(launch.absolutePath, held, root)
         } catch (failure: Throwable) {
             held.asReversed().forEach { runCatching { it.close() } }
@@ -77,12 +77,14 @@ object Ps1SafAccess {
         root: File,
         held: MutableList<ParcelFileDescriptor>,
         depth: Int,
+        cancelled: () -> Boolean,
     ): File {
+        if (cancelled()) throw IOException("Game preparation cancelled")
         if (depth > MAX_PLAYLIST_DEPTH) throw IOException("Nested playlist depth exceeded")
         return when (Ps1SafText.extension(displayName)) {
-            "cue" -> materializeCue(resolver, uri, root, held)
-            "m3u" -> materializePlaylist(resolver, uri, root, held, depth)
-            else -> descriptorLink(resolver, uri, "game.${Ps1SafText.extension(displayName).ifBlank { "bin" }}", root, held)
+            "cue" -> materializeCue(resolver, uri, root, held, cancelled)
+            "m3u" -> materializePlaylist(resolver, uri, root, held, depth, cancelled)
+            else -> descriptorLink(resolver, uri, "game.${Ps1SafText.extension(displayName).ifBlank { "bin" }}", root, held, cancelled)
         }
     }
 
@@ -91,6 +93,7 @@ object Ps1SafAccess {
         cueUri: Uri,
         root: File,
         held: MutableList<ParcelFileDescriptor>,
+        cancelled: () -> Boolean,
     ): File {
         val text = readSmallText(resolver, cueUri)
         val references = Ps1SafText.cueReferences(text)
@@ -100,13 +103,11 @@ object Ps1SafAccess {
 
         references.forEachIndexed { index, reference ->
             val requested = Ps1SafText.baseName(reference)
-            val sibling = siblings[requested]
-                ?: siblings.entries.firstOrNull { it.key.equals(requested, ignoreCase = true) }?.value
-                ?: childByName(resolver, cueUri, requested)
+            val sibling = resolveReference(resolver, cueUri, reference, siblings)
                 ?: throw IOException("CUE track is not accessible: $requested")
             val extension = Ps1SafText.extension(requested).ifBlank { "bin" }
             val localName = "track-${index.toString().padStart(2, '0')}.$extension"
-            descriptorLink(resolver, sibling, localName, root, held)
+            descriptorLink(resolver, sibling, localName, root, held, cancelled)
             localNames += localName
         }
 
@@ -119,16 +120,16 @@ object Ps1SafAccess {
         root: File,
         held: MutableList<ParcelFileDescriptor>,
         depth: Int,
+        cancelled: () -> Boolean,
     ): File {
         val entries = Ps1SafText.playlistEntries(readSmallText(resolver, playlistUri))
         if (entries.isEmpty()) throw IOException("The selected playlist contains no discs")
         val siblings = siblingDocuments(resolver, playlistUri)
         for (entry in entries) {
             val requested = Ps1SafText.baseName(entry)
-            val sibling = siblings[requested]
-                ?: siblings.entries.firstOrNull { it.key.equals(requested, ignoreCase = true) }?.value
+            val sibling = resolveReference(resolver, playlistUri, entry, siblings)
                 ?: continue
-            return materialize(resolver, sibling, requested, root, held, depth + 1)
+            return materialize(resolver, sibling, requested, root, held, depth + 1, cancelled)
         }
         throw IOException("No accessible disc from the selected playlist was found")
     }
@@ -139,20 +140,56 @@ object Ps1SafAccess {
         localName: String,
         root: File,
         held: MutableList<ParcelFileDescriptor>,
+        cancelled: () -> Boolean,
     ): File {
         val descriptor = resolver.openFileDescriptor(uri, "r")
             ?: throw IOException("The document provider did not return a file descriptor")
+        val link = File(root, localName)
         try {
-            // Disc readers require random access. Fail here with a useful launch error rather than
-            // letting a pipe-backed cloud provider look like a corrupt ISO later in the core.
-            Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_SET)
-            val link = File(root, localName)
-            Os.symlink("/proc/self/fd/${descriptor.fd}", link.absolutePath)
-            held += descriptor
+            val linked = runCatching {
+                Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_SET)
+                Os.symlink("/proc/self/fd/${descriptor.fd}", link.absolutePath)
+                link.inputStream().use { it.channel.position(0L) }
+            }.isSuccess
+            if (linked) {
+                held += descriptor
+                return link
+            }
+            link.delete()
+            val required = descriptor.statSize
+            if (required > 0 && required + 16L * 1024 * 1024 > root.usableSpace) {
+                throw IOException("Not enough free app storage to stage this game from its document provider")
+            }
+            runCatching { Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_SET) }
+            ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(descriptor.fileDescriptor)).use { input ->
+                link.outputStream().use { output ->
+                    val buffer = ByteArray(256 * 1024)
+                    var sinceSpaceCheck = 16L * 1024 * 1024
+                    while (true) {
+                        if (sinceSpaceCheck >= 16L * 1024 * 1024) {
+                            if (root.usableSpace < 16L * 1024 * 1024) {
+                                throw IOException("Not enough free app storage to prepare this game")
+                            }
+                            sinceSpaceCheck = 0
+                        }
+                        if (cancelled() || Thread.currentThread().isInterrupted) throw IOException("Game preparation cancelled")
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        sinceSpaceCheck += count
+                    }
+                }
+            }
+            if (link.length() == 0L || (required >= 0 && link.length() != required)) {
+                throw IOException("The document provider returned an incomplete game file")
+            }
+            println("@@ARMSX_SAF_STAGED@@ name=$localName bytes=${link.length()}")
+            descriptor.close()
             return link
         } catch (failure: Throwable) {
             runCatching { descriptor.close() }
-            throw IOException("The selected game is not available as a seekable file", failure)
+            link.delete()
+            throw IOException("Unable to prepare the selected game: ${failure.message}", failure)
         }
     }
 
@@ -188,6 +225,10 @@ object Ps1SafAccess {
     private fun siblingDocuments(resolver: ContentResolver, documentUri: Uri): Map<String, Uri> {
         val parent = parentDocumentUri(resolver, documentUri)
             ?: throw IOException("The document provider did not expose the CUE/playlist folder")
+        return childDocuments(resolver, parent)
+    }
+
+    private fun childDocuments(resolver: ContentResolver, parent: Uri): Map<String, Uri> {
         val parentId = DocumentsContract.getDocumentId(parent)
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(parent, parentId)
         val result = LinkedHashMap<String, Uri>()
@@ -217,11 +258,38 @@ object Ps1SafAccess {
         return result
     }
 
+    private fun resolveReference(
+        resolver: ContentResolver,
+        documentUri: Uri,
+        reference: String,
+        siblings: Map<String, Uri>,
+    ): Uri? {
+        val segments = Ps1SafText.relativeSegments(reference)
+        var parent = parentDocumentUri(resolver, documentUri) ?: return null
+        var children = siblings
+        segments.forEachIndexed { index, segment ->
+            if (segment == "..") {
+                parent = parentDocumentUri(resolver, parent) ?: return null
+                children = childDocuments(resolver, parent)
+            } else {
+                val child = children[segment]
+                    ?: children.entries.firstOrNull { it.key.equals(segment, ignoreCase = true) }?.value
+                    ?: childByName(resolver, parent, segment, isParent = true)
+                    ?: return null
+                if (index == segments.lastIndex) return child
+                parent = child
+                children = childDocuments(resolver, parent)
+            }
+        }
+        return null
+    }
+
     // Path-based providers can resolve a child omitted from the folder listing.
-    private fun childByName(resolver: ContentResolver, documentUri: Uri, name: String): Uri? =
+    private fun childByName(resolver: ContentResolver, documentUri: Uri, name: String, isParent: Boolean = false): Uri? =
         runCatching {
-            val parent = parentDocumentUri(resolver, documentUri) ?: return null
-            val childId = DocumentsContract.getDocumentId(parent) + "/" + name
+            val parent = if (isParent) documentUri else parentDocumentUri(resolver, documentUri) ?: return null
+            val parentId = DocumentsContract.getDocumentId(parent)
+            val childId = parentId + (if (parentId.endsWith(':')) "" else "/") + name
             val child = DocumentsContract.buildDocumentUriUsingTree(parent, childId)
             resolver.query(child, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null)
                 ?.use { cursor -> if (cursor.moveToFirst()) child else null }
@@ -238,7 +306,10 @@ object Ps1SafAccess {
         }
         return runCatching {
             val id = DocumentsContract.getDocumentId(uri)
-            val parentId = id.substringBeforeLast('/', missingDelimiterValue = "")
+            val treeRoot = DocumentsContract.getTreeDocumentId(uri)
+            if (id == treeRoot) return null
+            val parentId = if ('/' in id) id.substringBeforeLast('/')
+                else if (':' in id) id.substringBefore(':') + ":" else ""
             parentId.takeIf(String::isNotBlank)?.let {
                 DocumentsContract.buildDocumentUriUsingTree(uri, it)
             }

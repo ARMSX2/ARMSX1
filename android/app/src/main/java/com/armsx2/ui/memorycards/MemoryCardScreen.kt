@@ -6,7 +6,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,9 +13,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -61,8 +59,14 @@ import java.util.Date
  * [game] is only used for the "restart to apply" hint — cards cannot be scoped per game.
  */
 @Composable
-fun MemoryCardScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: MemoryCardViewModel = viewModel()) {
+fun MemoryCardScreen(
+    onBack: () -> Unit,
+    game: GameInfo? = null,
+    viewModel: MemoryCardViewModel = viewModel(),
+    embedded: Boolean = false,
+) {
     val state = viewModel.state.value
+    val sessionActive = com.armsx2.runtime.MainActivityRuntime.eState.value != com.armsx2.EmuState.STOPPED
     var resetTarget by remember { mutableStateOf<MemoryCardSlot?>(null) }
     var pendingImportSlot by remember { mutableStateOf<Int?>(null) }
     var pendingExportSlot by remember { mutableStateOf<Int?>(null) }
@@ -80,13 +84,13 @@ fun MemoryCardScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Memo
 
     LaunchedEffect(Unit) { viewModel.refresh() }
 
-    ArmsBackdrop {
-        LazyColumn(
-            Modifier.fillMaxSize(),
+    val content: @Composable () -> Unit = {
+        Column(
+            if (embedded) Modifier.fillMaxWidth()
+            else Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
-            contentPadding = PaddingValues(horizontal = 8.dp),
         ) {
-            item {
+            if (!embedded) {
                 ArmsTopBar(
                     title = str("memcard.title"),
                     subtitle = "Slot 1 and Slot 2 · 128 KiB each",
@@ -98,12 +102,12 @@ fun MemoryCardScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Memo
                 )
             }
 
-            item { AboutCardsPanel(state.directory, game) }
+            AboutCardsPanel(state.directory, game, sessionActive)
 
-            items(state.slots, key = { it.slot }) { slot ->
+            state.slots.forEach { slot ->
                 MemoryCardSlotRow(
                     item = slot,
-                    busy = state.busy,
+                    busy = state.busy || sessionActive,
                     onCreate = { viewModel.create(slot.slot) },
                     onReset = { resetTarget = slot },
                     onImport = {
@@ -117,9 +121,10 @@ fun MemoryCardScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Memo
                 )
             }
 
-            item { Spacer(Modifier.height(12.dp)) }
+            Spacer(Modifier.height(12.dp))
         }
     }
+    if (embedded) content() else ArmsBackdrop { content() }
 
     resetTarget?.let { item ->
         val confirm = {
@@ -170,7 +175,7 @@ fun MemoryCardScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Memo
  * shared by every game, because the core offers no per-game card path to hang a control off.
  */
 @Composable
-private fun AboutCardsPanel(directory: String, game: GameInfo?) {
+private fun AboutCardsPanel(directory: String, game: GameInfo?, sessionActive: Boolean) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(19.dp),
@@ -183,8 +188,7 @@ private fun AboutCardsPanel(directory: String, game: GameInfo?) {
             Text(
                 "The emulator always plugs a card into Slot 1 and Slot 2. Each card is a single " +
                     "128 KiB file and is shared by every game — there are no per-game cards, no card " +
-                    "sizes and no folder cards on PlayStation. A new card shows as unformatted until " +
-                    "the console's memory-card manager formats it.",
+                    "sizes or folder cards. New cards are formatted and ready to save.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -198,11 +202,11 @@ private fun AboutCardsPanel(directory: String, game: GameInfo?) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (game != null) {
+            if (sessionActive) {
                 Spacer(Modifier.height(10.dp))
                 // The core loads a card into memory on boot and writes the whole buffer back when
                 // the game shuts down, so anything changed mid-session is overwritten on exit.
-                StatusChip("Close ${game.title.ifBlank { "the game" }} before changing cards", Warning)
+                StatusChip("Close ${game?.title?.ifBlank { "the game" } ?: "the game"} before managing cards", Warning)
             }
         }
     }
@@ -260,27 +264,27 @@ private fun MemoryCardSlotRow(
                     Button(
                         onClick = onCreate,
                         enabled = !busy,
-                        modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.create", onConfirm = onCreate),
-                    ) { Text(str("memcard.create")) }
+                        modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.create", onConfirm = { if (!busy) onCreate() }),
+                    ) { Text("Create formatted card") }
                 } else {
                     OutlinedButton(
                         onClick = onExport,
                         enabled = !busy,
-                        modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.export", onConfirm = onExport),
+                        modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.export", onConfirm = { if (!busy) onExport() }),
                     ) { Text(str("action.export")) }
                 }
                 Spacer(Modifier.width(7.dp))
                 TextButton(
                     onClick = onImport,
                     enabled = !busy,
-                    modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.import", onConfirm = onImport),
+                    modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.import", onConfirm = { if (!busy) onImport() }),
                 ) { Text(str("action.import")) }
                 if (item.exists) {
                     Spacer(Modifier.width(7.dp))
                     TextButton(
                         onClick = onReset,
                         enabled = !busy,
-                        modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.reset", onConfirm = onReset),
+                        modifier = Modifier.controllerFocusable("memcard.slot${item.slot}.reset", onConfirm = { if (!busy) onReset() }),
                     ) { Text("Erase", color = MaterialTheme.colorScheme.error) }
                 }
             }

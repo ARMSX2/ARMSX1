@@ -166,7 +166,7 @@ void pad_write_tx(psx_pad_t* pad, uint16_t data) {
     psx_input_t* joy = pad->joy_slot[slot];
     psx_mcd_t* mcd = pad->mcd_slot[slot];
 
-    if (!(pad->ctrl & CTRL_TXEN))
+    if (!(pad->ctrl & CTRL_TXEN) || !(pad->ctrl & CTRL_JOUT))
         return;
 
     if (!pad->dest[slot]) {
@@ -234,6 +234,13 @@ void pad_write_tx(psx_pad_t* pad, uint16_t data) {
                 psx_mcd_write(mcd, data);
 
                 if (pad->ctrl & CTRL_ACIE) {
+                    if (mcd->state == MCD_R_STATE_TX_MEB ||
+                        mcd->state == MCD_W_STATE_TX_MEB ||
+                        mcd->state == MCD_S_STATE_TX_DAT3 ||
+                        (mcd->state == MCD_R_STATE_TX_LSB && mcd->msb >= 4) ||
+                        (mcd->state == MCD_STATE_TX_FLG &&
+                         data != 'R' && data != 'W' && data != 'S'))
+                        return;
                     pad->irq_bit = 1;
                     pad->cycles_until_irq = 1024;
 
@@ -259,8 +266,37 @@ uint32_t pad_handle_stat_read(psx_pad_t* pad) {
     return pad->stat | 7;
 }
 
+static void pad_reset_transfer(psx_pad_t* pad, int slot) {
+    pad->dest[slot] = 0;
+    if (pad->mcd_slot[slot])
+        psx_mcd_reset(pad->mcd_slot[slot]);
+    psx_input_t* input = pad->joy_slot[slot];
+    if (!input || !input->udata)
+        return;
+    switch (input->kind) {
+        case PSX_INPUT_KIND_SDA: psxi_sda_reset_transfer(input->udata); break;
+        case PSX_INPUT_KIND_MULTITAP: psxi_multitap_reset_transfer(input->udata); break;
+        case PSX_INPUT_KIND_GUNCON: psxi_guncon_reset_transfer(input->udata); break;
+    }
+}
+
 void pad_handle_ctrl_write(psx_pad_t* pad, uint32_t value) {
     int slot = pad->ctrl & CTRL_SLOT;
+
+    if (value & CTRL_REST) {
+        pad_trace_end(pad, 1);
+        pad->ctrl = pad->mode = pad->baud = pad->stat = 0;
+        pad_reset_transfer(pad, 0);
+        pad_reset_transfer(pad, 1);
+        pad->cycles_until_irq = pad->irq_bit = 0;
+        return;
+    }
+
+    if ((pad->ctrl ^ value) & CTRL_SLOT) {
+        pad_trace_end(pad, 1);
+        pad_reset_transfer(pad, slot >> 13);
+        pad_reset_transfer(pad, (slot >> 13) ^ 1);
+    }
 
     pad->ctrl = value;
 
@@ -289,11 +325,8 @@ void pad_handle_ctrl_write(psx_pad_t* pad, uint32_t value) {
             Both slots, because CTRL.SLOT has already been cleared above and a stale select on
             the slot that is not being addressed is just as wedged.
         */
-        pad->dest[0] = 0;
-        pad->dest[1] = 0;
-
-        if (pad->mcd_slot[slot >> 13])
-            psx_mcd_reset(pad->mcd_slot[slot >> 13]);
+        pad_reset_transfer(pad, 0);
+        pad_reset_transfer(pad, 1);
     }
 
     // Reset STAT bits 3, 4, 5, 9
@@ -585,6 +618,10 @@ int psx_pad_mcd_fingerprint(psx_pad_t* pad, int slot, uint64_t* out_hash,
 }
 
 void psx_pad_update(psx_pad_t* pad, int cyc) {
+    if (pad->mcd_slot[0] && pad->mcd_slot[0]->dirty)
+        psx_mcd_update(pad->mcd_slot[0], cyc);
+    if (pad->mcd_slot[1] && pad->mcd_slot[1]->dirty)
+        psx_mcd_update(pad->mcd_slot[1], cyc);
     if (pad->cycles_until_irq) {
         pad->cycles_until_irq -= cyc;
 

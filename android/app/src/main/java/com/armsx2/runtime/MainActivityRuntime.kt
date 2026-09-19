@@ -54,6 +54,7 @@ import com.armsx2.FilenameParser
 import com.armsx2.GameInfo
 import com.armsx2.PlayTime
 import com.armsx2.input.ControllerMappings
+import com.armsx2.input.ControllerMotion
 import com.armsx2.input.SoftKeyboard
 import com.armsx2.runtime.MainActivityRuntime.Companion.internalBiosDir
 import com.armsx2.runtime.MainActivityRuntime.Companion.romsDirs
@@ -519,11 +520,13 @@ open class MainActivityRuntime : ComponentActivity() {
                 println("@@ARMSX_SURFACE_ERROR@@ timed out waiting for $kind surface")
             }
             var grantRevoked = false
+            var preparationError: String? = null
             val launchSession = if (surfaceReady) runCatching {
                 val context = instance?.applicationContext
                     ?: throw IllegalStateException("No Android context is active")
-                com.armsx2.core.Ps1SafAccess.prepare(context, path)
+                com.armsx2.core.Ps1SafAccess.prepare(context, path) { vmStopInProgress }
             }.onFailure { failure ->
+                preparationError = failure.message
                 println("@@ARMSX_SAF_LAUNCH_FAILED@@ kind=$kind error=${failure.message}")
                 // A persisted grant can remain listed after its provider stops honoring it.
                 grantRevoked = failure is SecurityException ||
@@ -536,8 +539,15 @@ open class MainActivityRuntime : ComponentActivity() {
                             "bridge=${prepared.launchPath.take(160)}",
                     )
                 }
-                NativeApp.runVMThread(prepared.launchPath)
+                val cardLock = com.armsx2.core.Ps1MemoryCards.sessionLock
+                cardLock.lock()
+                try {
+                    if (vmStopInProgress) false else NativeApp.runVMThread(prepared.launchPath)
+                } finally {
+                    cardLock.unlock()
+                }
             } ?: false
+            if (vmStopInProgress) return false
             if (!launched) {
                 println("@@ARMSX_VM_LAUNCH_FAILED@@ kind=$kind path=${path.take(240)}")
                 instance?.let { activity ->
@@ -548,7 +558,7 @@ open class MainActivityRuntime : ComponentActivity() {
                         } else {
                             android.widget.Toast.makeText(
                                 activity,
-                                "Unable to start $kind. Open Diagnostics for the native launch error.",
+                                preparationError ?: "Unable to start $kind. Open Diagnostics for the native launch error.",
                                 android.widget.Toast.LENGTH_LONG,
                             ).show()
                         }
@@ -1138,10 +1148,14 @@ open class MainActivityRuntime : ComponentActivity() {
                     try {
                         // The core reads BIOS + resources from disk during boot; make sure the
                         // background prepare has finished before handing it a path.
-                        awaitAssetsReady()
+                        check(awaitAssetsReady()) { "Startup preparation is still running. Please try the game again." }
                         runVmThreadChecked(bootPath, "game")
                     } catch (t: Throwable) {
                         println("@@ARMSX_VM_ERROR@@ ${t.message}")
+                        instance?.runOnUiThread {
+                            android.widget.Toast.makeText(ctx, t.message ?: "Unable to start the game.",
+                                android.widget.Toast.LENGTH_LONG).show()
+                        }
                     } finally {
                         // runVMThread blocks for the whole session; when it returns the game ended.
                         instance?.runOnUiThread {
@@ -2604,6 +2618,12 @@ open class MainActivityRuntime : ComponentActivity() {
         dpadOwnHeld.forEach { it.clear() }
         stickDirDigitalHeld.forEach { it.clear() }
         stickHotkeyHeld.forEach { it.clear() }
+        lastPhysStickX.fill(0f)
+        lastPhysStickY.fill(0f)
+        gyroVecX = 0f
+        gyroVecY = 0f
+        gyroCombineActive = false
+        ControllerMotion.resetValues()
         heldKeys.clear()
     }
 
@@ -3304,6 +3324,8 @@ open class MainActivityRuntime : ComponentActivity() {
         return event.keyCode
     }
 
+    private val controllerKeyDevices = HashSet<Int>()
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // Joy-Con buttons all arrive as KEYCODE_UNKNOWN (no Android key layout for 0x057E,
         // so keyCode is always 0 — emulog-150). Rewrite to a stable scanCode-derived keycode
@@ -3329,8 +3351,8 @@ open class MainActivityRuntime : ComponentActivity() {
             }
         }
         // Track the active gamepad so PS2 rumble routes to its vibrator.
-        if (event.isFromSource(InputDevice.SOURCE_GAMEPAD) ||
-            event.isFromSource(InputDevice.SOURCE_JOYSTICK)) {
+        if (event.deviceId >= 0 && (ControllerMotion.isControllerDevice(event.deviceId) || isPadSourceKey(event))) {
+            controllerKeyDevices.add(event.deviceId)
             NativeApp.sRumbleDeviceId = event.deviceId
         }
         // Controller-input diagnostic (ARMSX2_JOYCON): dump the device once + this key.
@@ -4309,11 +4331,14 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        val isController = ControllerMotion.isController(ev)
+        if (isController) ControllerMotion.update(ev)
         // Controller-input diagnostic (ARMSX2_JOYCON): logged before ANY gate so it
         // captures the raw axes even mid-(re)bind and for SOURCE_DPAD-only events the
         // gameplay path would drop. Pure logging — no behaviour change.
         logControllerDeviceOnce(ev.deviceId)
         logControllerMotion(ev)
+        if (!isController) return super.dispatchGenericMotionEvent(ev)
         // While (re)binding a pad button or a hotkey, the physical D-pad on many
         // handhelds (AYN Odin 3, RP6, etc.) arrives HERE as a HAT *axis*, never as
         // a key in dispatchKeyEvent — so the capture (which only listens for key
@@ -4346,10 +4371,6 @@ open class MainActivityRuntime : ComponentActivity() {
             // touchpad/mouse node also emits generic motion (pointer AXIS_X/Y); reading
             // it as stick input injects garbage AND (via PadRouter) lets a non-pad node
             // grab a player slot — which pushed the real 2nd pad onto Player 1.
-            if (!ev.isFromSource(InputDevice.SOURCE_JOYSTICK) &&
-                !ev.isFromSource(InputDevice.SOURCE_GAMEPAD)) {
-                return super.dispatchGenericMotionEvent(ev)
-            }
             // SOURCE_TOUCHSCREEN motion events go through dispatchTouchEvent,
             // not here — generic motion is gamepad / mouse / stylus. So any
             // event reaching this method means a controller (or similar
@@ -4399,6 +4420,7 @@ open class MainActivityRuntime : ComponentActivity() {
             dispatchStickDirBindings(ev, port)
             // Single write per analog code per event, merged across ALL writers.
             flushAnalogAxes(port)
+            logMappedControllerMotion(ev, port)
             debugStickProbe(ev)
             return true
         }
@@ -4417,8 +4439,8 @@ open class MainActivityRuntime : ComponentActivity() {
         for (left in booleanArrayOf(true, false)) {
             // Same axis correction the main dispatch applies (swap, then inverts).
             val (rightX, rightY) = rightStickAxes(ev.deviceId)
-            var vx = ev.getAxisValue(if (left) MotionEvent.AXIS_X else rightX)
-            var vy = ev.getAxisValue(if (left) MotionEvent.AXIS_Y else rightY)
+            var vx = ControllerMotion.centered(ev, if (left) MotionEvent.AXIS_X else rightX)
+            var vy = ControllerMotion.centered(ev, if (left) MotionEvent.AXIS_Y else rightY)
             if (ControllerMappings.stickSwapXY(left)) { val t = vx; vx = vy; vy = t }
             if (ControllerMappings.stickInvertX(left)) vx = -vx
             if (ControllerMappings.stickInvertY(left)) vy = -vy
@@ -4446,49 +4468,9 @@ open class MainActivityRuntime : ComponentActivity() {
         }
     }
 
-    // Rate-limited raw-axis probe for the right-stick diagonals report (Area 51:
-    // camera moves only in a cross pattern on Android). OFF unless the tester sets
-    // prefs boolean "debug.stickLog" true. Shows the raw axes, the corrected pair
-    // and the shaped radial output in logcat + the exportable emulog.
-    // Right-stick axis pair, resolved per device and cached.
-    //
-    // Standard Android pads put the right stick on AXIS_Z/AXIS_RZ, but some controllers —
-    // Nintendo Joy-Cons notably — report it on AXIS_RX/AXIS_RY. Every right-stick path here
-    // read Z/RZ unconditionally, so on those pads the right stick's DIRECTIONS were simply
-    // invisible: they couldn't be bound, folded onto the D-pad, or fire a stick hotkey — while
-    // R3 bound fine, because R3 is a KEYCODE and not an axis. That asymmetry is exactly what
-    // was reported. InputDevice.getDevice() is a binder call and motion events arrive far too
-    // often to query per event, hence the cache.
-    private val rightStickAxisCache = HashMap<Int, Pair<Int, Int>>()
-    private fun rightStickAxes(deviceId: Int): Pair<Int, Int> = rightStickAxisCache.getOrPut(deviceId) {
-        val dev = runCatching { InputDevice.getDevice(deviceId) }.getOrNull()
-        fun has(axis: Int) = dev?.getMotionRange(axis) != null
-        val hasRxRy = has(MotionEvent.AXIS_RX) || has(MotionEvent.AXIS_RY)
-        // AXIS_RZ that idles at 0 (range min >= 0) is a TRIGGER, not a stick — some pads (AYANEO
-        // handhelds in Xbox mode) put the right trigger on RZ. A real right-stick-Y spans -1..1, so
-        // this never reclassifies a standard pad's stick.
-        val rz = dev?.getMotionRange(MotionEvent.AXIS_RZ)
-        val rzIsTrigger = rz != null && rz.min >= 0f
-        when {
-            // Joy-Cons expose RX/RY for the right stick; prefer it even if Z/RZ also exist.
-            dev?.vendorId == 0x057E && hasRxRy -> MotionEvent.AXIS_RX to MotionEvent.AXIS_RY
-            // RZ is really a trigger — the right stick can't live on it; use RX/RY when present.
-            rzIsTrigger && hasRxRy -> MotionEvent.AXIS_RX to MotionEvent.AXIS_RY
-            // Any pad with no Z/RZ at all but with RX/RY: that IS its right stick.
-            !has(MotionEvent.AXIS_Z) && !has(MotionEvent.AXIS_RZ) && hasRxRy ->
-                MotionEvent.AXIS_RX to MotionEvent.AXIS_RY
-            else -> MotionEvent.AXIS_Z to MotionEvent.AXIS_RZ
-        }
-    }
+    private fun rightStickAxes(deviceId: Int): Pair<Int, Int> = ControllerMotion.rightStickAxes(deviceId)
 
-    // Extra RT axis for pads that report the right trigger on AXIS_RZ (AYANEO Xbox mode) instead of
-    // RTRIGGER/GAS. Only when RZ is a 0..1 range (a real stick-Y is -1..1), so standard pads are
-    // untouched. -1 = no such axis. Cached — InputDevice.getDevice is a binder call.
-    private val rightTriggerAxisCache = HashMap<Int, Int>()
-    private fun rightTriggerExtraAxis(deviceId: Int): Int = rightTriggerAxisCache.getOrPut(deviceId) {
-        val rz = runCatching { InputDevice.getDevice(deviceId)?.getMotionRange(MotionEvent.AXIS_RZ) }.getOrNull()
-        if (rz != null && rz.min >= 0f) MotionEvent.AXIS_RZ else -1
-    }
+    private fun rightTriggerExtraAxis(deviceId: Int): Int = ControllerMotion.rightTriggerExtraAxis(deviceId)
 
     private var lastStickProbeMs = 0L
     private fun debugStickProbe(ev: MotionEvent) {
@@ -4505,22 +4487,11 @@ open class MainActivityRuntime : ComponentActivity() {
             z, rz, rx, ry, mag, shapeStickMag(mag.coerceAtMost(1f), false)))
     }
 
-    // ---- Joy-Con / controller input diagnostic (tag: ARMSX2_JOYCON) --------
-    // Dumps EXACTLY what a physical controller emits so a reporter can capture
-    // (adb logcat -s ARMSX2_JOYCON) what e.g. a Nintendo Joy-Con d-pad actually
-    // sends on their Android build — the unknown that blocks the real remap fix.
-    // Pure logging, zero behaviour change. Release builds never enable this path.
-    // Debug builds default OFF and can opt in with prefs "debug.joyconLog"=true.
-    // Full device info
-    // is logged once per deviceId; the per-event axis dump is throttled + non-zero.
     private val joyconLoggedDevices = HashSet<Int>()
     private var lastJoyconMotionLogMs = 0L
+    private var lastMappedMotionLogMs = 0L
     private fun joyconLogEnabled(): Boolean =
-        // Pref-gated, NOT BuildConfig.DEBUG-gated. The old `BuildConfig.DEBUG && pref` form
-        // made this permanently unreachable in a release build — i.e. unreachable for exactly
-        // the testers whose controllers we need to identify. It cost a round trip on the
-        // 8BitDo/Switch-Pro trigger report. Default off; costs one boolean read per event.
-        prefs.getBoolean("debug.joyconLog", false)
+        BuildConfig.DIAGNOSTIC_BUILD || prefs.getBoolean("debug.joyconLog", false)
 
     /** Emit a diagnostic line to BOTH logcat (adb `-s ARMSX2_JOYCON`) AND the emulog (in-app
      *  Save Log — so a handheld tester with no PC can capture it). NativeApp.emulog no-ops
@@ -4528,6 +4499,15 @@ open class MainActivityRuntime : ComponentActivity() {
     private fun joyconEmit(msg: String) {
         android.util.Log.d("ARMSX2_JOYCON", msg)
         runCatching { NativeApp.emulog("@@JOYCON@@ $msg") }
+    }
+
+    private fun logMappedControllerMotion(event: MotionEvent, port: Int) {
+        if (!joyconLogEnabled()) return
+        val now = SystemClock.uptimeMillis()
+        if (now - lastMappedMotionLogMs < 200) return
+        lastMappedMotionLogMs = now
+        joyconEmit("MAPPED id=${event.deviceId} port=$port leftMode=${ControllerMappings.leftStickMode(port)} " +
+            "rightMode=${ControllerMappings.rightStickMode(port)} analog=${analogPrevSent[port]} dpad=${dpadOwnHeld[port]}")
     }
 
     /** One-time full dump of a controller: ids, name, sources, and every motion axis
@@ -4539,7 +4519,7 @@ open class MainActivityRuntime : ComponentActivity() {
         val src = dev.sources
         val isPad = (src and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
             (src and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
-        if (!isPad) return
+        if (!isPad && src and InputDevice.SOURCE_DPAD != InputDevice.SOURCE_DPAD) return
         joyconEmit(
             "DEVICE id=%d vendor=0x%04x product=0x%04x sources=0x%08x name=\"%s\"".format(
                 deviceId, dev.vendorId, dev.productId, src, dev.name ?: "?"))
@@ -4557,7 +4537,7 @@ open class MainActivityRuntime : ComponentActivity() {
         if (!joyconLogEnabled()) return
         if (!ev.isFromSource(InputDevice.SOURCE_JOYSTICK) &&
             !ev.isFromSource(InputDevice.SOURCE_GAMEPAD) &&
-            !ev.isFromSource(InputDevice.SOURCE_DPAD)) return
+            !ev.isFromSource(InputDevice.SOURCE_DPAD) && !ControllerMotion.isController(ev)) return
         val now = SystemClock.uptimeMillis()
         if (now - lastJoyconMotionLogMs < 80) return
         val ranges = ev.device?.motionRanges ?: return
@@ -4566,18 +4546,19 @@ open class MainActivityRuntime : ComponentActivity() {
             val v = ev.getAxisValue(r.axis)
             if (kotlin.math.abs(v) > 0.001f) sb.append(" %s=%.3f".format(MotionEvent.axisToString(r.axis), v))
         }
-        if (sb.isEmpty()) return
         lastJoyconMotionLogMs = now
+        val (rightX, rightY) = rightStickAxes(ev.deviceId)
         joyconEmit(
-            "MOTION id=%d vendor=0x%04x src=0x%08x%s".format(
-                ev.deviceId, ev.device?.vendorId ?: -1, ev.source, sb))
+            "MOTION id=%d vendor=0x%04x src=0x%08x accepted=%s left=(%.3f,%.3f) right=(%.3f,%.3f) axes=(%d,%d)%s".format(
+                ev.deviceId, ev.device?.vendorId ?: -1, ev.source, ControllerMotion.isController(ev),
+                ControllerMotion.centered(ev, MotionEvent.AXIS_X), ControllerMotion.centered(ev, MotionEvent.AXIS_Y),
+                ControllerMotion.centered(ev, rightX), ControllerMotion.centered(ev, rightY), rightX, rightY, sb))
     }
 
     /** Log a controller key event (code + name + action). Low frequency, so no throttle. */
     private fun logControllerKey(event: KeyEvent) {
         if (!joyconLogEnabled()) return
-        if (!event.isFromSource(InputDevice.SOURCE_GAMEPAD) &&
-            !event.isFromSource(InputDevice.SOURCE_JOYSTICK)) return
+        if (!isPadSourceKey(event) || event.repeatCount != 0) return
         val a = when (event.action) {
             KeyEvent.ACTION_DOWN -> "DOWN"; KeyEvent.ACTION_UP -> "UP"; else -> "?"
         }
@@ -4720,11 +4701,7 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     private fun handleControllerUiMotion(ev: MotionEvent): Boolean {
-        if (!ev.isFromSource(InputDevice.SOURCE_JOYSTICK) &&
-            !ev.isFromSource(InputDevice.SOURCE_GAMEPAD)
-        ) {
-            return false
-        }
+        if (!ControllerMotion.isController(ev)) return false
         NativeApp.sRumbleDeviceId = ev.deviceId  // track active gamepad for rumble
 
         com.armsx2.ui.touch.TouchControls.onControllerInputDetected()
@@ -4736,18 +4713,18 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     private fun handleLibraryControllerMotion(ev: MotionEvent): Boolean {
-        val scrollY = uiScrollValue(ev.getAxisValue(MotionEvent.AXIS_RZ))
+        val scrollY = uiScrollValue(ControllerMotion.centered(ev, rightStickAxes(ev.deviceId).second))
         handleControllerUiScroll(scrollY)
 
         // Accept BOTH the left stick and the D-pad (HAT axis on this hardware) so
         // handhelds with or without a stick can browse the library.
         val (stickDx, stickDy) = uiDominantStickDirection(
-            ev.getAxisValue(MotionEvent.AXIS_X),
-            ev.getAxisValue(MotionEvent.AXIS_Y),
+            ControllerMotion.centered(ev, MotionEvent.AXIS_X),
+            ControllerMotion.centered(ev, MotionEvent.AXIS_Y),
         )
-        val dx = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_X))
+        val dx = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X))
             .let { if (it != 0) it else stickDx }
-        val dy = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_Y))
+        val dy = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y))
             .let { if (it != 0) it else stickDy }
         if (dx == 0 && dy == 0) {
             if (libraryAxisX != 0 || libraryAxisY != 0) stopNavRepeat()
@@ -4770,15 +4747,15 @@ open class MainActivityRuntime : ComponentActivity() {
         // HAT axis (not KEYCODE_DPAD_*); the stick is AXIS_X/Y. The adjust
         // skip/stuck bug was in the settings registry (now fixed), not the input
         // layer, so the stick is safe to use again. Right stick scrolls lists.
-        handleControllerUiScroll(uiScrollValue(ev.getAxisValue(MotionEvent.AXIS_RZ)))
+        handleControllerUiScroll(uiScrollValue(ControllerMotion.centered(ev, rightStickAxes(ev.deviceId).second)))
 
         val (stickDx, stickDy) = uiDominantStickDirection(
-            ev.getAxisValue(MotionEvent.AXIS_X),
-            ev.getAxisValue(MotionEvent.AXIS_Y),
+            ControllerMotion.centered(ev, MotionEvent.AXIS_X),
+            ControllerMotion.centered(ev, MotionEvent.AXIS_Y),
         )
-        val dirX = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_X))
+        val dirX = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X))
             .let { if (it != 0) it else stickDx }
-        val dirY = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_Y))
+        val dirY = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y))
             .let { if (it != 0) it else stickDy }
 
         // Vertical = move between settings; horizontal = adjust the focused setting
@@ -4816,16 +4793,16 @@ open class MainActivityRuntime : ComponentActivity() {
      *  direction steps the flat control list; edge-triggered (one move per push). */
     private fun handleMemcardControllerMotion(ev: MotionEvent) {
         val (stickDx, stickDy) = uiDominantStickDirection(
-            ev.getAxisValue(MotionEvent.AXIS_X),
-            ev.getAxisValue(MotionEvent.AXIS_Y),
+            ControllerMotion.centered(ev, MotionEvent.AXIS_X),
+            ControllerMotion.centered(ev, MotionEvent.AXIS_Y),
         )
-        val dirX = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_X))
+        val dirX = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X))
             .let { if (it != 0) it else stickDx }
-        val dirY = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_Y))
+        val dirY = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y))
             .let { if (it != 0) it else stickDy }
         android.util.Log.d("ARMSX2_MCNAV",
-            "motion hatX=${ev.getAxisValue(MotionEvent.AXIS_HAT_X)} hatY=${ev.getAxisValue(MotionEvent.AXIS_HAT_Y)} " +
-                "stickX=${ev.getAxisValue(MotionEvent.AXIS_X)} stickY=${ev.getAxisValue(MotionEvent.AXIS_Y)} -> dirX=$dirX dirY=$dirY")
+            "motion hatX=${ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X)} hatY=${ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y)} " +
+                "stickX=${ControllerMotion.centered(ev, MotionEvent.AXIS_X)} stickY=${ControllerMotion.centered(ev, MotionEvent.AXIS_Y)} -> dirX=$dirX dirY=$dirY")
         // Hold-to-repeat 2D nav (one repeat job; vertical wins a diagonal tie),
         // mirroring the overlay so the card grid navigates freely in every direction.
         when {
@@ -4882,8 +4859,8 @@ open class MainActivityRuntime : ComponentActivity() {
         // pair and one per stick (dominant direction), so sweeping through a
         // diagonal can't spuriously bind a two-direction combo.
         val want = HashSet<Int>()
-        val dx = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_X))
-        val dy = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_Y))
+        val dx = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X))
+        val dy = uiHatDirection(ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y))
         if (dx != 0) want.add(if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT)
         if (dy != 0) want.add(if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP)
         captureStickCode(ev, MotionEvent.AXIS_X, MotionEvent.AXIS_Y, true).takeIf { it != 0 }?.let { want.add(it) }
@@ -4920,8 +4897,8 @@ open class MainActivityRuntime : ComponentActivity() {
     /** The reserved hotkey keycode for whichever direction of the [left]/right stick is
      *  pushed past a firm threshold during capture, or 0 if centered. */
     private fun captureStickCode(ev: MotionEvent, axisX: Int, axisY: Int, left: Boolean): Int {
-        val x = ev.getAxisValue(axisX)
-        val y = ev.getAxisValue(axisY)
+        val x = ControllerMotion.centered(ev, axisX)
+        val y = ControllerMotion.centered(ev, axisY)
         val t = 0.7f
         return when {
             y <= -t -> ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.UP)
@@ -5157,8 +5134,8 @@ open class MainActivityRuntime : ComponentActivity() {
         // (swap X/Y first, then invert each) BEFORE any mode dispatch — so it fixes
         // pads that read rotated/mirrored ("down is up, left is right") in Analog,
         // Face and Custom modes alike.
-        var vx = event.getAxisValue(axisX)
-        var vy = event.getAxisValue(axisY)
+        var vx = ControllerMotion.centered(event, axisX)
+        var vy = ControllerMotion.centered(event, axisY)
         if (ControllerMappings.stickSwapXY(leftStick)) { val t = vx; vx = vy; vy = t }
         if (ControllerMappings.stickInvertX(leftStick)) vx = -vx
         if (ControllerMappings.stickInvertY(leftStick)) vy = -vy
@@ -5182,8 +5159,8 @@ open class MainActivityRuntime : ComponentActivity() {
                     // D-pad drives analog movement — full deflection, unshaped
                     // (a d-pad press is digital). The HAT is gated out of
                     // dispatchDpadCombined while this is on.
-                    val hx = event.getAxisValue(MotionEvent.AXIS_HAT_X)
-                    val hy = event.getAxisValue(MotionEvent.AXIS_HAT_Y)
+                    val hx = ControllerMotion.centered(event, MotionEvent.AXIS_HAT_X)
+                    val hy = ControllerMotion.centered(event, MotionEvent.AXIS_HAT_Y)
                     if (hx > STICK_DEAD) accumAnalog(aXPos, hx) else if (hx < -STICK_DEAD) accumAnalog(aXNeg, -hx)
                     if (hy > STICK_DEAD) accumAnalog(aYPos, hy) else if (hy < -STICK_DEAD) accumAnalog(aYNeg, -hy)
                 }
@@ -5231,8 +5208,8 @@ open class MainActivityRuntime : ComponentActivity() {
         fireStickHotkeyAxis(ev, hkRightX, hkRightY, false, port)
     }
     private fun fireStickHotkeyAxis(ev: MotionEvent, axisX: Int, axisY: Int, left: Boolean, port: Int) {
-        val x = ev.getAxisValue(axisX)
-        val y = ev.getAxisValue(axisY)
+        val x = ControllerMotion.centered(ev, axisX)
+        val y = ControllerMotion.centered(ev, axisY)
         val held = stickHotkeyHeld[port]
         val dirs = arrayOf(
             ControllerMappings.StickDir.UP to -y, ControllerMappings.StickDir.DOWN to y,
@@ -5362,8 +5339,8 @@ open class MainActivityRuntime : ComponentActivity() {
         // When the D-pad drives the left stick, the HAT is folded into the stick
         // in dispatchStick — ignore it here so it doesn't ALSO press the d-pad.
         val dpadAsStick = ControllerMappings.dpadAsLeftStick()
-        val hatX = if (dpadAsStick) 0f else ev.getAxisValue(MotionEvent.AXIS_HAT_X)
-        val hatY = if (dpadAsStick) 0f else ev.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        val hatX = if (dpadAsStick) 0f else ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X)
+        val hatY = if (dpadAsStick) 0f else ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y)
         val hatActive = hatX != 0f || hatY != 0f
         // "Stick as D-pad" preset (StickMode.DPAD, opt-in): a stick in DPAD mode drives
         // the PS2 d-pad through THIS single change-tracked owner (folded via foldStick
@@ -5396,23 +5373,29 @@ open class MainActivityRuntime : ComponentActivity() {
         var down = hatY > 0.5f && dpDownBound
         var up = hatY < -0.5f && dpUpBound
 
-        fun foldStick(axisX: Int, axisY: Int) {
-            val x = ev.getAxisValue(axisX)
-            val y = ev.getAxisValue(axisY)
+        fun correctedStick(isLeft: Boolean, axisX: Int, axisY: Int): Pair<Float, Float> {
+            var x = ControllerMotion.centered(ev, axisX)
+            var y = ControllerMotion.centered(ev, axisY)
+            if (ControllerMappings.stickSwapXY(isLeft)) { val t = x; x = y; y = t }
+            if (ControllerMappings.stickInvertX(isLeft)) x = -x
+            if (ControllerMappings.stickInvertY(isLeft)) y = -y
+            return x to y
+        }
+        fun foldStick(isLeft: Boolean, axisX: Int, axisY: Int) {
+            val (x, y) = correctedStick(isLeft, axisX, axisY)
             right = right || x > STICK_DIGITAL_THRESHOLD
             left = left || x < -STICK_DIGITAL_THRESHOLD
             down = down || y > STICK_DIGITAL_THRESHOLD
             up = up || y < -STICK_DIGITAL_THRESHOLD
         }
         val (foldRightX, foldRightY) = rightStickAxes(ev.deviceId)
-        if (leftDpad) foldStick(MotionEvent.AXIS_X, MotionEvent.AXIS_Y)
-        if (rightDpad) foldStick(foldRightX, foldRightY)
+        if (leftDpad) foldStick(true, MotionEvent.AXIS_X, MotionEvent.AXIS_Y)
+        if (rightDpad) foldStick(false, foldRightX, foldRightY)
 
         // Fold CUSTOM directions that target a D-pad code so they share this owner.
         fun foldCustom(isLeft: Boolean, axisX: Int, axisY: Int) {
             if (ControllerMappings.stickModeFor(isLeft, port) != ControllerMappings.StickMode.CUSTOM) return
-            val x = ev.getAxisValue(axisX)
-            val y = ev.getAxisValue(axisY)
+            val (x, y) = correctedStick(isLeft, axisX, axisY)
             fun mark(dir: ControllerMappings.StickDir, active: Boolean) {
                 if (!active) return
                 when (ControllerMappings.customStickCode(isLeft, dir, port)) {
@@ -5445,15 +5428,6 @@ open class MainActivityRuntime : ComponentActivity() {
         apply(19, up)    // D-pad up
     }
 
-    /** Does this device actually report the given motion axis? InputDevice.getDevice is a
-     *  binder call and motion events arrive far too often to query per event, hence the cache. */
-    private val axisPresenceCache = HashMap<Long, Boolean>()
-    private fun deviceHasAxis(deviceId: Int, axis: Int): Boolean {
-        if (axis < 0) return false
-        return axisPresenceCache.getOrPut((deviceId.toLong() shl 32) or (axis.toLong() and 0xffffffffL)) {
-            runCatching { InputDevice.getDevice(deviceId)?.getMotionRange(axis) }.getOrNull() != null
-        }
-    }
 
     private fun sendTrigger(event: MotionEvent, axisA: Int, axisB: Int, code: Int, port: Int, axisC: Int = -1) {
         // A pad with NO analog trigger axis at all — a Nintendo Switch Pro Controller, or an
@@ -5468,8 +5442,8 @@ open class MainActivityRuntime : ComponentActivity() {
         // D-pad "last write wins" bug handled in dispatchDpadCombined.
         //
         // When the device has none of these axes, leave the key path in sole charge.
-        if (!deviceHasAxis(event.deviceId, axisA) && !deviceHasAxis(event.deviceId, axisB) &&
-            !deviceHasAxis(event.deviceId, axisC))
+        if (!ControllerMotion.hasAxis(event, axisA) && !ControllerMotion.hasAxis(event, axisB) &&
+            !ControllerMotion.hasAxis(event, axisC))
             return
 
         // Pads report L2/R2 on AXIS_*TRIGGER or on AXIS_BRAKE/GAS — take the higher of
@@ -5483,10 +5457,7 @@ open class MainActivityRuntime : ComponentActivity() {
         // Resolve the physical trigger keycode to its mapped PS2 target — null = cleared,
         // so the trigger is disabled; otherwise drive the resolved (possibly remapped) code.
         val target = ControllerMappings.targetForPhysical(code, port) ?: return
-        val raw = maxOf(
-            maxOf(event.getAxisValue(axisA), event.getAxisValue(axisB)),
-            if (axisC >= 0) event.getAxisValue(axisC) else 0f,
-        ).coerceIn(0f, 1f)
+        val raw = ControllerMotion.trigger(event, axisA, axisB, axisC)
         val out = if (raw <= TRIGGER_DEAD) 0f else (raw - TRIGGER_DEAD) / (1f - TRIGGER_DEAD)
         if (target in 110..123) {
             // Trigger bound to a PS2 STICK direction ("(send)" rows): contribute the
@@ -5507,10 +5478,25 @@ open class MainActivityRuntime : ComponentActivity() {
      *  the stale dead id owning it and shunting gameplay to an un-armed pad (#394). Registered in
      *  onCreate and kept alive across pause so the wake-time remove/add is caught. */
     private val inputDeviceListener = object : android.hardware.input.InputManager.InputDeviceListener {
-        override fun onInputDeviceAdded(deviceId: Int) {}
-        override fun onInputDeviceChanged(deviceId: Int) {}
+        override fun onInputDeviceAdded(deviceId: Int) {
+            ControllerMotion.invalidate(deviceId)
+            joyconLoggedDevices.remove(deviceId)
+            logControllerDeviceOnce(deviceId)
+        }
+        override fun onInputDeviceChanged(deviceId: Int) {
+            val wasController = deviceId in controllerKeyDevices || ControllerMotion.isControllerDevice(deviceId)
+            ControllerMotion.invalidate(deviceId)
+            joyconLoggedDevices.remove(deviceId)
+            if (wasController || ControllerMotion.isControllerDevice(deviceId)) resetPadState()
+            logControllerDeviceOnce(deviceId)
+        }
         override fun onInputDeviceRemoved(deviceId: Int) {
+            val wasController = controllerKeyDevices.remove(deviceId) || ControllerMotion.isControllerDevice(deviceId) ||
+                (0 until NativeApp.MAX_PLAYERS).any { com.armsx2.input.PadRouter.deviceIdForPort(it) == deviceId }
+            ControllerMotion.invalidate(deviceId)
+            joyconLoggedDevices.remove(deviceId)
             com.armsx2.input.PadRouter.forgetDevice(deviceId)
+            if (wasController) resetPadState()
         }
     }
 

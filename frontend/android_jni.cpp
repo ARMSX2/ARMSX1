@@ -1705,41 +1705,8 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring pa
 
     psxe_host_set_present_callback(PresentToSurface, nullptr);
 
-    // EmulatorActivity.getArguments() passes `--bios <filesDir>/bios.bin` (copyBundledBios
-    // deposits it there). Mirror that so the in-process path boots with the same BIOS instead
-    // of depending on settings.toml alone — but only when that file actually exists;
-    // settings.toml's [bios] override_file / search_path is the normal source otherwise.
-    //
-    // NEVER probe with SDL_RWFromFile() here. On Android SDL_RWFromFile falls through to the
-    // asset manager (Android_JNI_FileOpen) when the plain fopen() misses, and that resolves
-    // org.libsdl.app.SDLActivity's static JNI glue, which does not exist in-process. With
-    // CheckJNI on (any debug build) that is an immediate, fatal
-    // "CallStaticObjectMethod received NULL jclass" abort — which is exactly what killed the
-    // armsx-vm thread here before external_main_ex() was ever reached. Plain POSIX stat().
-    std::string bios_path;
-    if (!files_dir.empty()) {
-        std::string candidate = files_dir;
-        if (candidate.back() != '/') {
-            candidate.push_back('/');
-        }
-        candidate += "bios.bin";
-
-        struct stat info{};
-        if (::stat(candidate.c_str(), &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0) {
-            bios_path = std::move(candidate);
-            ARMSX_LOGI("runVMThread: bundled BIOS at %s", bios_path.c_str());
-        } else {
-            ARMSX_LOGI("runVMThread: no %s; deferring BIOS selection to settings.toml",
-                       candidate.c_str());
-        }
-    }
-
     std::vector<const char*> argv;
     argv.push_back("armsx");
-    if (!bios_path.empty()) {
-        argv.push_back("--bios");
-        argv.push_back(bios_path.c_str());
-    }
     /*
         No game path means "Boot BIOS" from the library drawer (MainActivityRuntime.startBios
         passes ""). That needs an EXPLICIT launch argument, not merely the absence of one:
@@ -1985,17 +1952,6 @@ Java_kr_co_iefriends_pcsx2_NativeApp_setPs1TextureOptions(JNIEnv* env, jclass, j
 
     if (chars)
         env->ReleaseStringUTFChars(dir, chars);
-}
-
-// PGXP (psx/pgxp.c): sub-pixel vertex precision. Core-global, so this is safe to flip
-// while the VM runs — the module validates every attach against live RAM contents, and
-// the worst case after a toggle is one frame of plain integer vertices. The boot-time
-// value comes from settings.toml ([video] pgxp) through frontend/main.cpp; this native
-// exists so the Kotlin video tab can live-toggle without a restart.
-extern "C" JNIEXPORT void JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_setPgxpEnabled(JNIEnv*, jclass, jboolean enabled) {
-    psx_pgxp_set_enabled(enabled == JNI_TRUE ? 1 : 0);
-    ARMSX_LOGI("pgxp -> %s", enabled == JNI_TRUE ? "true" : "false");
 }
 
 // ---- Host CPU scheduling levers -------------------------------------------------------

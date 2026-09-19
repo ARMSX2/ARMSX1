@@ -47,9 +47,7 @@ extern int g_psx_pgxp_enabled;
 
 #define psx_pgxp_active() (g_psx_pgxp_enabled)
 
-/* Lifetime / control. Enabling allocates the address cache (~10 MiB) on first
-   use and keeps it across later toggles, so flipping the setting mid-game can
-   never race the emulation thread against free(). */
+/* All entry points run on the emulation thread. */
 void psx_pgxp_set_enabled(int enabled);
 int  psx_pgxp_enabled(void);
 
@@ -79,14 +77,16 @@ void psx_pgxp_gte_reg_write(uint32_t reg, uint32_t value);
    invalidates a stale entry at that address. */
 void psx_pgxp_cpu_swc2(uint32_t addr, uint32_t value, uint32_t reg);
 
-/* MFC2: GTE data register `reg` was read into CPU register `rt` (value is what
-   will land after the load delay). Keeps a per-CPU-register shadow so a later
-   plain SW can carry the precision along. */
+/* MFC2 queues precision until the delayed CPU load commits. */
 void psx_pgxp_cpu_mfc2(uint32_t rt, uint32_t value, uint32_t reg);
 
-/* SW: CPU register `rt` (contents `value`) was stored to `addr`. Attaches the
-   register shadow when it still matches, otherwise invalidates the address. */
+/* SW uses the register shadow captured before committing the pending load. */
 void psx_pgxp_cpu_sw(uint32_t addr, uint32_t value, uint32_t rt);
+void psx_pgxp_cpu_store_begin(uint32_t rt);
+void psx_pgxp_cpu_load_commit(uint32_t rt, uint32_t value);
+void psx_pgxp_cpu_lw(uint32_t rt, uint32_t addr, uint32_t value);
+void psx_pgxp_cpu_instruction(uint32_t opcode);
+void psx_pgxp_memory_written(uint32_t addr, uint32_t size);
 
 /* ---- submission (psx/dev/dma.c -> psx/dev/gpu.c) ----
    dma.c notes the RAM source address immediately before writing each word to

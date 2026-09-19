@@ -74,6 +74,8 @@ void psxi_sda_init(psxi_sda_t*, uint16_t);
    reports when a game boots. Same state change the pad's ANALOG button performs, minus the
    flip — the button keeps working afterwards. Call after psxi_sda_init(). */
 void psxi_sda_set_analog_mode(psxi_sda_t*, int enabled);
+uint16_t psxi_sda_button_state(const psxi_sda_t*);
+void psxi_sda_reset_transfer(psxi_sda_t*);
 void psxi_sda_init_input(psxi_sda_t*, psx_input_t*);
 /* The vtable entry points, declared so a container device can drive a pad it
    owns directly. The multitap (psx/input/multitap.c) holds four of these and has

@@ -1,4 +1,5 @@
 #include "gpu_hw_gl.h"
+#include "gpu_pgxp.h"
 
 #if defined(USE_HARDWARE) && defined(ARMSX_ENABLE_GL) && defined(__ANDROID__)
 #define ARMSX_HW_GL_BUILD 1
@@ -2650,13 +2651,7 @@ static void gl_triangle(hw_gl_t* g, psx_gpu_t* gpu, const poly_data_t* poly,
        and the tolerance is what turns "bizarre geometry" into "falls back to integer".
        pw > 0 guards the shader's 1/w divisions. */
     {
-        const float tol = 1.0f;
-
-        pgxp = v0.precise_valid && v1.precise_valid && v2.precise_valid &&
-               (v0.pw > 0.0f) && (v1.pw > 0.0f) && (v2.pw > 0.0f) &&
-               (fabsf(v0.px - (float)v0.x) <= tol) && (fabsf(v0.py - (float)v0.y) <= tol) &&
-               (fabsf(v1.px - (float)v1.x) <= tol) && (fabsf(v1.py - (float)v1.y) <= tol) &&
-               (fabsf(v2.px - (float)v2.x) <= tol) && (fabsf(v2.py - (float)v2.y) <= tol);
+        pgxp = armsx_pgxp_triangle_valid(&v0, &v1, &v2);
     }
 
     /* gpu.c:289-295 — enforce positive area, then apply the drawing offset.

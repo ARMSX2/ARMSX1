@@ -5,6 +5,9 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Process
+import android.system.Os
+import android.system.OsConstants
+import android.view.InputDevice
 import com.armsx2.config.Ps1SettingsStore
 import java.io.BufferedWriter
 import java.io.File
@@ -12,6 +15,7 @@ import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 /**
  * "Generate log file": everything a bug report needs, in one file the USER chose the location of.
@@ -88,15 +92,25 @@ object DiagnosticsReport {
      * grant is gone (file deleted, storage detached), or the write failed — never throws.
      * Blocking: call from an IO thread.
      */
-    fun refresh(context: Context): Boolean {
-        if (!isEnabled(context)) return false
-
-        val uri = reportUri(context) ?: return false
-
+    fun refresh(context: Context, export: Boolean = true): Boolean {
+        if (!isEnabled(context) && !BuildConfig.DIAGNOSTIC_BUILD) return false
+        if (!DiagnosticCapture.isMainProcess(context)) return false
+        val local = File(context.filesDir, "logs/diagnostic-report.txt")
+        val captured = synchronized(this) {
+            runCatching {
+                local.parentFile?.mkdirs()
+                val pending = File(local.parentFile, "diagnostic-report.pending")
+                pending.bufferedWriter().use { writeReport(context, it) }
+                check(pending.renameTo(local))
+                true
+            }.getOrDefault(false)
+        }
+        if (!captured) return false
+        val uri = if (export && isEnabled(context)) reportUri(context) else null
+        if (uri == null) return true
         return runCatching {
-            // "wt" truncates: a shorter rewrite must not leave the tail of the previous report.
             val stream = context.contentResolver.openOutputStream(uri, "wt") ?: return false
-            stream.bufferedWriter().use { writeReport(context, it) }
+            stream.use { output -> local.inputStream().use { it.copyTo(output) } }
             true
         }.getOrDefault(false)
     }
@@ -117,16 +131,45 @@ object DiagnosticsReport {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             w.appendLine("soc: ${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}")
         }
-        val coreLogging = runCatching { Ps1SettingsStore.load(context).loggingEnabled }.getOrDefault(false)
+        w.appendLine("diagnostic build: ${BuildConfig.DIAGNOSTIC_BUILD}")
+        w.appendLine("abis: ${Build.SUPPORTED_ABIS.joinToString()}")
+        w.appendLine("page size: ${runCatching { Os.sysconf(OsConstants._SC_PAGESIZE) }.getOrDefault(-1L)}")
+        w.appendLine("free app storage: ${context.filesDir.usableSpace}")
+        val coreLogging = BuildConfig.DIAGNOSTIC_BUILD ||
+            runCatching { Ps1SettingsStore.load(context).loggingEnabled }.getOrDefault(false)
         w.appendLine(
             "core logging: " +
                 if (coreLogging) "on" else "off — armsx.log below is stale; re-enable and play again",
         )
         w.appendLine()
 
+        w.appendLine("===== memory cards =====")
+        for (slot in 1..2) {
+            val card = File(context.filesDir, "slot$slot.mcd")
+            w.appendLine("slot=$slot exists=${card.exists()} bytes=${card.length()} readable=${card.canRead()} writable=${card.canWrite()}")
+        }
+        w.appendLine()
         section(w, "settings.toml", File(context.filesDir, "settings.toml"))
+        section(w, "armsx.previous.log", File(context.filesDir, "logs/armsx.log.previous"))
         section(w, "armsx.log — core/interpreter/renderer diagnostics", File(context.filesDir, "logs/armsx.log"))
+        section(w, "previous audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt.previous"))
+        section(w, "audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt"))
+        section(w, "previous device session", File(context.filesDir, "logs/device.previous.log"))
+        section(w, "device lifecycle, controller and native logs", File(context.filesDir, "logs/device.log"))
         section(w, "session.log — frontend stdout/stderr", File(externalLogs, "session.log"))
+        w.appendLine("===== input devices =====")
+        runCatching {
+            InputDevice.getDeviceIds().take(64).forEach { id ->
+                val device = InputDevice.getDevice(id) ?: return@forEach
+                w.appendLine("id=$id name=${device.name} vendor=${device.vendorId} product=${device.productId} " +
+                    "sources=0x${device.sources.toString(16)} descriptor=${device.descriptor}")
+                device.motionRanges.forEach { range ->
+                    w.appendLine("  axis=${range.axis} source=0x${range.source.toString(16)} " +
+                        "min=${range.min} max=${range.max} flat=${range.flat} fuzz=${range.fuzz}")
+                }
+            }
+        }.onFailure { w.appendLine("unavailable: ${it.javaClass.simpleName}") }
+        w.appendLine()
 
         val crashes = externalLogs
             .listFiles { f -> f.name.startsWith("crash-") && f.name.endsWith(".txt") }
@@ -175,12 +218,22 @@ object DiagnosticsReport {
         // Belt and braces alongside the exit records: the renderer's last lines and the abort
         // message are also still in our own logcat buffer right after a bad session.
         w.appendLine("===== recent logcat (this process) =====")
+        if (BuildConfig.DIAGNOSTIC_BUILD) {
+            w.appendLine("Captured in device.log above.")
+            return
+        }
         runCatching {
-            val p = Runtime.getRuntime().exec(
-                arrayOf("logcat", "-d", "-t", "2000", "--pid=${Process.myPid()}"),
-            )
-            p.inputStream.bufferedReader().useLines { lines -> lines.forEach { w.appendLine(it) } }
-            p.waitFor()
+            val snapshot = File.createTempFile("report-logcat-", ".txt", context.cacheDir)
+            var process: java.lang.Process? = null
+            try {
+                process = ProcessBuilder("logcat", "-d", "-t", "600", "--pid=${Process.myPid()}")
+                    .redirectErrorStream(true).redirectOutput(snapshot).start()
+                if (!process.waitFor(3, TimeUnit.SECONDS)) process.destroyForcibly()
+                section(w, "logcat snapshot", snapshot)
+            } finally {
+                process?.destroy()
+                snapshot.delete()
+            }
         }.onFailure { w.appendLine("logcat unavailable: ${it.javaClass.simpleName}") }
     }
 
@@ -214,11 +267,17 @@ object DiagnosticsReport {
         w.appendLine("===== $title ($size bytes$note) =====")
         runCatching {
             RandomAccessFile(file, "r").use { raf ->
-                val start = maxOf(0L, raf.length() - TAIL_LIMIT)
+                val length = raf.length()
+                val start = maxOf(0L, length - TAIL_LIMIT)
                 raf.seek(start)
-                val bytes = ByteArray((raf.length() - start).toInt())
-                raf.readFully(bytes)
-                w.append(String(bytes, Charsets.UTF_8))
+                val bytes = ByteArray((length - start).toInt())
+                var count = 0
+                while (count < bytes.size) {
+                    val read = raf.read(bytes, count, bytes.size - count)
+                    if (read <= 0) break
+                    count += read
+                }
+                w.append(String(bytes, 0, count, Charsets.UTF_8))
             }
         }.onFailure { w.appendLine("unreadable: ${it.javaClass.simpleName}") }
         w.appendLine()

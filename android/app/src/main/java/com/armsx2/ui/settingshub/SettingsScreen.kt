@@ -457,6 +457,7 @@ private fun settingsSections() = listOf(
     SettingsSection(SettingsCategory.Performance, "↯"),   // Emulation — [cpu] + [console] + pacing
     SettingsSection(SettingsCategory.Audio, "♫"),         // Audio   — [audio]
     SettingsSection(SettingsCategory.Bios, "▣"),          // BIOS    — [bios]
+    SettingsSection(SettingsCategory.MemoryCards, "▤"),
     SettingsSection(SettingsCategory.Network, "▤"),       // Library — [library]
     SettingsSection(SettingsCategory.Controls, "⌁"),
     SettingsSection(SettingsCategory.Hotkeys, "⌘"),
@@ -502,6 +503,9 @@ private fun CategoryContent(
         SettingsCategory.Performance -> ps1 { Ps1EmulationTab() }
         SettingsCategory.Audio -> ps1 { Ps1AudioTab() }
         SettingsCategory.Bios -> ps1 { Ps1BiosTab() }
+        SettingsCategory.MemoryCards -> com.armsx2.ui.memorycards.MemoryCardScreen(
+            onBack = {}, game = contextGame, embedded = true,
+        )
         SettingsCategory.Network -> Ps1LibraryTab()
         SettingsCategory.Controls -> PadTab(viewModel.settings)
         SettingsCategory.Hotkeys -> HotkeysTab(viewModel.settings)
@@ -530,6 +534,7 @@ internal fun categoryTitle(category: SettingsCategory): String = when (category)
     SettingsCategory.Performance -> str("tab.emulation")
     SettingsCategory.Audio -> str("tab.audio")
     SettingsCategory.Bios -> str("tab.bios")
+    SettingsCategory.MemoryCards -> str("memcard.title")
     SettingsCategory.Network -> str("tab.library")
     SettingsCategory.Controls -> str("tab.controls")
     SettingsCategory.Hotkeys -> str("tab.hotkeys")

@@ -9,13 +9,13 @@ internal object Ps1SafText {
         pattern = "(?im)^(\\s*FILE\\s+)(?:\"([^\"\\r\\n]+)\"|([^\\s\\r\\n]+))(\\s+.*)$",
     )
 
-    fun cueReferences(text: String): List<String> = cueFile.findAll(text).mapNotNull { match ->
+    fun cueReferences(text: String): List<String> = cueFile.findAll(text.removePrefix("\uFEFF")).mapNotNull { match ->
         (match.groups[2]?.value ?: match.groups[3]?.value)?.trim()?.takeIf(String::isNotEmpty)
     }.toList()
 
     fun rewriteCue(text: String, localNames: List<String>): String {
         var index = 0
-        val rewritten = cueFile.replace(text) { match ->
+        val rewritten = cueFile.replace(text.removePrefix("\uFEFF")) { match ->
             val local = localNames.getOrNull(index++) ?: return@replace match.value
             "${match.groupValues[1]}\"$local\"${match.groupValues[4]}"
         }
@@ -25,13 +25,22 @@ internal object Ps1SafText {
         return rewritten
     }
 
-    fun playlistEntries(text: String): List<String> = text.lineSequence()
+    fun playlistEntries(text: String): List<String> = text.removePrefix("\uFEFF").lineSequence()
         .map(String::trim)
         .filter { it.isNotEmpty() && !it.startsWith("#") }
         .toList()
 
     fun baseName(reference: String): String =
         reference.replace('\\', '/').substringAfterLast('/').trim()
+
+    fun relativeSegments(reference: String): List<String> {
+        val normalized = reference.trim().replace('\\', '/')
+        require(!normalized.startsWith('/') && !normalized.contains(':') && !normalized.contains('\u0000')) {
+            "Disc references must be relative to the selected folder"
+        }
+        return normalized.split('/').filter { it.isNotEmpty() && it != "." }
+            .also { require(it.isNotEmpty()) { "Empty disc reference" } }
+    }
 
     fun extension(name: String): String {
         val candidate = name.substringAfterLast('.', "").lowercase(Locale.US)

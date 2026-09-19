@@ -101,7 +101,9 @@ int cue_parse_keyword(cue_t* cue) {
     char* ptr = buf;
 
     while (isalpha(cue->c) || isdigit(cue->c) || cue->c == '/') {
-        *ptr++ = cue->c;
+        if (ptr == buf + sizeof(buf) - 1)
+            return -1;
+        *ptr++ = (char)toupper(cue->c);
 
         cue->c = fgetc(cue->file);
     }
@@ -127,19 +129,14 @@ int cue_parse_number(cue_t* cue) {
     if (!isdigit(cue->c))
         return 0;
 
-    char buf[4];
-
-    char* ptr = buf;
-
+    int result = 0;
     while (isdigit(cue->c)) {
-        *ptr++ = cue->c;
-
+        if (result > 999)
+            return -1;
+        result = result * 10 + cue->c - '0';
         cue->c = fgetc(cue->file);
     }
-
-    *ptr = '\0';
-
-    return atoi(buf);
+    return result;
 }
 
 uint32_t cue_parse_msf(cue_t* cue) {
@@ -185,7 +182,7 @@ void cue_parse_index(cue_t* cue) {
     while (isspace(cue->c))
         cue->c = fgetc(cue->file);
 
-    if (i > 1)
+    if (i < 0 || i > 1)
         return;
 
     track->index[i] = cue_parse_msf(cue);
@@ -195,10 +192,12 @@ cue_track_t* cue_parse_track(cue_t* cue) {
     while (isspace(cue->c))
         cue->c = fgetc(cue->file);
 
-    if (!isdigit(cue->c))
+    if (!isdigit(cue->c) || !list_back(cue->files))
         return NULL;
 
     cue_track_t* track = malloc(sizeof(cue_track_t));
+    if (!track)
+        return NULL;
 
     track->end = 0;
     track->start = 0;
@@ -207,11 +206,19 @@ cue_track_t* cue_parse_track(cue_t* cue) {
     track->index[1] = -1;
     track->file = list_back(cue->files)->data;
     track->number = cue_parse_number(cue);
+    if (track->number < 1 || track->number > 99) {
+        free(track);
+        return NULL;
+    }
 
     while (isspace(cue->c))
         cue->c = fgetc(cue->file);
 
     track->mode = cue_parse_keyword(cue);
+    if (track->mode < 0) {
+        free(track);
+        return NULL;
+    }
 
     return track;
 }
@@ -230,7 +237,13 @@ cue_file_t* cue_parse_file(cue_t* cue, const char* p, const char* s) {
         return NULL;
 
     file->tracks = list_create();
-    file->name = malloc(512);
+    const size_t prefix = (size_t)(s - p);
+    file->name = malloc(prefix + 4097);
+    if (!file->name) {
+        list_destroy(file->tracks);
+        free(file);
+        return NULL;
+    }
 
     // Append root path to track file path
     char* ptr = file->name;
@@ -241,6 +254,13 @@ cue_file_t* cue_parse_file(cue_t* cue, const char* p, const char* s) {
     cue->c = fgetc(cue->file);
 
     while (cue->c != '\"') {
+        if (cue->c == EOF || cue->c == '\r' || cue->c == '\n' ||
+            ptr == file->name + prefix + 4096) {
+            list_destroy(file->tracks);
+            free(file->name);
+            free(file);
+            return NULL;
+        }
         *ptr++ = cue->c;
 
         cue->c = fgetc(cue->file);
@@ -280,6 +300,11 @@ int cue_parse(cue_t* cue, const char* path) {
     const char* s = find_last_slash(path);
 
     cue->c = fgetc(cue->file);
+    if (cue->c == 0xef) {
+        if (fgetc(cue->file) != 0xbb || fgetc(cue->file) != 0xbf)
+            return CUE_TRACK_READ_ERROR;
+        cue->c = fgetc(cue->file);
+    }
 
     while (isspace(cue->c))
         cue->c = fgetc(cue->file);
@@ -289,11 +314,16 @@ int cue_parse(cue_t* cue, const char* path) {
 
         switch (kw) {
             case CUE_FILE: {
-                list_push_back(cue->files, cue_parse_file(cue, path, s));
+                cue_file_t* file = cue_parse_file(cue, path, s);
+                if (!file)
+                    return CUE_TRACK_READ_ERROR;
+                list_push_back(cue->files, file);
             } break;
 
             case CUE_TRACK: {
                 cue_track_t* track = cue_parse_track(cue);
+                if (!track)
+                    return CUE_TRACK_READ_ERROR;
                 cue_file_t* file = list_back(cue->files)->data;
 
                 list_push_back(cue->tracks, track);
@@ -301,6 +331,8 @@ int cue_parse(cue_t* cue, const char* path) {
             } break;
 
             case CUE_INDEX: {
+                if (!list_back(cue->tracks))
+                    return CUE_TRACK_READ_ERROR;
                 cue_parse_index(cue);
             } break;
 
@@ -329,6 +361,11 @@ int cue_parse(cue_t* cue, const char* path) {
             cue->c = fgetc(cue->file);
     }
 
+    if (!cue->tracks->size)
+        return CUE_TRACK_READ_ERROR;
+    for (node_t* node = list_front(cue->files); node; node = node->next)
+        if (!((cue_file_t*)node->data)->tracks->size)
+            return CUE_TRACK_READ_ERROR;
     return 0;
 }
 

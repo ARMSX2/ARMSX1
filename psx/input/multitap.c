@@ -31,6 +31,14 @@ void psxi_multitap_init(psxi_multitap_t* tap) {
     tap->last_cmd = 0;
 }
 
+void psxi_multitap_reset_transfer(psxi_multitap_t* tap) {
+    tap->pos = 0;
+    tap->tx_ready = 0;
+    tap->last_cmd = 0;
+    for (int i = 0; i < PSXI_MULTITAP_SLOTS; ++i)
+        psxi_sda_reset_transfer(&tap->sub[i]);
+}
+
 void psxi_multitap_set_analog_mode(psxi_multitap_t* tap, int enabled) {
     int i;
 
@@ -43,10 +51,11 @@ void psxi_multitap_set_analog_mode(psxi_multitap_t* tap, int enabled) {
    by the host's own byte clock, and the tap has to produce a whole packet in one
    go without disturbing it. */
 static void multitap_pack_slot(const psxi_sda_t* sda, uint8_t* out) {
+    const uint16_t buttons = psxi_sda_button_state(sda);
     out[0] = sda->model;
     out[1] = 0x5a;
-    out[2] = (uint8_t)(sda->sw & 0xff);
-    out[3] = (uint8_t)((sda->sw >> 8) & 0xff);
+    out[2] = (uint8_t)(buttons & 0xff);
+    out[3] = (uint8_t)((buttons >> 8) & 0xff);
 
     if (sda->sa_mode == SA_MODE_ANALOG) {
         out[4] = sda->adc0;

@@ -62,6 +62,7 @@ typedef struct {
 
 psxi_guncon_t* psxi_guncon_create(void);
 void psxi_guncon_init(psxi_guncon_t*);
+void psxi_guncon_reset_transfer(psxi_guncon_t*);
 void psxi_guncon_init_input(psxi_guncon_t*, psx_input_t*);
 /* GunCon serial transfer state machine + latched trigger position. */
 void psxi_guncon_save_state(psxi_guncon_t*, psx_state_writer_t*);

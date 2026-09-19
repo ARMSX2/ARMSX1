@@ -2,6 +2,7 @@ package com.armsx2.core
 
 import android.content.Context
 import android.net.Uri
+import android.system.Os
 import java.io.File
 import java.io.IOException
 
@@ -29,19 +30,18 @@ import java.io.IOException
  *  * **Size** — always [CARD_SIZE_BYTES] (`MCD_MEMORY_SIZE`, 0x20000 = 128 KiB) raw bytes. PS1 cards
  *    have no size options, no folder variant and no container header.
  *
- * `psx_mcd_init()` (psx/dev/mcd.c) creates a zero-filled 128 KiB file when the path is missing, and
- * `psx_mcd_destroy()` writes the whole 128 KiB buffer back on shutdown. Two consequences this
+ * `psx_mcd_init()` creates a formatted 128 KiB card when the path is missing. Modified cards are
+ * saved after one emulated second without writes and on shutdown. Two consequences this
  * object's callers must respect:
  *
- *  1. "Creating" a card is nothing more than producing a 128 KiB zero-filled file — identical to
- *     what the core would produce on its own. A fresh card reads as unformatted until the BIOS card
- *     manager (or the first game to save) formats it.
- *  2. Because the buffer is flushed on shutdown, edits made **while a game is running** are undone
+ *  1. New cards contain the PS1 header, empty directory, and frame checksums.
+ *  2. Because the core retains an in-memory image, edits made **while a game is running** are undone
  *     when that game exits. Card edits belong between sessions.
  *
  * All functions here do blocking file I/O — call them off the main thread.
  */
 object Ps1MemoryCards {
+    val sessionLock = java.util.concurrent.locks.ReentrantLock()
 
     /** `MCD_MEMORY_SIZE` from psx/dev/mcd.h — 0x20000. The only valid PS1 card size. */
     const val CARD_SIZE_BYTES: Long = 128L * 1024L
@@ -62,7 +62,7 @@ object Ps1MemoryCards {
     fun exists(context: Context, slot: Int): Boolean = cardFile(context, slot).isFile
 
     /**
-     * Write a blank 128 KiB card for [slot], the same bytes `psx_mcd_init` would write itself.
+     * Write a formatted 128 KiB card for [slot], the same bytes `psx_mcd_init` would write itself.
      * Overwrites nothing: throws if a card is already there.
      */
     @Throws(IOException::class)
@@ -73,19 +73,14 @@ object Ps1MemoryCards {
         return target
     }
 
-    /** Zero-fill [target] to exactly [CARD_SIZE_BYTES], creating parent directories as needed. */
+    /** Create a formatted card, creating parent directories as needed. */
     @Throws(IOException::class)
     fun writeBlank(target: File) {
         target.parentFile?.mkdirs()
-        val chunk = ByteArray(16 * 1024) // already zero-filled by the JVM
         target.outputStream().use { out ->
-            var written = 0L
-            while (written < CARD_SIZE_BYTES) {
-                val n = minOf(chunk.size.toLong(), CARD_SIZE_BYTES - written).toInt()
-                out.write(chunk, 0, n)
-                written += n
-            }
+            out.write(Ps1MemoryCardImage.formatted())
             out.flush()
+            out.fd.sync()
         }
         if (target.length() != CARD_SIZE_BYTES) {
             target.delete()
@@ -117,7 +112,18 @@ object Ps1MemoryCards {
         val staging = File(target.parentFile, "${target.name}.importing")
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
-                staging.outputStream().use { output -> input.copyTo(output) }
+                staging.outputStream().use { output ->
+                    val buffer = ByteArray(8192)
+                    var copied = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        copied += read
+                        if (copied > CARD_SIZE_BYTES) throw IOException("A PS1 memory card must be exactly 128 KiB.")
+                        output.write(buffer, 0, read)
+                    }
+                    output.fd.sync()
+                }
             } ?: throw IOException("Could not open the selected file.")
             val size = staging.length()
             if (size != CARD_SIZE_BYTES) {
@@ -126,8 +132,7 @@ object Ps1MemoryCards {
                         "($CARD_SIZE_BYTES bytes) of raw card data.",
                 )
             }
-            if (target.exists() && !target.delete()) throw IOException("Could not replace ${target.name}.")
-            if (!staging.renameTo(target)) throw IOException("Could not install ${target.name}.")
+            Os.rename(staging.absolutePath, target.absolutePath)
             return target
         } finally {
             staging.delete()

@@ -781,6 +781,15 @@ private fun BackupRestoreRows() {
             logCapture = false
         }
     }
+    OutlinedButton(
+        onClick = { logPicker.launch("armsx-report-${com.armsx2.BuildConfig.VERSION_NAME}.txt") },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(str("app.logs.export"))
+    }
+    if (com.armsx2.BuildConfig.DIAGNOSTIC_BUILD) {
+        Text(str("app.logs.diagnostic"), style = MaterialTheme.typography.bodySmall)
+    }
 
     // Factory reset. Sits with Backup/Restore because Export is the thing to do first — the
     // prompt says so. Routed through GlobalConfirm rather than a local overlay: this row is

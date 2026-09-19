@@ -46,7 +46,7 @@ typedef struct {
     uint8_t flag;
     uint16_t msb;
     uint16_t lsb;
-    uint16_t addr;
+    uint32_t addr;
     uint8_t rx_data;
     int pending_bytes;
     char mode;
@@ -69,6 +69,10 @@ typedef struct {
     uint32_t write_generation; /* ++ per 128-byte sector the game writes */
     int hash_valid;            /* hash_cached is up to date with buf */
     uint64_t hash_cached;
+    int initialized;
+    int dirty;
+    uint32_t flush_cycles;
+    uint32_t diagnostic_transfers;
 } psx_mcd_t;
 
 psx_mcd_t* psx_mcd_create(void);
@@ -77,6 +81,8 @@ uint8_t psx_mcd_read(psx_mcd_t*);
 void psx_mcd_write(psx_mcd_t*, uint8_t);
 int psx_mcd_query(psx_mcd_t*);
 void psx_mcd_reset(psx_mcd_t*);
+int psx_mcd_flush(psx_mcd_t*);
+void psx_mcd_update(psx_mcd_t*, int cycles);
 /* Transfer state machine + the 128 KiB card image. mcd->path is a borrowed
    host pointer and is not saved. See the comment in mcd.c for why the image is
    part of the state and how to opt out. */
@@ -99,9 +105,7 @@ void psx_mcd_set_state_restores_image(int);
 uint64_t psx_mcd_content_hash(psx_mcd_t*);
 uint32_t psx_mcd_write_generation(const psx_mcd_t*);
 uint64_t psx_mcd_session_id(const psx_mcd_t*);
-/* Live stat() of the card file, or 0 when it has no path / does not exist. A
-   secondary, cross-session direction hint: the image is only flushed to disk by
-   psx_mcd_destroy(), so this does NOT move when the game saves mid-session. */
+/* Live stat() of the card file, or 0 when it has no path / does not exist. */
 int64_t psx_mcd_file_mtime(const psx_mcd_t*);
 
 void psx_mcd_destroy(psx_mcd_t*);

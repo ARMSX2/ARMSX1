@@ -9,6 +9,8 @@
 #include "../psx/perf.h"
 #include "../frontend/gpu_hw.h"
 #include "../frontend/gpu_hw_rt.h"
+#include "../frontend/gpu_pgxp.h"
+#include "../psx/pgxp.h"
 
 void log_log(int level, const char* file, int line, const char* format, ...) {
     (void)level;
@@ -2366,8 +2368,111 @@ static int check_offset_stream(void) {
     return 0;
 }
 
+static vertex_t pgxp_lookup(uint32_t addr, uint32_t word) {
+    vertex_t v = {0};
+    psx_pgxp_note_gp0_word(addr);
+    psx_pgxp_gp0_slot(1);
+    psx_pgxp_poly_vertex(&v, word, 1);
+    return v;
+}
+
+static int run_pgxp_cache_case(void) {
+    const uint32_t word = (20u << 16) | 10u;
+    int failed = 0;
+    psx_pgxp_set_enabled(1);
+    psx_pgxp_gte_vertex(word, 10.25f, 20.5f, 10.0f);
+    psx_pgxp_cpu_swc2(0x1000, word, 14);
+    vertex_t v = pgxp_lookup(0xa0601000, word);
+    failed |= !v.precise_valid || v.px != 10.25f;
+    failed |= pgxp_lookup(0xc0001000, word).precise_valid;
+    psx_pgxp_memory_written(0x80001001, 1);
+    failed |= pgxp_lookup(0x1000, word).precise_valid;
+
+    psx_pgxp_cpu_mfc2(2, word, 14);
+    psx_pgxp_cpu_load_commit(2, word);
+    psx_pgxp_gte_vertex(word, 10.75f, 20.5f, 20.0f);
+    psx_pgxp_cpu_mfc2(2, word, 14);
+    psx_pgxp_cpu_store_begin(2);
+    psx_pgxp_cpu_load_commit(2, word);
+    psx_pgxp_cpu_sw(0x1000, word, 2);
+    failed |= pgxp_lookup(0x1000, word).px != 10.25f;
+    psx_pgxp_cpu_store_begin(2);
+    psx_pgxp_cpu_sw(0x1004, word, 2);
+    failed |= pgxp_lookup(0x1004, word).px != 10.75f;
+
+    psx_pgxp_cpu_lw(3, 0x1004, word);
+    psx_pgxp_cpu_load_commit(3, word);
+    psx_pgxp_cpu_store_begin(3);
+    psx_pgxp_cpu_sw(0x1008, word, 3);
+    failed |= !pgxp_lookup(0x1008, word).precise_valid;
+    psx_pgxp_cpu_instruction((9u << 26) | (3u << 16));
+    psx_pgxp_cpu_store_begin(3);
+    psx_pgxp_cpu_sw(0x1008, word, 3);
+    failed |= pgxp_lookup(0x1008, word).precise_valid;
+
+    psx_pgxp_set_enabled(0);
+    psx_pgxp_set_enabled(1);
+    failed |= pgxp_lookup(0x1004, word).precise_valid;
+    psx_pgxp_set_enabled(0);
+    printf("GPU_PARITY %s case=pgxp-cache\n", failed ? "failed" : "passed");
+    return failed;
+}
+
+static int run_pgxp_render_case(int scale) {
+    int failed = 0;
+    psx_gpu_t* gpu = make_gpu();
+    if (!gpu) return 1;
+    memset(gpu->vram, 0, PSX_GPU_VRAM_SIZE);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x)
+            gpu->vram[512 + x + y * 1024] = (uint16_t)(1 + x + 32 * y);
+    psx_gpu_backend_t* be = armsx_hw_rt_create(gpu, scale);
+    if (!be) { psx_gpu_destroy(gpu); return 1; }
+    uint32_t stride;
+    const uint16_t* pixels = be->display_buffer(be, 0, 0, &stride);
+    stride /= sizeof(uint16_t);
+    poly_data_t poly = {.attrib = PA_TEXTURED | PA_RAW, .texp = TEXP_AT_512(2, 0)};
+    poly.v[0] = (vertex_t){.x=10, .y=10, .px=10.5f, .py=10.5f, .pw=1, .precise_valid=1};
+    poly.v[1] = (vertex_t){.x=26, .y=10, .px=26.5f, .py=10.5f, .pw=2, .precise_valid=1, .tx=16};
+    poly.v[2] = (vertex_t){.x=10, .y=26, .px=10.5f, .py=26.5f, .pw=4, .precise_valid=1, .ty=16};
+    be->draw_poly(be, gpu, &poly);
+    failed |= pixels[14 * scale + 14 * scale * stride] != 35;
+    failed |= pixels[10 * scale + 11 * scale * stride] != 0;
+    failed |= gpu->vram[14 + 14 * 1024] != 0;
+
+    vertex_t temp = poly.v[1]; poly.v[1] = poly.v[2]; poly.v[2] = temp;
+    be->draw_poly(be, gpu, &poly);
+    failed |= pixels[14 * scale + 14 * scale * stride] != 35;
+
+    psx_gpu_set_accuracy_flags(gpu, PSX_GPU_ACCURACY_MASK_BIT);
+    gpu->gpustat |= (1u << 11);
+    be->draw_poly(be, gpu, &poly);
+    failed |= pixels[14 * scale + 14 * scale * stride] != (35 | 0x8000);
+    gpu->gpustat |= (1u << 12);
+    poly.attrib = 0; poly.v[0].c = 0xff;
+    be->draw_poly(be, gpu, &poly);
+    failed |= pixels[14 * scale + 14 * scale * stride] != (35 | 0x8000);
+
+    uint32_t invalid_bits = 0x7f800000u;
+    memcpy(&poly.v[0].pw, &invalid_bits, sizeof(invalid_bits));
+    failed |= armsx_pgxp_triangle_valid(&poly.v[0], &poly.v[1], &poly.v[2]);
+    poly.v[0].pw = 1.0e-38f;
+    failed |= armsx_pgxp_triangle_valid(&poly.v[0], &poly.v[1], &poly.v[2]);
+    poly.v[0].pw = 1.0f;
+    invalid_bits = 0x7fc00000u;
+    memcpy(&poly.v[0].px, &invalid_bits, sizeof(invalid_bits));
+    failed |= armsx_pgxp_triangle_valid(&poly.v[0], &poly.v[1], &poly.v[2]);
+    armsx_hw_rt_destroy(be);
+    psx_gpu_destroy(gpu);
+    printf("GPU_PARITY %s case=pgxp-render-%dx\n", failed ? "failed" : "passed", scale);
+    return failed;
+}
+
 int main(void) {
     int failed = 0;
+    failed |= run_pgxp_cache_case();
+    for (int scale = 1; scale <= 4; ++scale)
+        failed |= run_pgxp_render_case(scale);
     poly_data_t flat = {.attrib = 0};
     flat.v[0].c = flat.v[1].c = flat.v[2].c = 0x40a0f0;
     failed |= run_case(

@@ -5,21 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*
-    Implementation notes — see pgxp.h for the contract and
-    the backend for the end-to-end design.
-
-    The address cache is a direct table over the whole guest address space that
-    vertices can live in, not a hash: 2 MiB of RAM (mirrors folded down) plus
-    the 1 KiB scratchpad. That removes collisions as a correctness concern
-    entirely — every word address has exactly one entry — at the cost of
-    ~10 MiB of host memory, allocated lazily on first enable and deliberately
-    NEVER freed while the process runs a machine. Freeing on disable would race
-    the emulation thread (a JNI settings write can flip the flag mid-frame);
-    keeping the block makes the flag transition safe in both directions since
-    every reader re-checks g_psx_pgxp_enabled before touching it.
-*/
-
 #define PGXP_RAM_BYTES   0x200000u
 #define PGXP_RAM_WORDS   (PGXP_RAM_BYTES >> 2)          /* 524288 */
 #define PGXP_SPAD_WORDS  (0x400u >> 2)                  /* 256 */
@@ -43,6 +28,9 @@ int g_psx_pgxp_enabled = 0;
 static pgxp_entry_t* g_mem = NULL;               /* RAM + scratchpad shadow */
 static pgxp_entry_t  g_fifo[3];                  /* SXY0/1/2 shadow */
 static pgxp_entry_t  g_regs[32];                 /* CPU register shadow */
+static pgxp_entry_t  g_load;
+static pgxp_entry_t  g_store;
+static uint32_t     g_load_reg;
 static uint32_t      g_gp0_addr[PGXP_GP0_SLOTS]; /* source addr per gpu->buf slot */
 static uint32_t      g_pending_addr = PGXP_ADDR_NONE;
 
@@ -53,6 +41,8 @@ static uint32_t      g_pending_addr = PGXP_ADDR_NONE;
    stripped so KUSEG/KSEG0/KSEG1 aliases and the 4x RAM mirror all land on one
    entry — the same folding psx_bus_read32() itself performs. */
 static inline pgxp_entry_t* pgxp_mem_entry(uint32_t addr) {
+    if (!g_mem || (addr >= 0x20000000u && addr < 0x80000000u) || addr >= 0xc0000000u)
+        return NULL;
     uint32_t phys = addr & 0x1fffffffu;
 
     if (phys < 0x00800000u)
@@ -102,6 +92,9 @@ static void pgxp_clear_runtime(void) {
 
     memset(g_fifo, 0, sizeof(g_fifo));
     memset(g_regs, 0, sizeof(g_regs));
+    memset(&g_load, 0, sizeof(g_load));
+    memset(&g_store, 0, sizeof(g_store));
+    g_load_reg = 0;
 
     for (i = 0; i < PGXP_GP0_SLOTS; i++)
         g_gp0_addr[i] = PGXP_ADDR_NONE;
@@ -128,10 +121,7 @@ void psx_pgxp_set_enabled(int enabled) {
             }
         }
 
-        pgxp_clear_runtime();
-
-        /* Publish the flag last so a concurrent reader that sees it set also
-           sees a fully initialized cache. */
+        psx_pgxp_reset();
         g_psx_pgxp_enabled = 1;
 
         log_info("PGXP: enabled (address cache %u KiB)",
@@ -210,7 +200,8 @@ void psx_pgxp_cpu_swc2(uint32_t addr, uint32_t value, uint32_t reg) {
 
 void psx_pgxp_cpu_mfc2(uint32_t rt, uint32_t value, uint32_t reg) {
     int sxy = pgxp_sxy_index(reg);
-    pgxp_entry_t* r = &g_regs[rt & 31u];
+    pgxp_entry_t* r = &g_load;
+    g_load_reg = rt & 31u;
 
     if ((sxy >= 0) && g_fifo[sxy].valid && (g_fifo[sxy].value == value)) {
         *r = g_fifo[sxy];
@@ -222,7 +213,61 @@ void psx_pgxp_cpu_mfc2(uint32_t rt, uint32_t value, uint32_t reg) {
 }
 
 void psx_pgxp_cpu_sw(uint32_t addr, uint32_t value, uint32_t rt) {
-    pgxp_mem_store(addr, value, &g_regs[rt & 31u]);
+    (void)rt;
+    pgxp_mem_store(addr, value, &g_store);
+}
+
+void psx_pgxp_cpu_store_begin(uint32_t rt) {
+    g_store = g_regs[rt & 31u];
+    if (!rt)
+        g_store.valid = 0;
+}
+
+void psx_pgxp_cpu_load_commit(uint32_t rt, uint32_t value) {
+    pgxp_entry_t* r = &g_regs[rt & 31u];
+    if (rt && g_load_reg == rt && g_load.valid && g_load.value == value)
+        *r = g_load;
+    else
+        r->valid = 0;
+    g_load.valid = 0;
+}
+
+void psx_pgxp_cpu_lw(uint32_t rt, uint32_t addr, uint32_t value) {
+    const pgxp_entry_t* m = pgxp_mem_entry(addr);
+    g_load_reg = rt & 31u;
+    if (m && m->valid && m->value == value)
+        g_load = *m;
+    else
+        g_load.valid = 0;
+}
+
+void psx_pgxp_cpu_instruction(uint32_t opcode) {
+    const unsigned op = opcode >> 26;
+    const unsigned rs = (opcode >> 21) & 31u;
+    const unsigned rt = (opcode >> 16) & 31u;
+    const unsigned rd = (opcode >> 11) & 31u;
+    const unsigned fn = opcode & 63u;
+    unsigned dest = 0;
+    if (op == 0) {
+        if (fn <= 7 || fn == 9 || fn == 16 || fn == 18 || (fn >= 32 && fn <= 43))
+            dest = rd;
+    } else if (op == 3 || (op == 1 && (rt == 16 || rt == 17))) {
+        dest = 31;
+    } else if (op >= 8 && op <= 15) {
+        dest = rt;
+    }
+    g_regs[dest].valid = 0;
+    if ((op >= 32 && op <= 38 && op != 35) ||
+        ((op == 16 || op == 18) && rs <= 2 && !(op == 18 && rs == 0)))
+        g_load.valid = 0;
+}
+
+void psx_pgxp_memory_written(uint32_t addr, uint32_t size) {
+    for (uint32_t offset = 0; offset < size; ++offset) {
+        pgxp_entry_t* m = pgxp_mem_entry(addr + offset);
+        if (m)
+            m->valid = 0;
+    }
 }
 
 /* ---- submission ------------------------------------------------------------------- */

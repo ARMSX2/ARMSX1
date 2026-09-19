@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 8 * * *"
   workflow_dispatch:
+    inputs:
+      diagnostics:
+        description: Build a diagnostic test APK without publishing a release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -23,11 +28,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: android-compose
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'android-compose' }}
           fetch-depth: 0
 
       - name: Check out native dependencies
         run: git submodule update --init --depth 1 third_party/SDL third_party/libchdr
+
+      - name: Validate diagnostic build
+        if: inputs.diagnostics
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libsdl2-dev
+          python3 tests/run_validation.py --case source --case cpu --case cpu-spec --case gte --case gpu --case gpu-fast --case audio-queue --case mcard-diverge --case mcard-protocol --case cue-parse --case sda-input --case diagnostics --case cdrom-getlocp
+          clang -std=c11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx tests/cue_parse_bounds.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c -o build/tests/cue_parse_sanitized
+          build/tests/cue_parse_sanitized
+          clang -std=c11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -I. $(sdl2-config --cflags) tests/diagnostics_concurrency.c frontend/diagnostics.c $(sdl2-config --libs) -o build/tests/diagnostics_sanitized
+          build/tests/diagnostics_sanitized
 
       - name: Set up JDK
         uses: actions/setup-java@v6
@@ -55,10 +71,13 @@ jobs:
 
       - name: Set version
         id: version
+        env:
+          DIAGNOSTICS: ${{ inputs.diagnostics || false }}
         run: |
           build_date=$(date -u +%Y%m%d)
           version_code=$(( $(date -u +%s) - 1700000000 ))
           tag="nightly-${build_date}.${GITHUB_RUN_NUMBER}"
+          if [ "$DIAGNOSTICS" = true ]; then tag="diagnostic-${build_date}.${GITHUB_RUN_NUMBER}"; fi
           echo "code=$version_code" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -67,7 +86,7 @@ jobs:
         working-directory: android
         run: |
           export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/$NDK_VERSION"
-          ./gradlew --no-daemon :app:assembleGithubRelease "-Parmsx.versionCode=${{ steps.version.outputs.code }}" "-Parmsx.versionName=${{ steps.version.outputs.tag }}"
+          ./gradlew --no-daemon :app:assembleGithubRelease "-Parmsx.versionCode=${{ steps.version.outputs.code }}" "-Parmsx.versionName=${{ steps.version.outputs.tag }}" "-Parmsx.diagnostics=${{ inputs.diagnostics || false }}"
 
       - name: Verify APK
         id: apk
@@ -80,10 +99,36 @@ jobs:
           "$apksigner" verify "$source_apk"
           certificate_sha256=$("$apksigner" verify --print-certs "$source_apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
           test "$certificate_sha256" = "$SIGNING_CERT_SHA256"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$source_apk"
+          unzip -q "$source_apk" 'lib/*/*.so' -d build/apk-verify
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          libraries = list(Path('build/apk-verify/lib').rglob('*.so'))
+          assert libraries, 'No native libraries in APK'
+          for library in libraries:
+              headers = subprocess.check_output(['readelf', '-lW', str(library)], text=True)
+              alignments = [int(line.split()[-1], 16) for line in headers.splitlines() if line.strip().startswith('LOAD ')]
+              assert alignments and all(alignment >= 16384 for alignment in alignments), str(library)
+              print(f'{library.name}: 16 KB ELF alignment verified')
+          PY
           cp "$source_apk" "$release_apk"
           echo "path=$release_apk" >> "$GITHUB_OUTPUT"
 
+      - name: Test Android helpers
+        if: inputs.diagnostics
+        working-directory: android
+        run: ./gradlew --no-daemon :app:testGithubReleaseUnitTest -Parmsx.diagnostics=true "-Parmsx.versionCode=${{ steps.version.outputs.code }}" "-Parmsx.versionName=${{ steps.version.outputs.tag }}"
+
+      - name: Upload test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARMSX1-${{ steps.version.outputs.tag }}-arm64-v8a
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 14
+
       - name: Publish release
+        if: ${{ !inputs.diagnostics }}
         env:
           GH_TOKEN: ${{ github.token }}
           APK: ${{ steps.apk.outputs.path }}

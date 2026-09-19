@@ -112,9 +112,28 @@ class MemoryCardViewModel(application: Application) : AndroidViewModel(applicati
         work: () -> Unit,
     ) {
         if (state.value.busy) return
+        if (com.armsx2.runtime.MainActivityRuntime.eState.value != com.armsx2.EmuState.STOPPED ||
+            runCatching { kr.co.iefriends.pcsx2.NativeApp.hasActiveVM() }.getOrDefault(false)) {
+            state.value = state.value.copy(error = "Close the game before managing memory cards.")
+            return
+        }
         state.value = state.value.copy(busy = true, error = null, message = null)
         viewModelScope.launch {
-            val outcome = withContext(Dispatchers.IO) { runCatching { work() } }
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val lock = Ps1MemoryCards.sessionLock
+                    check(lock.tryLock()) { "Close the game before managing memory cards." }
+                    try {
+                        check(com.armsx2.runtime.MainActivityRuntime.eState.value == com.armsx2.EmuState.STOPPED &&
+                            !kr.co.iefriends.pcsx2.NativeApp.hasActiveVM()) {
+                            "Close the game before managing memory cards."
+                        }
+                        work()
+                    } finally {
+                        lock.unlock()
+                    }
+                }
+            }
             val slots = withContext(Dispatchers.IO) { readSlots() }
             state.value = state.value.copy(
                 slots = slots,

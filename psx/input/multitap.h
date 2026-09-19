@@ -76,6 +76,7 @@ typedef struct {
 psxi_multitap_t* psxi_multitap_create(void);
 /* All four sub-pads start as digital DualShocks. */
 void psxi_multitap_init(psxi_multitap_t*);
+void psxi_multitap_reset_transfer(psxi_multitap_t*);
 /* Same meaning as psxi_sda_set_analog_mode(), applied to every sub-pad — the
    front-end's [input] analog_mode_default is a property of "the pad", and a tap
    is four of them. */

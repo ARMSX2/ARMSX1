@@ -34,6 +34,7 @@ SDL_STATIC ?= 1
 WASM_LDFLAGS ?=
 USE_CHD ?= 1
 HW_DEBUG ?= 0
+ARMSX_DIAGNOSTIC_BUILD ?= 0
 
 # Presentation backends (frontend/render*.cpp). The SDL_Renderer backend is always built.
 #   ARMSX_ENABLE_GL      GLES 3.0 / GL 3.3-core present path. Needs nothing but SDL at build
@@ -245,6 +246,11 @@ endif
 ifeq ($(HW_DEBUG),1)
 	BASE_CFLAGS += -DHW_DEBUG
 	BASE_CXXFLAGS += -DHW_DEBUG
+endif
+
+ifeq ($(ARMSX_DIAGNOSTIC_BUILD),1)
+	BASE_CFLAGS += -DARMSX_DIAGNOSTIC_BUILD
+	BASE_CXXFLAGS += -DARMSX_DIAGNOSTIC_BUILD
 endif
 
 ifeq ($(UWP_TARGET),1)
@@ -802,12 +808,19 @@ TEST_GPU_SOURCES := tests/gpu_renderer_parity.c psx/dev/gpu.c psx/perf.c psx/pgx
 # in a shipped binary would put ~1800 calls a frame in the hottest function in the emulator and
 # hand a PGO run a profile shaped by test-only code. Adding this flag to any other rule, or to
 # the library build, silently undoes that.
-$(TEST_GPU_BIN): $(TEST_GPU_SOURCES) psx/dev/gpu.h
+$(TEST_GPU_BIN): $(TEST_GPU_SOURCES) psx/dev/gpu.h psx/pgxp.h frontend/gpu_pgxp.h
 	mkdir -p $(dir $@)
 	$(CC) -std=c11 -O2 -g -DUSE_HARDWARE -DPSXE_DIAG_STDIO_DISABLE -DARMSX_TEST_OFFSET_CENSUS -I. -Ipsx -Ifrontend $(SDL_CFLAGS) $(TEST_GPU_SOURCES) -lm -o $@
 
 test-gpu: $(TEST_GPU_BIN)
 	./$(TEST_GPU_BIN)
+
+build/tests/gpu_renderer_fast: $(TEST_GPU_SOURCES) psx/dev/gpu.h psx/pgxp.h frontend/gpu_pgxp.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O3 -ffast-math -g -DUSE_HARDWARE -DPSXE_DIAG_STDIO_DISABLE -DARMSX_TEST_OFFSET_CENSUS -I. -Ipsx -Ifrontend $(SDL_CFLAGS) $(TEST_GPU_SOURCES) -lm -o $@
+
+test-gpu-fast: build/tests/gpu_renderer_fast
+	./build/tests/gpu_renderer_fast
 
 # Texture dumping / replacement (psx/texrep.c), checked BEHAVIOURALLY.
 #
@@ -947,6 +960,41 @@ $(TEST_MCARD_BIN): tests/state_mcard_divergence.c $(TEST_CORE_SOURCES) psx/state
 
 test-mcard-diverge: $(TEST_MCARD_BIN)
 	./$(TEST_MCARD_BIN)
+
+.PHONY: test-mcard-protocol
+build/tests/memory_card_protocol: tests/memory_card_protocol.c $(TEST_CORE_SOURCES) psx/state.h psx/dev/mcd.h psx/dev/pad.h | $(TEST_CORE_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) \
+		tests/memory_card_protocol.c $(TEST_CORE_SOURCES) $(TEST_CORE_LIBS) -lm -o $@
+
+test-mcard-protocol: build/tests/memory_card_protocol
+	./build/tests/memory_card_protocol
+
+.PHONY: test-cue-parse
+build/tests/cue_parse_bounds: tests/cue_parse_bounds.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/cue.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. \
+		tests/cue_parse_bounds.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c -o $@
+
+test-cue-parse: build/tests/cue_parse_bounds
+	./build/tests/cue_parse_bounds
+
+.PHONY: test-sda-input
+build/tests/sda_input: tests/sda_input.c $(TEST_CORE_SOURCES) psx/input/sda.h psx/dev/pad.h | $(TEST_CORE_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) \
+		tests/sda_input.c $(TEST_CORE_SOURCES) $(TEST_CORE_LIBS) -lm -o $@
+
+test-sda-input: build/tests/sda_input
+	./build/tests/sda_input
+
+.PHONY: test-diagnostics
+build/tests/diagnostics_concurrency: tests/diagnostics_concurrency.c frontend/diagnostics.c frontend/diagnostics.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -I. $(SDL_CFLAGS) tests/diagnostics_concurrency.c frontend/diagnostics.c $(SDL_LIBS) -o $@
+
+test-diagnostics: build/tests/diagnostics_concurrency
+	./build/tests/diagnostics_concurrency
 
 # What the drive REPORTS about itself: CdlGetlocP (psx/dev/cdrom/impl.c) and the response
 # FIFO it comes back through (psx/dev/cdrom/cdrom.c).
