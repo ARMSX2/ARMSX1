@@ -4,11 +4,8 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.os.Build
-import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
-import android.system.Os
-import android.system.OsConstants
 import androidx.documentfile.provider.DocumentFile
 import java.io.Closeable
 import java.io.File
@@ -16,17 +13,10 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Makes a persisted SAF document look like an ordinary, extension-bearing file to the native core.
- *
- * Android's external-storage DocumentsProvider returns seekable file descriptors, while the core
- * dispatches formats by filename extension and then uses POSIX seek/read. A session therefore keeps
- * each descriptor open and creates a private symlink such as `game.chd -> /proc/self/fd/42`.
- * Nothing is copied, broad storage access is unnecessary, and the native disc readers remain the
- * single implementation of ISO/CHD/PBP/ZIP semantics.
- *
- * CUE sheets are the one multi-file case. Their tiny text is rewritten into the private session
- * directory and each referenced sibling track gets its own descriptor-backed symlink. The session
- * is closed only after runVMThread returns, then its descriptors and private directory are removed.
+ * Copies SAF documents through their granted content URI into a private session directory.
+ * Native readers can reopen and seek these regular files without broad storage permission.
+ * CUE references are rewritten to copied sibling tracks. Session files are removed after
+ * runVMThread returns, including failed launches. Original ROMs are never modified.
  */
 object Ps1SafAccess {
     private const val MAX_TEXT_BYTES = 512 * 1024
@@ -37,11 +27,9 @@ object Ps1SafAccess {
 
     class Session internal constructor(
         val launchPath: String,
-        private val descriptors: List<ParcelFileDescriptor> = emptyList(),
         private val directory: File? = null,
     ) : Closeable {
         override fun close() {
-            descriptors.asReversed().forEach { runCatching { it.close() } }
             directory?.let { runCatching { it.deleteRecursively() } }
         }
     }
@@ -58,13 +46,11 @@ object Ps1SafAccess {
             throw IOException("Unable to create the private SAF launch directory")
         }
 
-        val held = ArrayList<ParcelFileDescriptor>()
         return try {
             val name = displayName(context, uri)
-            val launch = materialize(context.contentResolver, uri, name, root, held, 0)
-            Session(launch.absolutePath, held, root)
+            val launch = materialize(context.contentResolver, uri, name, root, 0)
+            Session(launch.absolutePath, root)
         } catch (failure: Throwable) {
-            held.asReversed().forEach { runCatching { it.close() } }
             runCatching { root.deleteRecursively() }
             throw failure
         }
@@ -75,14 +61,13 @@ object Ps1SafAccess {
         uri: Uri,
         displayName: String,
         root: File,
-        held: MutableList<ParcelFileDescriptor>,
         depth: Int,
     ): File {
         if (depth > MAX_PLAYLIST_DEPTH) throw IOException("Nested playlist depth exceeded")
         return when (Ps1SafText.extension(displayName)) {
-            "cue" -> materializeCue(resolver, uri, root, held)
-            "m3u" -> materializePlaylist(resolver, uri, root, held, depth)
-            else -> descriptorLink(resolver, uri, "game.${Ps1SafText.extension(displayName).ifBlank { "bin" }}", root, held)
+            "cue" -> materializeCue(resolver, uri, root)
+            "m3u" -> materializePlaylist(resolver, uri, root, depth)
+            else -> copyDocument(resolver, uri, "game.${Ps1SafText.extension(displayName).ifBlank { "bin" }}", root)
         }
     }
 
@@ -90,7 +75,6 @@ object Ps1SafAccess {
         resolver: ContentResolver,
         cueUri: Uri,
         root: File,
-        held: MutableList<ParcelFileDescriptor>,
     ): File {
         val text = readSmallText(resolver, cueUri)
         val references = Ps1SafText.cueReferences(text)
@@ -106,7 +90,7 @@ object Ps1SafAccess {
                 ?: throw IOException("CUE track is not accessible: $requested")
             val extension = Ps1SafText.extension(requested).ifBlank { "bin" }
             val localName = "track-${index.toString().padStart(2, '0')}.$extension"
-            descriptorLink(resolver, sibling, localName, root, held)
+            copyDocument(resolver, sibling, localName, root)
             localNames += localName
         }
 
@@ -117,7 +101,6 @@ object Ps1SafAccess {
         resolver: ContentResolver,
         playlistUri: Uri,
         root: File,
-        held: MutableList<ParcelFileDescriptor>,
         depth: Int,
     ): File {
         val entries = Ps1SafText.playlistEntries(readSmallText(resolver, playlistUri))
@@ -128,31 +111,32 @@ object Ps1SafAccess {
             val sibling = siblings[requested]
                 ?: siblings.entries.firstOrNull { it.key.equals(requested, ignoreCase = true) }?.value
                 ?: continue
-            return materialize(resolver, sibling, requested, root, held, depth + 1)
+            return materialize(resolver, sibling, requested, root, depth + 1)
         }
         throw IOException("No accessible disc from the selected playlist was found")
     }
 
-    private fun descriptorLink(
+    private fun copyDocument(
         resolver: ContentResolver,
         uri: Uri,
         localName: String,
         root: File,
-        held: MutableList<ParcelFileDescriptor>,
     ): File {
-        val descriptor = resolver.openFileDescriptor(uri, "r")
-            ?: throw IOException("The document provider did not return a file descriptor")
+        val destination = File(root, localName)
+        val partial = File(root, "$localName.part")
         try {
-            // Disc readers require random access. Fail here with a useful launch error rather than
-            // letting a pipe-backed cloud provider look like a corrupt ISO later in the core.
-            Os.lseek(descriptor.fileDescriptor, 0L, OsConstants.SEEK_SET)
-            val link = File(root, localName)
-            Os.symlink("/proc/self/fd/${descriptor.fd}", link.absolutePath)
-            held += descriptor
-            return link
+            val input = resolver.openInputStream(uri)
+                ?: throw IOException("The document provider did not return a readable stream")
+            input.use { source ->
+                partial.outputStream().use { target -> source.copyTo(target, 1024 * 1024) }
+            }
+            if (!partial.renameTo(destination)) {
+                throw IOException("Unable to finish preparing the disc image")
+            }
+            return destination
         } catch (failure: Throwable) {
-            runCatching { descriptor.close() }
-            throw IOException("The selected game is not available as a seekable file", failure)
+            partial.delete()
+            throw failure
         }
     }
 
