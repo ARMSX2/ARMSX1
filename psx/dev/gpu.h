@@ -2,6 +2,7 @@
 #define GPU_H
 
 #include <stdint.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -320,7 +321,12 @@ static inline uint16_t gpu_fetch_texel_f(psx_gpu_t* gpu, float tx, float ty,
     if (gpu->texrep_bind.img)
         return psx_texrep_sample(gpu, tx, ty);
 
-    return gpu_fetch_texel(gpu, (uint16_t)tx, (uint16_t)ty, tpx, tpy, clutx, cluty, depth);
+    /* Polygon UV interpolation starts at texel centres. Truncating here repeats
+       the first font row and drops strokes in fractionally scaled BIOS quads.
+       Sprites use the integer sampler directly; replacements retain sub-texels. */
+    return gpu_fetch_texel(gpu, (uint16_t)(int)floorf(tx + 0.5f),
+                           (uint16_t)(int)floorf(ty + 0.5f),
+                           tpx, tpy, clutx, cluty, depth);
 }
 
 /* Texture filtering mode for the CPU rasterizers: 0 nearest (HARDWARE BEHAVIOUR, default),
@@ -527,6 +533,18 @@ static inline uint16_t psx_gpu_mask_from_texel(const psx_gpu_t* gpu) {
         PSX_GPU_STR(PSX_GPU_MASK_WRITE(force, from_texel, texel_stp)) "\n" \
     "#define PSX_GPU_MASK_SKIP(check, dst_bit15) " \
         PSX_GPU_STR(PSX_GPU_MASK_SKIP(check, dst_bit15)) "\n"
+
+/* GP1(07) counts field lines; GP1(08) doubles them only in high-resolution
+   interlace. Do not scan a fixed 480 rows past a shorter BIOS display range. */
+static inline int psx_gpu_display_height(const psx_gpu_t* gpu) {
+    int lines = (int)gpu->disp_y2 - (int)gpu->disp_y1;
+    if (lines <= 0)
+        return 0;
+    if ((gpu->display_mode & 0x24) == 0x24)
+        return lines < 256 ? lines * 2 : PSX_GPU_FB_HEIGHT;
+    /* Preserve the existing progressive-mode sizing. */
+    return lines < (255 - 16) ? lines : 240;
+}
 
 static inline int psx_gpu_dither_enabled(const psx_gpu_t* gpu) {
     if (!(gpu->accuracy_flags & PSX_GPU_ACCURACY_DITHER_GATE))

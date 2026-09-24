@@ -304,14 +304,7 @@ static int gpu_dump_dmode_width(const psx_gpu_t* gpu) {
 }
 
 static int gpu_dump_dmode_height(const psx_gpu_t* gpu) {
-    int disp;
-
-    if (gpu->display_mode & 0x4)
-        return 480;
-
-    disp = (int)gpu->disp_y2 - (int)gpu->disp_y1;
-
-    return (disp < (255 - 16)) ? disp : 240;
+    return psx_gpu_display_height(gpu);
 }
 
 /* A primitive covering at least half the display in BOTH axes. A global colour transform —

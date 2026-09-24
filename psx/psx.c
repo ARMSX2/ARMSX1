@@ -166,15 +166,7 @@ uint32_t psx_get_dmode_width(psx_t* psx) {
 }
 
 uint32_t psx_get_dmode_height(psx_t* psx) {
-    if (psx->gpu->display_mode & 0x4)
-        return 480;
-
-    int disp = psx->gpu->disp_y2 - psx->gpu->disp_y1;
-
-    if (disp < (255-16))
-        return disp;
-
-    return 240;
+    return psx_gpu_display_height(psx->gpu);
 }
 
 double psx_get_display_aspect(psx_t* psx) {
