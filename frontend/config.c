@@ -246,19 +246,6 @@ static void psxe_normalize_model_name(const char* src, char* dst, size_t dst_siz
     dst[out] = '\0';
 }
 
-static const char* psxe_basename_no_ext(const char* path) {
-    const char* base = path ? path : "";
-    const char* scan = base;
-
-    while (*scan) {
-        if (psxe_is_path_separator(*scan))
-            base = scan + 1;
-        scan++;
-    }
-
-    return base;
-}
-
 static int psxe_extension_matches(const char* ext, const char* expected) {
     if (!ext || !expected)
         return 0;
@@ -338,7 +325,15 @@ static char* psxe_find_bios_in_dir(const char* dir_path, const char* model) {
             continue;
         }
 
-        psxe_normalize_model_name(psxe_basename_no_ext(name), normalized_name, sizeof(normalized_name));
+        /* Match the model against the filename stem, not its .bin/.rom suffix. */
+        size_t stem_length = (size_t)(ext - name);
+        if (stem_length >= sizeof(normalized_name)) {
+            free(full_path);
+            continue;
+        }
+        memcpy(normalized_name, name, stem_length);
+        normalized_name[stem_length] = '\0';
+        psxe_normalize_model_name(normalized_name, normalized_name, sizeof(normalized_name));
 
         if (normalized_model[0] && !strcmp(normalized_model, normalized_name)) {
             if (fallback)
