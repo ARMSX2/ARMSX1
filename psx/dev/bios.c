@@ -1,5 +1,6 @@
 #include "bios.h"
 #include "../log.h"
+#include "../state.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -47,20 +48,39 @@ int psx_bios_load(psx_bios_t* bios, const char* path) {
         return 3;
     }
 
-    bios->buf = malloc(size);
-    bios->io_size = size;
+    uint8_t* buffer = malloc(size);
+    if (!buffer) {
+        fclose(file);
+        return 2;
+    }
 
-    if (fread(bios->buf, 1, size, file) != size) {
+    if (fread(buffer, 1, size, file) != size) {
         log_error("Failed to read BIOS at '%s': %s", path, strerror(errno));
+        free(buffer);
         fclose(file);
         return 2;
     }
 
     fclose(file);
 
+    free(bios->buf);
+    bios->buf = buffer;
+    bios->io_size = size;
+    bios->content_hash = psx_state_fnv1a(buffer, size, PSX_STATE_FNV_SEED);
+    bios->content_hash_valid = 1;
+
     log_info("Loaded BIOS '%s' (%zu bytes)", path, size);
 
     return 0;
+}
+
+uint64_t psx_bios_fingerprint(psx_bios_t* bios) {
+    if (!bios || !bios->buf || !bios->io_size)
+        return 0;
+    if (bios->content_hash_valid)
+        return bios->content_hash;
+    /* Hosts/tests supplying a mutable buffer without load retain the old check. */
+    return psx_state_fnv1a(bios->buf, bios->io_size, PSX_STATE_FNV_SEED);
 }
 
 uint32_t psx_bios_read32(psx_bios_t* bios, uint32_t offset) {

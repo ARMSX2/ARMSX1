@@ -234,6 +234,8 @@ enum {
 /* Flags for psx_load_state_ex() / psx_load_state_from_memory_ex() /
    psx_state_request_slot_ex(). */
 #define PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE 0x00000001u
+/* In-process runahead only. Decode entries validate both address and opcode. */
+#define PSX_STATE_LOAD_KEEP_DECODE_CACHE 0x00000002u
 
 const char* psx_state_strerror(int code);
 

@@ -411,14 +411,23 @@ int psx_mcd_load_state(psx_mcd_t* mcd, psx_state_reader_t* r) {
         return PSX_STATE_ERR_TRUNCATED;
 
     if (g_psx_mcd_state_restores_image) {
-        psx_sr_bytes(r, mcd->buf, MCD_MEMORY_SIZE);
+        /* Validate the entire image before comparing or replacing it. */
+        if (r->offset > r->size || r->size - r->offset < MCD_MEMORY_SIZE) {
+            r->error = 1;
+            return PSX_STATE_ERR_TRUNCATED;
+        }
+        const uint8_t* image = r->buf + r->offset;
+        /* Runahead usually restores exactly the same card bytes. Retain their
+           cached fingerprint instead of hashing 128 KiB again on the next save.
+           Compare bytes, not hashes, so changed saves still restore exactly. */
+        if (!mcd->hash_valid || memcmp(mcd->buf, image, MCD_MEMORY_SIZE) != 0) {
+            memcpy(mcd->buf, image, MCD_MEMORY_SIZE);
+            mcd->hash_valid = 0;
+        }
+        psx_sr_skip(r, MCD_MEMORY_SIZE);
 
-        /* The image was just replaced wholesale — the cached hash describes the
-           bytes that were there a moment ago. The generation is deliberately NOT
-           reset: it counts writes this card instance has seen, and a load is not
-           the game writing to the card. Leaving it monotonic is what stops a
-           reload of the same state from re-triggering the warning. */
-        mcd->hash_valid = 0;
+        /* Never rewind write_generation: it counts writes this card instance
+           has seen, rather than state loads, and prevents repeated warnings. */
     } else {
         psx_sr_skip(r, MCD_MEMORY_SIZE);
     }

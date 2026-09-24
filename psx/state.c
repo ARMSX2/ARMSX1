@@ -191,6 +191,11 @@ void psx_sw_f32(psx_state_writer_t* w, float v) {
 }
 
 void psx_sw_u16_array(psx_state_writer_t* w, const uint16_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 2) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 2);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -198,6 +203,11 @@ void psx_sw_u16_array(psx_state_writer_t* w, const uint16_t* data, size_t count)
 }
 
 void psx_sw_i16_array(psx_state_writer_t* w, const int16_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 2) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 2);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -205,6 +215,11 @@ void psx_sw_i16_array(psx_state_writer_t* w, const int16_t* data, size_t count) 
 }
 
 void psx_sw_u32_array(psx_state_writer_t* w, const uint32_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 4) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 4);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -212,6 +227,11 @@ void psx_sw_u32_array(psx_state_writer_t* w, const uint32_t* data, size_t count)
 }
 
 void psx_sw_i32_array(psx_state_writer_t* w, const int32_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 4) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 4);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -330,6 +350,13 @@ float psx_sr_f32(psx_state_reader_t* r) {
 }
 
 void psx_sr_u16_array(psx_state_reader_t* r, uint16_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 2 && r->offset <= r->size &&
+        count * 2 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 2);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -337,6 +364,13 @@ void psx_sr_u16_array(psx_state_reader_t* r, uint16_t* out, size_t count) {
 }
 
 void psx_sr_i16_array(psx_state_reader_t* r, int16_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 2 && r->offset <= r->size &&
+        count * 2 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 2);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -344,6 +378,13 @@ void psx_sr_i16_array(psx_state_reader_t* r, int16_t* out, size_t count) {
 }
 
 void psx_sr_u32_array(psx_state_reader_t* r, uint32_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 4 && r->offset <= r->size &&
+        count * 4 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 4);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -351,6 +392,13 @@ void psx_sr_u32_array(psx_state_reader_t* r, uint32_t* out, size_t count) {
 }
 
 void psx_sr_i32_array(psx_state_reader_t* r, int32_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 4 && r->offset <= r->size &&
+        count * 4 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 4);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -451,10 +499,7 @@ static const psx_state_section_t* state_find_section(
 /* -------------------------------------------------------------------------- */
 
 static uint64_t state_bios_fingerprint(psx_t* psx) {
-    if (!psx->bios || !psx->bios->buf || !psx->bios->io_size)
-        return 0;
-
-    return psx_state_fnv1a(psx->bios->buf, psx->bios->io_size, PSX_STATE_FNV_SEED);
+    return psx_bios_fingerprint(psx->bios);
 }
 
 static void state_write_string(psx_state_writer_t* w, const char* s) {
@@ -1085,7 +1130,11 @@ int psx_load_state_from_memory_ex(psx_t* psx, const void* data, size_t size, uns
     /* Phase 2: apply. From here the machine is being mutated; a failure past
        this point leaves it in a partial state, which is why every check that
        CAN be made up front is made up front. */
-    STATE_APPLY(PSX_SS_CPU, psx_cpu_load_state, psx->cpu);
+    if (flags & PSX_STATE_LOAD_KEEP_DECODE_CACHE) {
+        STATE_APPLY(PSX_SS_CPU, psx_cpu_load_state_keep_decode_cache, psx->cpu);
+    } else {
+        STATE_APPLY(PSX_SS_CPU, psx_cpu_load_state, psx->cpu);
+    }
     STATE_APPLY(PSX_SS_BUS, psx_bus_load_state, psx->bus);
     STATE_APPLY(PSX_SS_RAM, psx_ram_load_state, psx->ram);
     STATE_APPLY(PSX_SS_SCRATCHPAD, psx_scratchpad_load_state, psx->scratchpad);
@@ -1105,7 +1154,8 @@ int psx_load_state_from_memory_ex(psx_t* psx, const void* data, size_t size, uns
     /* Derived host-side caches that must not survive the load. The cached
        interpreter keys its blocks on guest addresses whose contents just
        changed wholesale. */
-    psx_cpu_invalidate_cache(psx->cpu);
+    if (!(flags & PSX_STATE_LOAD_KEEP_DECODE_CACHE))
+        psx_cpu_invalidate_cache(psx->cpu);
 
     /* Same reasoning for the PGXP shadows: they mirror RAM/GTE contents that
        were just replaced. Precision degrades to plain integers for the frame

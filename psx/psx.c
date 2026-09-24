@@ -65,7 +65,7 @@ static inline uint32_t psx_overclock_device_cycles(uint32_t cycles) {
     return (uint32_t)(scaled / g_overclock_percent);
 }
 
-void psx_update(psx_t* psx) {
+__attribute__((always_inline)) void psx_update(psx_t* psx) {
     /* Instruction boundary, emulation thread: the one place it is safe to
        swap the whole machine out from under the front-end. Costs a single
        atomic load when nothing is parked. */

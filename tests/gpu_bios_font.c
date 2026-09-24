@@ -1,6 +1,19 @@
-#define main parity_suite_main
-#include "gpu_renderer_parity.c"
-#undef main
+#include <stdio.h>
+#include <string.h>
+#include "../psx/dev/gpu.h"
+static psx_gpu_t* make_gpu(void) {
+    psx_gpu_t* gpu = psx_gpu_create();
+    if (!gpu) return NULL;
+    psx_gpu_init(gpu, NULL);
+    gpu->draw_x1 = gpu->draw_y1 = 0;
+    gpu->draw_x2 = PSX_GPU_FB_WIDTH - 1;
+    gpu->draw_y2 = PSX_GPU_FB_HEIGHT - 1;
+    return gpu;
+}
+static void emit_poly(psx_gpu_t* gpu, const poly_data_t* p) {
+    gpu_render_triangle(gpu, p->v[0], p->v[1], p->v[2], *p, 1);
+    gpu_render_triangle(gpu, p->v[1], p->v[2], p->v[3], *p, 1);
+}
 int main(void) {
     psx_gpu_t* gpu = make_gpu();
     if (!gpu) return 2;

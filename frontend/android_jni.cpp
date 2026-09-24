@@ -480,9 +480,9 @@ void* OpenCustomVulkanDriver(void* /*user*/) {
 
 // Keep the CPU bridge bounded, but never reduce 480/512-line interlaced
 // frames to the old 360-line buffer: nearest downscaling drops BIOS font
-// strokes before SurfaceFlinger enlarges the image. Share the tested 720p
-// presentation default, which preserves native detail in either orientation.
-constexpr int kDefaultMaxFramebufferShortEdge = ARMSX_RENDER_HOST_FB_MAX_SHORT_EDGE;
+// strokes before SurfaceFlinger enlarges the image. A 512-line cap retains
+// both NTSC and PAL interlaced detail without the 720p CPU copy cost.
+constexpr int kDefaultMaxFramebufferShortEdge = 512;
 
 int MaxFramebufferShortEdge() {
     if (const char* override_value = std::getenv("ARMSX_ANDROID_FB_HEIGHT")) {

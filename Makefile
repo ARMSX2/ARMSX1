@@ -104,6 +104,12 @@ endif
 BASE_CFLAGS = -g -DLOG_USE_COLOR -I"." -I"psx" $(SDL_CFLAGS)
 BASE_CFLAGS += -O3 -ffast-math -Wno-overflow -Wall -pedantic -Wno-address-of-packed-member -flto
 
+# Match the Android flags used to validate the runahead hot paths. ThinLTO
+# inlines across the CPU, bus and device-update translation units.
+ifeq ($(PLATFORM),Android)
+BASE_CFLAGS := $(filter-out -flto,$(BASE_CFLAGS)) -flto=thin -fno-semantic-interposition
+endif
+
 FSUI_INCLUDE_FLAGS = \
 	-I$(FSUI_DIR)/include \
 	-I$(FSUI_DIR)/third_party/imgui \
@@ -291,6 +297,10 @@ endif
 
 SHARED_EXT := .so
 SHARED_LDFLAGS := -shared
+ifeq ($(PLATFORM),Android)
+# The Android host uses a single core, without interposing its internal calls.
+SHARED_LDFLAGS += -flto=thin -Wl,-Bsymbolic-functions
+endif
 SHARED_CFLAGS := $(BASE_CFLAGS) -D__DLL_BUILD -fPIC
 SHARED_CXXFLAGS := $(BASE_CXXFLAGS) -D__DLL_BUILD -fPIC
 
@@ -413,6 +423,10 @@ C_SOURCES_SHARED := $(C_SOURCES)
 # Nothing here is hot enough to care.
 RCHEEVOS_OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(RCHEEVOS_SOURCES))
 $(RCHEEVOS_OBJS): BASE_CFLAGS += -fno-fast-math
+
+# Preserve exact texture-coordinate divisions in both CPU rasterizers. Fast
+# reciprocal multiplication can select the preceding texel in BIOS lettering.
+$(OBJ_DIR)/psx/dev/gpu.o $(OBJ_DIR)/frontend/gpu_hw_rt.o: BASE_CFLAGS += -fno-fast-math
 
 # frontend/android_jni.cpp is the in-process Android host (Compose-owned Surface + the
 # kr.co.iefriends.pcsx2.NativeApp JNI surface). Its whole body is behind #if defined(__ANDROID__),
