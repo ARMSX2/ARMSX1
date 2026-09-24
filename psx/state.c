@@ -1303,7 +1303,7 @@ int psx_state_slot_path(psx_t* psx, int slot, const char* base_dir, char* out, s
     uint64_t fingerprint;
     size_t len;
 
-    if (!psx || !out || !out_size || slot < 0)
+    if (!psx || !out || !out_size || (slot < 0 && slot != PSX_STATE_SLOT_AUTOSAVE))
         return PSX_STATE_ERR_ARG;
 
     if (!base_dir || !*base_dir)
@@ -1315,12 +1315,20 @@ int psx_state_slot_path(psx_t* psx, int slot, const char* base_dir, char* out, s
 
     len = strlen(base_dir);
 
-    if (snprintf(out, out_size, "%s%ssavestates/%s-%08x.slot%d.pss",
+    const char* separator = (len && (base_dir[len - 1] == '/' || base_dir[len - 1] == '\\')) ? "" : "/";
+    int written;
+    if (slot == PSX_STATE_SLOT_AUTOSAVE) {
+        written = snprintf(out, out_size, "%s%ssavestates/%s-%08x.autosave.pss",
+            base_dir, separator, stem, (unsigned)(fingerprint & 0xffffffffu));
+    } else {
+        written = snprintf(out, out_size, "%s%ssavestates/%s-%08x.slot%d.pss",
             base_dir,
-            (len && (base_dir[len - 1] == '/' || base_dir[len - 1] == '\\')) ? "" : "/",
+            separator,
             stem,
             (unsigned)(fingerprint & 0xffffffffu),
-            slot) < 0)
+            slot);
+    }
+    if (written < 0 || (size_t)written >= out_size)
         return PSX_STATE_ERR_ARG;
 
     return PSX_STATE_OK;

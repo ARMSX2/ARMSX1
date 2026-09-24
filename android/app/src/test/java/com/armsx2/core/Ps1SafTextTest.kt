@@ -1,9 +1,37 @@
 package com.armsx2.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class Ps1SafTextTest {
+    @Test
+    fun launchIdentitySeparatesGamesWithTheSameNameAndDiscLayout() {
+        val first = "content://provider/tree/roms/document/roms%2FA%2Fgame.chd"
+        val second = "content://provider/tree/roms/document/roms%2FB%2Fgame.chd"
+        for (extension in listOf("chd", "bin", "cue", "iso", "pbp")) {
+            val a = Ps1SafText.launchFileName(first, "game.$extension")
+            val b = Ps1SafText.launchFileName(second, "game.$extension")
+            assertNotEquals(a, b)
+            // The native path builder discards each temporary parent directory.
+            assertEquals(a, Ps1SafText.baseName("session-1/$a"))
+            assertEquals(a, Ps1SafText.baseName("session-2/${Ps1SafText.launchFileName(first, "game.$extension")}"))
+            assertTrue(a.endsWith(".$extension"))
+        }
+    }
+
+    @Test
+    fun launchIdentitySurvivesNativeStemLimitsAndUntrustedDisplayNames() {
+        val uri = "content://provider/document/roms%2Fgame"
+        for (name in listOf("../game.BIN", "x".repeat(500) + ".chd", "game.iso/../../outside")) {
+            val local = Ps1SafText.launchFileName(uri, name)
+            assertTrue(local.matches(Regex("game-[0-9a-f]{64}\\.[a-z0-9]{1,8}")))
+            assertTrue(local.substringBeforeLast('.').length < 128)
+        }
+        assertEquals(Ps1SafText.launchFileName(uri, "game.bin"), Ps1SafText.launchFileName(uri, "renamed.BIN"))
+    }
+
     @Test
     fun cueReferencesAndRewritePreserveTrackKinds() {
         val cue = """

@@ -333,7 +333,11 @@ int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_m
 int psx_state_request_slot_ex(int op, int slot, const char* base_dir, int timeout_ms,
                               unsigned flags);
 
+/* Dedicated automatic slot; never aliases a user's numbered save. */
+#define PSX_STATE_SLOT_AUTOSAVE (-1)
+
 /* Builds the on-disk path for a slot: <base_dir>/savestates/<game>.slot<N>.pss
+   or <game>.autosave.pss for PSX_STATE_SLOT_AUTOSAVE.
    where <game> is derived from the mounted disc (sanitised file stem + the
    low 32 bits of the disc fingerprint), or "nodisc" when running the BIOS
    shell. Returns 0 on success. */

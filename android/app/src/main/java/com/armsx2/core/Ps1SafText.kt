@@ -1,6 +1,7 @@
 package com.armsx2.core
 
 import java.util.Locale
+import java.security.MessageDigest
 
 /** Pure parsers shared by SAF discovery, launch preparation, and host-side unit tests. */
 internal object Ps1SafText {
@@ -32,6 +33,17 @@ internal object Ps1SafText {
 
     fun baseName(reference: String): String =
         reference.replace('\\', '/').substringAfterLast('/').trim()
+
+    /** Native save identities include the basename, not the temporary parent directory.
+     *  A shared game.bin/game.chd name makes unrelated single-track discs share their saves.
+     *  Keep the granted document URI's full digest in the basename so it survives native's
+     *  127-character stem limit and stays the same when a new session directory is created.
+     */
+    fun launchFileName(documentUri: String, displayName: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(documentUri.toByteArray(Charsets.UTF_8))
+        val identity = digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return "game-$identity.${extension(displayName).ifBlank { "bin" }}"
+    }
 
     fun extension(name: String): String {
         val candidate = name.substringAfterLast('.', "").lowercase(Locale.US)

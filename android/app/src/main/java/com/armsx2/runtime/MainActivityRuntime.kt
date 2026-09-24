@@ -1132,6 +1132,10 @@ open class MainActivityRuntime : ComponentActivity() {
                     armRestartWatchdog()
                     return
                 }
+                // The PS1 path returns before the legacy launch code below.
+                // Arm the saved preference here, once an actual boot is accepted.
+                pendingAutoLoadOnBoot = pendingSlotLoadOnBoot == null &&
+                    prefs.getBoolean("autoLoadOnBoot", false)
                 eState.value = EmuState.RUNNING
                 scheduleVmRunningCallback()
                 Thread({
@@ -1301,6 +1305,8 @@ open class MainActivityRuntime : ComponentActivity() {
          * once BIOS finishes booting.
          */
         fun startBios() {
+            pendingAutoLoadOnBoot = false
+            pendingSlotLoadOnBoot = null
             currentGame.value = null
             m_szGamefile = ""
             // ARMSX (PS1): boot the BIOS in the SDL runtime (see launchGame for why).
@@ -1514,6 +1520,9 @@ open class MainActivityRuntime : ComponentActivity() {
         }
 
         fun stop(saveAutosave: Boolean = false, restartAfterStop: Boolean = false) {
+            // An old boot callback must never restore into the next game.
+            vmRunningCallbackGeneration++
+            pendingAutoLoadOnBoot = false
             // Drop any latched fast-forward / slow-down toggle; the next game boots
             // at normal speed. Same for the gyro hotkey latch — a game left with gyro
             // toggled off must not silently start the next one with gyro dead.
@@ -1557,8 +1566,11 @@ open class MainActivityRuntime : ComponentActivity() {
                     runCatching { prefs.getBoolean("autoSaveOnExit", false) }.getOrDefault(false))
             vmStopControl.execute {
                 println("@@ANDROID_STOP_JAVA@@ begin saveAutosave=$doAutosave forced=$saveAutosave restart=$restartAfterStop")
-                if (doAutosave)
-                    NativeApp.saveAutosaveState()
+                if (doAutosave) {
+                    val saved = runCatching { NativeApp.saveAutosaveState() }.getOrDefault(false)
+                    println("@@ANDROID_AUTOSAVE@@ exit saved=$saved")
+                    if (!saved) reportAutoStateFailure(loading = false)
+                }
                 NativeApp.shutdown()
                 println("@@ANDROID_STOP_JAVA@@ shutdown_return active=${NativeApp.hasActiveVM()} runLoop=$vmRunLoopActive state=${eState.value}")
                 if (!vmRunLoopActive && (eState.value == EmuState.STOPPED || !NativeApp.hasActiveVM())) {
@@ -1763,6 +1775,20 @@ open class MainActivityRuntime : ComponentActivity() {
         @Volatile
         private var pendingSlotLoadOnBoot: Int? = null
 
+        @Volatile
+        private var vmRunningCallbackGeneration = 0
+
+        private fun reportAutoStateFailure(loading: Boolean) {
+            val activity = instance ?: return
+            activity.runOnUiThread {
+                android.widget.Toast.makeText(
+                    activity,
+                    com.armsx2.i18n.I18n.get(if (loading) "savestate.error.load" else "savestate.error.save"),
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+
         // The last game we booted, retained across exit-to-library so the Save Manager can
         // re-launch + load a save AFTER the game was exited. Kept SEPARATE from currentGame
         // (which stop() nulls for settings-scope) so it can't resurrect per-game scope in the
@@ -1811,7 +1837,7 @@ open class MainActivityRuntime : ComponentActivity() {
          * Interval autosave: while a game is actually RUNNING, write the autosave slot
          * every N minutes so a crash or a flat battery costs at most that much progress.
          *
-         * Writes the SAME dedicated `.autosave.p2s` that auto-save-on-exit uses, so the
+         * Writes the SAME dedicated `.autosave.pss` that auto-save-on-exit uses, so the
          * numbered slots 0-9 stay entirely the user's and auto-load-on-boot picks this up
          * with no extra plumbing.
          *
@@ -1829,7 +1855,7 @@ open class MainActivityRuntime : ComponentActivity() {
                 while (true) {
                     kotlinx.coroutines.delay(AUTOSAVE_POLL_MS)
                     val minutes = runCatching { prefs.getInt(KEY_AUTOSAVE_INTERVAL_MIN, 0) }.getOrDefault(0)
-                    if (minutes <= 0 || eState.value != EmuState.RUNNING || WindowImpl.frontendCovers) {
+                    if (minutes <= 0 || vmStopInProgress || eState.value != EmuState.RUNNING || WindowImpl.frontendCovers) {
                         // Reset the clock while it can't fire, so re-entering a game doesn't
                         // immediately dump a save from time that accrued in a menu.
                         lastSaveAt = 0L
@@ -1841,7 +1867,11 @@ open class MainActivityRuntime : ComponentActivity() {
                         continue
                     }
                     if (now - lastSaveAt < minutes * 60_000L) continue
-                    runCatching { NativeApp.saveAutosaveState() }
+                    val saved = withContext(Dispatchers.IO) {
+                        runCatching { NativeApp.saveAutosaveState() }.getOrDefault(false)
+                    }
+                    println("@@ANDROID_AUTOSAVE@@ interval saved=$saved")
+                    if (!saved) reportAutoStateFailure(loading = false)
                     // Stamped AFTER the write: a savestate takes real time, and starting
                     // the next interval from before it would make saves creep earlier.
                     lastSaveAt = android.os.SystemClock.elapsedRealtime()
@@ -1903,11 +1933,13 @@ open class MainActivityRuntime : ComponentActivity() {
          * armed, which is exactly the intended behaviour.
          */
         private fun scheduleVmRunningCallback() {
+            val generation = ++vmRunningCallbackGeneration
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
             val poll = object : Runnable {
                 var attempts = 0
                 override fun run() {
-                    if (eState.value == EmuState.STOPPED) return
+                    if (generation != vmRunningCallbackGeneration || vmStopInProgress ||
+                        eState.value == EmuState.STOPPED) return
                     val presenting = runCatching {
                         kr.co.iefriends.pcsx2.NativeApp.getPresentedFrameCount() > 0
                     }.getOrDefault(false)
@@ -1934,45 +1966,38 @@ open class MainActivityRuntime : ComponentActivity() {
             if (requestedSlot == null && !loadAutosave) return
             pendingSlotLoadOnBoot = null
             pendingAutoLoadOnBoot = false
-            val handler = android.os.Handler(android.os.Looper.getMainLooper())
-            val tryLoad = object : Runnable {
-                var attempts = 0
+            val generation = vmRunningCallbackGeneration
+            instance?.lifecycleScope?.launch {
                 var lastFrame = -1
                 var advancingPolls = 0
-                override fun run() {
-                    if (vmStopInProgress || eState.value == EmuState.STOPPED) return
-                    // Wait until the renderer is actually PRESENTING frames before restoring the
-                    // state. A boot-time load that fires as soon as the disc CRC is known — before
-                    // the present loop is flowing — leaves the restored frame undisplayed (a black
-                    // screen); loading the same state manually works only because the game is
-                    // already rendering by then. The present counter can read stale-high across a
-                    // re-launch (the GS may not fully reset between games), so gate on SUSTAINED
-                    // advancement rather than an absolute value: require frames to have grown
-                    // across a few consecutive polls (~0.75s of continuous presenting). (Native
-                    // then forces one present of the restored frame so it shows immediately.)
+                repeat(60) {
+                    delay(250)
+                    if (generation != vmRunningCallbackGeneration || vmStopInProgress ||
+                        eState.value == EmuState.STOPPED) return@launch
+                    // Require this boot to present several frames before restoring.
                     val frame = runCatching { NativeApp.getPresentedFrameCount() }.getOrDefault(0)
                     advancingPolls = if (lastFrame in 0 until frame) advancingPolls + 1 else 0
                     lastFrame = frame
-                    if (advancingPolls < 3) {
-                        if (++attempts < 60) handler.postDelayed(this, 250)
-                        return
+                    if (advancingPolls < 3) return@repeat
+                    // These native calls block until the emulation thread handles them.
+                    // Never block Android's main/presentation thread while it does so.
+                    val loaded = withContext(Dispatchers.IO) {
+                        if (generation != vmRunningCallbackGeneration || vmStopInProgress)
+                            return@withContext null
+                        if (requestedSlot == null && !NativeApp.hasAutosaveState())
+                            return@withContext null // First boot: no automatic state yet.
+                        runCatching {
+                            if (requestedSlot != null) NativeApp.loadStateFromSlot(requestedSlot)
+                            else NativeApp.loadAutosaveState()
+                        }.getOrDefault(false)
                     }
-                    // Deliberately the UNCHECKED loader (no memory-card divergence prompt).
-                    // This runnable re-posts itself up to 60 times until the load lands, and a
-                    // dialog inside that loop would ask the same question on every retry. The
-                    // cards were also only just attached from disk, so there is nothing the
-                    // player could have done since boot to diverge them. Live loads — the
-                    // picker, the pause menu, the hotkey, the Save Manager with a VM up — all
-                    // go through SaveStateGuard instead.
-                    val loaded = runCatching {
-                        if (requestedSlot != null) NativeApp.loadStateFromSlot(requestedSlot)
-                        else NativeApp.loadAutosaveState()
-                    }.getOrDefault(false)
-                    if (!loaded && ++attempts < 60)
-                        handler.postDelayed(this, 250)
+                    if (loaded != null) {
+                        println("@@ANDROID_AUTOLOAD@@ slot=${requestedSlot ?: "auto"} loaded=$loaded")
+                        if (!loaded) reportAutoStateFailure(loading = true)
+                    }
+                    return@launch
                 }
             }
-            handler.postDelayed(tryLoad, 250)
         }
 
         fun finishSetup() {
