@@ -235,6 +235,8 @@ enum {
 /* Flags for psx_load_state_ex() / psx_load_state_from_memory_ex() /
    psx_state_request_slot_ex(). */
 #define PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE 0x00000001u
+/* In-process runahead only. Decode entries validate both address and opcode. */
+#define PSX_STATE_LOAD_KEEP_DECODE_CACHE 0x00000002u
 
 const char* psx_state_strerror(int code);
 
@@ -318,10 +320,10 @@ void psx_state_set_machine(struct psx_t*);
    from psx_update(). */
 void psx_state_service_requests(void);
 
-/* Any thread. Parks a slot save/load and blocks up to timeout_ms for the
-   emulation thread to run it. Returns PSX_STATE_OK or one of the negative
-   codes above; PSX_STATE_ERR_TIMEOUT means the emulation thread never got
-   there (typically: the front-end has the VM paused). base_dir is the host's
+/* Any thread. Parks a slot save/load and waits up to timeout_ms for the
+   emulation thread to claim it, then waits for completion. Call off the UI thread.
+   Returns PSX_STATE_OK or one of the negative codes above. PSX_STATE_ERR_TIMEOUT
+   means the emulation thread never got there. base_dir is the host's
    data directory; slot files land in <base_dir>/savestates/. */
 int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_ms);
 
@@ -332,7 +334,21 @@ int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_m
 int psx_state_request_slot_ex(int op, int slot, const char* base_dir, int timeout_ms,
                               unsigned flags);
 
+#ifdef PSX_STATE_QUEUE_TEST
+enum {
+    PSX_STATE_QUEUE_RESERVED = 1,
+    PSX_STATE_QUEUE_CLAIMED = 2,
+    PSX_STATE_QUEUE_WAITING = 3,
+    PSX_STATE_QUEUE_PUBLISHED = 4
+};
+void psx_state_set_queue_test_hook(void (*hook)(int));
+#endif
+
+/* Dedicated automatic slot; never aliases a user's numbered save. */
+#define PSX_STATE_SLOT_AUTOSAVE (-1)
+
 /* Builds the on-disk path for a slot: <base_dir>/savestates/<game>.slot<N>.pss
+   or <game>.autosave.pss for PSX_STATE_SLOT_AUTOSAVE.
    where <game> is derived from the mounted disc (sanitised file stem + the
    low 32 bits of the disc fingerprint), or "nodisc" when running the BIOS
    shell. Returns 0 on success. */

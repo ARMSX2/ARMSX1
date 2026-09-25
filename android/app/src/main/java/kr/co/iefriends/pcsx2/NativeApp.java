@@ -1363,16 +1363,15 @@ public class NativeApp {
 	 *  emulation thread at the next instruction boundary, so true means "queued", not "done". */
 	public static native boolean changeDisc(String path);
 
-	// Autosave-on-exit slot. Backed by a dedicated `.autosave.p2s` filename
-	// in the savestate folder (see VMManager::SAVESTATE_SLOT_AUTOSAVE) so the
-	// numbered slots 0-9 stay user-controlled. saveAutosaveState is called
-	// from the in-game "Save State And Exit" menu; hasAutosaveState gates
-	// the load picker's autosave tile.
-	public static boolean saveAutosaveState() { return false; }
-	public static boolean loadAutosaveState() { return false; }
-	public static boolean hasAutosaveState() { return false; }
-	public static byte[] getAutosaveImage() { return new byte[0]; }
-	public static String getAutosaveGamePath() { return ""; }
+	// Matches PSX_STATE_SLOT_AUTOSAVE in psx/state.h. Uses a per-game
+	// .autosave.pss file through the same emulation-thread queue as numbered
+	// saves. Call the blocking save/load methods off the Android main thread.
+	public static final int AUTOSAVE_SLOT = -1;
+	public static boolean saveAutosaveState() { return saveStateToSlot(AUTOSAVE_SLOT); }
+	public static boolean loadAutosaveState() { return loadStateFromSlot(AUTOSAVE_SLOT); }
+	public static boolean hasAutosaveState() { return !getAutosaveGamePath().isEmpty(); }
+	public static byte[] getAutosaveImage() { return getImageSlot(AUTOSAVE_SLOT); }
+	public static String getAutosaveGamePath() { return getGamePathSlot(AUTOSAVE_SLOT); }
 	// Frames the GS has presented since it opened (host-side, not saved in the state). The
 	// auto-load-on-boot path waits until this is advancing before restoring, so the load happens
 	// once the renderer is actually presenting — otherwise the restored frame never reaches the

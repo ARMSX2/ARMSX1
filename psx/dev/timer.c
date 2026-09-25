@@ -299,7 +299,7 @@ float timer_get_dotclock_div(psx_timer_t* timer) {
     }
 }
 
-void timer_update_timer0(psx_timer_t* timer, int cyc) {
+static inline void timer_update_timer0(psx_timer_t* timer, int cyc) {
     if (T0_PAUSED)
         return;
 
@@ -313,7 +313,7 @@ void timer_update_timer0(psx_timer_t* timer, int cyc) {
     timer_handle_irq(timer, 0);
 }
 
-void timer_update_timer1(psx_timer_t* timer, int cyc) {
+static inline void timer_update_timer1(psx_timer_t* timer, int cyc) {
     if (T1_PAUSED)
         return;
 
@@ -326,7 +326,7 @@ void timer_update_timer1(psx_timer_t* timer, int cyc) {
     timer_handle_irq(timer, 1);
 }
 
-void timer_update_timer2(psx_timer_t* timer, int cyc) {
+static inline void timer_update_timer2(psx_timer_t* timer, int cyc) {
     if (T2_PAUSED)
         return;
 

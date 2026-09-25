@@ -69,7 +69,7 @@ object Ps1SafAccess {
         return when (Ps1SafText.extension(displayName)) {
             "cue" -> materializeCue(resolver, uri, root, cancelled)
             "m3u" -> materializePlaylist(resolver, uri, root, depth, cancelled)
-            else -> copyDocument(resolver, uri, "game.${Ps1SafText.extension(displayName).ifBlank { "bin" }}", root, cancelled)
+            else -> copyDocument(resolver, uri, Ps1SafText.launchFileName(uri.toString(), displayName), root, cancelled)
         }
     }
 
@@ -95,7 +95,8 @@ object Ps1SafAccess {
             localNames += localName
         }
 
-        return File(root, "game.cue").also { it.writeText(Ps1SafText.rewriteCue(text, localNames)) }
+        return File(root, Ps1SafText.launchFileName(cueUri.toString(), "game.cue"))
+            .also { it.writeText(Ps1SafText.rewriteCue(text, localNames)) }
     }
 
     private fun materializePlaylist(

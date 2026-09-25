@@ -1136,13 +1136,13 @@ static const char* kDrawFS =
    same rule psx_gpu_filter_active() states for the two CPU rasterizers, and for the same two
    reasons: the filter exists to hide the size of a NATIVE texel, and three filter kernels
    would otherwise have to agree over the atlas as well as over VRAM. psx/texrep.h. */
-"            if (repl)               texel = fetch_repl(tx, ty, fract(vec2(tx, ty)));\n"
+"            if (repl)               texel = fetch_repl(tx + 0.5, ty + 0.5, fract(vec2(tx, ty) + 0.5));\n"
 "            else if (u_filter == 1) texel = fetch_smooth(tx, ty);\n"
 "            else if (u_filter == 2) texel = fetch_xbr(tx, ty);\n"
 /* Mode 0 is NEAREST and must actually point-sample — it previously called fetch_bilinear(),
    so "nearest" filtered, matching the other two rasterizers' identical bug. All three now
    point-sample at 0, so the 1x parity gate still compares like with like. */
-"            else                    texel = fetch_texel(int(floor(tx)), int(floor(ty)));\n"
+"            else                    texel = fetch_texel(int(floor(tx + 0.5)), int(floor(ty + 0.5)));\n"
 "        }\n"
 "        if (texel == 0u) discard;\n"
 "        stp = (texel & 0x8000u) != 0u;\n"
@@ -3474,14 +3474,7 @@ static int gl_display_width(const psx_gpu_t* gpu) {
 }
 
 static int gl_display_height(const psx_gpu_t* gpu) {
-    int disp;
-
-    if (gpu->display_mode & 0x4)
-        return 480;
-
-    disp = (int)gpu->disp_y2 - (int)gpu->disp_y1;
-
-    return (disp < (255 - 16)) ? disp : 240;
+    return psx_gpu_display_height(gpu);
 }
 
 /* The 2-bytes-per-pixel readback is only legal if the implementation offers it; ES 3.0

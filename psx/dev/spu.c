@@ -1688,7 +1688,10 @@ void psx_spu_flush_samples(psx_spu_t* spu) {
     spu->gen_cycles = 0;
 }
 
-int counter = 0;
+static int cdda_irq_phase = 0;
+
+int psx_spu_cdda_irq_phase(void) { return cdda_irq_phase; }
+void psx_spu_restore_cdda_irq_phase(int phase) { cdda_irq_phase = phase & 1; }
 
 /* One CD sector is 2352 bytes = 588 stereo frames, and psx/dev/cdrom/cdrom.h sizes the only
    buffer ever passed in here — psx_cdrom_t::cdda_buf — as exactly int16_t[CD_SECTOR_SIZE >> 1],
@@ -1731,12 +1734,12 @@ void psx_spu_update_cdda_buffer(psx_spu_t* spu, void* buf) {
     // Simulate capture IRQ
     if (spu->ramdtc & 0xc) {
         if (spu->irq9addr <= 0x1ff) {
-            if (!counter) {
+            if (!cdda_irq_phase) {
                 psx_ic_irq(spu->ic, IC_SPU);
             }
 
-            counter++;
-            counter &= 0x1;
+            cdda_irq_phase++;
+            cdda_irq_phase &= 0x1;
         }
     }
 }

@@ -143,8 +143,11 @@ fun SaveStatePickerScreen(mode: SaveMode, onBack: () -> Unit) {
                     item(key = "autosave") {
                         AutosaveTile {
                             scope.launch(Dispatchers.IO) {
-                                NativeApp.loadAutosaveState()
-                                withContext(Dispatchers.Main) { onBack() }
+                                when (SaveStateGuard.load(NativeApp.AUTOSAVE_SLOT)) {
+                                    SaveStateGuard.Outcome.Loaded -> withContext(Dispatchers.Main) { onBack() }
+                                    SaveStateGuard.Outcome.Cancelled -> Unit
+                                    else -> withContext(Dispatchers.Main) { failure = "savestate.error.load" }
+                                }
                             }
                         }
                     }

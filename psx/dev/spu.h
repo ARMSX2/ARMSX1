@@ -217,6 +217,9 @@ void psx_spu_save_state(psx_spu_t*, psx_state_writer_t*);
 int psx_spu_load_state(psx_spu_t*, psx_state_reader_t*);
 void psx_spu_destroy(psx_spu_t*);
 void psx_spu_update_cdda_buffer(psx_spu_t*, void*);
+/* Internal runahead snapshots also preserve the CD capture IRQ divider. */
+int psx_spu_cdda_irq_phase(void);
+void psx_spu_restore_cdda_irq_phase(int phase);
 uint32_t psx_spu_get_sample(psx_spu_t*);
 /* Sample generation on the CPU's timeline rather than in one lump at the frame boundary.
    psx_spu_begin_frame() grants the number of samples the front-end is going to pull for the

@@ -1,6 +1,7 @@
 #include "cpu.h"
 #include "fastboot.h"
 #include "bus.h"
+#include "instruction_fetch.h"
 #include "log.h"
 #include "perf.h"
 #include "pgxp.h"
@@ -354,7 +355,7 @@ void psx_cpu_save_state(psx_cpu_t* cpu, psx_state_writer_t* w) {
     psx_sw_i64(w, cpu->s_mac3);
 }
 
-int psx_cpu_load_state(psx_cpu_t* cpu, psx_state_reader_t* r) {
+int psx_cpu_load_state_keep_decode_cache(psx_cpu_t* cpu, psx_state_reader_t* r) {
     int i;
 
     for (i = 0; i < 32; i++)
@@ -434,9 +435,14 @@ int psx_cpu_load_state(psx_cpu_t* cpu, psx_state_reader_t* r) {
     /* R0 is hardwired to zero; never let a corrupt state break that invariant. */
     cpu->r[0] = 0;
 
-    psx_cpu_invalidate_cache(cpu);
 
     return PSX_STATE_OK;
+}
+
+int psx_cpu_load_state(psx_cpu_t* cpu, psx_state_reader_t* r) {
+    const int result = psx_cpu_load_state_keep_decode_cache(cpu, r);
+    if (result == PSX_STATE_OK) psx_cpu_invalidate_cache(cpu);
+    return result;
 }
 
 void psx_cpu_init(psx_cpu_t* cpu, psx_bus_t* bus) {
@@ -542,7 +548,7 @@ static inline void psx_cpu_exception(psx_cpu_t* cpu, uint32_t cause) {
     cpu->next_pc = cpu->pc + 4;
 }
 
-void psx_cpu_cycle(psx_cpu_t* cpu) {
+__attribute__((always_inline)) void psx_cpu_cycle(psx_cpu_t* cpu) {
     cpu->last_cycles = 0;
 
     if ((cpu->pc & 0x3fffffff) == 0x000000b4)
@@ -571,7 +577,7 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
     if (cpu->saved_pc & 3)
         psx_cpu_exception(cpu, CAUSE_ADEL);
 
-    cpu->opcode = psx_bus_read32(cpu->bus, cpu->pc);
+    cpu->opcode = psx_instruction_fetch(cpu->bus, cpu->pc);
     cpu->last_cycles = psx_bus_get_access_cycles(cpu->bus);
 
     cpu->pc = cpu->next_pc;

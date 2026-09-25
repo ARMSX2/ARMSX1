@@ -50,7 +50,7 @@ class RecentGamesAccessActivity : Activity() {
             finish()
             return
         }
-        
+
         val ownLabel = appLabelFor(packageName)
         AlertDialog.Builder(this)
             .setTitle(I18n.get("library.shareRequest.title").format(ownLabel))

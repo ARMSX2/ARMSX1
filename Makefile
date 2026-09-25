@@ -105,6 +105,12 @@ endif
 BASE_CFLAGS = -g -DLOG_USE_COLOR -I"." -I"psx" $(SDL_CFLAGS)
 BASE_CFLAGS += -O3 -ffast-math -Wno-overflow -Wall -pedantic -Wno-address-of-packed-member -flto
 
+# Match the Android flags used to validate the runahead hot paths. ThinLTO
+# inlines across the CPU, bus and device-update translation units.
+ifeq ($(PLATFORM),Android)
+BASE_CFLAGS := $(filter-out -flto,$(BASE_CFLAGS)) -flto=thin -fno-semantic-interposition
+endif
+
 FSUI_INCLUDE_FLAGS = \
 	-I$(FSUI_DIR)/include \
 	-I$(FSUI_DIR)/third_party/imgui \
@@ -297,6 +303,10 @@ endif
 
 SHARED_EXT := .so
 SHARED_LDFLAGS := -shared
+ifeq ($(PLATFORM),Android)
+# The Android host uses a single core, without interposing its internal calls.
+SHARED_LDFLAGS += -flto=thin -Wl,-Bsymbolic-functions
+endif
 SHARED_CFLAGS := $(BASE_CFLAGS) -D__DLL_BUILD -fPIC
 SHARED_CXXFLAGS := $(BASE_CXXFLAGS) -D__DLL_BUILD -fPIC
 
@@ -419,6 +429,10 @@ C_SOURCES_SHARED := $(C_SOURCES)
 # Nothing here is hot enough to care.
 RCHEEVOS_OBJS := $(patsubst %.c,$(OBJ_DIR)/%.o,$(RCHEEVOS_SOURCES))
 $(RCHEEVOS_OBJS): BASE_CFLAGS += -fno-fast-math
+
+# Preserve exact texture-coordinate divisions in both CPU rasterizers. Fast
+# reciprocal multiplication can select the preceding texel in BIOS lettering.
+$(OBJ_DIR)/psx/dev/gpu.o $(OBJ_DIR)/frontend/gpu_hw_rt.o: BASE_CFLAGS += -fno-fast-math
 
 # frontend/android_jni.cpp is the in-process Android host (Compose-owned Surface + the
 # kr.co.iefriends.pcsx2.NativeApp JNI surface). Its whole body is behind #if defined(__ANDROID__),
@@ -1125,6 +1139,58 @@ $(DISC_PROBE_BIN): tests/disc_probe.c psx/dev/cdrom/disc.c psx/dev/cdrom/cue.c p
 		$(CHD_LINK_LIBS) -lm -o $@
 
 disc-probe: $(DISC_PROBE_BIN)
+
+.PHONY: test-state-snapshots test-runahead test-gpu-bios
+
+TEST_STATE_HEADERS := $(wildcard psx/*.h psx/dev/*.h psx/dev/cdrom/*.h psx/input/*.h)
+TEST_STATE_OBJECTS := $(patsubst %.c,build/tests/state-core/%.o,$(TEST_CORE_SOURCES))
+TEST_STATE_CASES := state_array_copy state_mcard_restore runahead_snapshot instruction_fetch bios_fingerprint
+TEST_STATE_BINS := $(addprefix build/tests/,$(TEST_STATE_CASES))
+
+build/tests/state-core/%.o: %.c $(TEST_STATE_HEADERS) | $(TEST_CORE_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -fno-fast-math -DPSXE_DIAG_STDIO_DISABLE -DPSX_STATE_QUEUE_TEST -I. -Ipsx $(TEST_CORE_CFLAGS) -c $< -o $@
+
+$(TEST_STATE_BINS): build/tests/%: tests/%.c $(TEST_STATE_OBJECTS)
+	$(CC) -std=c11 -O2 -g -fno-fast-math -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $< $(TEST_STATE_OBJECTS) $(TEST_CORE_LIBS) -lm -o $@
+
+build/tests/state_autosave build/tests/runahead_prediction build/tests/runahead_sequence: build/tests/%: tests/%.cpp $(TEST_STATE_OBJECTS) frontend/runahead_prediction.h frontend/runahead_sequence.h
+	$(CXX) -std=c++17 -O2 -g -fno-fast-math -DPSXE_DIAG_STDIO_DISABLE -DPSX_STATE_QUEUE_TEST -I. -Ipsx $< $(TEST_STATE_OBJECTS) $(TEST_CORE_LIBS) -lm -pthread -o $@
+
+test-state-snapshots: $(TEST_STATE_BINS) build/tests/state_autosave
+	fixture_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/armsx-state-test.XXXXXX")
+	trap 'rm -r -- "$$fixture_dir"' EXIT
+	for test_bin in $(abspath $(TEST_STATE_BINS)) $(abspath build/tests/state_autosave); do
+		(cd "$$fixture_dir" && "$$test_bin")
+	done
+
+build/tests/runahead_fixture: tests/runahead_fixture.c
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -I. $< -o $@
+
+test-runahead: build/tests/runahead_prediction build/tests/runahead_sequence build/tests/runahead_fixture
+	fixture_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/armsx-runahead-test.XXXXXX")
+	trap 'rm -r -- "$$fixture_dir"' EXIT
+	(cd "$$fixture_dir" && "$(abspath build/tests/runahead_fixture)")
+	./build/tests/runahead_prediction "$$fixture_dir/bios.bin" verify "$$fixture_dir/disc.bin" 480 two-cards
+	for depth in 2 3 4 5; do
+		./build/tests/runahead_sequence "$$fixture_dir/bios.bin" verify "$$fixture_dir/disc.bin" 480 two-cards "$$depth"
+	done
+	./build/tests/runahead_sequence "$$fixture_dir/bios.bin" verify "$$fixture_dir/disc.bin" 480 two-cards 2 switch irq
+
+build/tests/gpu_bios_font build/tests/gpu_triangle_regression: build/tests/%: tests/%.c $(TEST_CORE_SOURCES) $(TEST_STATE_HEADERS) frontend/gpu_hw.c frontend/gpu_hw_rt.c | $(TEST_CORE_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -fno-fast-math -DUSE_HARDWARE -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx -Ifrontend $(SDL_CFLAGS) $(TEST_CORE_CFLAGS) $< $(TEST_CORE_SOURCES) frontend/gpu_hw.c frontend/gpu_hw_rt.c $(TEST_CORE_LIBS) -lm -o $@
+
+build/tests/gpu_display_height build/tests/gpu_bios_uv_precision: build/tests/%: tests/%.c $(TEST_STATE_HEADERS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -fno-fast-math -I. -Ipsx $< -lm -o $@
+
+test-gpu-bios: build/tests/gpu_bios_font build/tests/gpu_triangle_regression build/tests/gpu_display_height build/tests/gpu_bios_uv_precision
+	./build/tests/gpu_display_height
+	./build/tests/gpu_bios_uv_precision
+	./build/tests/gpu_bios_font
+	./build/tests/gpu_triangle_regression
 
 test:
 	python3 tests/run_validation.py

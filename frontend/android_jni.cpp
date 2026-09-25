@@ -484,15 +484,11 @@ void* OpenCustomVulkanDriver(void* /*user*/) {
     return handle;
 }
 
-// Cap on the Android CPU presentation bridge. Scaling a PS1 frame to the physical display in
-// SDL's software renderer and then copying that full-size buffer into ANativeWindow needlessly
-// spends most of a 60 Hz frame on bandwidth. Keep the deterministic software rasterizer, but
-// present it with a 360-pixel short edge and let SurfaceFlinger do the final display scale. This
-// is still above the common 240/256-line PS1 output and keeps the Pixel 8 bridge near 0.29 M
-// pixels per frame in either orientation. A physical-height cap made portrait 160x360 and was
-// needlessly blurry; the short-edge rule rotates 800x360 to 360x800 instead. Keep the historical
-// environment variable name for developer-tool compatibility.
-constexpr int kDefaultMaxFramebufferShortEdge = 360;
+// Keep the CPU bridge bounded, but never reduce 480/512-line interlaced
+// frames to the old 360-line buffer: nearest downscaling drops BIOS font
+// strokes before SurfaceFlinger enlarges the image. A 512-line cap retains
+// both NTSC and PAL interlaced detail without the 720p CPU copy cost.
+constexpr int kDefaultMaxFramebufferShortEdge = 512;
 
 int MaxFramebufferShortEdge() {
     if (const char* override_value = std::getenv("ARMSX_ANDROID_FB_HEIGHT")) {

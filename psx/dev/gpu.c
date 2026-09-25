@@ -304,14 +304,7 @@ static int gpu_dump_dmode_width(const psx_gpu_t* gpu) {
 }
 
 static int gpu_dump_dmode_height(const psx_gpu_t* gpu) {
-    int disp;
-
-    if (gpu->display_mode & 0x4)
-        return 480;
-
-    disp = (int)gpu->disp_y2 - (int)gpu->disp_y1;
-
-    return (disp < (255 - 16)) ? disp : 240;
+    return psx_gpu_display_height(gpu);
 }
 
 /* A primitive covering at least half the display in BOTH axes. A global colour transform —
@@ -1092,7 +1085,7 @@ int max(int x0, int x1) {
 
 #define EDGE(a, b, c) ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x))
 
-uint16_t gpu_fetch_texel(psx_gpu_t* gpu, uint16_t tx, uint16_t ty, uint32_t tpx, uint32_t tpy, uint16_t clutx, uint16_t cluty, int depth) {
+__attribute__((always_inline)) uint16_t gpu_fetch_texel(psx_gpu_t* gpu, uint16_t tx, uint16_t ty, uint32_t tpx, uint32_t tpy, uint16_t clutx, uint16_t cluty, int depth) {
     /* Texture replacement (psx/texrep.h). `img` is NULL for the whole session unless the
        feature was switched on AND a pack file matched THIS primitive, so the cost here is a
        load from a struct this function is about to touch anyway and a branch that is never
@@ -1181,6 +1174,26 @@ uint16_t gpu_fetch_texel_bilinear(psx_gpu_t* gpu, float tx, float ty, uint32_t t
 #define TL(z, a, b) \
     ((z < 0) || ((z == 0) && ((b.y > a.y) || ((b.y == a.y) && (b.x < a.x)))))
 
+/* Intersect a scanline with one integer edge half-plane. This is exactly the
+   existing top-left test, including its exclusion of zero on selected edges.
+   Only coverage is stepped; colour/UV divisions retain strict FP semantics. */
+static inline int gpu_clip_triangle_edge(int value, int step, int minimum,
+                                         int origin, int* first, int* last) {
+    if (step > 0) {
+        if (value < minimum) {
+            const int start = origin + (minimum - value + step - 1) / step;
+            if (start > *first) *first = start;
+        }
+    } else if (step < 0) {
+        if (value < minimum) return 0;
+        const int end = origin + (value - minimum) / -step;
+        if (end < *last) *last = end;
+    } else if (value < minimum) {
+        return 0;
+    }
+    return *first <= *last;
+}
+
 void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, poly_data_t data, int edge) {
     gpu_offset_census(gpu);
 
@@ -1248,8 +1261,21 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
     const uint16_t mask_from_texel = psx_gpu_mask_from_texel(gpu);
     const int dither_on = psx_gpu_dither_enabled(gpu);
 
+    const int dx0 = b.y - c.y, dx1 = c.y - a.y, dx2 = a.y - b.y;
+    const int min0 = TL(0, b, c), min1 = TL(0, c, a), min2 = TL(0, a, b);
     for (int y = y_begin; y < y_end; y++) {
-        for (int x = x_begin; x < x_end; x++) {
+        p.x = x_begin;
+        p.y = y;
+        int w0 = EDGE(b, c, p), w1 = EDGE(c, a, p), w2 = EDGE(a, b, p);
+        int first = x_begin, last = x_end - 1;
+        if (!gpu_clip_triangle_edge(w0, dx0, min0, x_begin, &first, &last) ||
+            !gpu_clip_triangle_edge(w1, dx1, min1, x_begin, &first, &last) ||
+            !gpu_clip_triangle_edge(w2, dx2, min2, x_begin, &first, &last))
+            continue;
+        w0 += (first - x_begin) * dx0;
+        w1 += (first - x_begin) * dx1;
+        w2 += (first - x_begin) * dx2;
+        for (int x = first; x <= last; x++, w0 += dx0, w1 += dx1, w2 += dx2) {
             /* PER-PIXEL, and this reset is the whole point.
 
                `transp` used to be declared once per primitive and then ASSIGNED inside this
@@ -1268,23 +1294,7 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
             if (mask_check && (gpu->vram[x + (y * 1024)] & 0x8000))
                 continue;
 
-            p.x = x;
-            p.y = y;
-
-            float z0 = EDGE(b, c, p);
-
-            if (TL(z0, b, c))
-                continue;
-
-            float z1 = EDGE(c, a, p);
-
-            if (TL(z1, c, a))
-                continue;
-
-            float z2 = EDGE(a, b, p);
-
-            if (TL(z2, a, b))
-                continue;
+            const float z0 = w0, z1 = w1, z2 = w2;
 
             uint16_t color = 0;
             uint32_t mod   = 0;
@@ -3618,13 +3628,18 @@ void gpu_hblank_event(psx_gpu_t* gpu) {
 void psx_gpu_update(psx_gpu_t* gpu, int cyc) {
     const float cycles_per_hdraw = psx_gpu_is_pal_mode(gpu) ? GPU_CYCLES_PER_HDRAW_PAL : GPU_CYCLES_PER_HDRAW_NTSC;
     const float cycles_per_scanline = psx_gpu_is_pal_mode(gpu) ? GPU_CYCLES_PER_SCANL_PAL : GPU_CYCLES_PER_SCANL_NTSC;
-    const float gpu_clock = psx_gpu_clock_frequency(gpu);
+    // Both ratios are constant, correctly rounded float divisions. Select the
+    // ratio after division so the compiler does not emit an FDIV on every
+    // emulated instruction. Keep the accumulation and rasterizer FP rules.
+    const float gpu_clock_ratio = psx_gpu_is_pal_mode(gpu)
+        ? (PSX_GPU_CLOCK_FREQ_PAL / PSX_CPU_FREQ)
+        : (PSX_GPU_CLOCK_FREQ_NTSC / PSX_CPU_FREQ);
 
     int prev_hblank = (gpu->cycles >= cycles_per_hdraw) &&
                       (gpu->cycles <= cycles_per_scanline);
 
     // Convert CPU (~33.8 MHz) cycles to GPU (~53.7 MHz) cycles
-    gpu->cycles += (float)cyc * (gpu_clock / PSX_CPU_FREQ);
+    gpu->cycles += (float)cyc * gpu_clock_ratio;
 
     int curr_hblank = (gpu->cycles >= cycles_per_hdraw) &&
                       (gpu->cycles <= cycles_per_scanline);

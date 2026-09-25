@@ -841,6 +841,85 @@ static void case_glsl_matrix(void) {
     printf("TEXREP_PARITY passed case=%s (%d samples)\n", name, checked);
 }
 
+static uint16_t sample_pattern(int x, int y) {
+    return (uint16_t)(1 + (x + 37 * y) % 32767);
+}
+
+static int floor_eighth(int value) {
+    return value >= 0 ? value / 8 : -((-value + 7) / 8);
+}
+
+static void case_polygon_texel_centres(void) {
+    const char* name = "polygon-texel-centres";
+    static const int coordinates[] = {
+        -13, -9, -8, -5, -4, -3, -1, 0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 15,
+        2043, 2044, 2047, 2048, 2049
+    };
+    static const unsigned masks[] = {0, 8, 0xf8};
+    psx_gpu_t* gpu = make_gpu();
+    CHECK(name, gpu != NULL, "gpu");
+    unsigned checked = 0;
+    for (int scale = 1; scale <= 4; scale *= 2) {
+        const int width = 256 * scale;
+        uint8_t* pixels = malloc((size_t)width * width * 4);
+        CHECK(name, pixels != NULL, "pixels");
+        for (int y = 0; y < width; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const uint16_t value = sample_pattern(x, y);
+                uint8_t* p = pixels + ((size_t)y * width + x) * 4;
+                p[0] = (value & 31) * 8;
+                p[1] = ((value >> 5) & 31) * 8;
+                p[2] = ((value >> 10) & 31) * 8;
+                p[3] = 255;
+            }
+        }
+        psx_texrep_image_t im = {0};
+        im.nw = im.nh = 256;
+        im.pw = im.ph = (uint16_t)width;
+        im.scale = (uint8_t)scale;
+        im.rgba = pixels;
+        for (int y = 0; y < 256; ++y)
+            for (int x = 0; x < 256; ++x)
+                gpu->vram[y * 1024 + x] = sample_pattern(x, y);
+        for (unsigned m = 0; m < sizeof(masks) / sizeof(masks[0]); ++m) {
+            const unsigned mask = masks[m], off = 24;
+            gpu->texw_mx = gpu->texw_my = mask;
+            gpu->texw_ox = gpu->texw_oy = off;
+            for (unsigned x = 0; x < sizeof(coordinates) / sizeof(coordinates[0]); ++x) {
+                for (unsigned y = 0; y < sizeof(coordinates) / sizeof(coordinates[0]); ++y) {
+                    const int u = coordinates[x] + 4, v = coordinates[y] + 4;
+                    const int ix = floor_eighth(u), iy = floor_eighth(v);
+                    const int fx = (u - ix * 8) * scale / 8;
+                    const int fy = (v - iy * 8) * scale / 8;
+                    const unsigned wx = (((unsigned)ix & ~mask) | (off & mask)) & 255;
+                    const unsigned wy = (((unsigned)iy & ~mask) | (off & mask)) & 255;
+                    const float tx = coordinates[x] / 8.0f, ty = coordinates[y] / 8.0f;
+                    gpu->texrep_bind.img = NULL;
+                    const uint16_t native = gpu_fetch_texel_f(gpu, tx, ty, 0, 0, 0, 0, 2);
+                    gpu->texrep_bind.img = &im;
+                    const uint16_t replacement = gpu_fetch_texel_f(gpu, tx, ty, 0, 0, 0, 0, 2);
+                    if (native != sample_pattern(wx, wy) ||
+                        replacement != sample_pattern(wx * scale + fx, wy * scale + fy)) {
+                        fail(name, "polygon centre, wrap, window or sub-texel mismatch");
+                        gpu->texrep_bind.img = NULL;
+                        free(pixels);
+                        psx_gpu_destroy(gpu);
+                        return;
+                    }
+                    ++checked;
+                }
+            }
+        }
+        gpu->texw_mx = gpu->texw_my = 0;
+        CHECK(name, gpu_fetch_texel(gpu, 10, 11, 0, 0, 0, 0, 2) ==
+                    sample_pattern(10 * scale, 11 * scale), "sprite was shifted");
+        gpu->texrep_bind.img = NULL;
+        free(pixels);
+    }
+    psx_gpu_destroy(gpu);
+    printf("TEXREP_PARITY passed case=%s (%u samples)\n", name, checked);
+}
+
 /* ---- PNG codec round trip ----------------------------------------------------------------- */
 
 static void case_png_roundtrip(void) {
@@ -979,6 +1058,7 @@ int main(void) {
     case_disabled_is_inert();
     case_fold_axis();
     case_glsl_matrix();
+    case_polygon_texel_centres();
     case_png_roundtrip();
     case_png_rejects_garbage();
     case_dump_writes_png();

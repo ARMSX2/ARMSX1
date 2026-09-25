@@ -400,7 +400,10 @@ int psx_runahead_save(psx_t* psx) {
 }
 
 int psx_runahead_restore(psx_t* psx) {
-    return snapshot_restore(&g_runahead_slot, psx);
+    if (!g_runahead_slot.data || !g_runahead_slot.size)
+        return PSX_STATE_ERR_MISSING;
+    return psx_load_state_from_memory_ex(psx, g_runahead_slot.data,
+        g_runahead_slot.size, PSX_STATE_LOAD_KEEP_DECODE_CACHE);
 }
 
 int psx_runahead_has_snapshot(void) {

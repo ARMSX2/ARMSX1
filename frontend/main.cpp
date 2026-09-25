@@ -1,3 +1,5 @@
+#include "runahead_prediction.h"
+#include "runahead_sequence.h"
 #include <SDL.h>
 #include <SDL_gamecontroller.h>
 #include <SDL_render.h>
@@ -2766,6 +2768,7 @@ class ArmsxSession {
         psx_rewind_configure(settings.rewind ? 1 : 0, settings.rewind_seconds,
                              settings.rewind_frequency);
         psx_runahead_configure(settings.runahead);
+        runahead_restore_ms_ = 0.0;
         runahead_restore_pending_ = false;
 
         // [cheats]. Armed here, at the same point and for the same reason as rewind above: a
@@ -3021,6 +3024,9 @@ class ArmsxSession {
     }
 
     void destroy() {
+        runahead_prediction_.clear();
+        runahead_sequence_.clear();
+        runahead_reused_frames_ = 0;
         // A capture still open here would leak its FILE* and lose its tail; closing it also
         // clears g_psx_audio_diag_enabled so a fresh session starts unarmed.
         audioDiagEnd();
@@ -3145,6 +3151,10 @@ class ArmsxSession {
     }
 
     void setPaused(bool paused) {
+        if (paused) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+        }
         paused_ = paused;
         if (audio_dev_) {
             if (paused) {
@@ -3346,14 +3356,20 @@ class ArmsxSession {
        reach the game. Called from ArmsxApp::runFrame() as its first act. */
     void runaheadRestore() {
         if (!runahead_restore_pending_ || !psx_) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
             return;
         }
 
         runahead_restore_pending_ = false;
 
+        const uint64_t restore_start = SDL_GetPerformanceCounter();
         const int result = psx_runahead_restore(psx_);
+        runahead_restore_ms_ = 1000.0 * (SDL_GetPerformanceCounter() - restore_start) / SDL_GetPerformanceFrequency();
 
         if (result == PSX_STATE_ERR_MISSING) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
             /* The slot was deliberately dropped between the look-ahead and now — a reset, a
                disc swap, a rewind step, or the user loading a state (all of which call
                psx_rewind_reset). Putting a stale future back over any of those would undo
@@ -3362,6 +3378,8 @@ class ArmsxSession {
         }
 
         if (result != PSX_STATE_OK) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
             /* Disarm rather than retry: a slot that will not apply now will not apply later,
                and re-running the look-ahead on a machine that never got put back would
                compound the drift. */
@@ -3450,9 +3468,27 @@ class ArmsxSession {
         // this frame's work, so the machine must not also be advanced. The hardware frame that
         // was just opened is still closed by the caller's finishHardwareFrame().
         if (rewindFrameIfRequested()) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
             return 0;
         }
 
+        // Service paused-menu/JNI state requests even on frames whose execution
+        // can be reused. A load/reset drops the old runahead slot.
+        psx_state_service_requests();
+        if (!psx_runahead_has_snapshot()) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+        }
+        const int selected_runahead = psx_runahead_frames();
+        const bool prediction_supported = audio_dev_ && RunaheadPrediction::supported(psx_);
+        const bool predictive_reuse = selected_runahead==1 && prediction_supported;
+        const bool sequence_reuse = selected_runahead>=2 && prediction_supported &&
+            runahead_sequence_.configure(selected_runahead,static_cast<double>(kAudioMixRate)/frameRate());
+        if (!predictive_reuse) runahead_prediction_.clear();
+        if (!sequence_reuse) runahead_sequence_.clear();
+
+        const uint64_t runahead_work_start = psx_runahead_frames() > 0 ? SDL_GetPerformanceCounter() : 0;
         std::uint32_t steps = 0;
 
         // R3000A accounting. The equivalent lives in psx_run_frame(), which this front-end
@@ -3477,7 +3513,16 @@ class ArmsxSession {
         // beginAudioFrame() and the block comment above psx_spu_tick() in psx/dev/spu.c.
         beginAudioFrame();
 
-        steps = stepOneFrame();
+        const bool reused_prediction = predictive_reuse ? runahead_prediction_.reuse(psx_, steps) :
+            (sequence_reuse && runahead_sequence_.reuseReal(psx_,steps));
+        if (reused_prediction) {
+            // Timer/IRQ changes are already in the snapshot. Only the host's
+            // frame counter is outside it; don't fire the timer callback twice.
+            ++vblank_counter_;
+            ++runahead_reused_frames_;
+        } else {
+            steps = stepOneFrame();
+        }
 
         account_cpu();
 
@@ -3531,21 +3576,83 @@ class ArmsxSession {
             Audio deliberately comes from the REAL frame only. Queueing the look-ahead frames
             as well would play each frame's audio N+1 times.
 
-            The cost is unavoidable and is charged every single frame: one state save, one
-            state load, and N extra emulated frames. On a device that is already at 100% this
-            does not hide latency, it halves the frame rate — which is why the default is 0
-            and why the UI says so.
+            Software runahead can reuse byte-identical predictions. Levels 2-5 also keep
+            a chain of future frames: verify the whole root state and its audio phase,
+            then retain that chain and compute one new frame. Changed input/state rebuilds
+            it. Future audio is mixed privately to advance the SPU/CD state correctly;
+            only the real frame's audio reaches the device.
         */
         const int runahead = psx_runahead_frames();
 
         if (runahead > 0) {
+            const uint64_t save_start = SDL_GetPerformanceCounter();
             if (psx_runahead_save(psx_) == PSX_STATE_OK) {
-                for (int i = 0; i < runahead; i++) {
-                    stepOneFrame();
+                const uint64_t extra_start = SDL_GetPerformanceCounter();
+                int reused_future=0;
+                if (sequence_reuse && psx_runahead_restore(psx_)==PSX_STATE_OK) {
+                    // The real frame itself may have switched PAL/NTSC.
+                    runahead_sequence_.configure(runahead,static_cast<double>(kAudioMixRate)/frameRate());
+                    const uint64_t prediction_vblank_start=vblank_counter_;
+                    bool counted_reused_frames=false;
+                    const bool predicted=runahead_sequence_.predict(psx_,audio_sample_accumulator_,reused_future,
+                        [&]() -> uint32_t {
+                            if (!counted_reused_frames) {
+                                vblank_counter_+=reused_future;
+                                counted_reused_frames=true;
+                            }
+                            const uint32_t n=stepOneFrame();
+                            return n<kMaxFrameSteps ? n : 0;
+                        }, MixPsxAudio);
+                    if (!predicted) {
+                        runahead_sequence_.invalidate();
+                        if (psx_runahead_restore(psx_)!=PSX_STATE_OK) {
+                            psx_runahead_configure(0);
+                            log_error("runahead: could not restore after prediction failure; runahead off");
+                            return steps;
+                        }
+                        vblank_counter_=prediction_vblank_start;
+                        reused_future=0;
+                        for (int i=0;i<runahead;++i) stepOneFrame();
+                    }
+                } else if (predictive_reuse && psx_runahead_restore(psx_)==PSX_STATE_OK) {
+                    // Predict from exactly the canonical state next frame will
+                    // restore, with its actual audio budget. Do not advance the
+                    // host accumulator or queue the speculative audio.
+                    const int next_samples=static_cast<int>(audio_sample_accumulator_ +
+                        static_cast<double>(kAudioMixRate)/frameRate());
+                    psx_spu_begin_frame(psx_->spu,next_samples);
+                    runahead_prediction_.begin(psx_);
+                    const uint32_t predicted_steps=stepOneFrame();
+                    if (predicted_steps < kMaxFrameSteps)
+                        runahead_prediction_.finish(psx_,predicted_steps);
+                    else
+                        runahead_prediction_.invalidate();
+                    psx_spu_begin_frame(psx_->spu,0);
+                } else {
+                    runahead_prediction_.invalidate();
+                    runahead_sequence_.invalidate();
+                    for (int i = 0; i < runahead; i++) stepOneFrame();
                 }
 
                 runahead_restore_pending_ = true;
+                const uint64_t extra_end = SDL_GetPerformanceCounter();
+                const double to_ms = 1000.0 / SDL_GetPerformanceFrequency();
+                const double work_ms = runahead_restore_ms_ +
+                    to_ms * (extra_end - runahead_work_start);
+                // Timing is diagnostic only. Performance does not change the
+                // user's selected runahead level.
+                if ((runahead_profile_frames_++ % 60) == 0) {
+                    log_info("Runahead active=%d real=%.2f save=%.2f extra=%.2f restore=%.2f total=%.2f budget=%.2f ms reused=%d hits=%llu future_reused=%d",
+                             runahead, to_ms * (save_start - runahead_work_start),
+                             to_ms * (extra_start - save_start), to_ms * (extra_end - extra_start),
+                             runahead_restore_ms_, work_ms, 1000.0 / targetFrameRate(),
+                             reused_prediction ? 1 : 0,
+                             static_cast<unsigned long long>(runahead_reused_frames_), reused_future);
+                }
+                runahead_restore_ms_ = 0.0;
             } else {
+                runahead_prediction_.clear();
+                runahead_sequence_.clear();
                 psx_runahead_configure(0);
                 log_error("runahead: snapshot failed; runahead off");
             }
@@ -5429,6 +5536,11 @@ class ArmsxSession {
     // A look-ahead ran last frame and its snapshot is still waiting to be put back. See
     // runaheadRestore() for why the restore cannot happen at the end of the frame that took it.
     bool runahead_restore_pending_ = false;
+    double runahead_restore_ms_ = 0.0;
+    uint64_t runahead_profile_frames_ = 0;
+    RunaheadPrediction runahead_prediction_;
+    RunaheadSequence runahead_sequence_;
+    uint64_t runahead_reused_frames_ = 0;
     bool frame_uploaded_ = false;
     std::vector<uint8_t> texture_snapshot_;
 #ifdef USE_HARDWARE

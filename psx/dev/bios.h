@@ -14,11 +14,15 @@ typedef struct {
     uint32_t io_base, io_size;
 
     uint8_t* buf;
+    /* Host metadata, not emulated state. ROM bytes are immutable after load. */
+    uint64_t content_hash;
+    int content_hash_valid;
 } psx_bios_t;
 
 psx_bios_t* psx_bios_create(void);
 void psx_bios_init(psx_bios_t*);
 int psx_bios_load(psx_bios_t*, const char*);
+uint64_t psx_bios_fingerprint(psx_bios_t*);
 uint32_t psx_bios_read32(psx_bios_t*, uint32_t);
 uint16_t psx_bios_read16(psx_bios_t*, uint32_t);
 uint8_t psx_bios_read8(psx_bios_t*, uint32_t);

@@ -23,6 +23,11 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 static void state_mkdir(const char* path) {
@@ -42,8 +47,6 @@ static void state_mkdir(const char* path) {
 }
 
 #if defined(_WIN32)
-/* Declared by hand so the core does not have to pull in windows.h. */
-__declspec(dllimport) void __stdcall Sleep(unsigned long);
 #define PSX_STATE_SLEEP_MS(ms) Sleep((unsigned long)(ms))
 #else
 #include <time.h>
@@ -58,20 +61,19 @@ __declspec(dllimport) void __stdcall Sleep(unsigned long);
 
 #if !defined(__STDC_NO_ATOMICS__) && defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
 #include <stdatomic.h>
-#define PSX_STATE_ATOMIC_INT _Atomic int
+#define PSX_STATE_ATOMIC(type) _Atomic(type)
 #define PSX_STATE_LOAD(p) atomic_load_explicit(&(p), memory_order_acquire)
 #define PSX_STATE_STORE(p, v) atomic_store_explicit(&(p), (v), memory_order_release)
 #define PSX_STATE_CAS(p, expected_var, desired) \
     atomic_compare_exchange_strong_explicit(&(p), &(expected_var), (desired), memory_order_acq_rel, memory_order_acquire)
-#else
-/* No C11 atomics: fall back to volatile. The request word is a single int
-   written by one producer and consumed by one consumer, so the worst case is a
-   missed or duplicated wake-up, not a torn value. */
-#define PSX_STATE_ATOMIC_INT volatile int
-#define PSX_STATE_LOAD(p) (p)
-#define PSX_STATE_STORE(p, v) ((p) = (v))
+#elif defined(__GNUC__) || defined(__clang__)
+#define PSX_STATE_ATOMIC(type) type
+#define PSX_STATE_LOAD(p) __atomic_load_n(&(p), __ATOMIC_ACQUIRE)
+#define PSX_STATE_STORE(p, v) __atomic_store_n(&(p), (v), __ATOMIC_RELEASE)
 #define PSX_STATE_CAS(p, expected_var, desired) \
-    (((p) == (expected_var)) ? (((p) = (desired)), 1) : ((expected_var) = (p), 0))
+    __atomic_compare_exchange_n(&(p), &(expected_var), (desired), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+#else
+#error "Save-state requests require C11 or compiler atomics"
 #endif
 
 /* -------------------------------------------------------------------------- */
@@ -196,6 +198,11 @@ void psx_sw_f32(psx_state_writer_t* w, float v) {
 }
 
 void psx_sw_u16_array(psx_state_writer_t* w, const uint16_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 2) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 2);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -203,6 +210,11 @@ void psx_sw_u16_array(psx_state_writer_t* w, const uint16_t* data, size_t count)
 }
 
 void psx_sw_i16_array(psx_state_writer_t* w, const int16_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 2) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 2);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -210,6 +222,11 @@ void psx_sw_i16_array(psx_state_writer_t* w, const int16_t* data, size_t count) 
 }
 
 void psx_sw_u32_array(psx_state_writer_t* w, const uint32_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 4) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 4);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -217,6 +234,11 @@ void psx_sw_u32_array(psx_state_writer_t* w, const uint32_t* data, size_t count)
 }
 
 void psx_sw_i32_array(psx_state_writer_t* w, const int32_t* data, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (count > SIZE_MAX / 4) { w->error = 1; return; }
+    psx_sw_bytes(w, data, count * 4);
+    return;
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -335,6 +357,13 @@ float psx_sr_f32(psx_state_reader_t* r) {
 }
 
 void psx_sr_u16_array(psx_state_reader_t* r, uint16_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 2 && r->offset <= r->size &&
+        count * 2 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 2);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -342,6 +371,13 @@ void psx_sr_u16_array(psx_state_reader_t* r, uint16_t* out, size_t count) {
 }
 
 void psx_sr_i16_array(psx_state_reader_t* r, int16_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 2 && r->offset <= r->size &&
+        count * 2 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 2);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -349,6 +385,13 @@ void psx_sr_i16_array(psx_state_reader_t* r, int16_t* out, size_t count) {
 }
 
 void psx_sr_u32_array(psx_state_reader_t* r, uint32_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 4 && r->offset <= r->size &&
+        count * 4 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 4);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -356,6 +399,13 @@ void psx_sr_u32_array(psx_state_reader_t* r, uint32_t* out, size_t count) {
 }
 
 void psx_sr_i32_array(psx_state_reader_t* r, int32_t* out, size_t count) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    if (!r->error && count <= SIZE_MAX / 4 && r->offset <= r->size &&
+        count * 4 <= r->size - r->offset) {
+        psx_sr_bytes(r, out, count * 4);
+        return;
+    }
+#endif
     size_t i;
 
     for (i = 0; i < count; i++)
@@ -456,10 +506,7 @@ static const psx_state_section_t* state_find_section(
 /* -------------------------------------------------------------------------- */
 
 static uint64_t state_bios_fingerprint(psx_t* psx) {
-    if (!psx->bios || !psx->bios->buf || !psx->bios->io_size)
-        return 0;
-
-    return psx_state_fnv1a(psx->bios->buf, psx->bios->io_size, PSX_STATE_FNV_SEED);
+    return psx_bios_fingerprint(psx->bios);
 }
 
 static void state_write_string(psx_state_writer_t* w, const char* s) {
@@ -796,7 +843,9 @@ int psx_save_state(psx_t* psx, const char* path) {
     void* data = NULL;
     size_t size = 0;
     FILE* file;
-    size_t written;
+    char* temporary;
+    int fd;
+    int failed;
     int result;
 
     if (!psx || !path || !*path)
@@ -807,22 +856,62 @@ int psx_save_state(psx_t* psx, const char* path) {
     if (result != PSX_STATE_OK)
         return result;
 
-    file = fopen(path, "wb");
-
-    if (!file) {
+    const size_t temporary_size = strlen(path) + sizeof(".tmp.XXXXXX");
+    temporary = malloc(temporary_size);
+    if (!temporary) {
         free(data);
         return PSX_STATE_ERR_IO;
     }
-
-    written = fwrite(data, 1, size, file);
-
-    fclose(file);
-    free(data);
-
-    if (written != size) {
-        remove(path);
+    snprintf(temporary, temporary_size, "%s.tmp.XXXXXX", path);
+#if defined(_WIN32)
+    fd = _mktemp_s(temporary, temporary_size) == 0
+        ? _open(temporary, _O_RDWR | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE) : -1;
+#else
+    fd = mkstemp(temporary);
+#endif
+    if (fd < 0) {
+        free(temporary);
+        free(data);
         return PSX_STATE_ERR_IO;
     }
+#if defined(_WIN32)
+    file = _fdopen(fd, "wb");
+#else
+    file = fdopen(fd, "wb");
+#endif
+    failed = !file;
+    if (file) {
+        failed = fwrite(data, 1, size, file) != size;
+        if (fflush(file) != 0)
+            failed = 1;
+#if defined(_WIN32)
+        if (!failed && _commit(fd) != 0)
+#else
+        if (!failed && fsync(fd) != 0)
+#endif
+            failed = 1;
+        if (fclose(file) != 0)
+            failed = 1;
+    } else {
+#if defined(_WIN32)
+        _close(fd);
+#else
+        close(fd);
+#endif
+    }
+    free(data);
+    if (!failed) {
+#if defined(_WIN32)
+        failed = !MoveFileExA(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+#else
+        failed = rename(temporary, path) != 0;
+#endif
+    }
+    if (failed)
+        remove(temporary);
+    free(temporary);
+    if (failed)
+        return PSX_STATE_ERR_IO;
 
     log_info("Save state written to %s (%u bytes)", path, (unsigned)size);
 
@@ -1101,7 +1190,11 @@ int psx_load_state_from_memory_ex(psx_t* psx, const void* data, size_t size, uns
     /* Phase 2: apply. From here the machine is being mutated; a failure past
        this point leaves it in a partial state, which is why every check that
        CAN be made up front is made up front. */
-    STATE_APPLY(PSX_SS_CPU, psx_cpu_load_state, psx->cpu);
+    if (flags & PSX_STATE_LOAD_KEEP_DECODE_CACHE) {
+        STATE_APPLY(PSX_SS_CPU, psx_cpu_load_state_keep_decode_cache, psx->cpu);
+    } else {
+        STATE_APPLY(PSX_SS_CPU, psx_cpu_load_state, psx->cpu);
+    }
     STATE_APPLY(PSX_SS_BUS, psx_bus_load_state, psx->bus);
     STATE_APPLY(PSX_SS_RAM, psx_ram_load_state, psx->ram);
     STATE_APPLY(PSX_SS_SCRATCHPAD, psx_scratchpad_load_state, psx->scratchpad);
@@ -1128,7 +1221,8 @@ int psx_load_state_from_memory_ex(psx_t* psx, const void* data, size_t size, uns
     /* Derived host-side caches that must not survive the load. The cached
        interpreter keys its blocks on guest addresses whose contents just
        changed wholesale. */
-    psx_cpu_invalidate_cache(psx->cpu);
+    if (!(flags & PSX_STATE_LOAD_KEEP_DECODE_CACHE))
+        psx_cpu_invalidate_cache(psx->cpu);
 
     /* Same reasoning for the PGXP shadows: they mirror RAM/GTE contents that
        were just replaced. Precision degrades to plain integers for the frame
@@ -1276,7 +1370,7 @@ int psx_state_slot_path(psx_t* psx, int slot, const char* base_dir, char* out, s
     uint64_t fingerprint;
     size_t len;
 
-    if (!psx || !out || !out_size || slot < 0)
+    if (!psx || !out || !out_size || (slot < 0 && slot != PSX_STATE_SLOT_AUTOSAVE))
         return PSX_STATE_ERR_ARG;
 
     if (!base_dir || !*base_dir)
@@ -1288,12 +1382,20 @@ int psx_state_slot_path(psx_t* psx, int slot, const char* base_dir, char* out, s
 
     len = strlen(base_dir);
 
-    if (snprintf(out, out_size, "%s%ssavestates/%s-%08x.slot%d.pss",
+    const char* separator = (len && (base_dir[len - 1] == '/' || base_dir[len - 1] == '\\')) ? "" : "/";
+    int written;
+    if (slot == PSX_STATE_SLOT_AUTOSAVE) {
+        written = snprintf(out, out_size, "%s%ssavestates/%s-%08x.autosave.pss",
+            base_dir, separator, stem, (unsigned)(fingerprint & 0xffffffffu));
+    } else {
+        written = snprintf(out, out_size, "%s%ssavestates/%s-%08x.slot%d.pss",
             base_dir,
-            (len && (base_dir[len - 1] == '/' || base_dir[len - 1] == '\\')) ? "" : "/",
+            separator,
             stem,
             (unsigned)(fingerprint & 0xffffffffu),
-            slot) < 0)
+            slot);
+    }
+    if (written < 0 || (size_t)written >= out_size)
         return PSX_STATE_ERR_ARG;
 
     return PSX_STATE_OK;
@@ -1342,28 +1444,45 @@ static void state_ensure_slot_dir(const char* path) {
 
     g_state_request is a small state machine:
         0                    idle
+        -2                   a producer owns the arguments
         PSX_STATE_OP_SAVE    a save is parked
         PSX_STATE_OP_LOAD    a load is parked
+        -3                   the emulation thread owns the operation
         -1                   the emulation thread has finished; result is valid
 
-    A single producer at a time is enforced by the 0 -> op compare-and-swap, so
+    A single producer at a time is enforced by the 0 -> -2 compare-and-swap, so
     a second concurrent request gets PSX_STATE_ERR_BUSY rather than clobbering
     the first one's parameters.
 */
 
-static psx_t* g_state_machine = NULL;
-static PSX_STATE_ATOMIC_INT g_state_request = 0;
-static PSX_STATE_ATOMIC_INT g_state_result = 0;
+enum { STATE_REQUEST_DONE = -1, STATE_REQUEST_PREPARING = -2, STATE_REQUEST_EXECUTING = -3 };
+static PSX_STATE_ATOMIC(psx_t*) g_state_machine = NULL;
+static PSX_STATE_ATOMIC(uint64_t) g_state_machine_generation = 0;
+static PSX_STATE_ATOMIC(int) g_state_request = 0;
+static PSX_STATE_ATOMIC(int) g_state_result = 0;
+static uint64_t g_state_request_generation = 0;
 static int g_state_slot = 0;
+static char g_state_base_dir[1024];
 static char g_state_path[1024];
-/* Plain int, like g_state_slot and g_state_path: written by the producer BEFORE
+/* Plain int, like g_state_slot and g_state_base_dir: written by the producer BEFORE
    the release-store that parks the request, and read by the emulation thread
    after its acquire-load of it, so the CAS that admits one producer at a time
    is what publishes it. */
 static unsigned g_state_flags = 0;
 
+#ifdef PSX_STATE_QUEUE_TEST
+static void (*g_state_queue_test_hook)(int) = NULL;
+void psx_state_set_queue_test_hook(void (*hook)(int)) {
+    g_state_queue_test_hook = hook;
+}
+#define STATE_QUEUE_HOOK(stage) do { if (g_state_queue_test_hook) g_state_queue_test_hook(stage); } while (0)
+#else
+#define STATE_QUEUE_HOOK(stage) ((void)0)
+#endif
+
 void psx_state_set_machine(psx_t* psx) {
-    g_state_machine = psx;
+    PSX_STATE_STORE(g_state_machine, psx);
+    PSX_STATE_STORE(g_state_machine_generation, PSX_STATE_LOAD(g_state_machine_generation) + 1);
 }
 
 /* Little-endian scalar reads straight out of a byte buffer. The loader reads the
@@ -1503,6 +1622,7 @@ int psx_state_read_thumbnail(const char* path, void** out_data, size_t* out_size
 
 int psx_state_slot_thumbnail(int slot, const char* base_dir, void** out_data, size_t* out_size) {
     char path[1024];
+    psx_t* psx = PSX_STATE_LOAD(g_state_machine);
 
     if (out_data)
         *out_data = NULL;
@@ -1510,10 +1630,10 @@ int psx_state_slot_thumbnail(int slot, const char* base_dir, void** out_data, si
     if (out_size)
         *out_size = 0;
 
-    if (!g_state_machine)
+    if (!psx)
         return PSX_STATE_ERR_NO_MACHINE;
 
-    if (psx_state_slot_path(g_state_machine, slot, base_dir, path, sizeof(path)) != PSX_STATE_OK)
+    if (psx_state_slot_path(psx, slot, base_dir, path, sizeof(path)) != PSX_STATE_OK)
         return PSX_STATE_ERR_ARG;
 
     return psx_state_read_thumbnail(path, out_data, out_size);
@@ -1523,13 +1643,14 @@ int psx_state_slot_info(int slot, const char* base_dir, char* out_disc_path, siz
     char path[1024];
     const char* disc;
     FILE* file;
+    psx_t* psx = PSX_STATE_LOAD(g_state_machine);
 
-    if (!g_state_machine || !out_disc_path || !out_size)
+    if (!psx || !out_disc_path || !out_size)
         return 0;
 
     *out_disc_path = '\0';
 
-    if (psx_state_slot_path(g_state_machine, slot, base_dir, path, sizeof(path)) != PSX_STATE_OK)
+    if (psx_state_slot_path(psx, slot, base_dir, path, sizeof(path)) != PSX_STATE_OK)
         return 0;
 
     /* Existence only. Opening is enough and avoids a stat() portability split;
@@ -1541,7 +1662,7 @@ int psx_state_slot_info(int slot, const char* base_dir, char* out_disc_path, siz
 
     fclose(file);
 
-    disc = psx_cdrom_get_disc_path(g_state_machine->cdrom);
+    disc = psx_cdrom_get_disc_path(psx->cdrom);
 
     if (!disc || !*disc)
         return 0;
@@ -1554,28 +1675,31 @@ int psx_state_slot_info(int slot, const char* base_dir, char* out_disc_path, siz
 void psx_state_service_requests(void) {
     int op = PSX_STATE_LOAD(g_state_request);
     int result;
+    psx_t* psx;
 
     if (op != PSX_STATE_OP_SAVE && op != PSX_STATE_OP_LOAD)
         return;
 
-    if (!g_state_machine) {
-        PSX_STATE_STORE(g_state_result, PSX_STATE_ERR_NO_MACHINE);
-        PSX_STATE_STORE(g_state_request, -1);
+    int expected = op;
+    if (!PSX_STATE_CAS(g_state_request, expected, STATE_REQUEST_EXECUTING))
         return;
+
+    STATE_QUEUE_HOOK(PSX_STATE_QUEUE_CLAIMED);
+    psx = PSX_STATE_LOAD(g_state_machine);
+    result = psx && g_state_request_generation == PSX_STATE_LOAD(g_state_machine_generation)
+        ? psx_state_slot_path(psx, g_state_slot, g_state_base_dir, g_state_path, sizeof(g_state_path))
+        : PSX_STATE_ERR_NO_MACHINE;
+    if (result == PSX_STATE_OK) {
+        if (op == PSX_STATE_OP_SAVE) {
+            state_ensure_slot_dir(g_state_path);
+            result = psx_save_state(psx, g_state_path);
+        } else {
+            result = psx_load_state_ex(psx, g_state_path, g_state_flags);
+        }
     }
-
-    if (op == PSX_STATE_OP_SAVE) {
-        state_ensure_slot_dir(g_state_path);
-
-        result = psx_save_state(g_state_machine, g_state_path);
-    } else {
-        result = psx_load_state_ex(g_state_machine, g_state_path, g_state_flags);
-    }
-
-    (void)g_state_slot;
 
     PSX_STATE_STORE(g_state_result, result);
-    PSX_STATE_STORE(g_state_request, -1);
+    PSX_STATE_STORE(g_state_request, STATE_REQUEST_DONE);
 }
 
 int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_ms) {
@@ -1591,30 +1715,33 @@ int psx_state_request_slot_ex(int op, int slot, const char* base_dir, int timeou
     if (op != PSX_STATE_OP_SAVE && op != PSX_STATE_OP_LOAD)
         return PSX_STATE_ERR_ARG;
 
-    if (!g_state_machine)
+    if (!PSX_STATE_LOAD(g_state_machine))
         return PSX_STATE_ERR_NO_MACHINE;
 
-    if (PSX_STATE_LOAD(g_state_request) != 0)
+    if (!PSX_STATE_CAS(g_state_request, expected, STATE_REQUEST_PREPARING))
         return PSX_STATE_ERR_BUSY;
 
-    result = psx_state_slot_path(g_state_machine, slot, base_dir, g_state_path, sizeof(g_state_path));
+    g_state_request_generation = PSX_STATE_LOAD(g_state_machine_generation);
+    STATE_QUEUE_HOOK(PSX_STATE_QUEUE_RESERVED);
+    if (!base_dir || !*base_dir || strlen(base_dir) >= sizeof(g_state_base_dir) ||
+        (slot < 0 && slot != PSX_STATE_SLOT_AUTOSAVE)) {
+        PSX_STATE_STORE(g_state_request, 0);
+        return PSX_STATE_ERR_ARG;
+    }
 
-    if (result != PSX_STATE_OK)
-        return result;
-
+    memcpy(g_state_base_dir, base_dir, strlen(base_dir) + 1);
     g_state_slot = slot;
     g_state_flags = flags;
 
     PSX_STATE_STORE(g_state_result, PSX_STATE_ERR_TIMEOUT);
-
-    if (!PSX_STATE_CAS(g_state_request, expected, op))
-        return PSX_STATE_ERR_BUSY;
+    PSX_STATE_STORE(g_state_request, op);
+    STATE_QUEUE_HOOK(PSX_STATE_QUEUE_PUBLISHED);
 
     if (timeout_ms < 0)
         timeout_ms = 0;
 
     while (waited < timeout_ms) {
-        if (PSX_STATE_LOAD(g_state_request) == -1) {
+        if (PSX_STATE_LOAD(g_state_request) == STATE_REQUEST_DONE) {
             result = PSX_STATE_LOAD(g_state_result);
             PSX_STATE_STORE(g_state_request, 0);
 
@@ -1633,7 +1760,10 @@ int psx_state_request_slot_ex(int op, int slot, const char* base_dir, int timeou
     if (PSX_STATE_CAS(g_state_request, expected, 0))
         return PSX_STATE_ERR_TIMEOUT;
 
-    /* It completed while we were withdrawing. */
+    /* A claimed operation owns its arguments until completion. */
+    STATE_QUEUE_HOOK(PSX_STATE_QUEUE_WAITING);
+    while (PSX_STATE_LOAD(g_state_request) != STATE_REQUEST_DONE)
+        PSX_STATE_SLEEP_MS(2);
     result = PSX_STATE_LOAD(g_state_result);
     PSX_STATE_STORE(g_state_request, 0);
 
