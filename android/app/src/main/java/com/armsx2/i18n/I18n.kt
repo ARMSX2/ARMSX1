@@ -258,6 +258,12 @@ val EN: Map<String, String> = mapOf(
     "tab.patches" to "Patches",
     "tab.skins" to "Skins",
     // --- App tab / language ---
+    "app.shareRecentGames" to "Share recently played with other apps",
+    "app.shareRecentGames.desc" to "Your recently-played list — game titles, serials, last-played times and file paths. Off by default. A companion app can ask for it and you can allow just that one app, which switches this on. Turning it on yourself allows every app on the device; turning it off withdraws access from all of them, including any you allowed individually.",
+    "library.shareRequest.title" to "%s · Share recently played?",
+    "library.shareRequest.message" to "%1\$s (%2\$s) wants to read the games you recently played in %3\$s — titles, serials, last-played times and the file paths of your games.\n\nNo other app is allowed by this. To stop sharing later, switch it off in %3\$s under Settings → App.",
+    "library.shareRequest.allow" to "Allow",
+    "library.shareRequest.deny" to "Deny",
     "app.libraryMusic" to "Library Music",
     "app.libraryMusic.volume" to "Library Music Volume",
     "app.libraryMusic.choose" to "Choose Music File…",

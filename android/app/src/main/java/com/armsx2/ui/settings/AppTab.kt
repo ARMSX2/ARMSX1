@@ -2,6 +2,7 @@ package com.armsx2.ui.settings
 
 import androidx.compose.foundation.BorderStroke
 import android.os.Build
+import android.content.SharedPreferences
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -22,6 +23,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +40,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.widget.Toast
 import com.armsx2.i18n.I18n
+import com.armsx2.data.library.RecentGamesAccess
+import com.armsx2.data.library.RecentGamesContentProvider
 import com.armsx2.i18n.str
 import com.armsx2.navigation.AppRoute
 import com.armsx2.navigation.UiNavigator
@@ -336,6 +340,30 @@ fun AppTab() {
         )
 
         BackupRestoreRows()
+
+        run {
+            val prefs = MainActivityRuntime.prefs
+            var shareRecent by remember(prefs) { mutableStateOf(RecentGamesAccess.isSharing(prefs)) }
+            DisposableEffect(prefs) {
+                val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                    if (key == null || key == RecentGamesContentProvider.KEY_SHARE_ENABLED ||
+                        key == RecentGamesAccess.KEY_GRANTED_PACKAGES
+                    ) {
+                        shareRecent = RecentGamesAccess.isSharing(prefs)
+                    }
+                }
+                prefs.registerOnSharedPreferenceChangeListener(listener)
+                shareRecent = RecentGamesAccess.isSharing(prefs)
+                onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+            }
+            ToggleRow(
+                label = str("app.shareRecentGames"),
+                value = shareRecent,
+                description = str("app.shareRecentGames.desc"),
+            ) { on ->
+                RecentGamesAccess.setSharingEnabled(prefs, on)
+            }
+        }
 
         ToggleRow(
             label = str("app.blockHome"),
