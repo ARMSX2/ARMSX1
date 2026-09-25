@@ -52,6 +52,7 @@
 
 typedef struct {
     psx_gpu_backend_t base;
+    psx_gpu_t* gpu;
 
     int scale;
     uint16_t* rt;          /* 1024*S x 512*S, BGR555, same packing as gpu->vram */
@@ -223,23 +224,6 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
                 float cg = (z0 * ((a.c >>  8) & 0xff) + z1 * ((b.c >>  8) & 0xff) + z2 * ((c.c >>  8) & 0xff)) / area;
                 float cb = (z0 * ((a.c >> 16) & 0xff) + z1 * ((b.c >> 16) & 0xff) + z2 * ((c.c >> 16) & 0xff)) / area;
 
-                /* Dither is indexed in NATIVE pixels (): dividing the render-target
-                   coordinate back down makes each dither cell an SxS block instead of
-                   high-frequency noise that gets worse as S grows. Both x and y are >= 0
-                   here because the clip test above already rejected everything outside the
-                   drawing area, so the truncating division is a floor.
-
-                   The native coordinate is then used ABSOLUTELY, not relative to the
-                   primitive's bounding box — see the matching comment in gpu.c. */
-                int dy = (y / s) & 3;
-                int dx = (x / s) & 3;
-
-                int dither = dither_on ? g_psx_gpu_dither_kernel[dx + (dy * 4)] : 0;
-
-                cr += dither;
-                cg += dither;
-                cb += dither;
-
                 cr = (cr >= 255.0f) ? 255.0f : ((cr <= 0.0f) ? 0.0f : cr);
                 cg = (cg >= 255.0f) ? 255.0f : ((cg <= 0.0f) ? 0.0f : cg);
                 cb = (cb >= 255.0f) ? 255.0f : ((cb <= 0.0f) ? 0.0f : cb);
@@ -252,6 +236,10 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
             } else {
                 mod = data->v[0].c;
             }
+
+            const int dither = dither_on && ((data->attrib & PA_SHADED) ||
+                ((data->attrib & PA_TEXTURED) && !(data->attrib & PA_RAW)))
+                ? g_psx_gpu_dither_kernel[((x / s) & 3) + (((y / s) & 3) * 4)] : 0;
 
             if (data->attrib & PA_TEXTURED) {
                 /* z/area is scale-invariant (both scale by S^2), so UVs stay native. */
@@ -295,19 +283,18 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
                        shared by all three rasterizers. Hardware divides by 128 with integer
                        truncation; this used to round, which turns levels 1..8 into fixed
                        points and makes a frame-feedback trail permanent. See gpu.h. */
-                    unsigned int ucr = psx_gpu_modulate_channel(
+                    unsigned int ucr = psx_gpu_modulate_unclamped(
                         gpu, (texel >> 0 ) & 0x1f, (mod >> 0 ) & 0xff);
-                    unsigned int ucg = psx_gpu_modulate_channel(
+                    unsigned int ucg = psx_gpu_modulate_unclamped(
                         gpu, (texel >> 5 ) & 0x1f, (mod >> 8 ) & 0xff);
-                    unsigned int ucb = psx_gpu_modulate_channel(
+                    unsigned int ucb = psx_gpu_modulate_unclamped(
                         gpu, (texel >> 10) & 0x1f, (mod >> 16) & 0xff);
 
-                    uint32_t rgb = ucr | (ucg << 8) | (ucb << 16);
-
-                    color = BGR555(rgb);
+                    color = psx_gpu_pack_dithered(ucr, ucg, ucb, dither);
                 }
             } else {
-                color = BGR555(mod);
+                color = psx_gpu_pack_dithered(mod & 0xff, (mod >> 8) & 0xff,
+                                             (mod >> 16) & 0xff, dither);
             }
 
             float cr = ((color >> 0 ) & 0x1f) << 3;
@@ -695,29 +682,12 @@ static void rt_fill_vram(psx_gpu_backend_t* be, uint32_t x, uint32_t y,
     }
 }
 
-/* GP0(80), gpu.c:1877-1885. The software path neither wraps nor handles overlap; walking
-   the rectangle in the same order at scale reproduces both behaviours. */
 static void rt_copy_vram(psx_gpu_backend_t* be, uint32_t sx, uint32_t sy,
                          uint32_t dx, uint32_t dy, uint32_t w, uint32_t h) {
     armsx_hw_rt_t* rt = rt_self(be);
-    const int s = rt->scale;
-
-    for (uint32_t ny = 0; ny < h; ny++) {
-        for (uint32_t nx = 0; nx < w; nx++) {
-            int dstb = ((dx + nx) < 1024) && ((dy + ny) < 512);
-            int srcb = ((sx + nx) < 1024) && ((sy + ny) < 512);
-
-            if (!(dstb && srcb))
-                continue;
-
-            for (int by = 0; by < s; by++) {
-                const uint16_t* src = rt->rt + (((int)(sy + ny) * s + by) * rt->rt_w) + ((int)(sx + nx) * s);
-                uint16_t* dst = rt->rt + (((int)(dy + ny) * s + by) * rt->rt_w) + ((int)(dx + nx) * s);
-
-                memmove(dst, src, (size_t)s * sizeof(uint16_t));
-            }
-        }
-    }
+    psx_gpu_copy_pixels(rt->rt, (unsigned int)rt->scale, sx, sy, dx, dy, w, h,
+                        rt->gpu && psx_gpu_mask_check(rt->gpu) ? 0x8000 : 0,
+                        rt->gpu && psx_gpu_mask_set(rt->gpu) ? 0x8000 : 0);
 }
 
 /* GP0(A0), gpu.c:1286-1314. `src` is the whole native VRAM; the wrap masks match the
@@ -786,6 +756,7 @@ psx_gpu_backend_t* armsx_hw_rt_create(psx_gpu_t* gpu, int scale) {
         return NULL;
 
     rt->scale = scale;
+    rt->gpu = gpu;
     rt->rt_w = PSX_GPU_FB_WIDTH * scale;
     rt->rt_h = PSX_GPU_FB_HEIGHT * scale;
     rt->rt = (uint16_t*)calloc((size_t)rt->rt_w * (size_t)rt->rt_h, sizeof(uint16_t));

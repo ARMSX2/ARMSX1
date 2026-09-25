@@ -760,10 +760,15 @@ private fun BackupRestoreRows() {
             com.armsx2.DiagnosticsReport.enable(context, uri)
             logCapture = true
             scope.launch {
-                val ok = withContext(Dispatchers.IO) { com.armsx2.DiagnosticsReport.refresh(context) }
+                val result = withContext(Dispatchers.IO) { com.armsx2.DiagnosticsReport.refresh(context) }
+                val message = when (result) {
+                    com.armsx2.DiagnosticExportGate.Result.SUCCESS -> "app.logs.saved"
+                    com.armsx2.DiagnosticExportGate.Result.FAILED -> "app.logs.failed"
+                    com.armsx2.DiagnosticExportGate.Result.BUSY -> "app.logs.busy"
+                }
                 android.widget.Toast.makeText(
                     context,
-                    I18n.get(if (ok) "app.logs.saved" else "app.logs.failed"),
+                    I18n.get(message),
                     android.widget.Toast.LENGTH_LONG,
                 ).show()
             }

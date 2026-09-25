@@ -107,6 +107,18 @@ enum {
 */
 
 typedef struct {
+    uint32_t commands[256];
+    uint32_t incomplete[256];
+    uint32_t transactions;
+    uint32_t min_bytes;
+    uint32_t max_bytes;
+    uint32_t analog_polls;
+    uint8_t last_poll[9];
+    uint8_t axis_min[4];
+    uint8_t axis_max[4];
+} psx_pad_trace_t;
+
+typedef struct {
     uint32_t bus_delay;
     uint32_t io_base, io_size;
 
@@ -122,23 +134,17 @@ typedef struct {
 
     uint16_t mode, ctrl, baud, stat;
 
-    /* SIO0 transaction trace. Host-side only: never serialised, and every field is derived
-       from traffic that has already happened. The controller and the memory card share this
-       one serial port, so "which device held the bus, for how many bytes, and did the
-       transaction finish" is the only way to tell a card that never deselects from a pad that
-       is simply never polled. See pad_trace_flush() in pad.c. */
-    uint32_t trace_repeat;
-    uint32_t trace_bytes;
+    /* Host diagnostics, excluded from save states. */
+    psx_pad_trace_t trace[2][2];
+    uint64_t trace_cycles;
     uint32_t trace_open_bytes;
-    uint8_t trace_slot;
-    uint8_t trace_dev;
-    uint8_t trace_cmd;
-    uint8_t trace_incomplete;
-    uint8_t trace_valid;
+    uint8_t trace_pending;
     uint8_t trace_open;
     uint8_t trace_open_slot;
     uint8_t trace_open_dev;
     uint8_t trace_open_cmd;
+    uint8_t trace_reply_size;
+    uint8_t trace_reply[9];
 } psx_pad_t;
 
 psx_pad_t* psx_pad_create(void);

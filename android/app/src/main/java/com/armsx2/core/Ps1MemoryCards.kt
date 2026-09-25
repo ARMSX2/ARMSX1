@@ -43,6 +43,17 @@ import java.io.IOException
 object Ps1MemoryCards {
     val sessionLock = java.util.concurrent.locks.ReentrantLock()
 
+    fun runSession(cancelled: () -> Boolean, run: () -> Boolean): Boolean {
+        while (!sessionLock.tryLock(100, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            if (cancelled()) return false
+        }
+        try {
+            return if (cancelled()) false else run()
+        } finally {
+            sessionLock.unlock()
+        }
+    }
+
     /** `MCD_MEMORY_SIZE` from psx/dev/mcd.h — 0x20000. The only valid PS1 card size. */
     const val CARD_SIZE_BYTES: Long = 128L * 1024L
 

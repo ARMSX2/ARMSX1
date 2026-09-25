@@ -7,31 +7,8 @@
 
 #define JOY_IRQ_DELAY 512
 
-/*
-    SIO0 transaction trace.
-
-    The controller and the memory card are the same serial port with a different device select
-    byte, so a card transaction that never completes takes the pad down with it — and only on
-    the screen that talks to the card, which is exactly the shape of "input works everywhere
-    except Spyro's memory-card screen". Nothing in this device logged anything at all, which
-    is why four rounds of investigation kept landing on the CD-ROM: it was the only subsystem
-    that could be seen.
-
-    A transaction is a select (TX of 01h pad / 81h card) plus the bytes that follow it, ended
-    by a deselect (CTRL.JOUT cleared) or by the next select. Runs of identical transactions
-    collapse to one line, the way the CD trace does, because a game polls the pad every frame
-    and an uncollapsed line per poll buries the file.
-
-        sio0: slot0 JOY (01) cmd=42 len=9 x256 | stat=0007 ctrl=1003 dest=00/00 irq=0
-
-    What to read off it:
-      * JOY runs present, len 9, no INCOMPLETE   -> the pad is being polled and answered
-      * no JOY runs at all                       -> the game stopped asking; not a bus fault
-      * an MCD run marked INCOMPLETE             -> a card transaction never deselected, which
-                                                    is what would wedge the port
-      * dest=01/00 or dest=81/00 at flush time   -> a device still holds the bus right now
-*/
-#define PAD_TRACE_RUN_FLUSH 256
+#define PAD_TRACE_INTERVAL_CYCLES 33868800u
+#define PAD_TRACE_COMMANDS_PER_LINE 16
 
 static const char* pad_trace_device_name(uint8_t dev) {
     switch (dev) {
@@ -43,33 +20,73 @@ static const char* pad_trace_device_name(uint8_t dev) {
 }
 
 static void pad_trace_flush(psx_pad_t* pad) {
-    if (!pad->trace_valid || !pad->trace_repeat)
-        return;
-
-    printf("sio0: slot%u %s (%02x) cmd=%02x len=%u x%u%s | stat=%04x ctrl=%04x dest=%02x/%02x irq=%d\n",
-        pad->trace_slot,
-        pad_trace_device_name(pad->trace_dev),
-        pad->trace_dev,
-        pad->trace_cmd,
-        pad->trace_bytes,
-        pad->trace_repeat,
-        pad->trace_incomplete ? " INCOMPLETE" : "",
-        pad->stat,
-        pad->ctrl,
-        (unsigned)pad->dest[0] & 0xffu,
-        (unsigned)pad->dest[1] & 0xffu,
-        pad->cycles_until_irq ? 1 : 0);
-
-    pad->trace_repeat = 0;
+    const int enabled = log_get_level() <= LOG_DEBUG;
+    for (unsigned slot = 0; slot < 2; ++slot) {
+        for (unsigned dev = 0; dev < 2; ++dev) {
+            psx_pad_trace_t* trace = &pad->trace[slot][dev];
+            if (!trace->transactions)
+                continue;
+            if (enabled) {
+                char commands[512];
+                size_t used = 0;
+                unsigned shown = 0, omitted = 0;
+                uint32_t incomplete = 0, other_total = 0, other_incomplete = 0;
+                commands[0] = 0;
+                for (unsigned cmd = 0; cmd < 256; ++cmd) {
+                    incomplete += trace->incomplete[cmd];
+                    if (!trace->commands[cmd])
+                        continue;
+                    if (shown < PAD_TRACE_COMMANDS_PER_LINE) {
+                        used += (size_t)snprintf(commands + used, sizeof(commands) - used,
+                            "%s%02x:%u/%u", shown ? " " : "", cmd,
+                            trace->commands[cmd], trace->incomplete[cmd]);
+                        ++shown;
+                    } else {
+                        ++omitted;
+                        other_total += trace->commands[cmd];
+                        other_incomplete += trace->incomplete[cmd];
+                    }
+                }
+                log_debug("sio0: slot%u %s transactions=%u complete=%u incomplete=%u "
+                    "bytes=%u..%u commands(total/incomplete)=[%s] "
+                    "other_commands=%u other_total=%u other_incomplete=%u",
+                    slot, pad_trace_device_name(dev ? DEST_MCD : DEST_JOY),
+                    trace->transactions, trace->transactions - incomplete, incomplete,
+                    trace->min_bytes, trace->max_bytes, commands,
+                    omitted, other_total, other_incomplete);
+                if (trace->analog_polls) {
+                    const uint8_t* p = trace->last_poll;
+                    log_debug("sio0: slot%u analog_polls=%u last_reply="
+                        "%02x %02x %02x %02x %02x %02x %02x %02x %02x "
+                        "right=%u,%u left=%u,%u rx=%u..%u ry=%u..%u lx=%u..%u ly=%u..%u",
+                        slot, trace->analog_polls, p[0], p[1], p[2], p[3], p[4],
+                        p[5], p[6], p[7], p[8], p[5], p[6], p[7], p[8],
+                        trace->axis_min[0], trace->axis_max[0], trace->axis_min[1], trace->axis_max[1],
+                        trace->axis_min[2], trace->axis_max[2], trace->axis_min[3], trace->axis_max[3]);
+                }
+            }
+            memset(trace, 0, sizeof(*trace));
+        }
+    }
+    if (enabled && pad->trace_open) {
+        log_debug("sio0: open slot%u %s cmd=%02x bytes=%u stat=%04x ctrl=%04x dest=%02x/%02x",
+            pad->trace_open_slot, pad_trace_device_name(pad->trace_open_dev),
+            pad->trace_open_cmd, pad->trace_open_bytes, pad->stat, pad->ctrl,
+            (unsigned)pad->dest[0] & 0xffu, (unsigned)pad->dest[1] & 0xffu);
+    }
+    pad->trace_pending = 0;
 }
 
 /* A device just took the bus. */
 static void pad_trace_begin(psx_pad_t* pad, int slot, uint8_t dev) {
+    if (log_get_level() > LOG_DEBUG)
+        return;
     pad->trace_open = 1;
     pad->trace_open_slot = (uint8_t)slot;
     pad->trace_open_dev = dev;
     pad->trace_open_cmd = 0;
     pad->trace_open_bytes = 0;
+    pad->trace_reply_size = 0;
 }
 
 /* `incomplete` means the transaction was still holding the bus when it ended — a deselect
@@ -80,31 +97,28 @@ static void pad_trace_end(psx_pad_t* pad, int incomplete) {
 
     pad->trace_open = 0;
 
-    const int same = pad->trace_valid &&
-                     pad->trace_slot == pad->trace_open_slot &&
-                     pad->trace_dev == pad->trace_open_dev &&
-                     pad->trace_cmd == pad->trace_open_cmd &&
-                     pad->trace_bytes == pad->trace_open_bytes &&
-                     pad->trace_incomplete == (uint8_t)(incomplete ? 1 : 0);
-
-    if (same) {
-        pad->trace_repeat++;
-
-        if (pad->trace_repeat >= PAD_TRACE_RUN_FLUSH)
-            pad_trace_flush(pad);
-
-        return;
+    psx_pad_trace_t* trace = &pad->trace[pad->trace_open_slot][pad->trace_open_dev == DEST_MCD];
+    if (!trace->transactions || pad->trace_open_bytes < trace->min_bytes)
+        trace->min_bytes = pad->trace_open_bytes;
+    if (pad->trace_open_bytes > trace->max_bytes)
+        trace->max_bytes = pad->trace_open_bytes;
+    ++trace->transactions;
+    ++trace->commands[pad->trace_open_cmd];
+    trace->incomplete[pad->trace_open_cmd] += incomplete != 0;
+    if (!incomplete && pad->trace_open_dev == DEST_JOY && pad->trace_open_cmd == 0x42 &&
+        pad->trace_reply_size == 9 &&
+        (pad->trace_reply[1] == 0x73 || pad->trace_reply[1] == 0xf3)) {
+        memcpy(trace->last_poll, pad->trace_reply, sizeof(trace->last_poll));
+        for (unsigned axis = 0; axis < 4; ++axis) {
+            const uint8_t value = pad->trace_reply[5 + axis];
+            if (!trace->analog_polls || value < trace->axis_min[axis])
+                trace->axis_min[axis] = value;
+            if (!trace->analog_polls || value > trace->axis_max[axis])
+                trace->axis_max[axis] = value;
+        }
+        ++trace->analog_polls;
     }
-
-    pad_trace_flush(pad);
-
-    pad->trace_valid = 1;
-    pad->trace_slot = pad->trace_open_slot;
-    pad->trace_dev = pad->trace_open_dev;
-    pad->trace_cmd = pad->trace_open_cmd;
-    pad->trace_bytes = pad->trace_open_bytes;
-    pad->trace_incomplete = (uint8_t)(incomplete ? 1 : 0);
-    pad->trace_repeat = 1;
+    pad->trace_pending = 1;
 }
 
 uint32_t pad_read_rx(psx_pad_t* pad) {
@@ -128,6 +142,8 @@ uint32_t pad_read_rx(psx_pad_t* pad) {
             }
 
             uint8_t data = joy->read_func(joy->udata);
+            if (pad->trace_open && pad->trace_reply_size < sizeof(pad->trace_reply))
+                pad->trace_reply[pad->trace_reply_size++] = data;
 
             if (!joy->query_fifo_func(joy->udata)) {
                 pad->dest[slot] = 0;
@@ -618,6 +634,13 @@ int psx_pad_mcd_fingerprint(psx_pad_t* pad, int slot, uint64_t* out_hash,
 }
 
 void psx_pad_update(psx_pad_t* pad, int cyc) {
+    if ((pad->trace_pending || pad->trace_open) && cyc > 0) {
+        pad->trace_cycles += (unsigned)cyc;
+        if (pad->trace_cycles >= PAD_TRACE_INTERVAL_CYCLES) {
+            pad_trace_flush(pad);
+            pad->trace_cycles %= PAD_TRACE_INTERVAL_CYCLES;
+        }
+    }
     if (pad->mcd_slot[0] && pad->mcd_slot[0]->dirty)
         psx_mcd_update(pad->mcd_slot[0], cyc);
     if (pad->mcd_slot[1] && pad->mcd_slot[1]->dirty)
@@ -801,6 +824,9 @@ int psx_pad_load_state(psx_pad_t* pad, psx_state_reader_t* r) {
 }
 
 void psx_pad_destroy(psx_pad_t* pad) {
+    pad_trace_end(pad, 1);
+    if (pad->trace_pending)
+        pad_trace_flush(pad);
     psx_pad_detach_joy(pad, 0);
     psx_pad_detach_joy(pad, 1);
     psx_pad_detach_mcd(pad, 0);

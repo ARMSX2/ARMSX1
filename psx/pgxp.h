@@ -76,6 +76,8 @@ void psx_pgxp_gte_reg_write(uint32_t reg, uint32_t value);
    contents `value`. SXY sources create/overwrite a cache entry; anything else
    invalidates a stale entry at that address. */
 void psx_pgxp_cpu_swc2(uint32_t addr, uint32_t value, uint32_t reg);
+void psx_pgxp_cpu_lwc2(uint32_t addr, uint32_t value, uint32_t reg);
+void psx_pgxp_cpu_mtc2(uint32_t value, uint32_t reg);
 
 /* MFC2 queues precision until the delayed CPU load commits. */
 void psx_pgxp_cpu_mfc2(uint32_t rt, uint32_t value, uint32_t reg);
@@ -85,7 +87,8 @@ void psx_pgxp_cpu_sw(uint32_t addr, uint32_t value, uint32_t rt);
 void psx_pgxp_cpu_store_begin(uint32_t rt);
 void psx_pgxp_cpu_load_commit(uint32_t rt, uint32_t value);
 void psx_pgxp_cpu_lw(uint32_t rt, uint32_t addr, uint32_t value);
-void psx_pgxp_cpu_instruction(uint32_t opcode);
+void psx_pgxp_cpu_instruction_begin(uint32_t opcode, const uint32_t* regs);
+void psx_pgxp_cpu_instruction(uint32_t opcode, const uint32_t* regs);
 void psx_pgxp_memory_written(uint32_t addr, uint32_t size);
 
 /* ---- submission (psx/dev/dma.c -> psx/dev/gpu.c) ----

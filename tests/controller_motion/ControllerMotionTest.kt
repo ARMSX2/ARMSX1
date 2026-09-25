@@ -2,6 +2,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import com.armsx2.input.ControllerAxisPolicy
 import com.armsx2.input.ControllerMotion
+import com.armsx2.input.PadRouter
 import kotlin.math.abs
 
 private fun equal(actual: Float, expected: Float) {
@@ -15,6 +16,9 @@ private fun motion(id: Int, source: Int = InputDevice.SOURCE_JOYSTICK, vararg va
     MotionEvent(id, source, values = values.toMap()).also { check(ControllerMotion.isController(it)); ControllerMotion.update(it) }
 
 fun main() {
+    testControllerStickResponse()
+    testControllerStickState()
+    testControllerHolds()
     val signed = ControllerAxisPolicy.Range(-1f, 1f, 0.1f)
     equal(ControllerAxisPolicy.centered(0.05f, signed), 0f)
     equal(ControllerAxisPolicy.centered(-1f, signed), -1f)
@@ -102,5 +106,40 @@ fun main() {
     InputDevice.devices[8] = InputDevice(InputDevice.SOURCE_JOYSTICK, 0, standard)
     ControllerMotion.update(absent)
     equal(ControllerMotion.centered(absent, MotionEvent.AXIS_X), 0.75f)
-    println("Controller motion source, range, axis-layout and lifecycle tests passed")
+
+    InputDevice.devices[2] = InputDevice(InputDevice.SOURCE_JOYSTICK, 0, standard)
+    InputDevice.devices[9] = InputDevice(InputDevice.SOURCE_MOUSE, 0, emptyList())
+    var player2Joins = 0
+    PadRouter.onPlayer2Joined = { player2Joins++ }
+    PadRouter.setMultitapEnabled(false)
+    PadRouter.reset()
+    check(PadRouter.portForDevice(-1) == 0)
+    check(PadRouter.portForDevice(6) == 0)
+    check(PadRouter.portForDevice(9) == 0)
+    check(PadRouter.portForDevice(4) == 0)
+    check(PadRouter.deviceIdForPort(0) == -1)
+    check(PadRouter.portForDevice(1) == 0)
+    check(PadRouter.portForDevice(2) == 0)
+    check(PadRouter.deviceIdForPort(0) == 1)
+    check(PadRouter.deviceIdForPort(1) == -1)
+    check(player2Joins == 0)
+    PadRouter.forgetDevice(1)
+    check(PadRouter.portForDevice(2) == 0)
+    check(PadRouter.deviceIdForPort(0) == 2)
+    PadRouter.pruneStale(intArrayOf(1, 3))
+    check(PadRouter.deviceIdForPort(0) == -1)
+    check(PadRouter.portForDevice(3) == 0)
+    PadRouter.setMultitapEnabled(true)
+    check(PadRouter.portForDevice(1) == 1)
+    check(PadRouter.portForDevice(2) == 2)
+    check(PadRouter.portForDevice(7) == 3)
+    check(PadRouter.portForDevice(8) == 0)
+    check(PadRouter.portForDevice(1) == 1)
+    check(player2Joins == 1)
+    PadRouter.setMultitapEnabled(false)
+    check((1..3).all { PadRouter.deviceIdForPort(it) == -1 })
+    check(PadRouter.portForDevice(1) == 0)
+    PadRouter.reset()
+    PadRouter.onPlayer2Joined = null
+    println("Controller motion source, range, axis-layout, routing and lifecycle tests passed")
 }

@@ -18,6 +18,7 @@
 
 #include "psx/psx.h"
 #include "psx/cheats.h"
+#include "psx/pgxp.h"
 
 static int g_failures = 0;
 
@@ -222,6 +223,23 @@ static int case_apply(const char* bios_path) {
     check_u32(psx_ram_read16(psx->ram, 0x0A0010), 0x1234, name, "write16-colon");
     check_u32(psx_ram_read16(psx->ram, 0x0A0012), 0x5678, name, "write16-glued");
     check_u32(psx_ram_read8(psx->ram, 0x0A0020), 0x7F, name, "write8");
+
+    psx_pgxp_set_enabled(1);
+    const uint32_t tracked_addresses[] = {0x0a0000, 0x0a0020, 0x0b0000};
+    for (unsigned i = 0; i < 3; ++i) {
+        const uint32_t value = psx_ram_read32(psx->ram, tracked_addresses[i]);
+        psx_pgxp_gte_vertex(value, 10.25f, 20.5f, 10.0f);
+        psx_pgxp_cpu_swc2(tracked_addresses[i], value, 14);
+    }
+    psx_cheats_apply(psx);
+    for (unsigned i = 0; i < 3; ++i) {
+        vertex_t vertex = {0};
+        psx_pgxp_note_gp0_word(tracked_addresses[i]);
+        psx_pgxp_gp0_slot(1);
+        psx_pgxp_poly_vertex(&vertex, psx_ram_read32(psx->ram, tracked_addresses[i]), 1);
+        check(vertex.precise_valid == (i == 2), name, "pgxp-invalidated-only-on-cheat-write");
+    }
+    psx_pgxp_set_enabled(0);
 
     /* D0 matched, so the line after it ran. */
     check_u32(psx_ram_read16(psx->ram, 0x0A0032), 0x4321, name, "cond-taken");

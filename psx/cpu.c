@@ -625,11 +625,13 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
         return;
     }
 
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_instruction_begin(cpu->opcode, cpu->r);
     int cyc = cpu->execution_mode == PSX_CPU_INTERPRETER
         ? psx_cpu_execute(cpu)
         : psx_cpu_execute_cached(cpu);
     if (psx_pgxp_active())
-        psx_pgxp_cpu_instruction(cpu->opcode);
+        psx_pgxp_cpu_instruction(cpu->opcode, cpu->r);
 
     if (!cyc) {
         printf("psxe: Illegal instruction %08x at %08x (next=%08x, saved=%08x)\n", cpu->opcode, cpu->pc, cpu->next_pc, cpu->saved_pc);
@@ -1705,7 +1707,10 @@ static inline void psx_cpu_i_lwc2(psx_cpu_t* cpu) {
     if (addr & 0x3) {
         psx_cpu_exception(cpu, CAUSE_ADEL);
     } else {
-        gte_write_register(cpu, T, psx_bus_read32(cpu->bus, addr));
+        const uint32_t value = psx_bus_read32(cpu->bus, addr);
+        gte_write_register(cpu, T, value);
+        if (psx_pgxp_active())
+            psx_pgxp_cpu_lwc2(addr, value, T);
     }
 }
 
@@ -1761,9 +1766,13 @@ static inline void psx_cpu_i_mtc2(psx_cpu_t* cpu) {
 
     uint32_t t = cpu->r[T];
 
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_store_begin(T);
     DO_PENDING_LOAD;
 
     gte_write_register(cpu, D, t);
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_mtc2(t, D);
 }
 
 static inline void psx_cpu_i_ctc2(psx_cpu_t* cpu) {

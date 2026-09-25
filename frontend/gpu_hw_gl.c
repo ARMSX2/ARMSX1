@@ -793,12 +793,8 @@ static const char* kDrawFS =
 "const uint F_SPRITE = 256u, F_DITHER = 512u;\n"
 /* GLF_MASK_CHECK / GLF_MASK_SET. */
 "const uint F_MASK_CHECK = 1024u, F_MASK_SET = 2048u;\n"
-/* gpu.c indexes VRAM linearly and does NOT wrap the texture page at x=1024
-   (the backend deviation #8). Reproducing that means addressing linearly
-   here too; the row mask only keeps a pathological page from reading past the surface,
-   which is a latent overrun in the software path itself. */
-"uint vram_at(int lin) {\n"
-"    return texelFetch(u_vram, ivec2(lin & 1023, (lin >> 10) & 511), 0).r;\n"
+"uint vram_at(int x, int y) {\n"
+"    return texelFetch(u_vram, ivec2(x & 1023, y & 511), 0).r;\n"
 "}\n"
 "uint fetch_texel(int tx, int ty) {\n"
 "    int mx = int(v_texwin.x), my = int(v_texwin.y);\n"
@@ -812,16 +808,16 @@ static const char* kDrawFS =
 "    int cluty = (clut >> 6) & 0x1ff;\n"
 "    int depth = (texp >> 7) & 3;\n"
 "    if (depth == 0) {\n"
-"        uint w = vram_at((tpx + (tx >> 2)) + ((tpy + ty) << 10));\n"
+"        uint w = vram_at(tpx + (tx >> 2), tpy + ty);\n"
 "        int idx = int((w >> uint((tx & 3) << 2)) & 0xfu);\n"
-"        return vram_at((clutx + idx) + (cluty << 10));\n"
+"        return vram_at(clutx + idx, cluty);\n"
 "    }\n"
 "    if (depth == 1) {\n"
-"        uint w = vram_at((tpx + (tx >> 1)) + ((tpy + ty) << 10));\n"
+"        uint w = vram_at(tpx + (tx >> 1), tpy + ty);\n"
 "        int idx = int((w >> uint((tx & 1) << 3)) & 0xffu);\n"
-"        return vram_at((clutx + idx) + (cluty << 10));\n"
+"        return vram_at(clutx + idx, cluty);\n"
 "    }\n"
-"    return vram_at((tpx + tx) + ((tpy + ty) << 10));\n"
+"    return vram_at(tpx + tx, tpy + ty);\n"
 "}\n"
 /* ---- texture replacement (psx/texrep.h) -------------------------------------------------
    The window transform is the SAME two lines fetch_texel() opens with, because the folded
@@ -1068,19 +1064,13 @@ static const char* kDrawFS =
 "    if ((flags & F_SHADED) != 0u) {\n"
 "        vec3 n = z0 * vec3(v_col0.xyz) + z1 * vec3(v_col1.xyz) + z2 * vec3(v_col2.xyz);\n"
 "        vec3 c = vec3(bdiv(n.x, area), bdiv(n.y, area), bdiv(n.z, area));\n"
-/* Indexed by the ABSOLUTE native VRAM coordinate, matching gpu.c and gpu_hw_rt.c. It used
-   to subtract the primitive's bounding-box origin, which re-phased the 4x4 kernel per
-   primitive and put a seam at every shared edge of a gradient. pn is already the native
-   coordinate (gl_FragCoord / u_scale), so this is scale-invariant for free. */
-"        if (u_dither_on != 0 && (flags & F_DITHER) != 0u) {\n"
-"            int dx = pn.x & 3;\n"
-"            int dy = pn.y & 3;\n"
-"            c += float(u_dither[dx + dy * 4]);\n"
-"        }\n"
 "        md = floor(clamp(c, 0.0, 255.0) + 0.5);\n"
 "    } else {\n"
 "        md = vec3(v_col0.xyz);\n"
 "    }\n"
+"    float dither = (!sprite && u_dither_on != 0 && (flags & F_DITHER) != 0u &&\n"
+"        ((flags & F_SHADED) != 0u || ((flags & F_TEXTURED) != 0u && (flags & F_RAW) == 0u)))\n"
+"        ? float(u_dither[(pn.x & 3) + (pn.y & 3) * 4]) : 0.0;\n"
 "    bool transp = (flags & F_TRANSP) != 0u;\n"
 /* The SOURCE TEXEL's bit 15, which is the other half of GP0(E6) bit 0 and the half
    found missing. Untextured primitives leave it false and therefore write a 0 mask bit, which
@@ -1167,12 +1157,12 @@ static const char* kDrawFS =
    psx_gpu_modulate_channel() in psx/dev/gpu.h and the backend. t and md
    are integer-valued and t*md <= 63240, so t*md/128.0 is EXACT in float (128 is a power of
    two) and floor() cannot land a level low. */
-"            vec3 c = (u_tex_trunc != 0) ? floor(clamp(t * md / 128.0, 0.0, 255.0))\n"
-"                                        : floor(clamp(t * md / 128.0, 0.0, 255.0) + 0.5);\n"
-"            col = floor(c / 8.0);\n"
+"            vec3 c = (u_tex_trunc != 0) ? floor(t * md / 128.0)\n"
+"                                        : floor(t * md / 128.0 + 0.5);\n"
+"            col = floor(clamp(c + dither, 0.0, 255.0) / 8.0);\n"
 "        }\n"
 "    } else {\n"
-"        col = floor(md / 8.0);\n"
+"        col = floor(clamp(md + dither, 0.0, 255.0) / 8.0);\n"
 "    }\n"
 "    if (u_stp_pass == 1 && transp) discard;\n"
 "    if (u_stp_pass == 2 && !transp) discard;\n"
@@ -2349,35 +2339,38 @@ static void gl_note_sample(hw_gl_t* g, uint16_t texp, uint16_t clut) {
                        tiles_intersects(&g->gpu_dirty, tpx, tpy, words, 256));
     }
 
-    if (tiles_intersects(&g->dirty, tpx, tpy, words, 256)) {
-        gl_flush(g);
-        gl_sync_vram(g, tpx, tpy, words, 256);
+    int regions[4][4];
+    int count = 0;
+    const int page_width = words < 1024 - tpx ? words : 1024 - tpx;
+    regions[count][0] = tpx; regions[count][1] = tpy;
+    regions[count][2] = page_width; regions[count++][3] = 256;
+    if (page_width < words) {
+        regions[count][0] = 0; regions[count][1] = tpy;
+        regions[count][2] = words - page_width; regions[count++][3] = 256;
     }
-
-    /*  row 1, and the ORDER is load-bearing: the host upload above may have rewritten
-       whole 16x16 tiles that the rasterizer also drew into, so the render target's copy has
-       to land afterwards to win. gl_resolve_gpu_tiles() clears the CPU-dirty bit for every
-       tile it serves, which is what stops the next upload from undoing it again. */
-    if (g->any_gpu_dirty && tiles_intersects(&g->gpu_dirty, tpx, tpy, words, 256)) {
-        gl_flush(g);
-        gl_resolve_gpu_tiles(g, tpx, tpy, words, 256);
-    }
-
     if (depth < 2) {
-        if (tiles_intersects(&g->dirty, clutx, cluty, 256, 1)) {
-            gl_flush(g);
-            gl_sync_vram(g, clutx, cluty, 256, 1);
+        const int entries = depth == 0 ? 16 : 256;
+        const int palette_width = entries < 1024 - clutx ? entries : 1024 - clutx;
+        regions[count][0] = clutx; regions[count][1] = cluty;
+        regions[count][2] = palette_width; regions[count++][3] = 1;
+        if (palette_width < entries) {
+            regions[count][0] = 0; regions[count][1] = cluty;
+            regions[count][2] = entries - palette_width; regions[count++][3] = 1;
         }
-
-        if (g->any_gpu_dirty && tiles_intersects(&g->gpu_dirty, clutx, cluty, 256, 1)) {
-            gl_flush(g);
-            gl_resolve_gpu_tiles(g, clutx, cluty, 256, 1);
-        }
-
-        tiles_mark(&g->sampled, clutx, cluty, 256, 1);
     }
-
-    tiles_mark(&g->sampled, tpx, tpy, words, 256);
+    for (int i = 0; i < count; ++i) {
+        const int* r = regions[i];
+        if (tiles_intersects(&g->dirty, r[0], r[1], r[2], r[3])) {
+            gl_flush(g);
+            gl_sync_vram(g, r[0], r[1], r[2], r[3]);
+        }
+        if (g->any_gpu_dirty && tiles_intersects(&g->gpu_dirty, r[0], r[1], r[2], r[3])) {
+            gl_flush(g);
+            gl_resolve_gpu_tiles(g, r[0], r[1], r[2], r[3]);
+        }
+    }
+    for (int i = 0; i < count; ++i)
+        tiles_mark(&g->sampled, regions[i][0], regions[i][1], regions[i][2], regions[i][3]);
     g->any_sampled = 1;
 }
 
@@ -3154,9 +3147,7 @@ static void gl_copy_vram(psx_gpu_backend_t* be, uint32_t sx, uint32_t sy,
         return;
 
     if ((sx + w > 1024) || (sy + h > 512) || (dx + w > 1024) || (dy + h > 512)) {
-        /* gpu.c:1978-1982 drops out-of-range texels one at a time rather than wrapping.
-           Clamping the rectangle is the same result for every in-range texel, which is all
-           the software path keeps either. */
+        /* GP0 routes wrapping copies through its native transfer path. */
         uint32_t maxw = 1024 - (sx > dx ? sx : dx);
         uint32_t maxh = 512 - (sy > dy ? sy : dy);
 

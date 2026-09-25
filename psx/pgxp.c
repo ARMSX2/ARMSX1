@@ -30,7 +30,9 @@ static pgxp_entry_t  g_fifo[3];                  /* SXY0/1/2 shadow */
 static pgxp_entry_t  g_regs[32];                 /* CPU register shadow */
 static pgxp_entry_t  g_load;
 static pgxp_entry_t  g_store;
+static pgxp_entry_t  g_move;
 static uint32_t     g_load_reg;
+static uint32_t     g_move_reg;
 static uint32_t      g_gp0_addr[PGXP_GP0_SLOTS]; /* source addr per gpu->buf slot */
 static uint32_t      g_pending_addr = PGXP_ADDR_NONE;
 
@@ -94,7 +96,9 @@ static void pgxp_clear_runtime(void) {
     memset(g_regs, 0, sizeof(g_regs));
     memset(&g_load, 0, sizeof(g_load));
     memset(&g_store, 0, sizeof(g_store));
+    memset(&g_move, 0, sizeof(g_move));
     g_load_reg = 0;
+    g_move_reg = 0;
 
     for (i = 0; i < PGXP_GP0_SLOTS; i++)
         g_gp0_addr[i] = PGXP_ADDR_NONE;
@@ -198,6 +202,24 @@ void psx_pgxp_cpu_swc2(uint32_t addr, uint32_t value, uint32_t reg) {
     pgxp_mem_store(addr, value, (sxy >= 0) ? &g_fifo[sxy] : NULL);
 }
 
+static void pgxp_gte_write(uint32_t reg, uint32_t value, const pgxp_entry_t* source) {
+    const int sxy = pgxp_sxy_index(reg);
+    if (sxy < 0)
+        return;
+    if (source && source->valid && source->value == value)
+        g_fifo[sxy] = *source;
+    else
+        g_fifo[sxy].valid = 0;
+}
+
+void psx_pgxp_cpu_lwc2(uint32_t addr, uint32_t value, uint32_t reg) {
+    pgxp_gte_write(reg, value, pgxp_mem_entry(addr));
+}
+
+void psx_pgxp_cpu_mtc2(uint32_t value, uint32_t reg) {
+    pgxp_gte_write(reg, value, &g_store);
+}
+
 void psx_pgxp_cpu_mfc2(uint32_t rt, uint32_t value, uint32_t reg) {
     int sxy = pgxp_sxy_index(reg);
     pgxp_entry_t* r = &g_load;
@@ -241,7 +263,39 @@ void psx_pgxp_cpu_lw(uint32_t rt, uint32_t addr, uint32_t value) {
         g_load.valid = 0;
 }
 
-void psx_pgxp_cpu_instruction(uint32_t opcode) {
+void psx_pgxp_cpu_instruction_begin(uint32_t opcode, const uint32_t* regs) {
+    const unsigned op = opcode >> 26;
+    const unsigned rs = (opcode >> 21) & 31u;
+    const unsigned rt = (opcode >> 16) & 31u;
+    const unsigned rd = (opcode >> 11) & 31u;
+    const unsigned sa = (opcode >> 6) & 31u;
+    const unsigned fn = opcode & 63u;
+    unsigned source = 0;
+    g_move_reg = 0;
+    g_move.valid = 0;
+
+    if (op == 0) {
+        g_move_reg = rd;
+        if ((fn == 0 || fn == 2 || fn == 3) && sa == 0)
+            source = rt;
+        else if ((fn == 4 || fn == 6 || fn == 7) && rs == 0)
+            source = rt;
+        else if (fn == 32 || fn == 33 || fn == 37 || fn == 38)
+            source = rs == 0 ? rt : (rt == 0 ? rs : 0);
+        else if ((fn == 34 || fn == 35) && rt == 0)
+            source = rs;
+        if ((fn == 36 || fn == 37) && rs == rt)
+            source = rs;
+    } else if ((op == 8 || op == 9 || op == 13 || op == 14) && (opcode & 0xffffu) == 0) {
+        source = rs;
+        g_move_reg = rt;
+    }
+
+    if (source && g_move_reg && g_regs[source].valid && g_regs[source].value == regs[source])
+        g_move = g_regs[source];
+}
+
+void psx_pgxp_cpu_instruction(uint32_t opcode, const uint32_t* regs) {
     const unsigned op = opcode >> 26;
     const unsigned rs = (opcode >> 21) & 31u;
     const unsigned rt = (opcode >> 16) & 31u;
@@ -257,6 +311,9 @@ void psx_pgxp_cpu_instruction(uint32_t opcode) {
         dest = rt;
     }
     g_regs[dest].valid = 0;
+    if (dest && dest == g_move_reg && g_move.valid && g_move.value == regs[dest])
+        g_regs[dest] = g_move;
+    g_move.valid = 0;
     if ((op >= 32 && op <= 38 && op != 35) ||
         ((op == 16 || op == 18) && rs <= 2 && !(op == 18 && rs == 0)))
         g_load.valid = 0;

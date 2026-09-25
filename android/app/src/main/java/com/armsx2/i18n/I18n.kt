@@ -318,6 +318,7 @@ val EN: Map<String, String> = mapOf(
     "app.logs.desc" to "Capture emulator, interpreter, renderer and crash logs into a file you choose. The file is refreshed every time the app starts.",
     "app.logs.saved" to "Log file saved",
     "app.logs.failed" to "Could not write the log file",
+    "app.logs.busy" to "A log export is already in progress. Try again after it finishes.",
     "app.logs.export" to "Save diagnostic report now",
     "app.logs.diagnostic" to "Diagnostic build: detailed boot, controller, audio and crash capture is active. Save a report after reproducing the problem. Logging can reduce performance.",
     "app.reset" to "Reset app",

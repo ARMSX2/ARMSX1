@@ -2,6 +2,7 @@
 
 #include "psx.h"
 #include "log.h"
+#include "pgxp.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -871,6 +872,8 @@ static void psx_cheat_write(psx_t* psx, uint32_t address, uint32_t value, int wi
        code (a `jr $ra` over a check is a common one) would otherwise keep running the old
        instruction until the entry was evicted. No-op when the plain interpreter is selected. */
     psx_cpu_invalidate_range(psx->cpu, address, (uint32_t)width);
+    if (psx_pgxp_active())
+        psx_pgxp_memory_written(address, (uint32_t)width);
 }
 
 void psx_cheats_apply(struct psx_t* psx_opaque) {

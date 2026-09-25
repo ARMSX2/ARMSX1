@@ -815,6 +815,16 @@ $(TEST_GPU_BIN): $(TEST_GPU_SOURCES) psx/dev/gpu.h psx/pgxp.h frontend/gpu_pgxp.
 test-gpu: $(TEST_GPU_BIN)
 	./$(TEST_GPU_BIN)
 
+.PHONY: test-gpu-transfer
+TEST_GPU_TRANSFER_SOURCES := tests/gpu_transfer_contract.c psx/dev/gpu.c psx/perf.c psx/pgxp.c \
+                            psx/texrep.c psx/texrep_png.c frontend/gpu_hw_rt.c
+build/tests/gpu_transfer_contract: $(TEST_GPU_TRANSFER_SOURCES) psx/dev/gpu.h psx/dev/gpu_backend.h frontend/gpu_hw_rt.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DUSE_HARDWARE -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx -Ifrontend $(SDL_CFLAGS) $(TEST_GPU_TRANSFER_SOURCES) -lm -o $@
+
+test-gpu-transfer: build/tests/gpu_transfer_contract
+	./build/tests/gpu_transfer_contract
+
 build/tests/gpu_renderer_fast: $(TEST_GPU_SOURCES) psx/dev/gpu.h psx/pgxp.h frontend/gpu_pgxp.h
 	mkdir -p $(dir $@)
 	$(CC) -std=c11 -O3 -ffast-math -g -DUSE_HARDWARE -DPSXE_DIAG_STDIO_DISABLE -DARMSX_TEST_OFFSET_CENSUS -I. -Ipsx -Ifrontend $(SDL_CFLAGS) $(TEST_GPU_SOURCES) -lm -o $@
@@ -905,6 +915,23 @@ $(TEST_AUDIO_QUEUE_BIN): tests/audio_queue_policy.cpp frontend/audio_queue_polic
 test-audio-queue: $(TEST_AUDIO_QUEUE_BIN)
 	./$(TEST_AUDIO_QUEUE_BIN)
 
+.PHONY: test-audio-stretch
+build/tests/audio_time_stretcher: tests/audio_time_stretcher.cpp frontend/audio_time_stretcher.h
+	mkdir -p $(dir $@)
+	$(CXX) -std=c++17 -O3 -ffast-math -I. $< -o $@
+
+test-audio-stretch: build/tests/audio_time_stretcher
+	./build/tests/audio_time_stretcher
+
+.PHONY: test-cdrom-xa-audio
+build/tests/cdrom_xa_audio: tests/cdrom_xa_audio.c psx/dev/cdrom/audio.c psx/dev/cdrom/queue.c psx/perf.c psx/dev/cdrom/cdrom.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O3 -ffast-math -DPSXE_DIAG_STDIO_DISABLE -I. \
+		tests/cdrom_xa_audio.c psx/dev/cdrom/audio.c psx/dev/cdrom/queue.c psx/perf.c -o $@
+
+test-cdrom-xa-audio: build/tests/cdrom_xa_audio
+	./build/tests/cdrom_xa_audio
+
 # MDEC streams are game-controlled RLE. Exercise the public command path with exact, truncated,
 # padding-only and coefficient-overflow inputs so the decoder cannot regress to indexing before
 # validating a run.
@@ -979,6 +1006,14 @@ build/tests/cue_parse_bounds: tests/cue_parse_bounds.c psx/dev/cdrom/cue.c psx/d
 test-cue-parse: build/tests/cue_parse_bounds
 	./build/tests/cue_parse_bounds
 
+.PHONY: test-host-run-gate
+build/tests/host_run_gate: tests/host_run_gate.cpp frontend/host_run_gate.h
+	mkdir -p $(dir $@)
+	$(CXX) -std=c++17 -O2 -g -I. -pthread tests/host_run_gate.cpp -o $@
+
+test-host-run-gate: build/tests/host_run_gate
+	./build/tests/host_run_gate
+
 .PHONY: test-sda-input
 build/tests/sda_input: tests/sda_input.c $(TEST_CORE_SOURCES) psx/input/sda.h psx/dev/pad.h | $(TEST_CORE_DEPS)
 	mkdir -p $(dir $@)
@@ -987,6 +1022,15 @@ build/tests/sda_input: tests/sda_input.c $(TEST_CORE_SOURCES) psx/input/sda.h ps
 
 test-sda-input: build/tests/sda_input
 	./build/tests/sda_input
+
+.PHONY: test-dma-alignment
+build/tests/dma_alignment: tests/dma_alignment.c $(TEST_CORE_SOURCES) psx/dev/dma.h | $(TEST_CORE_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -g -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) \
+		tests/dma_alignment.c $(TEST_CORE_SOURCES) $(TEST_CORE_LIBS) -lm -o $@
+
+test-dma-alignment: build/tests/dma_alignment
+	./build/tests/dma_alignment
 
 .PHONY: test-diagnostics
 build/tests/diagnostics_concurrency: tests/diagnostics_concurrency.c frontend/diagnostics.c frontend/diagnostics.h

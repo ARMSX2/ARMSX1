@@ -329,12 +329,27 @@ object ControllerMappings {
 			cacheL = Float.NaN; cacheR = Float.NaN; cachedFor = "\u0000unset"
 		}
     }
-    private val prefStickSens = PerStickPref(KEY_STICK_SENS, 1.0f, STICK_SENS_MIN, STICK_SENS_MAX)
+    private val prefStickSens = PerStickPref(KEY_STICK_SENS, 1.33f, STICK_SENS_MIN, STICK_SENS_MAX)
     private val prefStickAccel = PerStickPref(KEY_STICK_ACCEL, 0.0f, 0f, STICK_ACCEL_MAX)
     fun stickSensitivity(left: Boolean): Float = prefStickSens.get(left)
     fun setStickSensitivity(left: Boolean, v: Float) = prefStickSens.set(left, v)
     fun stickAcceleration(left: Boolean): Float = prefStickAccel.get(left)
     fun setStickAcceleration(left: Boolean, v: Float) = prefStickAccel.set(left, v)
+
+    fun shapeStick(x: Float, y: Float, left: Boolean): Pair<Float, Float> =
+        ControllerStickResponse.vector(x, y, stickDeadzone(left), stickOuterDeadzone(left),
+            stickAcceleration(left), stickCurveGamma(left), stickSensitivity(left), stickAntiDeadzone(left))
+
+    fun diagnosticStickSettings(): String = buildString {
+        append("profile=${runtimeSerial() ?: "global"}")
+        for (left in listOf(true, false)) {
+            append(" ${if (left) "left" else "right"}={mode=${stickModeFor(left)}")
+            append(" sensitivity=${stickSensitivity(left)} deadzone=${stickDeadzone(left)}")
+            append(" outer=${stickOuterDeadzone(left)} anti=${stickAntiDeadzone(left)}")
+            append(" acceleration=${stickAcceleration(left)} curve=${stickResponseCurve(left)}")
+            append(" swap=${stickSwapXY(left)} invertX=${stickInvertX(left)} invertY=${stickInvertY(left)}}")
+        }
+    }
 
     // Response curve: an EXTRA exponent applied to the post-deadzone stick magnitude, on top
     // of any acceleration (they compose). Tames twitchy hall-effect sticks (e.g. GTA:SA) —

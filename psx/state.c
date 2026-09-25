@@ -1,3 +1,7 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 /*
     ARMSX PS1 core — save states. Container format is documented in state.h.
 */
@@ -9,6 +13,7 @@
 #include "pgxp.h"
 #include "rewind.h"
 #include "thumbnail.h"
+#include "input/dualshock_state.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -673,6 +678,8 @@ int psx_save_state_to_memory_ex(psx_t* psx, void** io_data, size_t* io_capacity,
         state_write_string(&w, PSXE_VERSION);
     });
 
+    STATE_SECTION(&w, PSX_SS_PAD_EXT, 1, psxi_dualshock_save_state(psx->pad, &w));
+
     /* Memory-card fingerprints. A NEW optional section rather than extra fields
        on the existing mcd payload, and that is the whole compatibility story:
        adding to psx_mcd_save_state() would change a section that already ships,
@@ -1082,6 +1089,15 @@ int psx_load_state_from_memory_ex(psx_t* psx, const void* data, size_t size, uns
         }
     }
 
+    const psx_state_section_t* pad_ext = state_find_section(sections, section_count, PSX_SS_PAD_EXT);
+    if (pad_ext) {
+        psx_state_reader_t pr;
+        psx_sr_init(&pr, pad_ext->data, pad_ext->size);
+        const int result = psxi_dualshock_load_state(psx->pad, &pr, 0);
+        if (result != PSX_STATE_OK)
+            return result;
+    }
+
     /* Phase 2: apply. From here the machine is being mutated; a failure past
        this point leaves it in a partial state, which is why every check that
        CAN be made up front is made up front. */
@@ -1099,6 +1115,13 @@ int psx_load_state_from_memory_ex(psx_t* psx, const void* data, size_t size, uns
     STATE_APPLY(PSX_SS_TIMER, psx_timer_load_state, psx->timer);
     STATE_APPLY(PSX_SS_CDROM, psx_cdrom_load_state, psx->cdrom);
     STATE_APPLY(PSX_SS_PAD, psx_pad_load_state, psx->pad);
+    if (pad_ext) {
+        psx_state_reader_t pr;
+        psx_sr_init(&pr, pad_ext->data, pad_ext->size);
+        const int result = psxi_dualshock_load_state(psx->pad, &pr, 1);
+        if (result != PSX_STATE_OK)
+            return result;
+    }
     STATE_APPLY(PSX_SS_MDEC, psx_mdec_load_state, psx->mdec);
     STATE_APPLY(PSX_SS_EXP2, psx_exp2_load_state, psx->exp2);
 

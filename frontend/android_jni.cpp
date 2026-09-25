@@ -79,6 +79,12 @@ void psxe_host_set_paused(int paused);
 void psxe_host_set_audio_suspended(int suspended);
 void psxe_host_set_presentation_suspended(int suspended);
 void psxe_host_request_shutdown(void);
+uint64_t psxe_host_prepare_run(void);
+int psxe_host_claim_run(uint64_t token);
+int psxe_host_run_cancelled(uint64_t token);
+int psxe_host_run_reserved(void);
+void psxe_host_release_run(uint64_t token, int finished);
+void psxe_host_cancel_run(uint64_t token);
 void psxe_host_request_reset(void);
 void psxe_host_set_fast_forward(int enabled);
 void psxe_host_set_display_aspect(int mode);
@@ -1656,13 +1662,19 @@ Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceDestroyed(JNIEnv*, jclass,
 
 // Blocking: boots [path] and runs the emulation loop until shutdown(). Call on a dedicated
 // thread, after onNativeSurfaceChanged has delivered a Surface. Returns true on a clean exit.
-extern "C" JNIEXPORT jboolean JNICALL
-Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring path) {
-    bool expected = false;
-    if (!g_run_active.compare_exchange_strong(expected, true)) {
-        ARMSX_LOGE("runVMThread: a run is already active");
+static jboolean RunVMThread(JNIEnv* env, jstring path, uint64_t token) {
+    if (!psxe_host_claim_run(token)) {
+        psxe_host_release_run(token, 0);
         return JNI_FALSE;
     }
+    g_run_active.store(true, std::memory_order_release);
+    struct RunLease {
+        uint64_t token;
+        ~RunLease() {
+            g_run_active.store(false, std::memory_order_release);
+            psxe_host_release_run(token, 1);
+        }
+    } lease{token};
 
     const std::string game_path = JStringToUtf8(env, path);
 
@@ -1699,7 +1711,6 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring pa
 
     if (!CreateHostWindowAndRenderer(env)) {
         psxe_host_set_embedded(0);
-        g_run_active.store(false, std::memory_order_release);
         return JNI_FALSE;
     }
 
@@ -1733,16 +1744,34 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring pa
 
     ARMSX_LOGI("runVMThread: booting %s", game_path.empty() ? "BIOS (bios://boot)"
                                                             : game_path.c_str());
-    const int result = external_main_ex(static_cast<int>(argv.size()) - 1, argv.data(),
-                                        g_sdl_window, g_sdl_renderer);
+    const int result = psxe_host_run_cancelled(token) ? 0 :
+        external_main_ex(static_cast<int>(argv.size()) - 1, argv.data(), g_sdl_window, g_sdl_renderer);
     ARMSX_LOGI("runVMThread: core returned %d", result);
 
     const bool sdl_lifecycle_clean = DestroyHostWindowAndRenderer();
     psxe_host_set_embedded(0);
     psxe_host_reset_pad_state();
-    g_run_active.store(false, std::memory_order_release);
-
     return (result == 0 && sdl_lifecycle_clean) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_prepareVMRun(JNIEnv*, jclass) {
+    return static_cast<jlong>(psxe_host_prepare_run());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_releaseVMRun(JNIEnv*, jclass, jlong token) {
+    psxe_host_release_run(static_cast<uint64_t>(token), 0);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_runVMThreadForSession(JNIEnv* env, jclass, jstring path, jlong token) {
+    return RunVMThread(env, path, static_cast<uint64_t>(token));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv* env, jclass, jstring path) {
+    return RunVMThread(env, path, psxe_host_prepare_run());
 }
 
 // Pin a custom Vulkan driver for the next renderer init, or pass empty strings to revert to
@@ -2086,9 +2115,14 @@ Java_kr_co_iefriends_pcsx2_NativeApp_shutdown(JNIEnv*, jclass) {
     psxe_host_request_shutdown();
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_shutdownVMRun(JNIEnv*, jclass, jlong token) {
+    psxe_host_cancel_run(static_cast<uint64_t>(token));
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_hasActiveVM(JNIEnv*, jclass) {
-    const bool active = g_run_active.load(std::memory_order_acquire) ||
+    const bool active = psxe_host_run_reserved() != 0 || g_run_active.load(std::memory_order_acquire) ||
                         psxe_host_loop_running() != 0 ||
                         psxe_host_vm_active() != 0;
     return active ? JNI_TRUE : JNI_FALSE;

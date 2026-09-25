@@ -391,12 +391,10 @@ uint32_t psx_gpu_accuracy_flags(const psx_gpu_t*);
     tex5 is 0..31, mod8 is 0..255; the result is the 8-bit channel the framebuffer packer
     then shifts down to 5 bits.
 */
-static inline unsigned int psx_gpu_modulate_channel(const psx_gpu_t* gpu,
-                                                    unsigned int tex5, unsigned int mod8) {
+static inline unsigned int psx_gpu_modulate_unclamped(const psx_gpu_t* gpu,
+                                                      unsigned int tex5, unsigned int mod8) {
     if (gpu->accuracy_flags & PSX_GPU_ACCURACY_TEX_MODULATE) {
-        const unsigned int c = ((tex5 << 3) * mod8) >> 7;
-
-        return (c > 255u) ? 255u : c;
+        return ((tex5 << 3) * mod8) >> 7;
     }
 
     {
@@ -404,10 +402,23 @@ static inline unsigned int psx_gpu_modulate_channel(const psx_gpu_t* gpu,
            non-negative value that is exactly what roundf() computes. */
         float c = (float)((tex5 << 3) * mod8) / 128.0f;
 
-        c = (c >= 255.0f) ? 255.0f : ((c <= 0.0f) ? 0.0f : c);
-
         return (unsigned int)(c + 0.5f);
     }
+}
+
+static inline unsigned int psx_gpu_modulate_channel(const psx_gpu_t* gpu,
+                                                    unsigned int tex5, unsigned int mod8) {
+    const unsigned int c = psx_gpu_modulate_unclamped(gpu, tex5, mod8);
+    return c > 255u ? 255u : c;
+}
+
+static inline uint16_t psx_gpu_pack_dithered(unsigned int r, unsigned int g,
+                                           unsigned int b, int dither) {
+    int cr = (int)r + dither, cg = (int)g + dither, cb = (int)b + dither;
+    cr = cr < 0 ? 0 : (cr > 255 ? 255 : cr);
+    cg = cg < 0 ? 0 : (cg > 255 ? 255 : cg);
+    cb = cb < 0 ? 0 : (cb > 255 ? 255 : cb);
+    return (uint16_t)((cr >> 3) | ((cg >> 3) << 5) | ((cb >> 3) << 10));
 }
 
 /* Hardware's polygon/line size cull, as a shared predicate so the three rasterizers cannot
@@ -463,6 +474,44 @@ static inline int psx_gpu_mask_check(const psx_gpu_t* gpu) {
 
 static inline int psx_gpu_mask_set(const psx_gpu_t* gpu) {
     return (gpu->accuracy_flags & PSX_GPU_ACCURACY_MASK_BIT) && ((gpu->gpustat & 0x0800) != 0);
+}
+
+static inline void psx_gpu_copy_pixels(uint16_t* pixels, unsigned int scale,
+                                      unsigned int sx, unsigned int sy,
+                                      unsigned int dx, unsigned int dy,
+                                      unsigned int width, unsigned int height,
+                                      uint16_t mask_check, uint16_t mask_set) {
+    /* Horizontal overlap reverses the copy; vertical overlap still proceeds downwards. */
+    const unsigned int stride = 1024 * scale;
+    for (unsigned int row = 0; row < height;) {
+        const unsigned int srcy = (sy + row) & 511;
+        const unsigned int dsty = (dy + row) & 511;
+        unsigned int rows = height - row;
+        if (rows > 512 - srcy) rows = 512 - srcy;
+        if (rows > 512 - dsty) rows = 512 - dsty;
+        for (unsigned int col = 0; col < width;) {
+            const unsigned int srcx = (sx + col) & 1023;
+            const unsigned int dstx = (dx + col) & 1023;
+            unsigned int cols = width - col;
+            if (cols > 1024 - srcx) cols = 1024 - srcx;
+            if (cols > 1024 - dstx) cols = 1024 - dstx;
+            for (unsigned int y = 0; y < rows; ++y) {
+                for (unsigned int i = 0; i < cols; ++i) {
+                    const unsigned int x = srcx < dstx ? cols - 1 - i : i;
+                    for (unsigned int by = 0; by < scale; ++by) {
+                        const uint16_t* src = pixels + ((srcy + y) * scale + by) * stride + (srcx + x) * scale;
+                        uint16_t* dst = pixels + ((dsty + y) * scale + by) * stride + (dstx + x) * scale;
+                        for (unsigned int bx = 0; bx < scale; ++bx) {
+                            if (!(dst[bx] & mask_check))
+                                dst[bx] = src[bx] | mask_set;
+                        }
+                    }
+                }
+            }
+            col += cols;
+        }
+        row += rows;
+    }
 }
 
 /*

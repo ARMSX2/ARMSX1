@@ -1341,7 +1341,8 @@ private fun StickWidget(cfg: TouchButtonCfg, edit: Boolean) {
                 // or release mid-gesture (worse with the floating origin, which
                 // would then re-capture at the surviving finger's position).
                 var activeId: androidx.compose.ui.input.pointer.PointerId? = null
-                while (true) {
+                try {
+                  while (true) {
                     val ev = awaitPointerEvent()
                     val tracked = if (activeId == null)
                         ev.changes.firstOrNull { it.pressed }
@@ -1407,6 +1408,13 @@ private fun StickWidget(cfg: TouchButtonCfg, edit: Boolean) {
                         applyStickDiff(codes, lastEmit.value, emit)
                         lastEmit.value = emit
                     }
+                  }
+                } finally {
+                    releaseStick(codes, lastEmit.value)
+                    lastEmit.value = StickEmit()
+                    thumb.value = Offset.Zero
+                    origin.value = null
+                    baseShift.value = Offset.Zero
                 }
             }
         }
@@ -1471,18 +1479,10 @@ private data class StickEmit(
     fun any() = xPos != 0 || xNeg != 0 || yPos != 0 || yNeg != 0
 }
 
-/** Apply the user-configurable PER-STICK analog deadzone and re-normalize past it
- *  so the on-screen stick responds from low values without a jump — matching the
- *  physical-stick path (MainActivityRuntime.shapeStickMag). */
-private fun shapeTouchAxis(m: Float, left: Boolean): Float {
-    val dz = ControllerMappings.stickDeadzone(left)
-    if (m <= dz) return 0f
-    return (if (dz < 1f) (m - dz) / (1f - dz) else 0f).coerceIn(0f, 1f)
-}
-
 private fun computeStickEmit(nx: Float, ny: Float, left: Boolean): StickEmit {
-    val scaleX = (shapeTouchAxis(abs(nx), left) * 32767f).toInt()
-    val scaleY = (shapeTouchAxis(abs(ny), left) * 32767f).toInt()
+    val (x, y) = ControllerMappings.shapeStick(nx, ny, left)
+    val scaleX = (abs(x) * 32767f).toInt()
+    val scaleY = (abs(y) * 32767f).toInt()
     return StickEmit(
         xPos = if (nx > 0) scaleX else 0,
         xNeg = if (nx < 0) scaleX else 0,
@@ -1491,22 +1491,13 @@ private fun computeStickEmit(nx: Float, ny: Float, left: Boolean): StickEmit {
     )
 }
 
-// The analog codes used here (110-113 left stick, 120-123 right stick) are per-direction
-// magnitudes. The core takes a 0x00..0xFF axis value centred on 0x80, not a magnitude
-// pair, so psxe_host_pad_button() accumulates the four directions per stick and collapses
-// them into the two psx_pad_analog_change() axis writes. Emit the directions as-is.
 private fun applyStickDiff(codes: StickCodes, prev: StickEmit, next: StickEmit) {
-    if (prev.xPos != next.xPos) NativeApp.setPadButton(codes.xPos, next.xPos, next.xPos > 0)
-    if (prev.xNeg != next.xNeg) NativeApp.setPadButton(codes.xNeg, next.xNeg, next.xNeg > 0)
-    if (prev.yPos != next.yPos) NativeApp.setPadButton(codes.yPos, next.yPos, next.yPos > 0)
-    if (prev.yNeg != next.yNeg) NativeApp.setPadButton(codes.yNeg, next.yNeg, next.yNeg > 0)
+    if (prev != next) NativeApp.setTouchStick(if (codes.xPos == 111) 0 else 1,
+        next.xPos, next.xNeg, next.yPos, next.yNeg)
 }
 
 private fun releaseStick(codes: StickCodes, last: StickEmit) {
-    if (last.xPos != 0) NativeApp.setPadButton(codes.xPos, 0, false)
-    if (last.xNeg != 0) NativeApp.setPadButton(codes.xNeg, 0, false)
-    if (last.yPos != 0) NativeApp.setPadButton(codes.yPos, 0, false)
-    if (last.yNeg != 0) NativeApp.setPadButton(codes.yNeg, 0, false)
+    applyStickDiff(codes, last, StickEmit())
 }
 
 /* -------------------------------------------------------------------- */
@@ -1558,8 +1549,10 @@ private fun FullHalfStickLayer(layout: TouchLayout, widthPx: Float, heightPx: Fl
                             if (ch.changedToDown()) {
                                 // Claim this finger for a stick unless a widget above took the DOWN or
                                 // it landed on a button. Which screen half decides which stick.
-                                if (!ch.isConsumed && !inForeign(ch.position)) {
-                                    tracks[ch.id] = HalfStickTrack(ch.position.x < widthPx / 2f, ch.position)
+                                val leftHalf = ch.position.x < widthPx / 2f
+                                if (!ch.isConsumed && !inForeign(ch.position) &&
+                                    tracks.values.none { it.leftHalf == leftHalf }) {
+                                    tracks[ch.id] = HalfStickTrack(leftHalf, ch.position)
                                 }
                             }
                             if (!ch.pressed) {

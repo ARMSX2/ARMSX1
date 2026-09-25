@@ -26,6 +26,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include "host_run_gate.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -255,6 +256,7 @@ std::atomic<int> g_host_overscan_crop{-1};    // 0 none, 1 small, 2 full
 std::atomic<int> g_host_display_rotation{-1}; // quarter turns clockwise 0..3
 
 std::mutex g_host_control_lock;
+HostRunGate g_host_run_gate;
 bool g_host_embedded = false;
 bool g_host_pause_pending = false;
 bool g_host_pause_value = false;
@@ -448,7 +450,7 @@ const char* LogLevelTitle(int level) {
 }
 
 void StructuredLogCallback(log_Event* ev) {
-    if (!ev) {
+    if (!ev || !psxe_diag_is_enabled()) {
         return;
     }
 
@@ -5922,14 +5924,13 @@ class ArmsxApp {
             ARMSX_BOOTLOG("core: argv[%d]=%s", index, argv_ && argv_[index] ? argv_[index] : "(null)");
         }
 
-        // A shutdown requested between runs targeted the PREVIOUS session; with no loop
-        // alive to drain it, the flag survives here and would kill this run on its first
-        // applyHostControlRequests() ("game flashes and returns to the library"). Drop it —
-        // and only it: a stale pause/audio-suspend is legitimate lifecycle state (the app
-        // may be backgrounded right now) and must still apply to this session.
         {
             std::lock_guard<std::mutex> host_lock(g_host_control_lock);
-            g_host_shutdown_pending = false;
+            if (g_host_run_gate.active()) {
+                if (g_host_run_gate.cancelled(g_host_run_gate.active())) return 0;
+            } else {
+                g_host_shutdown_pending = false;
+            }
         }
 
         psxe_diag_initialize(psxe_cfg_get_pref_path());
@@ -8419,7 +8420,7 @@ bool HostStickSlotForCode(int code, int* stick, int* slot) {
 
 int HostAxisByte(int positive, int negative) {
     const int delta = std::clamp(positive, 0, kHostStickFullRange) - std::clamp(negative, 0, kHostStickFullRange);
-    const int scaled = (delta * 127) / kHostStickFullRange;
+    const int scaled = (delta * (delta < 0 ? 128 : 127)) / kHostStickFullRange;
     return std::clamp(0x80 + scaled, 0x00, 0xFF);
 }
 
@@ -8573,18 +8574,54 @@ extern "C" PSXE_API void psxe_host_set_gl_video_options(int texture_filter, int 
 #endif
 }
 
+extern "C" PSXE_API uint64_t psxe_host_prepare_run(void) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    const uint64_t token = g_host_run_gate.prepare();
+    if (token) g_host_shutdown_pending = false;
+    return token;
+}
+
+extern "C" PSXE_API int psxe_host_claim_run(uint64_t token) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    return g_host_run_gate.claim(token) ? 1 : 0;
+}
+
+extern "C" PSXE_API int psxe_host_run_cancelled(uint64_t token) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    return g_host_run_gate.cancelled(token) ? 1 : 0;
+}
+
+extern "C" PSXE_API int psxe_host_run_reserved(void) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    return g_host_run_gate.active() ? 1 : 0;
+}
+
+extern "C" PSXE_API void psxe_host_release_run(uint64_t token, int finished) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    if (g_host_run_gate.release(token, finished != 0)) g_host_shutdown_pending = false;
+}
+
+static void QueueHostShutdownLocked() {
+    g_host_shutdown_pending = true;
+    g_host_pause_pending = true;
+    g_host_pause_value = false;
+    g_host_audio_suspend_pending = true;
+    g_host_audio_suspend_value = false;
+}
+
+extern "C" PSXE_API void psxe_host_cancel_run(uint64_t token) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    if (g_host_run_gate.cancel(token)) QueueHostShutdownLocked();
+}
+
 extern "C" PSXE_API void psxe_host_request_shutdown(void) {
     {
         std::lock_guard<std::mutex> lock(g_host_control_lock);
-        g_host_shutdown_pending = true;
-        // A shutdown must never be blocked behind a stale pause.
-        g_host_pause_pending = true;
-        g_host_pause_value = false;
-        // ...nor behind a stale background-suspend. Shutting down straight out of the background
-        // (swipe-kill, Close Game from the pause menu after a screen-off) has to leave the stream
-        // un-parked so the teardown below can close it cleanly.
-        g_host_audio_suspend_pending = true;
-        g_host_audio_suspend_value = false;
+        QueueHostShutdownLocked();
+        if (g_host_run_gate.active()) {
+            g_host_run_gate.cancel(g_host_run_gate.active());
+            return;
+        }
     }
 
     // Wake a LIVE loop only. With no loop running there is nothing to wake, and SDL may be

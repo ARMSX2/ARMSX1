@@ -640,20 +640,10 @@ public class NativeApp {
 				else setPadButtonForPlayer(port, index, range, iskeypressed);
 				return;
 		}
-		int x, y;
 		synchronized (sStickLock) {
-			sStickDir[port][stick][slot] = iskeypressed
-					? Math.max(0, Math.min(STICK_FULL_RANGE, range))
-					: 0;
-			x = stickAxisByte(sStickDir[port][stick][STICK_RIGHT], sStickDir[port][stick][STICK_LEFT]);
-			y = stickAxisByte(sStickDir[port][stick][STICK_DOWN], sStickDir[port][stick][STICK_UP]);
+			int axes = sStickState.setPhysicalDirection(port, stick, slot, iskeypressed ? range : 0);
+			publishStick(port, stick, axes);
 		}
-		if (android.util.Log.isLoggable("ARMSX-PAD", android.util.Log.DEBUG)) {
-			android.util.Log.d("ARMSX-PAD", "setPadAnalog port=" + port + " stick=" + stick
-					+ " x=0x" + Integer.toHexString(x) + " y=0x" + Integer.toHexString(y));
-		}
-		if (port == 0) setPadAnalog(stick, x, y);
-		else setPadAnalogForPlayer(port, stick, x, y);
 	}
 
 	/** Players the core can address: four, because a Multitap in port 1 carries four pads
@@ -665,15 +655,29 @@ public class NativeApp {
 	// Per-direction stick magnitudes, collapsed into the two absolute axes the PS1
 	// pad actually has. [player][stick][direction]; stick 0 = left, 1 = right.
 	private static final int STICK_UP = 0, STICK_RIGHT = 1, STICK_DOWN = 2, STICK_LEFT = 3;
-	private static final int STICK_FULL_RANGE = 32767;
 	private static final Object sStickLock = new Object();
-	private static final int[][][] sStickDir = new int[MAX_PLAYERS][2][4];
+	private static final com.armsx2.input.ControllerStickState sStickState =
+			new com.armsx2.input.ControllerStickState(MAX_PLAYERS);
 
-	/** Two opposed 0..32767 magnitudes -> one 0x00..0xFF axis centred on 0x80. */
-	private static int stickAxisByte(int positive, int negative) {
-		int delta = positive - negative;
-		int v = 0x80 + (delta * 127) / STICK_FULL_RANGE;
-		return v < 0x00 ? 0x00 : (v > 0xFF ? 0xFF : v);
+	private static void publishStick(int port, int stick, int axes) {
+		int x = axes & 0xff;
+		int y = (axes >>> 8) & 0xff;
+		if (port == 0) setPadAnalog(stick, x, y);
+		else setPadAnalogForPlayer(port, stick, x, y);
+	}
+
+	public static void setPadStickForPort(int port, int stick, int xPos, int xNeg, int yPos, int yNeg) {
+		if (port < 0 || port >= MAX_PLAYERS || stick < 0 || stick > 1) return;
+		synchronized (sStickLock) {
+			publishStick(port, stick, sStickState.setPhysicalStick(port, stick, xPos, xNeg, yPos, yNeg));
+		}
+	}
+
+	public static void setTouchStick(int stick, int xPos, int xNeg, int yPos, int yNeg) {
+		if (stick < 0 || stick > 1) return;
+		synchronized (sStickLock) {
+			publishStick(0, stick, sStickState.setTouchStick(0, stick, xPos, xNeg, yPos, yNeg));
+		}
 	}
 
 	// Every digital pad code the core understands (see HostPadMaskForCode in
@@ -702,27 +706,24 @@ public class NativeApp {
 	 *  twice. Releasing a code that isn't held is free (the core no-ops it). */
 	public static void resetPadState() {
 		synchronized (sStickLock) {
-			// [player][stick][direction] since the Multitap landed, so this is two levels deep.
-			for (int[][] player : sStickDir) {
-				for (int[] stick : player) java.util.Arrays.fill(stick, 0);
-			}
-		}
-		try {
-			resetKeyStatus();
-			// Every player, not just player 0: with a Multitap attached the guest holds four
-			// pads' worth of bits, and leaving players 2-4 pressed is the same "button reads
-			// dead until pressed twice" bug this whole sweep exists to prevent.
-			for (int player = 0; player < MAX_PLAYERS; player++) {
-				for (int code : PAD_DIGITAL_CODES) setPadButtonForPort(player, code, 0, false);
-				if (player == 0) {
-					setPadAnalog(0, 0x80, 0x80);
-					setPadAnalog(1, 0x80, 0x80);
-				} else {
-					setPadAnalogForPlayer(player, 0, 0x80, 0x80);
-					setPadAnalogForPlayer(player, 1, 0x80, 0x80);
+			sStickState.reset();
+			try {
+				resetKeyStatus();
+				// Every player, not just player 0: with a Multitap attached the guest holds four
+				// pads' worth of bits, and leaving players 2-4 pressed is the same "button reads
+				// dead until pressed twice" bug this whole sweep exists to prevent.
+				for (int player = 0; player < MAX_PLAYERS; player++) {
+					for (int code : PAD_DIGITAL_CODES) setPadButtonForPort(player, code, 0, false);
+					if (player == 0) {
+						setPadAnalog(0, 0x80, 0x80);
+						setPadAnalog(1, 0x80, 0x80);
+					} else {
+						setPadAnalogForPlayer(player, 0, 0x80, 0x80);
+						setPadAnalogForPlayer(player, 1, 0x80, 0x80);
+					}
 				}
+			} catch (Throwable ignored) {
 			}
-		} catch (Throwable ignored) {
 		}
 	}
 	/** Local co-op: hot-plug a 2nd DualShock2 into PS2 port 2 when a second physical
@@ -1138,6 +1139,10 @@ public class NativeApp {
 	/** Implemented natively. BLOCKING: boots [path] and runs the emulation loop until
 	 *  shutdown(). Call on a dedicated thread, after onNativeSurfaceChanged. */
 	public static native boolean runVMThread(String path);
+	public static native long prepareVMRun();
+	public static native boolean runVMThreadForSession(String path, long token);
+	public static native void releaseVMRun(long token);
+	public static native void shutdownVMRun(long token);
 	public static native void pause();
 	public static native void resume();
 	/** Implemented natively: park (or restart) the PLATFORM audio stream because the Activity

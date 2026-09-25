@@ -518,7 +518,7 @@ static int check_mask_from_texel(const char* name, uint32_t accuracy,
     gpu->draw_y2 = PSX_GPU_FB_HEIGHT - 1;
     gpu->off_x = 0;
     gpu->off_y = 0;
-    psx_gpu_set_accuracy_flags(gpu, accuracy);
+    psx_gpu_set_accuracy_flags(gpu, accuracy | PSX_GPU_ACCURACY_DITHER_GATE);
 
     memset(gpu->vram, 0, PSX_GPU_VRAM_SIZE);
 
@@ -627,7 +627,7 @@ static int check_mask_contract(const char* name, uint32_t accuracy) {
     }
 
     psx_gpu_init(gpu, NULL);
-    psx_gpu_set_accuracy_flags(gpu, accuracy);
+    psx_gpu_set_accuracy_flags(gpu, accuracy | PSX_GPU_ACCURACY_DITHER_GATE);
 
     for (row = 0; row < 16; ++row) {
         const int force     = (row >> 0) & 1;
@@ -2405,7 +2405,8 @@ static int run_pgxp_cache_case(void) {
     psx_pgxp_cpu_store_begin(3);
     psx_pgxp_cpu_sw(0x1008, word, 3);
     failed |= !pgxp_lookup(0x1008, word).precise_valid;
-    psx_pgxp_cpu_instruction((9u << 26) | (3u << 16));
+    const uint32_t regs[32] = {0};
+    psx_pgxp_cpu_instruction((9u << 26) | (3u << 16), regs);
     psx_pgxp_cpu_store_begin(3);
     psx_pgxp_cpu_sw(0x1008, word, 3);
     failed |= pgxp_lookup(0x1008, word).precise_valid;

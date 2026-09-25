@@ -66,6 +66,16 @@ typedef struct {
     uint8_t adc1;
     uint8_t adc2;
     uint8_t adc3;
+    uint8_t config_mode;
+    uint8_t analog_locked;
+    uint8_t dualshock_enabled;
+    uint8_t status;
+    uint8_t command;
+    uint8_t parameter;
+    uint8_t response_length;
+    uint8_t response[9];
+    uint8_t rumble_map[6];
+    uint8_t motor[2];
 } psxi_sda_t;
 
 psxi_sda_t* psxi_sda_create(void);
@@ -90,6 +100,8 @@ void psxi_sda_on_analog_change(void*, uint32_t, uint16_t);
    mid-poll resumes mid-poll instead of feeding the game a garbage byte. */
 void psxi_sda_save_state(psxi_sda_t*, psx_state_writer_t*);
 int psxi_sda_load_state(psxi_sda_t*, psx_state_reader_t*);
+void psxi_sda_save_extended_state(const psxi_sda_t*, psx_state_writer_t*);
+int psxi_sda_load_extended_state(psxi_sda_t*, psx_state_reader_t*);
 void psxi_sda_destroy(psxi_sda_t*);
 
 #endif

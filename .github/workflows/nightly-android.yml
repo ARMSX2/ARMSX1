@@ -1,8 +1,9 @@
 name: Nightly Android
 
 on:
-  schedule:
-    - cron: "0 8 * * *"
+  push:
+    branches:
+      - android-compose
   workflow_dispatch:
     inputs:
       diagnostics:
@@ -28,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'android-compose' }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Check out native dependencies
@@ -118,7 +119,7 @@ jobs:
       - name: Test Android helpers
         if: inputs.diagnostics
         working-directory: android
-        run: ./gradlew --no-daemon :app:testGithubReleaseUnitTest -Parmsx.diagnostics=true "-Parmsx.versionCode=${{ steps.version.outputs.code }}" "-Parmsx.versionName=${{ steps.version.outputs.tag }}"
+        run: ./gradlew --no-daemon :app:testGithubDebugUnitTest -Parmsx.diagnostics=true "-Parmsx.versionCode=${{ steps.version.outputs.code }}" "-Parmsx.versionName=${{ steps.version.outputs.tag }}"
 
       - name: Upload test APK
         uses: actions/upload-artifact@v4

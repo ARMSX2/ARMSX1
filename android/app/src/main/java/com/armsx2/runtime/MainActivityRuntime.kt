@@ -53,6 +53,7 @@ import com.armsx2.EmuState
 import com.armsx2.FilenameParser
 import com.armsx2.GameInfo
 import com.armsx2.PlayTime
+import com.armsx2.input.ControllerHoldTracker
 import com.armsx2.input.ControllerMappings
 import com.armsx2.input.ControllerMotion
 import com.armsx2.input.SoftKeyboard
@@ -539,12 +540,18 @@ open class MainActivityRuntime : ComponentActivity() {
                             "bridge=${prepared.launchPath.take(160)}",
                     )
                 }
-                val cardLock = com.armsx2.core.Ps1MemoryCards.sessionLock
-                cardLock.lock()
-                try {
-                    if (vmStopInProgress) false else NativeApp.runVMThread(prepared.launchPath)
-                } finally {
-                    cardLock.unlock()
+                com.armsx2.core.Ps1MemoryCards.runSession({ vmStopInProgress }) {
+                    val token = synchronized(vmLifecycleLock) {
+                        if (vmStopInProgress) 0L else NativeApp.prepareVMRun().also { vmNativeRunToken = it }
+                    }
+                    if (token == 0L) false else try {
+                        NativeApp.runVMThreadForSession(prepared.launchPath, token)
+                    } finally {
+                        NativeApp.releaseVMRun(token)
+                        synchronized(vmLifecycleLock) {
+                            if (vmNativeRunToken == token) vmNativeRunToken = 0L
+                        }
+                    }
                 }
             } ?: false
             if (vmStopInProgress) return false
@@ -569,6 +576,14 @@ open class MainActivityRuntime : ComponentActivity() {
         }
 
         private val vmLifecycleLock = Any()
+        private var vmRunGeneration = 0L
+        private var vmNativeRunToken = 0L
+        private val vmUiHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        private fun dispatchVmUi(action: () -> Unit): Boolean {
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return false
+            vmUiHandler.post { action() }
+            return true
+        }
         @Volatile private var vmStopInProgress = false
         @Volatile private var vmRestartAfterStop = false
         @Volatile private var vmRunLoopActive = false
@@ -752,12 +767,16 @@ open class MainActivityRuntime : ComponentActivity() {
         }
 
         fun start() {
+            if (dispatchVmUi { start() }) return
+            var runGeneration = 0L
             synchronized(vmLifecycleLock) {
                 if (vmStopInProgress || vmRunLoopActive || eState.value != EmuState.STOPPED) {
                     vmRestartAfterStop = true
                     return
                 }
                 vmRunLoopActive = true
+                vmRunGeneration++
+                runGeneration = vmRunGeneration
                 // start() boots m_szGamefile, which launchGame already switched to the newest
                 // request — a parked switch is satisfied here and must not fire again later
                 // from some future session's exit path.
@@ -794,35 +813,24 @@ open class MainActivityRuntime : ComponentActivity() {
                         startAutoProgressiveScanHold()
                     runVmThreadChecked(m_szGamefile, "game")
                 } finally {
-                    // runVMThread blocks until the VM exits (Stopping/Shutdown
-                    // observed). Drop back to STOPPED only after native has
-                    // actually unwound, so users can't launch the next game
-                    // while the previous VM is still tearing down.
-                    eState.value = EmuState.STOPPED
-                    // Game over: release everything the pad layer thinks is held so a
-                    // button down at exit can't bleed into the next session.
-                    instance?.resetPadState()
-                    val restartNow = synchronized(vmLifecycleLock) {
-                        vmRunLoopActive = false
-                        vmStopInProgress = false
-                        if (vmRestartAfterStop) {
-                            vmRestartAfterStop = false
-                            true
-                        } else {
-                            false
+                    vmUiHandler.post {
+                        if (vmRunGeneration != runGeneration) return@post
+                        eState.value = EmuState.STOPPED
+                        instance?.resetPadState()
+                        val restartNow = synchronized(vmLifecycleLock) {
+                            vmRunLoopActive = false
+                            vmStopInProgress = false
+                            vmRestartAfterStop.also { vmRestartAfterStop = false }
                         }
-                    }
-                    if (restartNow) {
-                        start()
-                    } else {
-                        WindowImpl.toolbarVisible.value = true
-                        WindowImpl.showLibrary.value = false
-                        WindowImpl.overlayVisible.value = false
-                        // This is the branch that actually fires on a normal game exit (stop()'s
-                        // equivalent block loses the vmRunLoopActive race), so the return-to-library
-                        // cleanup has to happen here or the launcher keeps the game's rotation.
-                        onReturnedToLibrary()
-                        finishToLauncherIfRequested()
+                        if (restartNow) {
+                            start()
+                        } else {
+                            WindowImpl.toolbarVisible.value = true
+                            WindowImpl.showLibrary.value = false
+                            WindowImpl.overlayVisible.value = false
+                            onReturnedToLibrary()
+                            finishToLauncherIfRequested()
+                        }
                     }
                 }
             }
@@ -923,6 +931,9 @@ open class MainActivityRuntime : ComponentActivity() {
                 else -> NativeApp.renderAuto()
             }
             resolved.applyTo()
+            if (com.armsx2.BuildConfig.DIAGNOSTIC_BUILD) {
+                android.util.Log.i("ARMSX-PAD", "effective ${ControllerMappings.diagnosticStickSettings()}")
+            }
             // applyTo() pushed the per-stat OSD flags (= "Custom"); re-assert the stored OSD
             // mode on top so a Full / Min / Off choice from the menu or hotkey survives a
             // relaunch instead of snapping back to the per-stat selection every boot.
@@ -1017,6 +1028,7 @@ open class MainActivityRuntime : ComponentActivity() {
          * path that doesn't have a GameInfo (Swap/Boot Disc file picker).
          */
         fun launchGame(uri: String, info: GameInfo? = null, external: Boolean = false) {
+            if (dispatchVmUi { launchGame(uri, info, external) }) return
             if (uri.isBlank()) {
                 println("@@ANDROID_LAUNCH_REJECT@@ reason=blank_uri title=${info?.title ?: ""}")
                 return
@@ -1119,6 +1131,7 @@ open class MainActivityRuntime : ComponentActivity() {
                         com.armsx2.CustomDriver.applyToNative(driverCtx, picked)
                     }
                 }
+                var runGeneration = 0L
                 val launchNow = synchronized(vmLifecycleLock) {
                     if (vmStopInProgress || vmRunLoopActive || eState.value != EmuState.STOPPED ||
                         kr.co.iefriends.pcsx2.NativeApp.hasActiveVM()
@@ -1130,6 +1143,8 @@ open class MainActivityRuntime : ComponentActivity() {
                         false
                     } else {
                         vmRunLoopActive = true
+                        vmRunGeneration++
+                        runGeneration = vmRunGeneration
                         // An actual boot supersedes any parked switch.
                         vmNextLaunch = null
                         true
@@ -1158,7 +1173,8 @@ open class MainActivityRuntime : ComponentActivity() {
                         }
                     } finally {
                         // runVMThread blocks for the whole session; when it returns the game ended.
-                        instance?.runOnUiThread {
+                        vmUiHandler.post {
+                            if (vmRunGeneration != runGeneration) return@post
                             eState.value = EmuState.STOPPED
                             // ★ A pending restart is honoured HERE, and only here.
                             //
@@ -1315,6 +1331,8 @@ open class MainActivityRuntime : ComponentActivity() {
          * once BIOS finishes booting.
          */
         fun startBios() {
+            if (dispatchVmUi { startBios() }) return
+            var runGeneration = 0L
             currentGame.value = null
             m_szGamefile = ""
             // ARMSX (PS1): boot the BIOS in the SDL runtime (see launchGame for why).
@@ -1334,6 +1352,8 @@ open class MainActivityRuntime : ComponentActivity() {
                         false
                     } else {
                         vmRunLoopActive = true
+                        vmRunGeneration++
+                        runGeneration = vmRunGeneration
                         true
                     }
                 }
@@ -1352,7 +1372,8 @@ open class MainActivityRuntime : ComponentActivity() {
                     } catch (t: Throwable) {
                         println("@@ARMSX_VM_ERROR@@ ${t.message}")
                     } finally {
-                        instance?.runOnUiThread {
+                        vmUiHandler.post {
+                            if (vmRunGeneration != runGeneration) return@post
                             eState.value = EmuState.STOPPED
                             val (restartNow, nextGame) = synchronized(vmLifecycleLock) {
                                 vmRunLoopActive = false
@@ -1387,6 +1408,8 @@ open class MainActivityRuntime : ComponentActivity() {
                     false
                 } else {
                     vmRunLoopActive = true
+                    vmRunGeneration++
+                    runGeneration = vmRunGeneration
                     true
                 }
             }
@@ -1408,26 +1431,20 @@ open class MainActivityRuntime : ComponentActivity() {
                     applyRendererPrefs()
                     runVmThreadChecked(m_szGamefile, "BIOS")
                 } finally {
-                    eState.value = EmuState.STOPPED
-                    // Game over: release everything the pad layer thinks is held so a
-                    // button down at exit can't bleed into the next session.
-                    instance?.resetPadState()
-                    val restartNow = synchronized(vmLifecycleLock) {
-                        vmRunLoopActive = false
-                        vmStopInProgress = false
-                        if (vmRestartAfterStop) {
-                            vmRestartAfterStop = false
-                            true
-                        } else {
-                            false
+                    vmUiHandler.post {
+                        if (vmRunGeneration != runGeneration) return@post
+                        eState.value = EmuState.STOPPED
+                        instance?.resetPadState()
+                        val restartNow = synchronized(vmLifecycleLock) {
+                            vmRunLoopActive = false
+                            vmStopInProgress = false
+                            vmRestartAfterStop.also { vmRestartAfterStop = false }
                         }
-                    }
-                    if (restartNow) {
-                        start()
-                    } else {
-                        // BIOS exit had no cleanup at all — it relied entirely on stop()'s racy
-                        // branch, so quitting the BIOS also left the launcher stuck in its rotation.
-                        onReturnedToLibrary()
+                        if (restartNow) {
+                            start()
+                        } else {
+                            onReturnedToLibrary()
+                        }
                     }
                 }
             }
@@ -1528,18 +1545,28 @@ open class MainActivityRuntime : ComponentActivity() {
         }
 
         fun stop(saveAutosave: Boolean = false, restartAfterStop: Boolean = false) {
+            if (dispatchVmUi { stop(saveAutosave, restartAfterStop) }) return
             // Drop any latched fast-forward / slow-down toggle; the next game boots
             // at normal speed. Same for the gyro hotkey latch — a game left with gyro
             // toggled off must not silently start the next one with gyro dead.
             fastForwardToggleActive = false
             slowDownToggleActive = false
-            gyroActive.value = true
+            instance?.let { activity ->
+                activity.runOnUiThread {
+                    activity.controllerHolds.cancel(ControllerHoldTracker.Action.GYRO)
+                    gyroActive.value = true
+                }
+            } ?: run { gyroActive.value = true }
             // ...and tell the CORE, not just the latch. Otherwise the session that boots next
             // inherits ArmsxSession::fast_forward_enabled_ from the one that just closed.
             runCatching { NativeApp.setFastForward(false) }
             com.armsx2.ui.GameOsd.reset()
             val nativeActive = runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
+            var stopGeneration = 0L
+            var stopToken = 0L
             val shouldStop = synchronized(vmLifecycleLock) {
+                stopGeneration = vmRunGeneration
+                stopToken = vmNativeRunToken
                 if (restartAfterStop)
                     vmRestartAfterStop = true
                 else
@@ -1571,13 +1598,18 @@ open class MainActivityRuntime : ComponentActivity() {
                     runCatching { prefs.getBoolean("autoSaveOnExit", false) }.getOrDefault(false))
             vmStopControl.execute {
                 println("@@ANDROID_STOP_JAVA@@ begin saveAutosave=$doAutosave forced=$saveAutosave restart=$restartAfterStop")
-                if (doAutosave)
-                    NativeApp.saveAutosaveState()
-                NativeApp.shutdown()
+                synchronized(vmLifecycleLock) {
+                    if (vmRunGeneration == stopGeneration && vmNativeRunToken == stopToken && stopToken != 0L) {
+                        if (doAutosave) NativeApp.saveAutosaveState()
+                        NativeApp.shutdownVMRun(stopToken)
+                    }
+                }
                 println("@@ANDROID_STOP_JAVA@@ shutdown_return active=${NativeApp.hasActiveVM()} runLoop=$vmRunLoopActive state=${eState.value}")
-                if (!vmRunLoopActive && (eState.value == EmuState.STOPPED || !NativeApp.hasActiveVM())) {
+                vmUiHandler.post { synchronized(vmLifecycleLock) {
+                    if (vmRunGeneration != stopGeneration || vmRunLoopActive ||
+                        (eState.value != EmuState.STOPPED && NativeApp.hasActiveVM())) return@synchronized
                     eState.value = EmuState.STOPPED
-                    val restartNow = synchronized(vmLifecycleLock) {
+                    val restartNow = run {
                         vmStopInProgress = false
                         if (vmRestartAfterStop) {
                             vmRestartAfterStop = false
@@ -1589,17 +1621,15 @@ open class MainActivityRuntime : ComponentActivity() {
                     if (restartNow) {
                         start()
                     } else {
-                        synchronized(vmLifecycleLock) {
-                            WindowImpl.toolbarVisible.value = true
-                            WindowImpl.showLibrary.value = false
-                            WindowImpl.overlayVisible.value = false
-                        }
+                        WindowImpl.toolbarVisible.value = true
+                        WindowImpl.showLibrary.value = false
+                        WindowImpl.overlayVisible.value = false
                         // Clear the current-game pointer (so Settings reverts to Global scope) and
                         // hand rotation back to the launcher. Shared with the other terminal paths.
                         onReturnedToLibrary()
                         finishToLauncherIfRequested()
                     }
-                }
+                } }
             }
         }
 
@@ -1607,6 +1637,7 @@ open class MainActivityRuntime : ComponentActivity() {
          *  machine rebuilt (RA hardcore, texture manager). For the in-game "Restart" action
          *  use [resetGame] — see the note there. */
         fun restart() {
+            if (dispatchVmUi { restart() }) return
             synchronized(vmLifecycleLock) {
                 vmRestartAfterStop = true
             }
@@ -1636,15 +1667,20 @@ open class MainActivityRuntime : ComponentActivity() {
          */
         private fun armRestartWatchdog() {
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            val runGeneration = vmRunGeneration
             var attempts = 0
             handler.postDelayed(object : Runnable {
                 override fun run() {
-                    val stillPending = synchronized(vmLifecycleLock) { vmRestartAfterStop }
+                    val stillPending = synchronized(vmLifecycleLock) {
+                        vmRunGeneration == runGeneration && vmRestartAfterStop
+                    }
                     if (!stillPending) return                       // someone else relaunched it
                     val vmGone = !vmRunLoopActive &&
                         runCatching { !NativeApp.hasActiveVM() }.getOrDefault(true)
                     if (vmGone) {
                         val claim = synchronized(vmLifecycleLock) {
+                            if (vmRunGeneration != runGeneration || vmRunLoopActive || NativeApp.hasActiveVM())
+                                return@synchronized false
                             val pending = vmRestartAfterStop
                             vmRestartAfterStop = false
                             vmStopInProgress = false
@@ -1867,11 +1903,12 @@ open class MainActivityRuntime : ComponentActivity() {
             if (!launchedExternally || currentGame.value != null) return
             val path = m_szGamefile.takeIf { it.isNotEmpty() } ?: return
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            val runGeneration = vmRunGeneration
             handler.post(object : Runnable {
                 var attempts = 0
                 override fun run() {
                     // A library launch that lands mid-poll wins: it has the real entry.
-                    if (vmStopInProgress || eState.value == EmuState.STOPPED) return
+                    if (vmRunGeneration != runGeneration || vmStopInProgress || eState.value == EmuState.STOPPED) return
                     if (currentGame.value != null) return
                     // "00000000" is the placeholder the core reports before the disc is
                     // read — the same value TouchControls.coreSerial() rejects.
@@ -1918,10 +1955,11 @@ open class MainActivityRuntime : ComponentActivity() {
          */
         private fun scheduleVmRunningCallback() {
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            val runGeneration = vmRunGeneration
             val poll = object : Runnable {
                 var attempts = 0
                 override fun run() {
-                    if (eState.value == EmuState.STOPPED) return
+                    if (vmRunGeneration != runGeneration || vmStopInProgress || eState.value == EmuState.STOPPED) return
                     val presenting = runCatching {
                         kr.co.iefriends.pcsx2.NativeApp.getPresentedFrameCount() > 0
                     }.getOrDefault(false)
@@ -1937,6 +1975,8 @@ open class MainActivityRuntime : ComponentActivity() {
 
         @JvmStatic
         fun onVmRunning() {
+            if (dispatchVmUi { onVmRunning() }) return
+            val runGeneration = vmRunGeneration
             /* The VM is up, which means the renderer initialised and the custom driver (if any)
                survived. Disarm the crash guard — anything later is a normal bug, not a driver
                that cannot be booted with. */
@@ -1954,7 +1994,7 @@ open class MainActivityRuntime : ComponentActivity() {
                 var lastFrame = -1
                 var advancingPolls = 0
                 override fun run() {
-                    if (vmStopInProgress || eState.value == EmuState.STOPPED) return
+                    if (vmRunGeneration != runGeneration || vmStopInProgress || eState.value == EmuState.STOPPED) return
                     // Wait until the renderer is actually PRESENTING frames before restoring the
                     // state. A boot-time load that fires as soon as the disc CRC is known — before
                     // the present loop is flowing — leaves the restored frame undisplayed (a black
@@ -2608,10 +2648,14 @@ open class MainActivityRuntime : ComponentActivity() {
             return
         }
         runCatching { NativeApp.resetPadState() }
+        controllerHolds.reset(::releaseControllerHold)
         // Turbo autofire: kill the timers first, or a queued runnable re-presses after the reset.
         turboRunnables.values.forEach { turboHandler.removeCallbacks(it) }
         turboRunnables.clear()
         turboPressed.clear()
+        backHoldRunnable?.let { backHoldHandler.removeCallbacks(it) }
+        backHoldRunnable = null
+        com.armsx2.ui.touch.TouchControls.pressureModifierHeld.value = false
         analogAccum.clear()
         analogPrevSent.forEach { it.clear() }
         analogKeyHeld.forEach { it.clear() }
@@ -2624,6 +2668,20 @@ open class MainActivityRuntime : ComponentActivity() {
         gyroVecY = 0f
         gyroCombineActive = false
         ControllerMotion.resetValues()
+        stopNavRepeat()
+        libraryAxisX = 0
+        libraryAxisY = 0
+        overlayAxisX = 0
+        overlayAxisY = 0
+        memcardAxisX = 0
+        memcardAxisY = 0
+        com.armsx2.ui.settings.SettingsControllerNav.setScrollVelocity(0f)
+        com.armsx2.ui.home.HomeInputController.scroll(0f)
+        captureHatX = 0
+        captureHatY = 0
+        captureHeldSynth.clear()
+        ControllerMappings.captureKeys.clear()
+        ControllerMappings.captureFirstDownMs = 0L
         heldKeys.clear()
     }
 
@@ -3325,6 +3383,15 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     private val controllerKeyDevices = HashSet<Int>()
+    private val controllerHolds = ControllerHoldTracker()
+
+    private fun releaseControllerHold(action: ControllerHoldTracker.Action) {
+        when (action) {
+            ControllerHoldTracker.Action.FAST_FORWARD -> applyFastForward(false)
+            ControllerHoldTracker.Action.REWIND -> com.armsx2.core.Ps1Emulation.setRewindActive(false)
+            ControllerHoldTracker.Action.GYRO -> gyroActive.value = false
+        }
+    }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // Joy-Con buttons all arrive as KEYCODE_UNKNOWN (no Android key layout for 0x057E,
@@ -3358,6 +3425,8 @@ open class MainActivityRuntime : ComponentActivity() {
         // Controller-input diagnostic (ARMSX2_JOYCON): dump the device once + this key.
         logControllerDeviceOnce(event.deviceId)
         logControllerKey(event)
+        if (event.action == KeyEvent.ACTION_UP &&
+            controllerHolds.release(event.deviceId, kc, ::releaseControllerHold)) return true
         // #254 Emulated USB keyboard. When a game runs with the USB HID keyboard
         // attached (Settings.usbKeyboard, e.g. EQOA / Konami-keyboard titles),
         // forward physical/Bluetooth keyboard key events to it. Gated so it only
@@ -3837,24 +3906,16 @@ open class MainActivityRuntime : ComponentActivity() {
                     return true
                 }
                 ControllerMappings.SysHotkey.GYRO_HOLD -> {
-                    // "Only while aiming": gyro is live only while the button is held.
-                    // Same shape as the FAST_FORWARD hold — act on both edges, ignore
-                    // auto-repeat. No toast: it would fire on every aim.
-                    if (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP) {
-                        if (event.repeatCount == 0) gyroActive.value = down
-                    }
+                    if (down && !vmStopInProgress && event.repeatCount == 0 && controllerHolds.press(
+                            event.deviceId, kc, ControllerHoldTracker.Action.GYRO))
+                        gyroActive.value = true
                     return true
                 }
                 ControllerMappings.SysHotkey.FAST_FORWARD -> {
-                    // Hold to fast-forward (Turbo), release to return to the user's
-                    // current limiter mode (Nominal if frame-limit is on, else Unlimited)
-                    // — not blindly Nominal, which would re-enable a disabled limiter.
-                    if (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP) {
-                        if (event.repeatCount == 0) {
-                            // Holding FF supersedes any latched FF-toggle.
-                            if (down) fastForwardToggleActive = false
-                            applyFastForward(down)
-                        }
+                    if (down && !vmStopInProgress && event.repeatCount == 0 && controllerHolds.press(
+                            event.deviceId, kc, ControllerHoldTracker.Action.FAST_FORWARD)) {
+                        fastForwardToggleActive = false
+                        applyFastForward(true)
                     }
                     return true
                 }
@@ -3866,25 +3927,15 @@ open class MainActivityRuntime : ComponentActivity() {
                     return true
                 }
                 ControllerMappings.SysHotkey.REWIND -> {
-                    // Hold to run backwards through the rewind ring: the core steps one
-                    // snapshot back per frame while this is true, and holds still (rather
-                    // than resuming forward play) once the ring is empty. Same both-edges,
-                    // ignore-auto-repeat shape as the FAST_FORWARD hold above; no toast,
-                    // because it is held constantly. Inert unless [emulation] rewind is on.
-                    if (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP) {
-                        if (event.repeatCount == 0) {
-                            /* Say so when the feature is off. A bound key that produces silence
-                               reads as a broken hotkey — reported as exactly that — when the real
-                               answer is that rewind costs memory and ships disabled. Only on the
-                               DOWN edge, and only when off, so a working hold stays silent. */
-                            if (down && !com.armsx2.config.Ps1SettingsStore.active(applicationContext).rewind) {
-                                com.armsx2.ui.WelcomeBanner.show(
-                                    "Rewind is off — turn it on in Settings › Emulation"
-                                )
-                                return true
-                            }
-                            com.armsx2.core.Ps1Emulation.setRewindActive(down)
+                    if (down && !vmStopInProgress && event.repeatCount == 0) {
+                        if (!com.armsx2.config.Ps1SettingsStore.active(applicationContext).rewind) {
+                            com.armsx2.ui.WelcomeBanner.show(
+                                "Rewind is off — turn it on in Settings › Emulation"
+                            )
+                            return true
                         }
+                        if (controllerHolds.press(event.deviceId, kc, ControllerHoldTracker.Action.REWIND))
+                            com.armsx2.core.Ps1Emulation.setRewindActive(true)
                     }
                     return true
                 }
@@ -4066,6 +4117,7 @@ open class MainActivityRuntime : ComponentActivity() {
      *  edge-triggered (stick/combo) path. Only silences the sensor for this session — the
      *  user's Gyro Mode setting is untouched, so re-enabling restores their configured mode. */
     private fun toggleGyro() {
+        controllerHolds.cancel(ControllerHoldTracker.Action.GYRO)
         val on = !gyroActive.value
         gyroActive.value = on
         hotkeyToast(if (on) "Gyro ON" else "Gyro OFF")
@@ -4110,6 +4162,7 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     fun toggleFastForward() {
+        controllerHolds.cancel(ControllerHoldTracker.Action.FAST_FORWARD)
         fastForwardToggleActive = !fastForwardToggleActive
         val on = fastForwardToggleActive
         // Fast-forward supersedes an active slow-down latch (mutually exclusive).
@@ -5045,16 +5098,12 @@ open class MainActivityRuntime : ComponentActivity() {
     private fun flushAnalogAxes(port: Int) {
         val prev = analogPrevSent[port]
         for ((code, held) in analogKeyHeld[port]) accumAnalog(code, held)
-        // Release pass: codes we sent before but that have no contribution now.
-        for (code in prev.keys) {
-            if (!analogAccum.containsKey(code)) {
-                NativeApp.setPadButtonForPort(port, code, 0, false)
-            }
-        }
-        for ((code, v) in analogAccum) {
-            if (prev[code] != v) {
-                padTrace { "analog code=$code v=$v port=$port" }
-                NativeApp.setPadButtonForPort(port, code, (v * 32767).toInt(), true)
+        for (stick in 0..1) {
+            val base = if (stick == 0) 110 else 120
+            if ((base..base + 3).any { (prev[it] ?: 0f) != (analogAccum[it] ?: 0f) }) {
+                fun value(code: Int) = ((analogAccum[code] ?: 0f).coerceIn(0f, 1f) * 32767f).toInt()
+                NativeApp.setPadStickForPort(port, stick,
+                    value(base + 1), value(base + 3), value(base + 2), value(base))
             }
         }
         prev.clear()
@@ -5068,26 +5117,7 @@ open class MainActivityRuntime : ComponentActivity() {
      *  Direction is preserved exactly; only the magnitude is reshaped. */
     private fun accumStickRadial(vx: Float, vy: Float, left: Boolean,
                                  aXPos: Int, aXNeg: Int, aYPos: Int, aYNeg: Int) {
-        // Off-axis BLEED gate (fixes the "push up also presses right" regression). Moving
-        // the deadzone from per-axis to radial (above) stopped diagonals being eaten, but
-        // the old per-axis zone was also silently cleaning up small perpendicular values —
-        // so a near-cardinal push on a stick that doesn't sit perfectly centered on the
-        // other axis now leaks that value through. Restore the cleanup WITHOUT the square
-        // zone: drop the minor axis only when it's a small fraction of the major one. That
-        // snaps just very shallow (~<9°) diagonals to the cardinal; genuine diagonals (minor
-        // axis well above STICK_CROSS_GATE of the major) are untouched, so 8-way is intact.
-        var gx = vx
-        var gy = vy
-        val ax = abs(gx)
-        val ay = abs(gy)
-        if (ax >= ay) { if (ay < ax * STICK_CROSS_GATE) gy = 0f }
-        else { if (ax < ay * STICK_CROSS_GATE) gx = 0f }
-        val mag = kotlin.math.hypot(gx, gy)
-        if (mag <= 0f) return
-        val shaped = shapeStickMag(mag.coerceAtMost(1f), left)
-        val scale = shaped / mag // preserves direction; caps square-gate diagonals at unit circle
-        val ox = gx * scale
-        val oy = gy * scale
+        val (ox, oy) = ControllerMappings.shapeStick(vx, vy, left)
         if (ox > 0f) accumAnalog(aXPos, ox) else if (ox < 0f) accumAnalog(aXNeg, -ox)
         if (oy > 0f) accumAnalog(aYPos, oy) else if (oy < 0f) accumAnalog(aYNeg, -oy)
     }
@@ -5491,6 +5521,7 @@ open class MainActivityRuntime : ComponentActivity() {
             logControllerDeviceOnce(deviceId)
         }
         override fun onInputDeviceRemoved(deviceId: Int) {
+            controllerHolds.releaseDevice(deviceId, ::releaseControllerHold)
             val wasController = controllerKeyDevices.remove(deviceId) || ControllerMotion.isControllerDevice(deviceId) ||
                 (0 until NativeApp.MAX_PLAYERS).any { com.armsx2.input.PadRouter.deviceIdForPort(it) == deviceId }
             ControllerMotion.invalidate(deviceId)
@@ -5668,7 +5699,7 @@ open class MainActivityRuntime : ComponentActivity() {
             super.onDestroy()
             return
         }
-        NativeApp.shutdown()
+        if (instance === this) stop()
         super.onDestroy()
     }
 

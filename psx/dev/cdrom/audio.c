@@ -220,7 +220,7 @@ static void cdrom_xa_diag_push(psx_cdrom_t* cdrom, uint32_t lba, int verdict) {
 int cdrom_fetch_xa_sector(psx_cdrom_t* cdrom) {
     uint32_t walked = 0;
 
-    while (1) {
+    while (walked < 32 && cdrom->xa_lba <= cdrom->lba) {
         int ts = psx_disc_read(cdrom->disc, cdrom->xa_lba, cdrom->xa_buf);
 
         if (ts == TS_FAR) {
@@ -314,6 +314,11 @@ int cdrom_fetch_xa_sector(psx_cdrom_t* cdrom) {
 
         ++walked;
     }
+
+    if (g_psx_audio_diag_enabled && walked > g_psx_audio_diag.xa_walk_peak)
+        g_psx_audio_diag.xa_walk_peak = walked;
+
+    return -1;
 }
 
 int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
@@ -337,16 +342,18 @@ int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
         int stereo = (cdrom->xa_buf[0x13] & 1) == 1;
 
         if (!cdrom->xa_remaining_samples) {
-            if (!cdrom_fetch_xa_sector(cdrom)) {
-                cdrom->xa_playing = 0;
+            const int fetched = cdrom_fetch_xa_sector(cdrom);
+            if (fetched <= 0) {
+                if (fetched == 0)
+                    cdrom->xa_playing = 0;
                 cdrom->xa_remaining_samples = 0;
+                cdrom->xa_sample_index = 0;
 
-                /* Returning 0 here abandons the rest of `buf` AND makes the caller fall
-                   through to the CDDA path, so a starve is audible twice over. */
-                if (g_psx_audio_diag_enabled)
+                if (fetched == 0 && g_psx_audio_diag_enabled)
                     g_psx_audio_diag.xa_starved++;
 
-                return 0;
+                memset(ptr, 0, size - (size_t)i * 4);
+                return 1;
             }
 
             stereo = (cdrom->xa_buf[0x13] & 1) == 1;

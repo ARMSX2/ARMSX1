@@ -15,7 +15,7 @@ class ArmsxAudioTimeStretcher {
     static constexpr std::size_t kSegmentFrames = 1024;   // 23.2 ms at 44.1 kHz
     static constexpr std::size_t kOverlapFrames = 256;    // 5.8 ms cross-fade
     static constexpr std::size_t kSynthesisHop = kSegmentFrames - kOverlapFrames;
-    static constexpr std::size_t kSearchFrames = 128;     // +/- 2.9 ms
+    static constexpr std::size_t kSearchFrames = 512;     // +/- 11.6 ms, including bass periods
     static constexpr std::size_t kSearchStride = 4;
 
     void reset() {
@@ -39,7 +39,11 @@ class ArmsxAudioTimeStretcher {
             return {};
         }
 
-        if (!std::isfinite(ratio)) {
+        std::uint64_t ratio_bits;
+        std::memcpy(&ratio_bits, &ratio, sizeof(ratio_bits));
+        // Keep the representation check observable under -ffast-math.
+        const volatile std::uint64_t checked_ratio_bits = ratio_bits;
+        if ((checked_ratio_bits & UINT64_C(0x7ff0000000000000)) == UINT64_C(0x7ff0000000000000)) {
             ratio = 1.0;
         }
         ratio = std::clamp(ratio, 0.5, 1.05);

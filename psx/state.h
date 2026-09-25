@@ -133,6 +133,7 @@
 #define PSX_SS_TIMER      PSX_FOURCC('T', 'M', 'R', ' ')
 #define PSX_SS_CDROM      PSX_FOURCC('C', 'D', 'R', 'M')
 #define PSX_SS_PAD        PSX_FOURCC('P', 'A', 'D', ' ')
+#define PSX_SS_PAD_EXT    PSX_FOURCC('P', 'A', 'D', 'X')
 #define PSX_SS_MDEC       PSX_FOURCC('M', 'D', 'E', 'C')
 #define PSX_SS_EXP2       PSX_FOURCC('E', 'X', 'P', '2')
 /* Optional, never mandatory — see the compatibility note above. Payload:

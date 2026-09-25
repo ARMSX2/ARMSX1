@@ -52,7 +52,7 @@ object DiagnosticCapture {
                 val target = File(logs, "device.log")
                 val previous = File(logs, "device.previous.log")
                 if (target.length() >= LIMIT && !target.renameTo(previous)) target.delete()
-                var writer = FileOutputStream(target, true).bufferedWriter(Charsets.UTF_8, 8192)
+                var writer = FileOutputStream(target, true).bufferedWriter(Charsets.UTF_8)
                 var size = target.length()
                 var flushedAt = SystemClock.elapsedRealtime()
                 try {
@@ -61,7 +61,7 @@ object DiagnosticCapture {
                             if (size >= LIMIT) {
                                 writer.close()
                                 if (!target.renameTo(previous)) target.delete()
-                                writer = FileOutputStream(target, true).bufferedWriter(Charsets.UTF_8, 8192)
+                                writer = FileOutputStream(target, true).bufferedWriter(Charsets.UTF_8)
                                 size = 0
                             }
                             val bounded = line.take(8192)

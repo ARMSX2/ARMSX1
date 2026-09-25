@@ -1646,7 +1646,7 @@ static int case_pgxp_provenance(pair_t* p) {
         enc_i(OP_SH, 1, 2, 20),
     };
     const int offsets[] = {-1, 0, 4, -1, 8, 12, -1, 16, 4, 20, 20};
-    const int valid[] = {0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0};
+    const int valid[] = {0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0};
     int ok = 1;
     psx_pgxp_set_enabled(1);
     for (int mi = 0; mi < 2; ++mi) {
@@ -1680,6 +1680,233 @@ static int case_pgxp_provenance(pair_t* p) {
     return ok;
 }
 
+static int case_pgxp_gte_transfers(pair_t* p) {
+    const uint32_t word = (20u << 16) | 10u;
+    const uint32_t prog[] = {
+        (0x12u << 26) | (2u << 16) | (14u << 11),
+        NOP,
+        (0x12u << 26) | (4u << 21) | (2u << 16) | (12u << 11),
+        enc_i(0x3a, 1, 12, 4),
+        enc_i(0x32, 1, 15, 0),
+        enc_i(0x3a, 1, 12, 8),
+        enc_i(0x3a, 1, 13, 12),
+        enc_i(0x3a, 1, 15, 16),
+        enc_i(OP_SB, 1, 2, 0),
+        enc_i(0x32, 1, 14, 0),
+        enc_i(0x3a, 1, 14, 20),
+        (0x12u << 26) | (4u << 21) | (14u << 11),
+        enc_i(0x3a, 1, 14, 24),
+        (0x12u << 26) | (4u << 21) | (2u << 16) | (15u << 11),
+        enc_i(0x3a, 1, 15, 28),
+    };
+    const int offsets[] = {-1, -1, -1, 4, -1, 8, 12, 16, -1, -1, 20, -1, 24, -1, 28};
+    const float expected[] = {0, 0, 0, 10.25f, 0, 10.75f, 10.25f, 10.75f, 0, 0, 0, 0, 0, 0, 10.25f};
+    int ok = 1;
+    psx_pgxp_set_enabled(1);
+    for (int mi = 0; mi < 2; ++mi) {
+        psx_t* m = p->m[mi];
+        cpu_reset(m->cpu);
+        psx_pgxp_reset();
+        write_prog(m, prog, sizeof(prog) / sizeof(prog[0]));
+        write_data(m, 0, word);
+        m->cpu->r[1] = DATA_VA;
+        m->cpu->cop0_r[COP0_SR] |= 1u << 30;
+        m->cpu->cop2_dr.sxy[2].p[0] = 10;
+        m->cpu->cop2_dr.sxy[2].p[1] = 20;
+        psx_pgxp_gte_vertex(word, 10.75f, 20.5f, 20.0f);
+        psx_pgxp_cpu_swc2(DATA_PA, word, 14);
+        psx_pgxp_gte_vertex(word, 10.25f, 20.5f, 10.0f);
+        m->cpu->cop2_dr.sxy[1].xy = word;
+        for (unsigned i = 0; i < sizeof(prog) / sizeof(prog[0]); ++i) {
+            psx_cpu_cycle(m->cpu);
+            if (offsets[i] < 0) continue;
+            vertex_t v = {0};
+            psx_pgxp_note_gp0_word(DATA_PA + offsets[i]);
+            psx_pgxp_gp0_slot(1);
+            psx_pgxp_poly_vertex(&v, read_data(m, offsets[i]), 1);
+            ++g_checked;
+            if (v.precise_valid != (expected[i] != 0) ||
+                (v.precise_valid && v.px != expected[i])) {
+                fail("case=pgxp-gte-transfers mode=%s step=%u valid=%d x=%f expected=%f",
+                     MODE_NAME[mi], i, v.precise_valid, v.px, expected[i]);
+                ok = 0;
+            }
+        }
+    }
+    psx_pgxp_set_enabled(0);
+    if (ok) puts("CPU_SPEC passed case=pgxp-gte-transfers");
+    return ok;
+}
+
+static int case_pgxp_mtc2_delay(pair_t* p) {
+    const uint32_t word = (20u << 16) | 10u;
+    const uint32_t prog[] = {
+        (0x12u << 26) | (2u << 16) | (14u << 11),
+        (0x12u << 26) | (4u << 21) | (2u << 16) | (12u << 11),
+        enc_i(0x3a, 1, 12, 0),
+        (0x12u << 26) | (4u << 21) | (2u << 16) | (13u << 11),
+        enc_i(0x3a, 1, 13, 4),
+    };
+    int ok = 1;
+    psx_pgxp_set_enabled(1);
+    for (int mi = 0; mi < 2; ++mi) {
+        psx_t* m = p->m[mi];
+        cpu_reset(m->cpu);
+        psx_pgxp_reset();
+        write_prog(m, prog, sizeof(prog) / sizeof(prog[0]));
+        m->cpu->r[1] = DATA_VA;
+        m->cpu->r[2] = word;
+        m->cpu->cop0_r[COP0_SR] |= 1u << 30;
+        m->cpu->cop2_dr.sxy[2].xy = word;
+        psx_pgxp_gte_vertex(word, 10.25f, 20.5f, 10.0f);
+        psx_pgxp_cpu_mfc2(2, word, 14);
+        psx_pgxp_cpu_load_commit(2, word);
+        psx_pgxp_gte_vertex(word, 10.75f, 20.5f, 20.0f);
+        for (unsigned i = 0; i < sizeof(prog) / sizeof(prog[0]); ++i)
+            psx_cpu_cycle(m->cpu);
+        for (unsigned i = 0; i < 2; ++i) {
+            vertex_t v = {0};
+            psx_pgxp_note_gp0_word(DATA_PA + 4 * i);
+            psx_pgxp_gp0_slot(1);
+            psx_pgxp_poly_vertex(&v, read_data(m, 4 * i), 1);
+            ++g_checked;
+            if (!v.precise_valid || v.px != (i ? 10.75f : 10.25f)) {
+                fail("case=pgxp-mtc2-delay mode=%s slot=%u", MODE_NAME[mi], i);
+                ok = 0;
+            }
+        }
+    }
+    psx_pgxp_set_enabled(0);
+    if (ok) puts("CPU_SPEC passed case=pgxp-mtc2-delay");
+    return ok;
+}
+
+static int case_pgxp_identity_moves(pair_t* p) {
+    const uint32_t word = (20u << 16) | 10u;
+    const struct {
+        const char* name;
+        uint32_t opcode;
+        unsigned dest;
+        int precise;
+        uint32_t result;
+        int stale;
+    } cases[] = {
+        {"addu-rs", enc_r(2, 0, 3, 0, F_ADDU), 3, 1, word, 0},
+        {"addu-rt", enc_r(0, 2, 3, 0, F_ADDU), 3, 1, word, 0},
+        {"add", enc_r(2, 0, 3, 0, F_ADD), 3, 1, word, 0},
+        {"sub", enc_r(2, 0, 3, 0, F_SUB), 3, 1, word, 0},
+        {"subu", enc_r(2, 0, 3, 0, F_SUBU), 3, 1, word, 0},
+        {"or-rs", enc_r(2, 0, 3, 0, F_OR), 3, 1, word, 0},
+        {"or-rt", enc_r(0, 2, 3, 0, F_OR), 3, 1, word, 0},
+        {"or-self", enc_r(2, 2, 3, 0, F_OR), 3, 1, word, 0},
+        {"and-self", enc_r(2, 2, 3, 0, F_AND), 3, 1, word, 0},
+        {"xor-zero", enc_r(2, 0, 3, 0, F_XOR), 3, 1, word, 0},
+        {"sll-zero", enc_r(0, 2, 3, 0, F_SLL), 3, 1, word, 0},
+        {"srl-zero", enc_r(0, 2, 3, 0, F_SRL), 3, 1, word, 0},
+        {"sra-zero", enc_r(0, 2, 3, 0, F_SRA), 3, 1, word, 0},
+        {"sllv-zero", enc_r(0, 2, 3, 0, F_SLLV), 3, 1, word, 0},
+        {"srlv-zero", enc_r(0, 2, 3, 0, F_SRLV), 3, 1, word, 0},
+        {"srav-zero", enc_r(0, 2, 3, 0, F_SRAV), 3, 1, word, 0},
+        {"addi-zero", enc_i(OP_ADDI, 2, 3, 0), 3, 1, word, 0},
+        {"addiu-zero", enc_i(OP_ADDIU, 2, 3, 0), 3, 1, word, 0},
+        {"ori-zero", enc_i(OP_ORI, 2, 3, 0), 3, 1, word, 0},
+        {"xori-zero", enc_i(OP_XORI, 2, 3, 0), 3, 1, word, 0},
+        {"same-destination", enc_r(2, 0, 2, 0, F_ADDU), 2, 1, word, 0},
+        {"zero-destination", enc_r(2, 0, 0, 0, F_ADDU), 0, 0, 0, 0},
+        {"zero-source", enc_r(0, 0, 3, 0, F_ADDU), 3, 0, 0, 0},
+        {"stale-source", enc_r(2, 0, 3, 0, F_ADDU), 3, 0, word + 1, 1},
+        {"arithmetic", enc_i(OP_ADDIU, 2, 3, 1), 3, 0, word + 1, 0},
+        {"arithmetic-same-word", enc_r(2, 5, 3, 0, F_ADDU), 3, 0, word, 0},
+        {"masked-same-word", enc_r(2, 4, 3, 0, F_AND), 3, 0, word, 0},
+        {"shift", enc_r(0, 2, 3, 1, F_SLL), 3, 0, word << 1, 0},
+        {"xor-self", enc_r(2, 2, 3, 0, F_XOR), 3, 0, 0, 0},
+    };
+    int ok = 1;
+    for (int enabled = 0; enabled < 2; ++enabled) {
+        psx_pgxp_set_enabled(enabled);
+        for (int mi = 0; mi < 2; ++mi) {
+            psx_t* m = p->m[mi];
+            for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+                const uint32_t prog[] = {cases[i].opcode, enc_i(OP_SW, 1, cases[i].dest, 0)};
+                cpu_reset(m->cpu);
+                psx_pgxp_reset();
+                write_prog(m, prog, 2);
+                m->cpu->r[1] = DATA_VA;
+                m->cpu->r[2] = word + cases[i].stale;
+                m->cpu->r[4] = 0xffffffffu;
+                if (enabled) {
+                    psx_pgxp_gte_vertex(word, 10.25f, 20.5f, 10.0f);
+                    psx_pgxp_cpu_mfc2(2, word, 14);
+                    psx_pgxp_cpu_load_commit(2, word);
+                }
+                psx_cpu_cycle(m->cpu);
+                psx_cpu_cycle(m->cpu);
+                vertex_t v = {0};
+                psx_pgxp_note_gp0_word(DATA_PA);
+                psx_pgxp_gp0_slot(1);
+                psx_pgxp_poly_vertex(&v, read_data(m, 0), 1);
+                ++g_checked;
+                if (read_data(m, 0) != cases[i].result ||
+                    v.precise_valid != (enabled && cases[i].precise) ||
+                    (v.precise_valid && (v.px != 10.25f || v.py != 20.5f || v.pw != 10.0f))) {
+                    fail("case=pgxp-identity-moves mode=%s enabled=%d op=%s word=%08x valid=%d",
+                         MODE_NAME[mi], enabled, cases[i].name, read_data(m, 0), v.precise_valid);
+                    ok = 0;
+                }
+            }
+        }
+    }
+    psx_pgxp_set_enabled(0);
+    if (ok) puts("CPU_SPEC passed case=pgxp-identity-moves");
+    return ok;
+}
+
+static int case_pgxp_move_load_delay(pair_t* p) {
+    const uint32_t word = (20u << 16) | 10u;
+    int ok = 1;
+    psx_pgxp_set_enabled(1);
+    for (int mi = 0; mi < 2; ++mi) {
+        psx_t* m = p->m[mi];
+        for (unsigned dest = 2; dest <= 3; ++dest) {
+            const uint32_t prog[] = {
+                enc_i(OP_LW, 1, 2, 0),
+                enc_r(2, 0, dest, 0, F_ADDU),
+                enc_i(OP_SW, 1, dest, 4),
+                enc_i(OP_SW, 1, 2, 8),
+            };
+            cpu_reset(m->cpu);
+            psx_pgxp_reset();
+            write_prog(m, prog, 4);
+            write_data(m, 0, word);
+            m->cpu->r[1] = DATA_VA;
+            m->cpu->r[2] = word;
+            psx_pgxp_gte_vertex(word, 10.25f, 20.5f, 10.0f);
+            psx_pgxp_cpu_mfc2(2, word, 14);
+            psx_pgxp_cpu_load_commit(2, word);
+            psx_pgxp_gte_vertex(word, 10.75f, 20.5f, 20.0f);
+            psx_pgxp_cpu_swc2(DATA_PA, word, 14);
+            for (unsigned i = 0; i < 4; ++i)
+                psx_cpu_cycle(m->cpu);
+            for (unsigned offset = 4; offset <= 8; offset += 4) {
+                const float expected_x = offset == 4 || dest == 2 ? 10.25f : 10.75f;
+                vertex_t v = {0};
+                psx_pgxp_note_gp0_word(DATA_PA + offset);
+                psx_pgxp_gp0_slot(1);
+                psx_pgxp_poly_vertex(&v, read_data(m, offset), 1);
+                ++g_checked;
+                if (read_data(m, offset) != word || !v.precise_valid || v.px != expected_x) {
+                    fail("case=pgxp-move-load-delay mode=%s dest=%u offset=%u valid=%d x=%f expected=%f",
+                         MODE_NAME[mi], dest, offset, v.precise_valid, v.px, expected_x);
+                    ok = 0;
+                }
+            }
+        }
+    }
+    psx_pgxp_set_enabled(0);
+    if (ok) puts("CPU_SPEC passed case=pgxp-move-load-delay");
+    return ok;
+}
+
 int main(void) {
     const char* bios_path = "build/tests/blank-bios.bin";
     if (!write_blank_bios(bios_path)) {
@@ -1708,6 +1935,10 @@ int main(void) {
     ok &= case_cop0_masks(&p);
     ok &= case_cache_isolation(&p);
     ok &= case_pgxp_provenance(&p);
+    ok &= case_pgxp_gte_transfers(&p);
+    ok &= case_pgxp_mtc2_delay(&p);
+    ok &= case_pgxp_identity_moves(&p);
+    ok &= case_pgxp_move_load_delay(&p);
 
     pair_destroy(&p);
 

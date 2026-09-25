@@ -42,6 +42,7 @@ object DiagnosticsReport {
 
     private const val KEY_ENABLED = "diagnostics.generateLog"
     private const val KEY_URI = "diagnostics.reportUri"
+    private val exportGate = DiagnosticExportGate()
 
     private fun prefs(context: Context) =
         context.getSharedPreferences("ARMSX2", Context.MODE_PRIVATE)
@@ -88,29 +89,33 @@ object DiagnosticsReport {
     }
 
     /**
-     * Rewrite the report at the chosen destination. Returns false when the toggle is off, the
-     * grant is gone (file deleted, storage detached), or the write failed — never throws.
+     * Rewrite the report at the chosen destination. Concurrent exports return BUSY.
      * Blocking: call from an IO thread.
      */
-    fun refresh(context: Context, export: Boolean = true): Boolean {
-        if (!isEnabled(context) && !BuildConfig.DIAGNOSTIC_BUILD) return false
-        if (!DiagnosticCapture.isMainProcess(context)) return false
+    fun refresh(context: Context, export: Boolean = true): DiagnosticExportGate.Result {
+        if (!isEnabled(context) && !BuildConfig.DIAGNOSTIC_BUILD) return DiagnosticExportGate.Result.FAILED
+        if (!DiagnosticCapture.isMainProcess(context)) return DiagnosticExportGate.Result.FAILED
         val local = File(context.filesDir, "logs/diagnostic-report.txt")
-        val captured = synchronized(this) {
-            runCatching {
-                local.parentFile?.mkdirs()
-                val pending = File(local.parentFile, "diagnostic-report.pending")
-                pending.bufferedWriter().use { writeReport(context, it) }
-                check(pending.renameTo(local))
-                true
-            }.getOrDefault(false)
+        val exportRequested = export && isEnabled(context)
+        val uri = if (exportRequested) reportUri(context) else null
+        if (exportRequested && uri == null) return DiagnosticExportGate.Result.FAILED
+        if (uri == null) {
+            return if (capture(context, local)) DiagnosticExportGate.Result.SUCCESS else DiagnosticExportGate.Result.FAILED
         }
-        if (!captured) return false
-        val uri = if (export && isEnabled(context)) reportUri(context) else null
-        if (uri == null) return true
-        return runCatching {
-            val stream = context.contentResolver.openOutputStream(uri, "wt") ?: return false
+        return exportGate.run {
+            if (!capture(context, local)) return@run false
+            val stream = context.contentResolver.openOutputStream(uri, "wt") ?: return@run false
             stream.use { output -> local.inputStream().use { it.copyTo(output) } }
+            true
+        }
+    }
+
+    private fun capture(context: Context, local: File): Boolean = synchronized(this) {
+        runCatching {
+            local.parentFile?.mkdirs()
+            val pending = File(local.parentFile, "diagnostic-report.pending")
+            pending.bufferedWriter().use { writeReport(context, it) }
+            check(pending.renameTo(local))
             true
         }.getOrDefault(false)
     }
@@ -158,6 +163,9 @@ object DiagnosticsReport {
         section(w, "device lifecycle, controller and native logs", File(context.filesDir, "logs/device.log"))
         section(w, "session.log — frontend stdout/stderr", File(externalLogs, "session.log"))
         w.appendLine("===== input devices =====")
+        w.appendLine("Controller settings at export (session settings are in device.log):")
+        w.appendLine(runCatching { com.armsx2.input.ControllerMappings.diagnosticStickSettings() }
+            .getOrElse { "unavailable: ${it.javaClass.simpleName}" })
         runCatching {
             InputDevice.getDeviceIds().take(64).forEach { id ->
                 val device = InputDevice.getDevice(id) ?: return@forEach

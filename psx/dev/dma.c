@@ -185,6 +185,10 @@ const char* g_psx_dma_sync_type_name_table[] = {
     "reserved"
 };
 
+static uint32_t dma_transfer_address(uint32_t address) {
+    return address & 0x00fffffc;
+}
+
 void psx_dma_do_mdec_in(psx_dma_t* dma) {
     if (!CHCR_BUSY(mdec_in))
         return;
@@ -203,7 +207,7 @@ void psx_dma_do_mdec_in(psx_dma_t* dma) {
     int step = CHCR_STEP(mdec_in) ? -4 : 4;
 
     for (int i = 0; i < size; i++) {
-        uint32_t data = psx_bus_read32(dma->bus, dma->mdec_in.madr);
+        uint32_t data = psx_bus_read32(dma->bus, dma_transfer_address(dma->mdec_in.madr));
 
         psx_bus_write32(dma->bus, 0x1f801820, data);
 
@@ -236,7 +240,7 @@ void psx_dma_do_mdec_out(psx_dma_t* dma) {
     for (int i = 0; i < size; i++) {
         uint32_t data = psx_bus_read32(dma->bus, 0x1f801820);
 
-        psx_bus_write32(dma->bus, dma->mdec_out.madr, data);
+        psx_bus_write32(dma->bus, dma_transfer_address(dma->mdec_out.madr), data);
 
         dma->mdec_out.madr += CHCR_STEP(mdec_out) ? -4 : 4;
     }
@@ -248,9 +252,9 @@ void psx_dma_do_mdec_out(psx_dma_t* dma) {
 }
 
 void psx_dma_do_gpu_linked(psx_dma_t* dma) {
-    uint32_t hdr = psx_bus_read32(dma->bus, dma->gpu.madr);
+    uint32_t addr = dma_transfer_address(dma->gpu.madr);
+    uint32_t hdr = psx_bus_read32(dma->bus, addr);
     uint32_t size = hdr >> 24;
-    uint32_t addr = dma->gpu.madr;
 
     int timeout = 16384;
 
@@ -280,6 +284,7 @@ void psx_dma_do_gpu_linked(psx_dma_t* dma) {
         if (addr == 0xffffff)
             break;
 
+        addr = dma_transfer_address(addr);
         hdr = psx_bus_read32(dma->bus, addr);
         size = hdr >> 24;
     }
@@ -295,13 +300,14 @@ void psx_dma_do_gpu_request(psx_dma_t* dma) {
 
     if (CHCR_TDIR(gpu)) {
         for (int i = 0; i < size; i++) {
-            uint32_t data = psx_bus_read32(dma->bus, dma->gpu.madr);
+            uint32_t addr = dma_transfer_address(dma->gpu.madr);
+            uint32_t data = psx_bus_read32(dma->bus, addr);
 
             /* PGXP: request-mode transfers are mostly VRAM image uploads (the
                GPU discards those notes in RECV_DATA), but some titles push
                command lists this way too. */
             if (psx_pgxp_active())
-                psx_pgxp_note_gp0_word(dma->gpu.madr);
+                psx_pgxp_note_gp0_word(addr);
 
             psx_bus_write32(dma->bus, 0x1f801810, data);
 
@@ -311,7 +317,7 @@ void psx_dma_do_gpu_request(psx_dma_t* dma) {
         for (int i = 0; i < size; i++) {
             uint32_t data = psx_bus_read32(dma->bus, 0x1f801810);
 
-            psx_bus_write32(dma->bus, dma->gpu.madr, data);
+            psx_bus_write32(dma->bus, dma_transfer_address(dma->gpu.madr), data);
 
             dma->gpu.madr += CHCR_STEP(gpu) ? -4 : 4;
         }
@@ -390,7 +396,7 @@ void psx_dma_do_cdrom(psx_dma_t* dma) {
             data |= psx_bus_read8(dma->bus, 0x1f801802) << 16;
             data |= psx_bus_read8(dma->bus, 0x1f801802) << 24;
 
-            psx_bus_write32(dma->bus, dma->cdrom.madr, data);
+            psx_bus_write32(dma->bus, dma_transfer_address(dma->cdrom.madr), data);
 
             dma->cdrom.madr += CHCR_STEP(cdrom) ? -4 : 4;
         }
@@ -440,7 +446,7 @@ void psx_dma_do_spu(psx_dma_t* dma) {
     if (CHCR_TDIR(spu)) {
         for (int j = 0; j < blocks; j++) {
             for (int i = 0; i < size; i++) {
-                uint32_t data = psx_bus_read32(dma->bus, dma->spu.madr);
+                uint32_t data = psx_bus_read32(dma->bus, dma_transfer_address(dma->spu.madr));
 
                 psx_bus_write16(dma->bus, 0x1f801da8, data & 0xffff);
                 psx_bus_write16(dma->bus, 0x1f801da8, data >> 16);
@@ -456,7 +462,7 @@ void psx_dma_do_spu(psx_dma_t* dma) {
                 data  = psx_bus_read16(dma->bus, 0x1f801da8);
                 data |= psx_bus_read16(dma->bus, 0x1f801da8) << 16;
 
-                psx_bus_write32(dma->bus, dma->spu.madr, data);
+                psx_bus_write32(dma->bus, dma_transfer_address(dma->spu.madr), data);
 
                 dma->spu.madr += CHCR_STEP(spu) ? -4 : 4;
             }
@@ -493,9 +499,9 @@ void psx_dma_do_otc(psx_dma_t* dma) {
     PSX_PERF_ADD(dma_words[PSX_PERF_DMA_OTC], size);
 
     for (int i = size; i > 0; i--) {
-        uint32_t addr = (i != 1) ? (dma->otc.madr - 4) : 0xffffff;
+        uint32_t addr = (i != 1) ? dma_transfer_address(dma->otc.madr - 4) : 0xffffff;
 
-        psx_bus_write32(dma->bus, dma->otc.madr, addr & 0xffffff);
+        psx_bus_write32(dma->bus, dma_transfer_address(dma->otc.madr), addr);
 
         dma->otc.madr -= 4;
     }

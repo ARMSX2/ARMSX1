@@ -1114,25 +1114,25 @@ uint16_t gpu_fetch_texel(psx_gpu_t* gpu, uint16_t tx, uint16_t ty, uint32_t tpx,
     switch (depth) {
         // 4-bit
         case 0: {
-            uint16_t texel = gpu->vram[(tpx + (tx >> 2)) + ((tpy + ty) * 1024)];
+            uint16_t texel = gpu->vram[((tpx + (tx >> 2)) & 0x3ff) + (((tpy + ty) & 0x1ff) * 1024)];
 
             int index = (texel >> ((tx & 0x3) << 2)) & 0xf;
 
-            return gpu->vram[(clutx + index) + (cluty * 1024)];
+            return gpu->vram[((clutx + index) & 0x3ff) + ((cluty & 0x1ff) * 1024)];
         } break;
 
         // 8-bit
         case 1: {
-            uint16_t texel = gpu->vram[(tpx + (tx >> 1)) + ((tpy + ty) * 1024)];
+            uint16_t texel = gpu->vram[((tpx + (tx >> 1)) & 0x3ff) + (((tpy + ty) & 0x1ff) * 1024)];
 
             int index = (texel >> ((tx & 0x1) << 3)) & 0xff;
 
-            return gpu->vram[(clutx + index) + (cluty * 1024)];
+            return gpu->vram[((clutx + index) & 0x3ff) + ((cluty & 0x1ff) * 1024)];
         } break;
 
         // 15-bit
         default: {
-            return gpu->vram[(tpx + tx) + ((tpy + ty) * 1024)];
+            return gpu->vram[((tpx + tx) & 0x3ff) + (((tpy + ty) & 0x1ff) * 1024)];
         } break;
     }
 }
@@ -1294,25 +1294,6 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
                 float cg = (z0 * ((a.c >>  8) & 0xff) + z1 * ((b.c >>  8) & 0xff) + z2 * ((c.c >>  8) & 0xff)) / area;
                 float cb = (z0 * ((a.c >> 16) & 0xff) + z1 * ((b.c >> 16) & 0xff) + z2 * ((c.c >> 16) & 0xff)) / area;
 
-                /* ABSOLUTE framebuffer coordinate, not bounding-box relative.
-
-                   Hardware indexes the 4x4 kernel with the low two bits of the VRAM x/y
-                   being written, so the pattern is fixed to the framebuffer and every
-                   primitive that touches a pixel dithers it identically. Indexing from the
-                   primitive's own bounding box instead re-phases the kernel per primitive,
-                   so a smooth gradient split across adjacent Gouraud polygons picks up a
-                   visible discontinuity at every shared edge. Mirrored in
-                   frontend/gpu_hw_rt.c and the GL draw shader — all three must agree or the
-                   parity gate breaks. */
-                int dy = y & 3;
-                int dx = x & 3;
-
-                int dither = dither_on ? g_psx_gpu_dither_kernel[dx + (dy * 4)] : 0;
-
-                cr += dither;
-                cg += dither;
-                cb += dither;
-
                 // Saturate (clamp) to 00-ff
                 cr = (cr >= 255.0f) ? 255.0f : ((cr <= 0.0f) ? 0.0f : cr);
                 cg = (cg >= 255.0f) ? 255.0f : ((cg <= 0.0f) ? 0.0f : cg);
@@ -1328,6 +1309,10 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
             } else {
                 mod = data.v[0].c;
             }
+
+            const int dither = dither_on && ((data.attrib & PA_SHADED) ||
+                ((data.attrib & PA_TEXTURED) && !(data.attrib & PA_RAW)))
+                ? g_psx_gpu_dither_kernel[(x & 3) + ((y & 3) * 4)] : 0;
 
             if (data.attrib & PA_TEXTURED) {
                 float tx = ((z0 * a.tx) + (z1 * b.tx) + (z2 * c.tx)) / area;
@@ -1362,19 +1347,18 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
                        shared by all three rasterizers. Hardware divides by 128 with integer
                        truncation; this used to round, which turns levels 1..8 into fixed
                        points and makes a frame-feedback trail permanent. See gpu.h. */
-                    unsigned int ucr = psx_gpu_modulate_channel(
+                    unsigned int ucr = psx_gpu_modulate_unclamped(
                         gpu, (texel >> 0 ) & 0x1f, (mod >> 0 ) & 0xff);
-                    unsigned int ucg = psx_gpu_modulate_channel(
+                    unsigned int ucg = psx_gpu_modulate_unclamped(
                         gpu, (texel >> 5 ) & 0x1f, (mod >> 8 ) & 0xff);
-                    unsigned int ucb = psx_gpu_modulate_channel(
+                    unsigned int ucb = psx_gpu_modulate_unclamped(
                         gpu, (texel >> 10) & 0x1f, (mod >> 16) & 0xff);
 
-                    uint32_t rgb = ucr | (ucg << 8) | (ucb << 16);
-
-                    color = BGR555(rgb);
+                    color = psx_gpu_pack_dithered(ucr, ucg, ucb, dither);
                 }
             } else {
-                color = BGR555(mod);
+                color = psx_gpu_pack_dithered(mod & 0xff, (mod >> 8) & 0xff,
+                                             (mod >> 16) & 0xff, dither);
             }
 
             float cr = ((color >> 0 ) & 0x1f) << 3;
@@ -2407,6 +2391,24 @@ void gpu_line(psx_gpu_t* gpu) {
     }
 }
 
+#ifdef USE_HARDWARE
+static void gpu_download_transfer(psx_gpu_t* gpu, uint32_t x, uint32_t y,
+                                  uint32_t w, uint32_t h) {
+    if (!GPU_BACKEND_HAS(gpu, download_vram) || GPU_BACKEND_SHADOWS(gpu))
+        return;
+    const uint32_t first_w = w < 1024 - x ? w : 1024 - x;
+    const uint32_t first_h = h < 512 - y ? h : 512 - y;
+    gpu->backend->download_vram(gpu->backend, x, y, first_w, first_h, gpu->vram, 1024);
+    if (first_w < w)
+        gpu->backend->download_vram(gpu->backend, 0, y, w - first_w, first_h, gpu->vram, 1024);
+    if (first_h < h) {
+        gpu->backend->download_vram(gpu->backend, x, 0, first_w, h - first_h, gpu->vram, 1024);
+        if (first_w < w)
+            gpu->backend->download_vram(gpu->backend, 0, 0, w - first_w, h - first_h, gpu->vram, 1024);
+    }
+}
+#endif
+
 void gpu_cmd_a0(psx_gpu_t* gpu) {
     switch (gpu->state) {
         case GPU_STATE_RECV_CMD: {
@@ -2431,6 +2433,10 @@ void gpu_cmd_a0(psx_gpu_t* gpu) {
                 PSX_PERF_ADD(gpu_vram_words, gpu->tsiz);
                 gpu->xcnt = 0;
                 gpu->ycnt = 0;
+#ifdef USE_HARDWARE
+                if (psx_gpu_mask_check(gpu))
+                    gpu_download_transfer(gpu, gpu->xpos, gpu->ypos, gpu->xsiz, gpu->ysiz);
+#endif
 
                 if (gpu->dbg_file) {
                     gpu->dbg_prims++;
@@ -2443,34 +2449,18 @@ void gpu_cmd_a0(psx_gpu_t* gpu) {
         } break;
 
         case GPU_STATE_RECV_DATA: {
-            unsigned int xpos = (gpu->xpos + gpu->xcnt) & 0x3ff;
-            unsigned int ypos = (gpu->ypos + gpu->ycnt) & 0x1ff;
-
-            gpu->vram[xpos + (ypos * 1024)] = gpu->recv_data & 0xffff;
-
-            ++gpu->xcnt;
-
-            xpos = (gpu->xpos + gpu->xcnt) & 0x3ff;
-            ypos = (gpu->ypos + gpu->ycnt) & 0x1ff;
-
-            if (gpu->xcnt == gpu->xsiz) {
-                ++gpu->ycnt;
-                gpu->xcnt = 0;
-
-                ypos = (gpu->ypos + gpu->ycnt) & 0x1ff;
-                xpos = (gpu->xpos + gpu->xcnt) & 0x3ff;
-            }
-
-            gpu->vram[xpos + (ypos * 1024)] = gpu->recv_data >> 16;
-
-            ++gpu->xcnt;
-            
-            if (gpu->xcnt == gpu->xsiz) {
-                ++gpu->ycnt;
-                gpu->xcnt = 0;
-
-                xpos = (gpu->xpos + gpu->xcnt) & 0x3ff;
-                ypos = (gpu->ypos + gpu->ycnt) & 0x1ff;
+            const int mask_check = psx_gpu_mask_check(gpu);
+            const uint16_t mask_set = psx_gpu_mask_set(gpu) ? 0x8000 : 0;
+            for (unsigned int half = 0; half < 2 && gpu->ycnt < gpu->ysiz; ++half) {
+                const unsigned int xpos = (gpu->xpos + gpu->xcnt) & 0x3ff;
+                const unsigned int ypos = (gpu->ypos + gpu->ycnt) & 0x1ff;
+                uint16_t* dst = &gpu->vram[xpos + ypos * 1024];
+                if (!mask_check || !(*dst & 0x8000))
+                    *dst = (uint16_t)(gpu->recv_data >> (half * 16)) | mask_set;
+                if (++gpu->xcnt == gpu->xsiz) {
+                    ++gpu->ycnt;
+                    gpu->xcnt = 0;
+                }
             }
 
             gpu->tsiz -= 2;
@@ -3118,12 +3108,14 @@ void gpu_cmd_80(psx_gpu_t* gpu) {
             if (!gpu->cmd_args_remaining) {
                 gpu->state = GPU_STATE_RECV_DATA;
 
-                uint32_t srcx = gpu->buf[1] & 0xffff;
-                uint32_t srcy = gpu->buf[1] >> 16;
-                uint32_t dstx = gpu->buf[2] & 0xffff;
-                uint32_t dsty = gpu->buf[2] >> 16;
-                uint32_t xsiz = gpu->buf[3] & 0xffff;
-                uint32_t ysiz = gpu->buf[3] >> 16;
+                uint32_t srcx = gpu->buf[1] & 0x3ff;
+                uint32_t srcy = (gpu->buf[1] >> 16) & 0x1ff;
+                uint32_t dstx = gpu->buf[2] & 0x3ff;
+                uint32_t dsty = (gpu->buf[2] >> 16) & 0x1ff;
+                uint32_t xsiz = ((gpu->buf[3] - 1) & 0x3ff) + 1;
+                uint32_t ysiz = (((gpu->buf[3] >> 16) - 1) & 0x1ff) + 1;
+                const uint16_t mask_check = psx_gpu_mask_check(gpu) ? 0x8000 : 0;
+                const uint16_t mask_set = psx_gpu_mask_set(gpu) ? 0x8000 : 0;
 
                 /* A copy touches the rectangle twice (read + write). */
                 PSX_PERF_ADD(gpu_vram_words, 2ull * (uint64_t)xsiz * (uint64_t)ysiz);
@@ -3136,21 +3128,24 @@ void gpu_cmd_80(psx_gpu_t* gpu) {
                 }
 
 #ifdef USE_HARDWARE
-                /* Runs before the host copy so a backend that reads gpu->vram for its
-                   source still sees the pre-copy contents. */
-                if (GPU_BACKEND_HAS(gpu, copy_vram))
+                const int native_transfer = mask_check || mask_set ||
+                    srcx + xsiz > 1024 || dstx + xsiz > 1024 ||
+                    srcy + ysiz > 512 || dsty + ysiz > 512 ||
+                    (dsty > srcy && dsty < srcy + ysiz);
+                if (native_transfer) {
+                    gpu_download_transfer(gpu, srcx, srcy, xsiz, ysiz);
+                    if (mask_check)
+                        gpu_download_transfer(gpu, dstx, dsty, xsiz, ysiz);
+                } else if (GPU_BACKEND_HAS(gpu, copy_vram)) {
                     gpu->backend->copy_vram(gpu->backend, srcx, srcy, dstx, dsty, xsiz, ysiz);
-#endif
-
-                for (int y = 0; y < ysiz; y++) {
-                    for (int x = 0; x < xsiz; x++) {
-                        int dstb = ((dstx + x) < 1024) && ((dsty + y) < 512);
-                        int srcb = ((srcx + x) < 1024) && ((srcy + y) < 512);
-                        
-                        if (dstb && srcb)
-                            gpu->vram[(dstx + x) + (dsty + y) * 1024] = gpu->vram[(srcx + x) + (srcy + y) * 1024];
-                    }
                 }
+#endif
+                psx_gpu_copy_pixels(gpu->vram, 1, srcx, srcy, dstx, dsty, xsiz, ysiz,
+                                    mask_check, mask_set);
+#ifdef USE_HARDWARE
+                if (native_transfer && GPU_BACKEND_HAS(gpu, upload_vram))
+                    gpu->backend->upload_vram(gpu->backend, dstx, dsty, xsiz, ysiz, gpu->vram, 1024);
+#endif
 
                 psx_texrep_invalidate(gpu);   /* GP0(80) moved VRAM; see gpu_cmd_a0. */
 

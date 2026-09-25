@@ -1,10 +1,13 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "mcd.h"
 #include "../log.h"
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
-#include <limits.h>
 #include <time.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -17,7 +20,6 @@ static void psx_mcd_ensure_parent(const char* path) {
     if (!path)
         return;
 
-#ifdef PSVITA_TARGET
     const size_t path_len = strlen(path);
     if (path_len == 0)
         return;
@@ -27,11 +29,6 @@ static void psx_mcd_ensure_parent(const char* path) {
         return;
 
     memcpy(tmp, path, path_len + 1);
-#else
-    char tmp[PATH_MAX];
-    strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-#endif
 
     char* slash = strrchr(tmp, '/');
 #ifdef _WIN32
@@ -40,9 +37,7 @@ static void psx_mcd_ensure_parent(const char* path) {
         slash = bslash;
 #endif
     if (!slash || slash == tmp) {
-#ifdef PSVITA_TARGET
         free(tmp);
-#endif
         return;
     }
 
@@ -50,9 +45,7 @@ static void psx_mcd_ensure_parent(const char* path) {
 
     struct stat st;
     if (stat(tmp, &st) == 0) {
-#ifdef PSVITA_TARGET
         free(tmp);
-#endif
         return;
     }
 
@@ -62,9 +55,7 @@ static void psx_mcd_ensure_parent(const char* path) {
     mkdir(tmp, 0755);
 #endif
 
-#ifdef PSVITA_TARGET
     free(tmp);
-#endif
 }
 
 psx_mcd_t* psx_mcd_create(void) {
