@@ -10,6 +10,7 @@
 #define PBP_BLOCK_SECTORS 16
 #define PBP_BLOCK_BYTES   (PBP_BLOCK_SECTORS * CD_SECTOR_SIZE)   /* 37632 */
 #define PBP_INDEX_OFFSET  0x4000
+#define PBP_MAX_BLOCKS    32256u
 #define PBP_DATA_OFFSET   0x100000
 #define PBP_TOC_OFFSET    0x800
 #define PBP_SERIAL_OFFSET 0x400
@@ -96,6 +97,9 @@ static void pbp_read_toc(pbp_t* pbp) {
     uint8_t entry[10];
     int first = 1, last = 1;
 
+    memset(pbp->track_lba, 0, sizeof(pbp->track_lba));
+    memset(pbp->track_audio, 0, sizeof(pbp->track_audio));
+
     pbp->track_count = 0;
     pbp->lead_out_lba = 0;
 
@@ -124,7 +128,12 @@ static void pbp_read_toc(pbp_t* pbp) {
         } else if (point == 0xa1) {
             last = pbp_from_bcd(entry[7]);
         } else if (point == 0xa2) {
-            pbp->lead_out_lba = lba;
+            /* Reject malformed BCD rather than deriving an arbitrary disc size. */
+            if ((entry[7] >> 4) <= 9 && (entry[7] & 15) <= 9 &&
+                (entry[8] >> 4) <= 5 && (entry[8] & 15) <= 9 &&
+                (entry[9] >> 4) <= 7 && (entry[9] & 15) <= 9 &&
+                pbp_from_bcd(entry[9]) < 75 && lba > PBP_LBA_BIAS)
+                pbp->lead_out_lba = lba;
         } else {
             const int track = pbp_from_bcd((uint8_t)point);
 
@@ -139,9 +148,6 @@ static void pbp_read_toc(pbp_t* pbp) {
         }
     }
 
-    if (pbp->track_count < last)
-        pbp->track_count = last;
-
     if (pbp->track_count < 1) {
         /* No usable TOC: present the whole image as one data track, which is what a
            single-track rip is anyway. */
@@ -150,10 +156,8 @@ static void pbp_read_toc(pbp_t* pbp) {
         pbp->track_audio[1] = 0;
     }
 
-    if (!pbp->lead_out_lba)
-        pbp->lead_out_lba = pbp->sector_count + PBP_LBA_BIAS;
-
     (void)first;
+    (void)last;
 }
 
 static void pbp_read_serial(pbp_t* pbp) {
@@ -197,19 +201,30 @@ static int pbp_mount(pbp_t* pbp, int index) {
         return 1;
 
     pbp->iso_base = pbp->disc_offset[index];
-    pbp->data_base = pbp->iso_base + PBP_DATA_OFFSET;
+    uint32_t data_offset = pbp_rd32(pbp->file, (long)(pbp->iso_base + 0xbfc));
+    if (!data_offset)
+        data_offset = PBP_DATA_OFFSET; /* Older homebrew writers omit this field. */
+    if (data_offset < PBP_DATA_OFFSET || data_offset > UINT32_MAX - pbp->iso_base)
+        return 1;
+    pbp->data_base = pbp->iso_base + data_offset;
     pbp->disc_index = index;
     pbp->cached_block = PBP_NO_BLOCK;
 
-    const uint32_t iso_size = pbp_rd32(pbp->file, (long)(pbp->iso_base + 0x0c));
-
-    pbp->sector_count = iso_size / CD_SECTOR_SIZE;
-    pbp->block_count = (pbp->sector_count + PBP_BLOCK_SECTORS - 1) / PBP_BLOCK_SECTORS;
-
-    if (!pbp->block_count) {
-        log_error("PBP: disc %d reports a zero-length image", index);
-
-        return 1;
+    /* +0x0c is not the uncompressed image length. In compressed PBPs it can
+       describe the stored extent, truncating valid high-LBA reads if divided
+       by 2352. The TOC lead-out defines the disc, and the index maps its data. */
+    pbp->sector_count = 0;
+    pbp_read_toc(pbp);
+    if (pbp->lead_out_lba) {
+        pbp->sector_count = pbp->lead_out_lba - PBP_LBA_BIAS;
+        pbp->block_count = (pbp->sector_count + PBP_BLOCK_SECTORS - 1) / PBP_BLOCK_SECTORS;
+        if (pbp->block_count > PBP_MAX_BLOCKS) {
+            log_error("PBP: TOC exceeds block table capacity");
+            return 1;
+        }
+    } else {
+        /* No lead-out: use the contiguous populated index, never +0x0c. */
+        pbp->block_count = PBP_MAX_BLOCKS;
     }
 
     free(pbp->index);
@@ -229,21 +244,31 @@ static int pbp_mount(pbp_t* pbp, int index) {
         uint8_t e[32];
 
         if (fread(e, 1, sizeof(e), pbp->file) != sizeof(e)) {
-            /* A short index is not fatal — clamp to what we actually have. */
-            pbp->block_count = i;
-            break;
+            log_error("PBP: truncated block index at %u", i);
+            return 1;
         }
 
         pbp->index[i].offset = (uint32_t)e[0] | ((uint32_t)e[1] << 8) |
                                ((uint32_t)e[2] << 16) | ((uint32_t)e[3] << 24);
-        pbp->index[i].size   = (uint32_t)e[4] | ((uint32_t)e[5] << 8) |
-                               ((uint32_t)e[6] << 16) | ((uint32_t)e[7] << 24);
+        /* Size is u16; bytes 6-7 contain a marker, not size bits. */
+        pbp->index[i].size = (uint32_t)e[4] | ((uint32_t)e[5] << 8);
+        if (!pbp->index[i].size && !pbp->lead_out_lba) {
+            pbp->block_count = i;
+            break;
+        }
+        if (!pbp->index[i].size || pbp->index[i].size > PBP_BLOCK_BYTES) {
+            log_error("PBP: invalid block %u size %u", i, pbp->index[i].size);
+            return 1;
+        }
     }
 
     if (!pbp->block_count)
         return 1;
 
-    pbp_read_toc(pbp);
+    if (!pbp->lead_out_lba) {
+        pbp->sector_count = pbp->block_count * PBP_BLOCK_SECTORS;
+        pbp->lead_out_lba = pbp->sector_count + PBP_LBA_BIAS;
+    }
     pbp_read_serial(pbp);
 
     log_info("PBP: disc %d/%d serial=%s sectors=%u blocks=%u tracks=%d",

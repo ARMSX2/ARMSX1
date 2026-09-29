@@ -19,11 +19,12 @@
 
       each disc
         +0x00000   "PSISOIMG0000"
-        +0x0000C   u32 uncompressed disc size in bytes
+        +0x0000C   stored extent metadata (not the uncompressed disc size)
         +0x00400   NUL-terminated ASCII serial, "_SCES_02380" style
         +0x00800   CD TOC, 10 bytes per entry, subchannel-Q shaped (BCD)
-        +0x04000   block index, 32 bytes per entry: u32 offset, u32 size, then padding
-        +0x100000  block data. Each block is RAW DEFLATE (no zlib header) and inflates
+        +0x00BFC   u32 block-data offset relative to the disc header
+        +0x04000   block index, 32 bytes per entry: u32 offset, u16 size, u16 marker
+        +0x100000  usual block-data start. Each block is RAW DEFLATE (no zlib header) and inflates
                    to exactly 16 sectors * 2352 = 37632 bytes. A block whose stored size
                    is already 37632 is held verbatim rather than compressed.
 
