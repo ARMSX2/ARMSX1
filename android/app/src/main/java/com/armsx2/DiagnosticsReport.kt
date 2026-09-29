@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Process
+import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
 import android.view.InputDevice
@@ -25,9 +26,8 @@ import java.util.concurrent.TimeUnit
  * on) is written under the app-INTERNAL files dir, invisible to file managers; the Kotlin
  * session/crash logs live under the app's external files dir; native render errors only reach
  * logcat. Enabling the toggle asks for a destination through the system save dialog, switches
- * the core's own logging on, and from then on the report at that destination is rewritten on
- * every app start — so after a crash or a bad session, the file the user already knows the
- * location of holds the evidence.
+ * the core's own logging on. Startup refreshes a private report; explicit exports update the
+ * chosen destination without making startup depend on its storage provider.
  *
  * Prefs are read through the app's canonical "ARMSX2" SharedPreferences file directly (not
  * [com.armsx2.runtime.MainActivityRuntime.prefs]) because the startup refresh runs from
@@ -104,8 +104,17 @@ object DiagnosticsReport {
         }
         return exportGate.run {
             if (!capture(context, local)) return@run false
-            val stream = context.contentResolver.openOutputStream(uri, "wt") ?: return@run false
-            stream.use { output -> local.inputStream().use { it.copyTo(output) } }
+            // A stable provider reference lets Android kill this process when the provider
+            // dies. Keep this optional export on an unstable client: provider death becomes
+            // a failed export handled by exportGate, with the local report still intact.
+            val client = context.contentResolver.acquireUnstableContentProviderClient(uri)
+                ?: return@run false
+            client.use {
+                val descriptor = it.openFile(uri, "wt", null) ?: return@run false
+                ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
+                    local.inputStream().use { input -> input.copyTo(output) }
+                }
+            }
             true
         }
     }
@@ -159,6 +168,8 @@ object DiagnosticsReport {
         section(w, "armsx.log — core/interpreter/renderer diagnostics", File(context.filesDir, "logs/armsx.log"))
         section(w, "previous audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt.previous"))
         section(w, "audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt"))
+        section(w, "previous automatic Mali pacing", File(context.filesDir, "logs/armsx.log.pacing.previous"))
+        section(w, "automatic Mali pacing (independent of core logging)", File(context.filesDir, "logs/armsx.log.pacing"))
         section(w, "previous device session", File(context.filesDir, "logs/device.previous.log"))
         section(w, "device lifecycle, controller and native logs", File(context.filesDir, "logs/device.log"))
         section(w, "session.log — frontend stdout/stderr", File(externalLogs, "session.log"))

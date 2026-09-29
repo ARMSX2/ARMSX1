@@ -12,7 +12,6 @@ import com.armsx2.core.Ps1DiscId
 import com.armsx2.core.Ps1Folders
 import com.armsx2.core.Ps1Game
 import com.armsx2.core.Ps1Library
-import com.armsx2.core.Ps1SafAccess
 import com.armsx2.runtime.MainActivityRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,10 +38,9 @@ import java.util.Locale
  *             └─ GameInfo        content:// identity stays intact through cache and launch
  * ```
  *
- * POSIX games are identified straight off their disc. SAF games are identified the same way,
- * through a short-lived descriptor lease ([com.armsx2.core.Ps1SafAccess]) that shows the
- * extension-dispatched disc readers an ordinary seekable path — so covers, per-game settings and
- * achievements identity do not depend on a serial in the filename.
+ * POSIX games are identified straight off their disc. SAF discovery uses cached identities
+ * and filenames only. Launch preparation can copy a complete image and native identification
+ * can terminate the process on a bad image; neither belongs in a background library scan.
  */
 class GameLibraryRepository(private val context: Context) {
 
@@ -100,8 +98,8 @@ class GameLibraryRepository(private val context: Context) {
         // Mirror only genuine POSIX roots into settings.toml. SAF tree identity must stay as a
         // content URI; the Compose scanner and per-session descriptor lease own those entries.
         runCatching { Ps1Folders.syncFromLibrary(roots) }
-        // Serials are read out of the disc image itself (up to 16 MB per game). Re-seed the memo
-        // from the previous scan so only genuinely new files pay that cost.
+        // Preserve known serials, including SAF entries which must not stage or probe images.
+        // POSIX entries retain their existing direct-disc identification path.
         runCatching {
             loadCached().games.forEach { g ->
                 // SAF rows have no POSIX path; their memo key is the content URI string itself.
@@ -110,6 +108,7 @@ class GameLibraryRepository(private val context: Context) {
             }
         }
 
+        println("@@ARMSX_LIBRARY_SCAN@@ saf_metadata_only=true")
         val collected = linkedMapOf<String, GameInfo>()
         val probeLog = ArrayList<String>()
         Ps1Library.scan(context, directories).forEach { game ->
@@ -133,9 +132,9 @@ class GameLibraryRepository(private val context: Context) {
      * nothing ever asks again. The user's library would keep the blank tile until they thought to
      * hit Refresh.
      *
-     * So a null serial is treated as "not determined yet", not as "known to have none". It costs a
-     * few kilobytes of disc reads per unidentified game, only for games that HAVE no serial, and
-     * only until they get one. Returns the updated list, or null when nothing changed.
+     * So a null serial is treated as "not determined yet", not as "known to have none". This performs
+     * disc reads for POSIX files only. SAF entries may pick up a cached identity, but must
+     * never stage a ROM or call native identification here. Returns null when nothing changed.
      */
     suspend fun retryMissingSerials(games: List<GameInfo>): List<GameInfo>? = withContext(Dispatchers.IO) {
         if (games.none { it.serial.isNullOrBlank() }) return@withContext null
@@ -145,7 +144,7 @@ class GameLibraryRepository(private val context: Context) {
             if (!game.serial.isNullOrBlank()) return@map game
             val probe = if (game.uri.scheme == "content") {
                 val key = game.uri.toString()
-                probeDocument(key)?.also { Ps1Covers.prime(key, it.serial) }
+                Ps1Covers.cachedProbe(key)
             } else {
                 val path = pathOf(game.uri)?.takeIf { runCatching { File(it).isFile }.getOrDefault(false) }
                     ?: return@map game
@@ -286,36 +285,18 @@ class GameLibraryRepository(private val context: Context) {
     private fun pathOf(uri: Uri): String? =
         if (uri.scheme == null || uri.scheme == "file") uri.path?.takeIf { it.isNotBlank() } else null
 
-    /**
-     * Identify a SAF document exactly the way launch reads it: [Ps1SafAccess] leases descriptors
-     * and presents them as extension-bearing symlinks, so [Ps1DiscId]'s dispatch — ISO9660 walk,
-     * cue target resolution, the core's CHD/PBP readers — runs unmodified. The lease lives only
-     * for the probe; a provider that cannot supply a seekable descriptor comes back null and the
-     * filename fallbacks stay in charge.
-     */
-    private fun probeDocument(uriString: String): Ps1DiscId.Probe? = runCatching {
-        Ps1SafAccess.prepare(context, uriString).use { session ->
-            Ps1DiscId.probe(File(session.launchPath))
-        }
-    }.getOrNull()
-
     private fun createGame(uri: Uri, game: Ps1Game, probeLog: MutableList<String>): GameInfo {
         val name = game.name
         val extension = name.substringAfterLast('.', "").lowercase()
         val (fileTitle, fileSerial) = FilenameParser.parse(name)
-        // The disc's own boot line beats the filename: a renamed dump still boots the same disc,
-        // and psx-covers is keyed by the real serial. A .chd answers too — Ps1DiscId hands the
-        // compressed container to the core's disc reader rather than giving up on it. What is
-        // still null is a .zip/.exe and an image whose filesystem is unreadable; those fall back
-        // to a serial in the filename, then to a dump-name lookup for the cover only
-        // (GameInfo.coverSerial), and failing that to a placeholder tile.
+        // Keep known SAF identities, but do not open/stage entire ROMs just to populate
+        // a tile. Kotlin exception handling cannot catch a native disc-reader crash.
+        // The selected game's launch preparation remains unchanged.
         val posixPath = pathOf(uri)
         val probe = when {
             posixPath != null -> runCatching { Ps1Covers.probeForPath(posixPath) }.getOrNull()
-            // SAF: same disc readers, reached through a probe-lifetime descriptor lease. The
-            // memo (seeded from the previous scan) means only genuinely new documents pay it.
             uri.scheme == "content" -> Ps1Covers.cachedProbe(game.path)
-                ?: probeDocument(game.path)?.also { Ps1Covers.prime(game.path, it.serial) }
+                ?: Ps1DiscId.Probe(null, "deferred", "SAF scan: metadata only; no ROM staging or native probe")
             else -> null
         }
         probe?.let { probeLog += describe(name, it) }

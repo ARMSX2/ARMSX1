@@ -35,10 +35,10 @@ class Pasx2Application : Application(), ImageLoaderFactory {
 		DiagnosticCapture.start(this)
 		StartupTrace.begin()
 		warmUpOffMainThread()
-		// "Generate log file" checkbox: rewrite the user's chosen report file with whatever the
-		// previous run left behind — crash files included, which is exactly when the user needs
-		// it. No-op when the box is off; best-effort and off the UI thread either way.
-		Thread({ runCatching { DiagnosticsReport.refresh(this) } }, "diag-report")
+		// Preserve the previous run's evidence locally. Opening a user-selected document here
+		// makes cold start depend on an external storage provider, even before the library opens.
+		// Export to that document only when the user requests it from the diagnostics UI.
+		Thread({ runCatching { DiagnosticsReport.refresh(this, export = false) } }, "diag-report")
 			.apply { isDaemon = true }.start()
 	}
 
