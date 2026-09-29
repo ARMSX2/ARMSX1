@@ -162,6 +162,8 @@ void psx_cdrom_init(psx_cdrom_t* cdrom, psx_ic_t* ic) {
 
 void psx_cdrom_reset(psx_cdrom_t* cdrom) {
     cdrom->xa_prefetch_state = 0;
+    cdrom->xa_start_phase = 0;
+    cdrom->xa_start_age_cycles = 0;
     queue_clear(cdrom->data);
     queue_clear(cdrom->response);
     queue_clear(cdrom->parameters);
@@ -247,6 +249,8 @@ int psx_cdrom_open(psx_cdrom_t* cdrom, const char* path) {
 
 void psx_cdrom_close(psx_cdrom_t* cdrom) {
     cdrom->xa_prefetch_state = 0;
+    cdrom->xa_start_phase = 0;
+    cdrom->xa_start_age_cycles = 0;
     if (cdrom->disc) {
         psx_disc_destroy(cdrom->disc);
 
@@ -796,6 +800,16 @@ void cdrom_handle_read(psx_cdrom_t* cdrom) {
                     drive rate. SPU delivery is psx_cdrom_get_audio_samples()'s job, on its
                     own xa_lba walk, and it applies the filter itself.
                 */
+                /* The mixer runs in video-frame batches. Timestamp the first
+                   matching sector at delivery, not at ReadN/ReadS acknowledgement. */
+                if (cdrom->xa_start_phase < 0 && cdrom->xa_playing &&
+                    (!(cdrom->mode & MODE_XA_FILTER) ||
+                     (sector[0x10] == cdrom->xa_file && sector[0x11] == cdrom->xa_channel))) {
+                    cdrom->xa_start_phase = 1;
+                    cdrom->xa_start_age_cycles = 0;
+                    cdrom->xa_lba = cdrom->lba;
+                    cdrom->xa_prefetch_state = 0;
+                }
                 cdrom->pending_lba = cdrom->lba + 1;
                 cdrom->delay = cdrom_get_read_delay(cdrom);
 
@@ -1016,6 +1030,8 @@ static void cdrom_trace_command_response(psx_cdrom_t* cdrom) {
 }
 
 void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
+    if (cdrom->xa_start_phase > 0 && cycles > 0)
+        cdrom->xa_start_age_cycles += (unsigned)cycles;
     /* Before every early return below: the disc keeps spinning whether or not the controller
        has anything to do. CdlGetlocP has to see that, and a read parked behind a query has to
        be charged for it. */
@@ -1501,6 +1517,8 @@ void psx_cdrom_save_state(psx_cdrom_t* cdrom, psx_state_writer_t* w) {
 
 int psx_cdrom_load_state(psx_cdrom_t* cdrom, psx_state_reader_t* r) {
     cdrom->xa_prefetch_state = 0;
+    cdrom->xa_start_phase = 0;
+    cdrom->xa_start_age_cycles = 0;
     cdrom->mute = psx_sr_i32(r);
     cdrom->bus_delay = psx_sr_u32(r);
     cdrom->disc_type = psx_sr_i32(r);

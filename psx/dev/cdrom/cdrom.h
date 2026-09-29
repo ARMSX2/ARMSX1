@@ -291,6 +291,10 @@ typedef struct {
     int16_t xa_mono_resample_buf[XA_MONO_RESAMPLE_MAX_SIZE];
     /* Disposable one-sector read-ahead cache. Logical xa_lba is committed only
        when consumed; disc data is re-read after loading an existing save state. */
+    /* Derived startup phase: -1 waits for transport delivery, 1 timestamps it,
+       0 is established playback. Not added to the save-state wire format. */
+    int xa_start_phase;
+    uint64_t xa_start_age_cycles;
     int xa_prefetch_state; /* 0=empty, 1=searching, 2=ready, 3=end */
     uint32_t xa_prefetch_base, xa_prefetch_next;
     int xa_prefetch_file, xa_prefetch_channel, xa_prefetch_mode;

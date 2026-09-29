@@ -114,6 +114,7 @@ void cdrom_pause(psx_cdrom_t* cdrom) {
     cdrom->busy = 0;
     cdrom->cdda_playing = 0;
     cdrom->xa_playing = 0;
+    cdrom->xa_start_phase = 0;
     cdrom->read_ongoing = 0;
 }
 
@@ -227,6 +228,8 @@ void cdrom_cmd_readn(psx_cdrom_t* cdrom) {
 
     if (cdrom->mode & MODE_XA_ADPCM) {
         cdrom->xa_playing = 1;
+        cdrom->xa_start_phase = -1;
+        cdrom->xa_start_age_cycles = 0;
         cdrom->xa_prefetch_state = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;
@@ -731,6 +734,8 @@ void cdrom_cmd_reads(psx_cdrom_t* cdrom) {
 
     if (cdrom->mode & MODE_XA_ADPCM) {
         cdrom->xa_playing = 1;
+        cdrom->xa_start_phase = -1;
+        cdrom->xa_start_age_cycles = 0;
         cdrom->xa_prefetch_state = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;

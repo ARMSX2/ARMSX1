@@ -365,6 +365,7 @@ static int cdrom_prefetch_xa(psx_cdrom_t* cdrom, xa_search_budget_t* budget, int
 int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
     if ((!cdrom->xa_playing) || !(cdrom->mode & MODE_XA_ADPCM)) {
         cdrom->xa_prefetch_state = 0;
+        cdrom->xa_start_phase = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;
 
@@ -384,7 +385,24 @@ int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
     if (cdrom->xa_remaining_samples > 0)
         cdrom_prefetch_xa(cdrom, &search_budget, 0);
 
-    for (int i = 0; i < (size >> 2); i++) {
+    int start_frame = 0;
+    if (cdrom->xa_start_phase < 0) {
+        memset(buf, 0, size);
+        return 1;
+    }
+    if (cdrom->xa_start_phase > 0) {
+        /* 33,868,800 CPU clocks / 44,100 output frames = 768. Only the
+           part of this batch after delivery may consume the new stream. */
+        const uint64_t ready_frames = cdrom->xa_start_age_cycles / 768u;
+        if (ready_frames < (size >> 2))
+            start_frame = (int)((size >> 2) - ready_frames);
+        memset(ptr, 0, (size_t)start_frame * 4);
+        ptr += start_frame * 2;
+        if (ready_frames)
+            cdrom->xa_start_phase = 0;
+    }
+
+    for (int i = start_frame; i < (size >> 2); i++) {
         int stereo = (cdrom->xa_buf[0x13] & 1) == 1;
 
         if (!cdrom->xa_remaining_samples) {
