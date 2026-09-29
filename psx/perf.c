@@ -37,3 +37,10 @@ void psx_audio_diag_set_enabled(int enabled) {
 
     g_psx_audio_diag_enabled = enabled ? 1 : 0;
 }
+
+psx_audio_pcm_probe_t g_psx_audio_pcm_probe = NULL;
+void* g_psx_audio_pcm_probe_context = NULL;
+
+psx_xa_probe_t g_psx_xa_probe = NULL;
+
+psx_disc_timing_t g_psx_disc_timing;

@@ -1136,6 +1136,20 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
     // are levers whose only honest test is an A/B in a scene that will not hold full speed, and
     // leaving the game to flip one loses the scene.
     SectionCard(str("perf.section.device")) {
+        HorizontalOptions(
+            title = "Display refresh rate",
+            options = listOf(0 to "Auto", 60 to "60 Hz", 120 to "120 Hz"),
+            selected = settings.displayRefreshRate,
+            onSelect = { rate ->
+                viewModel.updateSettings { it.copy(displayRefreshRate = rate) }
+                com.armsx2.runtime.MainActivityRuntime.surface.value?.applyFrameRatePreference()
+            },
+        )
+        Text(
+            "Changes screen refresh without changing game speed. Android may limit the requested rate.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         // Zero queued frames + a display refresh vote that is an integer multiple of the game's
         // rate (60 -> 120 Hz, PAL 50 -> 100 Hz), so there is no 3:2 cadence.
         MenuSwitchRow(str("renderer.lowLatency.label"), settings.vsyncQueueSize == 0) { enabled ->

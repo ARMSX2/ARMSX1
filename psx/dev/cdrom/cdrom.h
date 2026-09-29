@@ -289,6 +289,12 @@ typedef struct {
     int16_t xa_left_resample_buf[XA_STEREO_RESAMPLE_MAX_SIZE];
     int16_t xa_right_resample_buf[XA_STEREO_RESAMPLE_MAX_SIZE];
     int16_t xa_mono_resample_buf[XA_MONO_RESAMPLE_MAX_SIZE];
+    /* Disposable one-sector read-ahead cache. Logical xa_lba is committed only
+       when consumed; disc data is re-read after loading an existing save state. */
+    int xa_prefetch_state; /* 0=empty, 1=searching, 2=ready, 3=end */
+    uint32_t xa_prefetch_base, xa_prefetch_next;
+    int xa_prefetch_file, xa_prefetch_channel, xa_prefetch_mode;
+    uint8_t xa_prefetch_buf[CD_SECTOR_SIZE];
     /* Path of the currently-open image. Save states never embed the disc itself; they record
        this plus a fingerprint so a state can be refused if it is loaded against a different
        game, and so the already-open disc can simply be re-seeked on load. */

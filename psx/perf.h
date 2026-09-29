@@ -43,6 +43,7 @@
 */
 
 #include <stdint.h>
+#include <stddef.h>
 
 enum {
     PSX_PERF_PRIM_TRIANGLE = 0,
@@ -292,6 +293,29 @@ typedef struct {
     int32_t  mix_peak_l, mix_peak_r;
 } psx_audio_diag_t;
 
+/* Optional bounded PCM probe, called only on the emulation thread.
+   source: 0=CD/XA, 1=SPU dry, 2=reverb, stereo signed 16-bit at 44100 Hz. */
+typedef void (*psx_audio_pcm_probe_t)(void*, int, const int16_t*, size_t);
+extern psx_audio_pcm_probe_t g_psx_audio_pcm_probe;
+extern void* g_psx_audio_pcm_probe_context;
+
+/* Pre-filter XA sector probe; all pointers are valid only during the call. */
+typedef struct {
+    uint32_t lba, output_offset, rate, frames;
+    int16_t history[4];
+    const uint8_t* sector;
+    const int16_t* left;
+    const int16_t* right;
+} psx_xa_probe_sector_t;
+typedef void (*psx_xa_probe_t)(void*, const psx_xa_probe_sector_t*);
+extern psx_xa_probe_t g_psx_xa_probe;
+
+
+typedef struct {
+    uint64_t total_ns, max_ns;
+    uint32_t reads, slowest_lba;
+} psx_disc_timing_t;
+extern psx_disc_timing_t g_psx_disc_timing;
 extern int g_psx_audio_diag_enabled;
 extern psx_audio_diag_t g_psx_audio_diag;
 

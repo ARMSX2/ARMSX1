@@ -9,6 +9,7 @@
 #include "pbp.h"
 #include "../../log.h"
 #include "../../perf.h"
+#include "xa_search_budget.h"
 
 #define MSF_TO_LBA(m, s, f) ((m * 4500) + (s * 75) + f)
 
@@ -323,7 +324,18 @@ int psx_disc_read(psx_disc_t* disc, uint32_t lba, void* buf) {
        here is every sector the drive actually pulled off the image. */
     PSX_PERF_INC(cdrom_sectors);
 
-    return disc->read_sector(disc->udata, lba, buf);
+    if (!g_psx_audio_diag_enabled)
+        return disc->read_sector(disc->udata, lba, buf);
+    const uint64_t start = xa_search_clock_ns();
+    const int result = disc->read_sector(disc->udata, lba, buf);
+    const uint64_t elapsed = xa_search_clock_ns() - start;
+    ++g_psx_disc_timing.reads;
+    g_psx_disc_timing.total_ns += elapsed;
+    if (elapsed > g_psx_disc_timing.max_ns) {
+        g_psx_disc_timing.max_ns = elapsed;
+        g_psx_disc_timing.slowest_lba = lba;
+    }
+    return result;
 }
 
 int psx_disc_query(psx_disc_t* disc, uint32_t lba) {

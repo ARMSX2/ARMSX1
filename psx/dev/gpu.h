@@ -272,8 +272,21 @@ static inline float psx_gpu_clock_frequency(const psx_gpu_t* gpu) {
     return psx_gpu_is_pal_mode(gpu) ? PSX_GPU_CLOCK_FREQ_PAL : PSX_GPU_CLOCK_FREQ_NTSC;
 }
 
+#define GPU_CYCLES_PER_HDRAW_NTSC 2560.0f
+#define GPU_CYCLES_PER_SCANL_NTSC 3413.0f
+#define GPU_SCANS_PER_VDRAW_NTSC 240
+#define GPU_SCANS_PER_FRAME_NTSC 263
+#define GPU_CYCLES_PER_HDRAW_PAL 2560.0f
+#define GPU_CYCLES_PER_SCANL_PAL 3406.0f
+#define GPU_SCANS_PER_VDRAW_PAL  288
+#define GPU_SCANS_PER_FRAME_PAL  314
+
 static inline float psx_gpu_frame_rate(const psx_gpu_t* gpu) {
-    return psx_gpu_is_pal_mode(gpu) ? 49.76f : 59.29f;
+    return psx_gpu_is_pal_mode(gpu)
+        ? (PSX_GPU_CLOCK_FREQ_PAL * 1000000.0f /
+           (GPU_CYCLES_PER_SCANL_PAL * GPU_SCANS_PER_FRAME_PAL))
+        : (PSX_GPU_CLOCK_FREQ_NTSC * 1000000.0f /
+           (GPU_CYCLES_PER_SCANL_NTSC * GPU_SCANS_PER_FRAME_NTSC));
 }
 
 psx_gpu_t* psx_gpu_create(void);

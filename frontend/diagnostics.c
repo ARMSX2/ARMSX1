@@ -363,6 +363,41 @@ int psxe_diag_is_enabled(void) {
     return SDL_AtomicGet(&g_diag_enabled);
 }
 
+void psxe_diag_pacingf(const char* fmt, ...) {
+    SDL_mutex* mutex = psxe_diag_mutex();
+    if (!mutex) return;
+    SDL_LockMutex(mutex);
+    if (g_diag_log_path[0]) {
+        char path[sizeof(g_diag_log_path) + 32];
+        char previous[sizeof(g_diag_log_path) + 48];
+        SDL_snprintf(path, sizeof(path), "%s.pacing", g_diag_log_path);
+        SDL_snprintf(previous, sizeof(previous), "%s.previous", path);
+        FILE* file = fopen(path, "a");
+        if (file) {
+            fseek(file, 0, SEEK_END);
+            if (ftell(file) >= 256 * 1024) {
+                fclose(file);
+                remove(previous);
+                if (rename(path, previous) != 0) {
+                    SDL_UnlockMutex(mutex);
+                    return;
+                }
+                file = fopen(path, "w");
+            }
+            if (file) {
+                va_list args;
+                va_start(args, fmt);
+                fprintf(file, "[uptime_ms=%u] ", SDL_GetTicks());
+                vfprintf(file, fmt, args);
+                fprintf(file, "\n");
+                va_end(args);
+                fclose(file);
+            }
+        }
+    }
+    SDL_UnlockMutex(mutex);
+}
+
 void psxe_diag_log_line(const char* source, const char* line) {
     psxe_diag_write_text(source, line);
 }

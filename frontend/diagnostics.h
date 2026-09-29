@@ -15,6 +15,8 @@ void psxe_diag_shutdown(void);
 const char* psxe_diag_log_path(void);
 void psxe_diag_set_enabled(int enabled);
 int psxe_diag_is_enabled(void);
+/* Bounded automatic pacing capture, independent of verbose core logging. */
+void psxe_diag_pacingf(const char* fmt, ...);
 
 void psxe_diag_log_line(const char* source, const char* line);
 void psxe_diag_logf(const char* source, const char* fmt, ...);

@@ -320,6 +320,7 @@ data class Settings(
     val dithering: Int = 2,
     /** EmuCore/GS/VsyncQueueSize — frames the GS thread may queue (0-3). PCSX2 default 2. */
     val vsyncQueueSize: Int = 2,
+    val displayRefreshRate: Int = 0, // Auto, 60 Hz or 120 Hz; independent of emulation speed.
     // Output-surface scaling. App-side (no EmuCore key) but PER-GAME scoped: a heavy
     // game can render its output smaller while the library and lighter games stay
     // sharp. Were global-only prefs until #-Duda reported that changing them in Game
@@ -1582,6 +1583,7 @@ data class Settings(
         put("cropBottom", cropBottom)
         put("dithering", dithering)
         put("vsyncQueueSize", vsyncQueueSize)
+        put("displayRefreshRate", displayRefreshRate)
         put("hwScaler", hwScaler)
         put("screenResOverride", screenResOverride)
         put("autoFlushSw", autoFlushSw)
@@ -1834,6 +1836,7 @@ data class Settings(
                 cropBottom = json.optInt("cropBottom", def.cropBottom),
                 dithering = json.optInt("dithering", def.dithering),
                 vsyncQueueSize = json.optInt("vsyncQueueSize", def.vsyncQueueSize),
+                displayRefreshRate = json.optInt("displayRefreshRate", 0).takeIf { it == 60 || it == 120 } ?: 0,
                 hwScaler = json.optInt("hwScaler", def.hwScaler),
                 screenResOverride = json.optString("screenResOverride", def.screenResOverride).ifEmpty { def.screenResOverride },
                 autoFlushSw = json.optBoolean("autoFlushSw", def.autoFlushSw),
@@ -2072,6 +2075,7 @@ data class Settings(
             if (current.cropBottom           != base.cropBottom)           j.put("cropBottom", current.cropBottom)
             if (current.dithering            != base.dithering)            j.put("dithering", current.dithering)
             if (current.vsyncQueueSize       != base.vsyncQueueSize)       j.put("vsyncQueueSize", current.vsyncQueueSize)
+            if (current.displayRefreshRate != base.displayRefreshRate) j.put("displayRefreshRate", current.displayRefreshRate)
             if (current.hwScaler             != base.hwScaler)             j.put("hwScaler", current.hwScaler)
             if (current.screenResOverride    != base.screenResOverride)    j.put("screenResOverride", current.screenResOverride)
             if (current.autoFlushSw          != base.autoFlushSw)          j.put("autoFlushSw", current.autoFlushSw)
@@ -2295,6 +2299,7 @@ data class Settings(
             cropBottom = if (overrides.has("cropBottom")) overrides.getInt("cropBottom") else base.cropBottom,
             dithering = if (overrides.has("dithering")) overrides.getInt("dithering") else base.dithering,
             vsyncQueueSize = if (overrides.has("vsyncQueueSize")) overrides.getInt("vsyncQueueSize") else base.vsyncQueueSize,
+            displayRefreshRate = overrides.optInt("displayRefreshRate", base.displayRefreshRate).takeIf { it == 60 || it == 120 } ?: 0,
             hwScaler = if (overrides.has("hwScaler")) overrides.getInt("hwScaler") else base.hwScaler,
             screenResOverride = if (overrides.has("screenResOverride")) overrides.getString("screenResOverride") else base.screenResOverride,
             autoFlushSw = if (overrides.has("autoFlushSw")) overrides.getBoolean("autoFlushSw") else base.autoFlushSw,

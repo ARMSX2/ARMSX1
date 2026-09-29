@@ -9,6 +9,7 @@
 */
 
 #include "render_internal.h"
+#include "mali_present_timing.h"
 
 #include <cstring>
 
@@ -24,6 +25,7 @@ struct SdlRenderer {
     int texture_width = 0;
     int texture_height = 0;
     Uint32 texture_format = SDL_PIXELFORMAT_UNKNOWN;
+    bool mali_native_pixels = false;
     int scale_mode = -1; /* -1 unset, 0 nearest, 1 linear */
 
     char driver_name[64] = {0};
@@ -66,6 +68,7 @@ void DestroyTexture(SdlRenderer* self) {
     self->texture_height = 0;
     self->texture_format = SDL_PIXELFORMAT_UNKNOWN;
     self->scale_mode = -1;
+    self->mali_native_pixels = false;
 }
 
 /* "Software" for the plain path (which is what the Android host's blit bridge adopts), and
@@ -143,8 +146,33 @@ bool OpUploadFrame(armsx_renderer_t* base,
     if (width != self->texture_width || height != self->texture_height ||
         sdl_format != self->texture_format || !self->texture) {
         DestroyTexture(self);
-        self->texture = SDL_CreateTexture(self->renderer, sdl_format, SDL_TEXTUREACCESS_STREAMING,
+        // The Android host uses an RGBA32 surface. Matching it enables SDL's
+        // fast scaler instead of converting every destination pixel in the blit.
+        // Only PS1 opaque scanout formats on the adopted Mali software path qualify.
+#if defined(__ANDROID__)
+        self->mali_native_pixels = !self->owns_renderer && !self->accelerated &&
+            armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI &&
+            (sdl_format == SDL_PIXELFORMAT_BGR555 || sdl_format == SDL_PIXELFORMAT_RGB24);
+#endif
+        const Uint32 storage_format = self->mali_native_pixels ? SDL_PIXELFORMAT_RGBA32 : sdl_format;
+        self->texture = SDL_CreateTexture(self->renderer, storage_format, SDL_TEXTUREACCESS_STREAMING,
                                           width, height);
+        if (self->texture && self->mali_native_pixels) {
+            // PS1 scanout is opaque; the new alpha channel must not enable blending.
+            if (SDL_SetTextureBlendMode(self->texture, SDL_BLENDMODE_NONE) != 0) {
+                SDL_DestroyTexture(self->texture);
+                self->texture = nullptr;
+            }
+        }
+        if (!self->texture && self->mali_native_pixels) {
+            self->mali_native_pixels = false;
+            self->texture = SDL_CreateTexture(self->renderer, sdl_format,
+                                              SDL_TEXTUREACCESS_STREAMING, width, height);
+        }
+        if (self->mali_native_pixels) {
+            psxe_diag_pacingf("mali_software_upload format=%s storage=RGBA32 size=%dx%d blend=none",
+                              SDL_GetPixelFormatName(sdl_format), width, height);
+        }
         if (!self->texture) {
             armsx_render_log("renderer", "SDL_CreateTexture failed (%dx%d %s): %s", width, height,
                              SDL_GetPixelFormatName(sdl_format), SDL_GetError());
@@ -171,6 +199,18 @@ bool OpUploadFrame(armsx_renderer_t* base,
 
     SDL_Rect dirty{0, dirty_first_row, width, dirty_last_row - dirty_first_row + 1};
     const auto* source = static_cast<const Uint8*>(pixels);
+    if (dirty.h <= 0) return true;
+    if (self->mali_native_pixels) {
+        void* destination = nullptr;
+        int destination_pitch = 0;
+        if (SDL_LockTexture(self->texture, &dirty, &destination, &destination_pitch) != 0)
+            return false;
+        const int result = SDL_ConvertPixels(width, dirty.h, sdl_format,
+            source + static_cast<size_t>(dirty_first_row) * pitch, pitch,
+            SDL_PIXELFORMAT_RGBA32, destination, destination_pitch);
+        SDL_UnlockTexture(self->texture);
+        return result == 0;
+    }
     SDL_UpdateTexture(self->texture, &dirty,
                       source + (static_cast<size_t>(dirty_first_row) * static_cast<size_t>(pitch)),
                       pitch);
@@ -194,6 +234,8 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
         return;
     }
 
+    MaliPresentTiming timing;
+    static thread_local MaliPresentStats timing_stats;
     ApplyScaleMode(self, params && params->linear_filter);
 
     int out_w = 0;
@@ -244,6 +286,7 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
 
     SDL_SetRenderDrawColor(self->renderer, 0, 0, 0, 255);
     SDL_RenderClear(self->renderer);
+    timing.mark(0);
 
     /* [video] display_rotation. SDL_RenderCopyEx maps src onto dst and THEN spins the result
        about dst's centre, so dst must be handed over UNROTATED (width and height swapped
@@ -269,7 +312,11 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
                          90.0 * (double)rotation, nullptr, SDL_FLIP_NONE);
     }
 
+    timing.mark(1);
     SDL_RenderPresent(self->renderer);
+    timing.mark(2);
+    timing.finish(timing_stats, "sdl", "setup_clear", "draw_copy", "sdl_present", "unused",
+                  self->texture_width, self->texture_height, out_w, out_h);
 }
 
 void OpPresentBlank(armsx_renderer_t* base) {

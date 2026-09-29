@@ -15,6 +15,7 @@
 #include <dlfcn.h>
 
 #include <SDL.h>
+#include "mali_present_timing.h"
 
 #include <sys/stat.h>
 
@@ -551,6 +552,8 @@ void PresentToSurface(void* /*user*/) {
         return;
     }
 
+    MaliPresentTiming timing;
+    static thread_local MaliPresentStats timing_stats;
     ANativeWindow* window = nullptr;
     SDL_Surface* surface = nullptr;
     {
@@ -573,7 +576,11 @@ void PresentToSurface(void* /*user*/) {
     }
 
     ANativeWindow_Buffer buffer{};
-    if (ANativeWindow_lock(window, &buffer, nullptr) == 0) {
+    timing.mark(0);
+    const int lock_result = ANativeWindow_lock(window, &buffer, nullptr);
+    timing.mark(1);
+    int post_result = 0;
+    if (lock_result == 0) {
         if (buffer.width > 0 && buffer.height > 0 && surface->w > 0 && surface->h > 0 &&
             buffer.bits && surface->pixels) {
             const size_t dst_pitch = static_cast<size_t>(buffer.stride) * 4u;
@@ -629,9 +636,15 @@ void PresentToSurface(void* /*user*/) {
                 }
             }
         }
-        ANativeWindow_unlockAndPost(window);
+        timing.mark(2);
+        post_result = ANativeWindow_unlockAndPost(window);
+        timing.mark(3);
     }
 
+    timing.finish(timing_stats, "native_window", "setup", "buffer_lock", "buffer_copy", "buffer_post",
+                  surface->w, surface->h, buffer.width, buffer.height,
+                  lock_result != 0 || post_result != 0,
+                  lock_result == 0 && (buffer.width != surface->w || buffer.height != surface->h));
     ANativeWindow_release(window);
 }
 

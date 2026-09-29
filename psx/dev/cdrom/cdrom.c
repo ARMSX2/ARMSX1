@@ -161,6 +161,7 @@ void psx_cdrom_init(psx_cdrom_t* cdrom, psx_ic_t* ic) {
 }
 
 void psx_cdrom_reset(psx_cdrom_t* cdrom) {
+    cdrom->xa_prefetch_state = 0;
     queue_clear(cdrom->data);
     queue_clear(cdrom->response);
     queue_clear(cdrom->parameters);
@@ -245,6 +246,7 @@ int psx_cdrom_open(psx_cdrom_t* cdrom, const char* path) {
 }
 
 void psx_cdrom_close(psx_cdrom_t* cdrom) {
+    cdrom->xa_prefetch_state = 0;
     if (cdrom->disc) {
         psx_disc_destroy(cdrom->disc);
 
@@ -1498,6 +1500,7 @@ void psx_cdrom_save_state(psx_cdrom_t* cdrom, psx_state_writer_t* w) {
 }
 
 int psx_cdrom_load_state(psx_cdrom_t* cdrom, psx_state_reader_t* r) {
+    cdrom->xa_prefetch_state = 0;
     cdrom->mute = psx_sr_i32(r);
     cdrom->bus_delay = psx_sr_u32(r);
     cdrom->disc_type = psx_sr_i32(r);

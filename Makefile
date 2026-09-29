@@ -1011,6 +1011,30 @@ build/tests/memory_card_protocol: tests/memory_card_protocol.c $(TEST_CORE_SOURC
 test-mcard-protocol: build/tests/memory_card_protocol
 	./build/tests/memory_card_protocol
 
+# Regression coverage for display pacing, CD capture, and bounded XA reads.
+.PHONY: test-playback-fixes
+test-playback-fixes: build/tests/gpu_frame_rate build/tests/spu_cd_capture build/tests/xa_search_budget build/tests/mcard_full_address
+	./build/tests/gpu_frame_rate
+	./build/tests/spu_cd_capture
+	./build/tests/xa_search_budget
+	./build/tests/mcard_full_address
+
+build/tests/gpu_frame_rate: tests/gpu_frame_rate.c psx/dev/gpu.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -I. $< -lm -o $@
+
+build/tests/spu_cd_capture: tests/spu_cd_capture.c psx/dev/spu.c psx/dev/spu.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -I. -ffunction-sections -fdata-sections tests/spu_cd_capture.c psx/dev/spu.c -Wl,--gc-sections -lm -o $@
+
+build/tests/xa_search_budget: tests/xa_search_budget.c psx/dev/cdrom/audio.c psx/dev/cdrom/xa_search_budget.h psx/dev/cdrom/cdrom.h psx/perf.c psx/perf.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -I. -DPSXE_DIAG_STDIO_DISABLE -ffunction-sections -fdata-sections tests/xa_search_budget.c psx/dev/cdrom/audio.c psx/perf.c -Wl,--gc-sections -lm -o $@
+
+build/tests/mcard_full_address: tests/mcard_full_address.c psx/dev/mcd.c psx/dev/mcd.h psx/state.c psx/state.h psx/log.c psx/log.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -I. -ffunction-sections -fdata-sections tests/mcard_full_address.c psx/dev/mcd.c psx/state.c psx/log.c -Wl,--gc-sections -o $@
+
 .PHONY: test-cue-parse
 build/tests/cue_parse_bounds: tests/cue_parse_bounds.c psx/dev/cdrom/cue.c psx/dev/cdrom/list.c psx/dev/cdrom/cue.h
 	mkdir -p $(dir $@)

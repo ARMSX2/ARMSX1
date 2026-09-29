@@ -342,6 +342,18 @@ fun Ps1VideoTab() {
             )
             SettingsDivider()
 
+            SegmentedRow(
+                label = "Display refresh rate",
+                options = listOf("Auto", "60 Hz", "120 Hz"),
+                selectedIndex = listOf(0, 60, 120).indexOf(host.displayRefreshRate).coerceAtLeast(0),
+                description = "Requests the screen refresh rate without changing game speed. Requires a supported display mode; Android may limit refresh rate.",
+                onChange = { idx ->
+                    applyHost(host.copy(displayRefreshRate = listOf(0, 60, 120)[idx]))
+                    com.armsx2.runtime.MainActivityRuntime.surface.value?.applyFrameRatePreference()
+                },
+            )
+            SettingsDivider()
+
             ToggleRow(
                 str("renderer.lowLatency.label"),
                 host.vsyncQueueSize == 0,

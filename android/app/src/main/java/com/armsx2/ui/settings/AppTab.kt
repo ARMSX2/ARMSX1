@@ -775,8 +775,8 @@ private fun BackupRestoreRows() {
 
     /*
         Generate log file — the bug-report checkbox. Ticking it asks WHERE through the system
-        save dialog; from then on that one file is rewritten on every app start with the core's
-        armsx.log, the frontend session log, recent crashes, settings and this process's logcat
+        save dialog. Startup refreshes a private report; the save button exports the core's
+        armsx.log, frontend session log, recent crashes, settings and this process's logcat
         (DiagnosticsReport). Core logging is switched on when the box is ticked, so the next
         session captures the full emulator/interpreter/renderer stream.
     */

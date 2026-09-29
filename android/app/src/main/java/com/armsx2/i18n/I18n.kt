@@ -321,7 +321,7 @@ val EN: Map<String, String> = mapOf(
     "app.covers.upToDate" to "All covers already downloaded",
     "app.covers.none" to "No games found to fetch covers for",
     "app.logs" to "Generate log file",
-    "app.logs.desc" to "Capture emulator, interpreter, renderer and crash logs into a file you choose. The file is refreshed every time the app starts.",
+    "app.logs.desc" to "Capture emulator, interpreter, renderer and crash logs. Startup keeps a report inside the app. Use Save diagnostic report now to export the latest report.",
     "app.logs.saved" to "Log file saved",
     "app.logs.failed" to "Could not write the log file",
     "app.logs.busy" to "A log export is already in progress. Try again after it finishes.",

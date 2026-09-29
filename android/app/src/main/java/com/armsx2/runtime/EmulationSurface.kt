@@ -160,7 +160,7 @@ class EmulationSurface(context: Context) :
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
             !gameActive ||
             !holder.surface.isValid ||
-            !lowLatencyEnabled()
+            (!lowLatencyEnabled() && displayRefreshPreference() == 0)
         ) {
             clearFrameRatePreference()
             return
@@ -213,6 +213,12 @@ class EmulationSurface(context: Context) :
         lastRequestedFrameRate = Float.NaN
     }
 
+    private fun displayRefreshPreference(): Int = runCatching {
+        val settingsKey = MainActivityRuntime.currentGame.value?.settingsKey
+            ?: NativeApp.getGameSerial().takeIf { it.isNotBlank() }
+        ConfigStore.resolveForGame(settingsKey).displayRefreshRate
+    }.getOrDefault(0)
+
     private fun lowLatencyEnabled(): Boolean = runCatching {
         val settingsKey = MainActivityRuntime.currentGame.value?.settingsKey
             ?: NativeApp.getGameSerial().takeIf { it.isNotBlank() }
@@ -234,6 +240,15 @@ class EmulationSurface(context: Context) :
             .distinct()
             .toList()
         if (rates.isEmpty()) return current.refreshRate
+
+        val explicit = displayRefreshPreference()
+        if (explicit != 0) {
+            rates.minByOrNull { abs(it - explicit) }
+                ?.takeIf { abs(it - explicit) < 1f }
+                ?.let { return it }
+            // Unsupported 120 Hz requests fall back to the nearest 60 Hz mode.
+            return rates.minByOrNull { abs(it - 60f) } ?: current.refreshRate
+        }
 
         val integerMultiples = rates.filter { rate ->
             val multiple = (rate / nominalRate).roundToInt()

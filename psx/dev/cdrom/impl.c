@@ -227,6 +227,7 @@ void cdrom_cmd_readn(psx_cdrom_t* cdrom) {
 
     if (cdrom->mode & MODE_XA_ADPCM) {
         cdrom->xa_playing = 1;
+        cdrom->xa_prefetch_state = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;
         cdrom->xa_lba = cdrom->lba;
@@ -730,6 +731,7 @@ void cdrom_cmd_reads(psx_cdrom_t* cdrom) {
 
     if (cdrom->mode & MODE_XA_ADPCM) {
         cdrom->xa_playing = 1;
+        cdrom->xa_prefetch_state = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;
         cdrom->xa_lba = cdrom->lba;

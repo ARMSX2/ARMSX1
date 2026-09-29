@@ -3507,14 +3507,6 @@ void psx_gpu_set_udata(psx_gpu_t* gpu, int index, void* udata) {
     gpu->udata[index] = udata;
 }
 
-#define GPU_CYCLES_PER_HDRAW_NTSC 2560.0f
-#define GPU_CYCLES_PER_SCANL_NTSC 3413.0f
-#define GPU_SCANS_PER_VDRAW_NTSC 240
-#define GPU_SCANS_PER_FRAME_NTSC 263
-#define GPU_CYCLES_PER_HDRAW_PAL 2560.0f
-#define GPU_CYCLES_PER_SCANL_PAL 3406.0f
-#define GPU_SCANS_PER_VDRAW_PAL  288
-#define GPU_SCANS_PER_FRAME_PAL  314
 
 void gpu_hblank_event(psx_gpu_t* gpu) {
     const int scans_per_vdraw = psx_gpu_is_pal_mode(gpu) ? GPU_SCANS_PER_VDRAW_PAL : GPU_SCANS_PER_VDRAW_NTSC;

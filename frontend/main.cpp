@@ -1,4 +1,5 @@
 #include "runahead_prediction.h"
+#include "mali_frame_pacing.h"
 #include "runahead_sequence.h"
 #include <SDL.h>
 #include <SDL_gamecontroller.h>
@@ -2452,7 +2453,10 @@ void MixPsxAudio(psx_t* psx, uint8_t* buffer, int size) {
     std::memset(buffer, 0, static_cast<size_t>(size));
 
     psx_cdrom_get_audio_samples(cdrom, buffer, size);
-    psx_spu_update_cdda_buffer(spu, cdrom->cdda_buf);
+    if (g_psx_audio_pcm_probe)
+        g_psx_audio_pcm_probe(g_psx_audio_pcm_probe_context, 0,
+                             reinterpret_cast<const int16_t*>(buffer), static_cast<size_t>(size) / 4u);
+    psx_spu_capture_cd_audio(spu, buffer, (size_t)size / 4u);
 
     for (int sample = 0; sample < (size >> 2); sample++) {
         // Drain first, generate only as a fallback. psx_spu_tick() has already produced this
@@ -3449,7 +3453,29 @@ class ArmsxSession {
         return true;
     }
 
+    void recordStallTiming(uint64_t start, uint64_t end, uint64_t core,
+                           uint64_t upload, uint64_t draw, uint64_t wait) {
+        if (!audio_diag_file_) return;
+        const double total = CounterTicksToMilliseconds(end - start);
+        const double interval = stall_last_start_ ? CounterTicksToMilliseconds(start - stall_last_start_) : total;
+        stall_last_start_ = start;
+        ++stall_frames_;
+        if (total < 33.0 && interval < 33.0 && (stall_frames_ % 60) != 0) return;
+        const uint64_t accounted = core + upload + draw + wait;
+        const uint64_t other = end - start > accounted ? end - start - accounted : 0;
+        audioDiagLine("frame_timing t=%.3f frame=%u total_ms=%.3f interval_ms=%.3f "
+                      "core_ms=%.3f audio_ms=%.3f upload_ms=%.3f draw_ms=%.3f wait_ms=%.3f other_ms=%.3f "
+                      "disc_reads=%u disc_ms=%.3f disc_max_ms=%.3f slow_lba=%u",
+                      CounterTicksToMilliseconds(start - stall_capture_start_) / 1000.0,
+                      stall_frames_, total, interval, CounterTicksToMilliseconds(core),
+                      CounterTicksToMilliseconds(stall_audio_ticks_), CounterTicksToMilliseconds(upload),
+                      CounterTicksToMilliseconds(draw), CounterTicksToMilliseconds(wait), CounterTicksToMilliseconds(other),
+                      g_psx_disc_timing.reads, g_psx_disc_timing.total_ns / 1e6,
+                      g_psx_disc_timing.max_ns / 1e6, g_psx_disc_timing.slowest_lba);
+    }
+
     std::uint32_t runFrame() {
+        stall_audio_ticks_ = 0;
         if (!psx_ || paused_) {
             return 0;
         }
@@ -3546,7 +3572,9 @@ class ArmsxSession {
         psx_cheats_set_inhibited(armsx_ach_hardcore_active() ? 1 : 0);
         psx_cheats_apply(psx_);
 
+        const uint64_t audio_start = g_psx_audio_diag_enabled ? SDL_GetPerformanceCounter() : 0;
         queueAudioForFrame();
+        if (audio_start) stall_audio_ticks_ = SDL_GetPerformanceCounter() - audio_start;
 
         // The grant ends with the frame it was made for. A frame that reached vblank in fewer
         // cycles than its budget covered still has some left, and everything below this line —
@@ -4387,7 +4415,7 @@ class ArmsxSession {
 
     double frameRate() const {
         if (!psx_ || !psx_->gpu) {
-            return 59.29;
+            return psx_gpu_frame_rate(nullptr);
         }
 
         return static_cast<double>(psx_gpu_frame_rate(psx_->gpu));
@@ -4535,8 +4563,8 @@ class ArmsxSession {
         been landed on this project and failed. So: measure first.
 
         `touch files/logs/audio_diag` arms it. The marker is deleted the instant a capture
-        starts, so one touch buys exactly one window; ~10 s of it, sampled five times a second,
-        written to `audio_diag.txt` beside the marker. Four windows per process, then the probe
+        starts, so one touch buys one minute of emulated audio, sampled every 30 frames,
+        written to `audio_diag.txt` beside the marker. Sixteen windows per process, then the probe
         stops for good.
 
         Cost when idle: one fopen() every kAudioDiagPollFrames frames while budget remains, and
@@ -4833,6 +4861,68 @@ class ArmsxSession {
         g_psx_audio_diag.spu_ram_lo = 0xffffffffu;
     }
 
+    // Keep the bounded probe in memory; never write PCM from the audio callback.
+    static constexpr size_t kAudioDiagPcmLimit = 44100u * 4u * 64u;
+
+    void audioDiagCapturePcm(std::vector<uint8_t>& destination,
+                             const std::vector<uint8_t>& samples) {
+        if (!audio_diag_file_) return;
+        const size_t count = std::min(samples.size(), kAudioDiagPcmLimit - destination.size());
+        destination.insert(destination.end(), samples.begin(), samples.begin() + count);
+    }
+
+    void audioDiagSavePcm(const char* name, std::vector<uint8_t>& samples,
+                          const char* format = "s16le/stereo/44100") {
+        std::string path;
+        if (!samples.empty() && audioDiagPath(path, name)) {
+            FILE* file = std::fopen(path.c_str(), "wb");
+            if (file) {
+                const size_t written = std::fwrite(samples.data(), 1, samples.size(), file);
+                const int close_status = std::fclose(file);
+                audioDiagLine("pcm: %s bytes=%zu expected=%zu close=%d format=%s",
+                              name, written, samples.size(), close_status, format);
+            } else {
+                audioDiagLine("pcm: failed to open %s", name);
+            }
+        }
+        samples.clear();
+    }
+
+    static void audioDiagStem(void* context, int source, const int16_t* samples, size_t frames) {
+        auto* session = static_cast<ArmsxSession*>(context);
+        if (source < 0 || source >= 3 || !session->audio_diag_file_) return;
+        auto& dst = session->audio_diag_stems_[source];
+        const size_t count = std::min(frames * 4u, kAudioDiagPcmLimit - dst.size());
+        const auto* bytes = reinterpret_cast<const uint8_t*>(samples);
+        dst.insert(dst.end(), bytes, bytes + count);
+    }
+
+    static void audioDiagXa(void* context, const psx_xa_probe_sector_t* sector) {
+        auto* session = static_cast<ArmsxSession*>(context);
+        if (!session->audio_diag_file_) return;
+        auto& dst = session->audio_diag_xa_;
+        const size_t bytes = 32u + CD_SECTOR_SIZE + sector->frames * 4u;
+        if (bytes > kAudioDiagXaLimit - dst.size()) {
+            ++session->audio_diag_xa_dropped_;
+            return;
+        }
+        auto u16 = [&dst](uint16_t x) {
+            dst.push_back(static_cast<uint8_t>(x)); dst.push_back(static_cast<uint8_t>(x >> 8));
+        };
+        auto u32 = [&u16](uint32_t x) { u16(static_cast<uint16_t>(x)); u16(static_cast<uint16_t>(x >> 16)); };
+        // XAR1: size, LBA, position in dialogue PCM, rate, frames, decoder
+        // history, original 2352-byte sector, decoded interleaved stereo PCM.
+        u32(0x31524158u); u32(static_cast<uint32_t>(bytes)); u32(sector->lba);
+        u32(static_cast<uint32_t>(session->audio_diag_stems_[0].size() / 4) + sector->output_offset);
+        u32(sector->rate); u32(sector->frames);
+        for (auto h : sector->history) u16(static_cast<uint16_t>(h));
+        dst.insert(dst.end(), sector->sector, sector->sector + CD_SECTOR_SIZE);
+        for (uint32_t i = 0; i < sector->frames; ++i) {
+            u16(static_cast<uint16_t>(sector->left[i]));
+            u16(static_cast<uint16_t>(sector->right[i]));
+        }
+    }
+
     void audioDiagBegin() {
         std::string path;
         if (!audioDiagPath(path, "audio_diag.txt")) {
@@ -4851,13 +4941,32 @@ class ArmsxSession {
             return;
         }
 
+        audio_diag_core_pcm_.clear();
+        audio_diag_output_pcm_.clear();
+        audio_diag_core_pcm_.reserve(kAudioDiagPcmLimit);
+        audio_diag_output_pcm_.reserve(kAudioDiagPcmLimit);
+
+        for (auto& stem : audio_diag_stems_) {
+            stem.clear();
+            stem.reserve(kAudioDiagPcmLimit);
+        }
+        audio_diag_xa_.clear();
+        audio_diag_xa_.reserve(kAudioDiagXaLimit);
+        audio_diag_xa_dropped_ = 0;
+        g_psx_xa_probe = &ArmsxSession::audioDiagXa;
+        g_psx_audio_pcm_probe_context = this;
+        g_psx_audio_pcm_probe = &ArmsxSession::audioDiagStem;
+
+        stall_capture_start_ = SDL_GetPerformanceCounter();
+        stall_last_start_ = 0;
+        stall_frames_ = 0;
         audio_diag_seq_++;
-        audio_diag_frames_left_ = kAudioDiagFrames;
+        audio_diag_frames_left_ = std::max(1, static_cast<int>(frameRate() * kAudioDiagSeconds + 0.5));
         audio_diag_snapshots_ = 0;
 
         audioDiagLine("=== audio_diag capture #%d (%d frames, ~%.0f s) ===",
-                      audio_diag_seq_, kAudioDiagFrames,
-                      static_cast<double>(kAudioDiagFrames) / frameRate());
+                      audio_diag_seq_, audio_diag_frames_left_,
+                      static_cast<double>(audio_diag_frames_left_) / frameRate());
 
         // Also breadcrumbed so "did it fire?" is answerable from armsx.log alone.
         psxe_diag_logf("audio", "audio_diag: capture #%d armed, %d left this process",
@@ -4884,11 +4993,22 @@ class ArmsxSession {
     }
 
     void audioDiagEnd() {
+        g_psx_xa_probe = nullptr;
+        g_psx_audio_pcm_probe = nullptr;
+        g_psx_audio_pcm_probe_context = nullptr;
         psx_audio_diag_set_enabled(0);
 
         if (!audio_diag_file_) {
             return;
         }
+
+        audioDiagLine("xa_raw: records_dropped=%u", audio_diag_xa_dropped_);
+        audioDiagSavePcm("audio_diag_xa.bin", audio_diag_xa_, "XAR1/sector+decoded");
+        audioDiagSavePcm("audio_diag_dialogue.pcm", audio_diag_stems_[0]);
+        audioDiagSavePcm("audio_diag_voices.pcm", audio_diag_stems_[1]);
+        audioDiagSavePcm("audio_diag_reverb.pcm", audio_diag_stems_[2]);
+        audioDiagSavePcm("audio_diag_core.pcm", audio_diag_core_pcm_);
+        audioDiagSavePcm("audio_diag_output.pcm", audio_diag_output_pcm_);
 
         char tail[256];
         std::snprintf(tail, sizeof(tail), "--- end capture #%d: %d snapshots ---\n",
@@ -5028,6 +5148,7 @@ class ArmsxSession {
 
         std::vector<uint8_t> frame_audio(byte_count);
         MixPsxAudio(psx_, frame_audio.data(), static_cast<int>(frame_audio.size()));
+        audioDiagCapturePcm(audio_diag_core_pcm_, frame_audio);
         applyOutputShaping(frame_audio.data(), static_cast<size_t>(sample_count));
 
         size_t queued_samples = 0;
@@ -5058,6 +5179,8 @@ class ArmsxSession {
         } else {
             resetRealtimeAudioClock();
         }
+
+        audioDiagCapturePcm(audio_diag_output_pcm_, frame_audio);
 
         SDL_LockAudioDevice(audio_dev_);
         const size_t queue_before = audio_queue_.size() - audio_queue_read_offset_;
@@ -5499,8 +5622,8 @@ class ArmsxSession {
     // audio to cover that without changing the emulated sample clock.  This is a startup/jitter
     // cushion only; the authoritative mixer still produces exactly one frame's samples.
     static constexpr int kAudioPrebufferSamples = kAudioMixRate * 120 / 1000;
-    // `audio_diag`: ~10 s of capture, sampled five times a second, four arms per process.
-    static constexpr int kAudioDiagFrames = 1800;
+    // `audio_diag`: one minute of capture, sampled every 30 frames, sixteen arms per process.
+    static constexpr int kAudioDiagSeconds = 60;
     static constexpr int kAudioDiagSnapshotFrames = 30;
     static constexpr int kAudioDiagPollFrames = 30;
     static constexpr int kAudioDiagBudget = 16;
@@ -5575,6 +5698,14 @@ class ArmsxSession {
     uint32_t audio_overflow_trims_ = 0;
     // One-shot capture state; see runAudioDiag(). All emulation thread.
     FILE* audio_diag_file_ = nullptr;
+    static constexpr size_t kAudioDiagXaLimit = 16u * 1024u * 1024u;
+    uint64_t stall_capture_start_ = 0, stall_last_start_ = 0, stall_audio_ticks_ = 0;
+    unsigned stall_frames_ = 0;
+    std::vector<uint8_t> audio_diag_xa_;
+    unsigned audio_diag_xa_dropped_ = 0;
+    std::array<std::vector<uint8_t>, 3> audio_diag_stems_;
+    std::vector<uint8_t> audio_diag_core_pcm_;
+    std::vector<uint8_t> audio_diag_output_pcm_;
     int audio_diag_frames_left_ = 0;
     int audio_diag_poll_ = 0;
     int audio_diag_budget_ = kAudioDiagBudget;
@@ -7246,6 +7377,10 @@ class ArmsxApp {
     }
 
     void runFrame() {
+        const bool stall_probe = g_psx_audio_diag_enabled != 0;
+        const uint64_t stall_start = stall_probe ? SDL_GetPerformanceCounter() : 0;
+        if (stall_probe) std::memset(&g_psx_disc_timing, 0, sizeof(g_psx_disc_timing));
+
         // Affinity Control Mode. Here rather than once at startup because sched_setaffinity()
         // acts on the CALLING thread and this is the emulation thread, and because polling an
         // atomic per frame is what turns a boot-only setting into a live one. Costs one relaxed
@@ -7297,7 +7432,20 @@ class ArmsxApp {
             psx_state_service_requests();
         }
 
-        waitForFrameDeadline(currentTargetFrameRate());
+        const bool lag_probe = session_.valid() && !session_.paused()
+            && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || stall_probe);
+        const uint64_t lag_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        uint64_t lag_wait = 0, lag_core_end = 0;
+        const bool pace_before_present = armsx_mali_frame_pacing_active(
+            armsx_gpu_profile_get()->vendor, session_.valid() && !session_.paused());
+        if (pace_before_present != mali_pacing_active_) {
+            mali_pacing_active_ = pace_before_present;
+            resetFramePacing("Mali experimental pacing changed");
+            psxe_diag_logf("renderer", "Mali experimental pacing active=%d", pace_before_present);
+        }
+        if (!pace_before_present) waitForFrameDeadline(currentTargetFrameRate());
+        const uint64_t lag_work_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        if (lag_probe) lag_wait = lag_work_begin - lag_begin;
 
         // `touch files/logs/perf_log` sends the overlay's own snapshot to the diag log as well
         // as to the UI. The numbers otherwise exist only inside Compose, which makes every
@@ -7340,6 +7488,7 @@ class ArmsxApp {
 
         if (session_stepping) {
             session_steps = session_.runFrame();
+            if (lag_probe) lag_core_end = SDL_GetPerformanceCounter();
             if (!skip_present) {
                 session_.updateTexture(settings_);
             }
@@ -7356,7 +7505,7 @@ class ArmsxApp {
         // CPU is not the thing that is short.
         armsx_perf_hint_frame_end();
 
-        const uint64_t phase_emu_end = stats_enabled ? SDL_GetPerformanceCounter() : 0;
+        const uint64_t phase_emu_end = (stats_enabled || lag_probe) ? SDL_GetPerformanceCounter() : 0;
 
         // RetroAchievements pump. Unconditional: it also drives the saved-login restore and the
         // deferred disc identification, neither of which needs a stepping session.
@@ -7421,6 +7570,13 @@ class ArmsxApp {
         // same reason, but a different question: suspended means "nobody can see it", skipped
         // means "the device cannot afford to draw every one". Note the ORDER — a suspended frame
         // still has to hit the pacing wait below, so skip cannot short-circuit it.
+        // Experimental Mali path: finish emulation before waiting, so variations in
+        // its cost do not shift the draw start. Still wait on skipped frames to keep
+        // emulation speed unchanged. This is not a display-vsync synchronizer.
+        const uint64_t lag_wait_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        if (pace_before_present) waitForFrameDeadline(currentTargetFrameRate());
+        const uint64_t lag_draw_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        if (lag_probe) lag_wait += lag_draw_begin - lag_wait_begin;
         if (presentation_suspended) {
             // Nothing to post, but the loop still has to pace itself or it becomes a spin.
             waitForFrameDeadline(currentTargetFrameRate());
@@ -7452,6 +7608,61 @@ class ArmsxApp {
             HostNotifyFramePresented();
         }
 
+        if (stall_probe && session_stepping && lag_core_end) {
+            const uint64_t end = SDL_GetPerformanceCounter();
+            session_.recordStallTiming(stall_start, end, lag_core_end - lag_work_begin,
+                                      phase_emu_end - lag_core_end, end - lag_draw_begin, lag_wait);
+        }
+        if (lag_probe && armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI && session_stepping && lag_core_end) {
+            const uint64_t end = SDL_GetPerformanceCounter();
+            const uint64_t interval = lag_prev_end_ ? end - lag_prev_end_ : 0;
+            lag_prev_end_ = end;
+            const uint64_t values[6] = {
+                lag_core_end - lag_work_begin, // Emulation (includes audio and disc work).
+                phase_emu_end - lag_core_end, // Texture upload / hardware frame completion.
+                lag_wait,
+                end - lag_draw_begin, // Draw / swap / host presentation (CPU wall time).
+                lag_wait_begin - phase_emu_end, // Achievements and other host work.
+                interval
+            };
+            for (unsigned i = 0; i < 6; ++i) {
+                lag_sum_[i] += values[i];
+                lag_max_[i] = std::max(lag_max_[i], values[i]);
+            }
+            ++lag_samples_;
+            if (interval) ++lag_intervals_;
+            if (skip_present || presentation_suspended) ++lag_not_presented_;
+            if (interval && frame_period_ticks_ && interval > frame_period_ticks_ * 3 / 2)
+                ++lag_long_intervals_;
+            if (!lag_window_start_) lag_window_start_ = lag_begin;
+            if (end - lag_window_start_ >= SDL_GetPerformanceFrequency() * 2) {
+                const auto avg = [this](unsigned i) {
+                    const unsigned n = i == 5 ? lag_intervals_ : lag_samples_;
+                    return n ? CounterTicksToMilliseconds(lag_sum_[i]) / n : 0.0;
+                };
+                psxe_diag_pacingf(
+                    "gpu=%s model=%d driver=%s target_fps=%.3f mode=pre-draw samples=%u "
+                    "core_ms=%.2f/%.2f upload_finish_ms=%.2f/%.2f wait_ms=%.2f/%.2f "
+                    "draw_swap_ms=%.2f/%.2f other_ms=%.2f/%.2f loop_interval_ms=%.2f/%.2f "
+                    "long_intervals=%u not_presented=%u (pairs=avg/max; CPU wall time, not display timestamps)",
+                    armsx_gpu_profile_get()->name, armsx_gpu_profile_get()->model,
+                    armsx_gpu_profile_get()->driver_info, currentTargetFrameRate(), lag_samples_,
+                    avg(0), CounterTicksToMilliseconds(lag_max_[0]),
+                    avg(1), CounterTicksToMilliseconds(lag_max_[1]),
+                    avg(2), CounterTicksToMilliseconds(lag_max_[2]),
+                    avg(3), CounterTicksToMilliseconds(lag_max_[3]),
+                    avg(4), CounterTicksToMilliseconds(lag_max_[4]),
+                    avg(5), CounterTicksToMilliseconds(lag_max_[5]),
+                    lag_long_intervals_, lag_not_presented_);
+                lag_window_start_ = 0;
+                lag_samples_ = lag_intervals_ = lag_long_intervals_ = lag_not_presented_ = 0;
+                lag_sum_.fill(0); lag_max_.fill(0);
+            }
+        } else {
+            lag_window_start_ = lag_prev_end_ = 0;
+            lag_samples_ = lag_intervals_ = lag_long_intervals_ = lag_not_presented_ = 0;
+            lag_sum_.fill(0); lag_max_.fill(0);
+        }
         publishFrameSkipTrace(session_stepping);
         publishFrameStats(stats_enabled, session_stepping, phase_frame_begin, phase_emu_end);
 
@@ -8299,6 +8510,10 @@ class ArmsxApp {
     uint32_t host_pad_pressed_prev_pass_[kHostMaxPlayers] = {};
     FsuiWindowState ui_window_state_ = FsuiWindowState::None;
     bool managed_renderer_vsync_ = DefaultVsyncEnabled();
+    std::array<uint64_t, 6> lag_sum_{}, lag_max_{};
+    uint64_t lag_window_start_ = 0, lag_prev_end_ = 0;
+    unsigned lag_samples_ = 0, lag_intervals_ = 0, lag_long_intervals_ = 0, lag_not_presented_ = 0;
+    bool mali_pacing_active_ = false;
     uint64_t next_frame_deadline_ = 0;
     uint64_t frame_period_ticks_ = 0;
     // How late the loop arrived for the current frame, sampled in waitForFrameDeadline(). 0

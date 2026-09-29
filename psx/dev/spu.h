@@ -217,6 +217,7 @@ void psx_spu_save_state(psx_spu_t*, psx_state_writer_t*);
 int psx_spu_load_state(psx_spu_t*, psx_state_reader_t*);
 void psx_spu_destroy(psx_spu_t*);
 void psx_spu_update_cdda_buffer(psx_spu_t*, void*);
+void psx_spu_capture_cd_audio(psx_spu_t*, const void*, size_t frames);
 /* Internal runahead snapshots also preserve the CD capture IRQ divider. */
 int psx_spu_cdda_irq_phase(void);
 void psx_spu_restore_cdda_irq_phase(int phase);

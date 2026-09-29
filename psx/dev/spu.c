@@ -497,7 +497,7 @@ void adsr_calculate_values(psx_spu_t* spu, int v) {
 }
 
 void adsr_load_attack(psx_spu_t* spu, int v) {
-    EXPONENTIAL = spu_adsr_cfg(spu, v) >> 15;
+    EXPONENTIAL = (spu_adsr_cfg(spu, v) >> 15) & 1;
     DECREASE    = 0;
     SHIFT       = (spu_adsr_cfg(spu, v) >> 10) & 0x1f;
     STEP        = 7 - ((spu_adsr_cfg(spu, v) >> 8) & 3);
@@ -523,7 +523,8 @@ void adsr_load_sustain(psx_spu_t* spu, int v) {
     DECREASE    = (spu_adsr_cfg(spu, v) >> 30) & 1;
     SHIFT       = (spu_adsr_cfg(spu, v) >> 24) & 0x1f;
     STEP        = (spu_adsr_cfg(spu, v) >> 22) & 3;
-    LEVEL       = spu_adsr_sustain_level(spu, v);
+    // Sustain starts at the level reached by decay. The threshold is a phase
+    // transition condition, not a new volume (and can be 0x8000).
     STEP        = DECREASE ? (-8 + STEP) : (7 - STEP);
     PHASE       = ADSR_SUSTAIN;
 
@@ -608,6 +609,12 @@ void spu_kon(psx_spu_t* spu, uint32_t value) {
     for (int i = 0; i < VOICE_COUNT; i++) {
         if ((value & (1 << i))) {
             spu->data[i].playing = 1;
+            // A key-on starts a new sample stream, even when this voice was
+            // already playing. Never carry the previous sound into its decoder.
+            spu->data[i].counter = 0;
+            spu->data[i].prev_sample_index = 0;
+            memset(spu->data[i].h, 0, sizeof(spu->data[i].h));
+            memset(spu->data[i].s, 0, sizeof(spu->data[i].s));
             spu->data[i].current_addr = spu_wrap_addr((uint32_t)spu->voice[i].adsaddr << 3);
             spu->data[i].repeat_addr = spu_wrap_addr((uint32_t)spu->voice[i].adraddr << 3);
             /* A fresh voice takes its repeat address from the sample data again. */
@@ -636,7 +643,7 @@ void spu_kon(psx_spu_t* spu, uint32_t value) {
             adsr_load_attack(spu, i);
             spu_read_block(spu, i);
 
-            spu->voice[i].envcvol = 0x7fff;
+            spu->voice[i].envcvol = 0;
         }
     }
 
@@ -1523,8 +1530,14 @@ uint32_t psx_spu_get_sample(psx_spu_t* spu) {
             g_psx_audio_diag.spu_silent++;
     }
 
-    if ((spu->spucnt & 0x4000) == 0)
+    if ((spu->spucnt & 0x4000) == 0) {
+        if (g_psx_audio_pcm_probe) {
+            const int16_t silent[2] = {0, 0};
+            g_psx_audio_pcm_probe(g_psx_audio_pcm_probe_context, 1, silent, 1);
+            g_psx_audio_pcm_probe(g_psx_audio_pcm_probe_context, 2, silent, 1);
+        }
         return 0;
+    }
 
     /* Keep intermediate samples signed and clamp after volume scaling. */
     int mixl;
@@ -1555,6 +1568,18 @@ uint32_t psx_spu_get_sample(psx_spu_t* spu) {
     } else {
         mixl = (int)(CLAMP(clampsl, INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainlvol));
         mixr = (int)(CLAMP(clampsr, INT16_MIN, INT16_MAX) * spu_volume_gain(spu->mainrvol));
+    }
+
+    if (g_psx_audio_pcm_probe) {
+        const int wet = (spu->spucnt & 0x0080) && !spu->reverb_disabled;
+        const float gl = spu_volume_gain(spu->mainlvol);
+        const float gr = spu_volume_gain(spu->mainrvol);
+        const int16_t dry[2] = {(int16_t)CLAMP((int)(clampsl * gl), INT16_MIN, INT16_MAX),
+                                (int16_t)CLAMP((int)(clampsr * gr), INT16_MIN, INT16_MAX)};
+        const int16_t reverb[2] = {wet ? (int16_t)CLAMP((int)(spu->lrsl * gl), INT16_MIN, INT16_MAX) : 0,
+                                   wet ? (int16_t)CLAMP((int)(spu->lrsr * gr), INT16_MIN, INT16_MAX) : 0};
+        g_psx_audio_pcm_probe(g_psx_audio_pcm_probe_context, 1, dry, 1);
+        g_psx_audio_pcm_probe(g_psx_audio_pcm_probe_context, 2, reverb, 1);
     }
 
     outl = (int16_t)CLAMP(mixl, INT16_MIN, INT16_MAX);
@@ -1693,44 +1718,25 @@ static int cdda_irq_phase = 0;
 int psx_spu_cdda_irq_phase(void) { return cdda_irq_phase; }
 void psx_spu_restore_cdda_irq_phase(int phase) { cdda_irq_phase = phase & 1; }
 
-/* One CD sector is 2352 bytes = 588 stereo frames, and psx/dev/cdrom/cdrom.h sizes the only
-   buffer ever passed in here — psx_cdrom_t::cdda_buf — as exactly int16_t[CD_SECTOR_SIZE >> 1],
-   i.e. 1176 samples. Kept as a named constant rather than derived because spu.c must not
-   include the CD-ROM headers. */
-#define SPU_CDDA_SECTOR_FRAMES 588
-
+/* Keep the sector-sized entry point for existing core callers. */
 void psx_spu_update_cdda_buffer(psx_spu_t* spu, void* buf) {
-    int16_t* ptr = buf;
-    int16_t* ram = (int16_t*)spu->ram;
+    psx_spu_capture_cd_audio(spu, buf, 588);
+}
 
-    /* Bounded read. This loop ran 0x400 = 1024 frames unconditionally, taking 2048 int16 out
-       of a 1176-int16 buffer: 872 samples, 1744 bytes, past the end of cdda_buf every single
-       call. What it actually copied into SPU RAM as "CD audio" was the psx_cdrom_t fields that
-       follow cdda_buf in the struct, and then the head of the raw XA sector buffer.
-
-       This is a memory-safety fix only. It is NOT claimed to resolve any reported symptom, and
-       the SEPARATE question of whether the destination regions are right is deliberately left
-       alone: the hardware capture buffers are 1024 BYTES each at 0x000 and 0x400, while the
-       int16 indexing below spans bytes 0x000-0x7FF and 0x800-0xFFF. Changing that without
-       measurement is exactly the guess this investigation is trying not to make. */
-    for (int i = 0; i < SPU_CDDA_SECTOR_FRAMES; i++) {
-        ram[i + 0x000] = *ptr++;
-        ram[i + 0x400] = *ptr++;
+/* Capture the decoded CD input, before SPU voices are added. XA and CDDA both
+   pass through this input. The two channels occupy 0x400 BYTES each; writing
+   beyond 0x7ff would overwrite the voice capture areas. Keep the newest 512
+   frames, without smoothing away the peaks games use for mouth animation.
+   IRQ scheduling remains the existing frame-based approximation. */
+void psx_spu_capture_cd_audio(psx_spu_t* spu, const void* buf, size_t frames) {
+    if (!spu || !buf || !frames) return;
+    const uint8_t* input = (const uint8_t*)buf;
+    size_t count = frames < 512u ? frames : 512u;
+    input += (frames - count) * 4u;
+    for (size_t i = 0; i < count; ++i) {
+        memcpy(spu->ram + i * 2u, input + i * 4u, 2);
+        memcpy(spu->ram + 0x400u + i * 2u, input + i * 4u + 2u, 2);
     }
-
-    // Little bit of lowpass/smoothing
-    for (int i = 0; i < 0x400; i += 8) {
-        int l = 0, r = 0;
-
-        for (int j = 0; j < 8; j++) {
-            l += ram[i + j];
-            r += ram[i + j + 0x400];
-        }
-
-        ram[i + 0x000] = l / 8;
-        ram[i + 0x400] = r / 8;
-    }
-
     // Simulate capture IRQ
     if (spu->ramdtc & 0xc) {
         if (spu->irq9addr <= 0x1ff) {
