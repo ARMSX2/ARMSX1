@@ -12,6 +12,7 @@ apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 def repoDebugKeystore = file("debug.keystore")
 def hasRepoDebugKeystore = repoDebugKeystore.exists()
 def diagnosticBuild = providers.gradleProperty('armsx.diagnostics').map { it.toBoolean() }.getOrElse(false)
+def windowsNativeBuild = System.getProperty('os.name').toLowerCase().contains('windows')
 
 // ---- Discord rich presence ----------------------------------------------------------------
 //
@@ -69,10 +70,20 @@ def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.1.0').to
 def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '1').toString() as Integer
 
 android {
+    if (windowsNativeBuild) {
+        ndkVersion rootProject.ext.ndkVersion
+        externalNativeBuild { cmake { path file('../CMakeLists.txt'); version '3.30.5' } }
+    }
     namespace 'com.armsx2'
     compileSdk rootProject.ext.compileSdkVersion
 
     defaultConfig {
+        if (windowsNativeBuild) {
+            externalNativeBuild { cmake {
+                arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                if (diagnosticBuild) arguments '-DARMSX_DIAGNOSTIC_BUILD=ON'
+            } }
+        }
         // applicationId stays com.nanodata.armsx so SDL_GetPrefPath / libarmsx / the JNI binding
         // (Java_com_nanodata_armsx_*) and the native settings/BIOS paths are all unchanged. Only
         // the module NAMESPACE moves to com.armsx2 so the lifted UI's R/BuildConfig references
@@ -336,7 +347,7 @@ tasks.register("prepareNativeBinaries", BuildNativeLibraries) {
     // Set ARMSX_SKIP_NATIVE_PREPARE=1 when you are driving ./build.sh android yourself. Two
     // concurrent native builds share bin/obj and clobber each other, so gradle must not start
     // one behind your back.
-    onlyIf { !skipNativePrepare }
+    onlyIf { !skipNativePrepare && !windowsNativeBuild }
 }
 
 preBuild.dependsOn(tasks.named("prepareNativeBinaries"))

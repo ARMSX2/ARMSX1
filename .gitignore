@@ -5,6 +5,7 @@ android/app/build
 android/build
 android/.gradle/
 android/.kotlin/
+android/app/.cxx/
 android/app/src/main/jniLibs/
 android/native-deps/
 *.so
