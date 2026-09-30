@@ -160,6 +160,40 @@ static void write_sector(psx_pad_t* pad, unsigned sector, unsigned seed, int bad
     assert(pad->dest[0] == 0);
 }
 
+/* BIOS/card drivers need not consume the echo of the checksum byte.
+   Sending the next byte still clocks the card to its acknowledgement. */
+static void write_sector_unread_checksum(psx_pad_t* pad, int bad_checksum, int restore) {
+    command(pad, 'W');
+    address(pad, 100);
+    unsigned checksum = 100;
+    for (unsigned i = 0; i < 128; ++i) {
+        const unsigned byte = (i * 7 + 3) & 255;
+        transfer(pad, byte);
+        checksum ^= byte;
+    }
+    /* CTR reads RX again after the last payload byte, without clocking TX. */
+    const int state_before = pad->mcd_slot[0]->state;
+    const unsigned checksum_before = pad->mcd_slot[0]->checksum;
+    (void)psx_pad_read8(pad, 0);
+    assert(pad->mcd_slot[0]->state == state_before);
+    assert(pad->mcd_slot[0]->checksum == checksum_before);
+    psx_pad_write16(pad, 0, checksum ^ bad_checksum); /* Leave RX unread. */
+    if (restore) {
+        psx_state_writer_t writer;
+        psx_state_reader_t reader;
+        psx_sw_init(&writer);
+        psx_mcd_save_state(pad->mcd_slot[0], &writer);
+        psx_mcd_reset(pad->mcd_slot[0]);
+        psx_sr_init(&reader, writer.buf, writer.size);
+        assert(psx_mcd_load_state(pad->mcd_slot[0], &reader) == PSX_STATE_OK);
+        psx_sw_free(&writer);
+    }
+    assert(transfer(pad, 0) == 0x5c);
+    assert(transfer(pad, 0) == 0x5d);
+    assert(transfer(pad, 0) == (bad_checksum ? 'N' : 'G'));
+    assert(pad->dest[0] == 0);
+}
+
 static void read_sector(psx_pad_t* pad, unsigned sector, unsigned seed) {
     command(pad, 'R');
     address(pad, sector);
@@ -217,6 +251,9 @@ int main(void) {
     unsigned id[] = {0x5c, 0x5d, 4, 0, 0, 0x80};
     for (unsigned i = 0; i < sizeof(id) / sizeof(id[0]); ++i) assert(transfer(pad, 0) == id[i]);
     assert(pad->dest[0] == 0 && card->flag == 8);
+    write_sector_unread_checksum(pad, 0, 0);
+    write_sector_unread_checksum(pad, 1, 0);
+    write_sector_unread_checksum(pad, 0, 1);
     write_sector(pad, 0, 1, 0);
     write_sector(pad, 511, 2, 0);
     write_sector(pad, 512, 3, 0);
@@ -248,6 +285,7 @@ int main(void) {
     psx_mcd_reset(card);
     assert(psx_mcd_load_state(card, &reader) == PSX_STATE_OK);
     assert(card->addr == 1023 * 128 + 10);
+    psx_mcd_write(card, 0);
     assert(psx_mcd_read(card) == 14);
     writer.buf[8] = writer.buf[9] = writer.buf[10] = writer.buf[11] = 0;
     psx_sr_init(&reader, writer.buf, writer.size);

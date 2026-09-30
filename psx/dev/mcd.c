@@ -9,12 +9,33 @@
 #include <errno.h>
 #include <string.h>
 #include <time.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <sys/system_properties.h>
+#endif
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
 #else
 #include <unistd.h>
 #endif
+
+/* Opt-in host trace; does not enter save states or alter card replies. */
+static void psx_mcd_trace(psx_mcd_t* mcd, const char* event, int result) {
+#ifdef __ANDROID__
+    if (!mcd->host_trace_enabled || mcd->host_trace_events >= 4096) return;
+    ++mcd->host_trace_events;
+    __android_log_print(ANDROID_LOG_INFO, "ARMSX-MCARD",
+        "%s path=%s cmd=%02x sector=%u state=%d pending=%d checksum=%02x "
+        "flag=%02x generation=%u dirty=%d rx=%02x tx=%02x result=%d",
+        event, mcd->path ? mcd->path : "(memory)", (unsigned char)mcd->mode,
+        ((unsigned)mcd->msb << 8) | mcd->lsb, mcd->state, mcd->pending_bytes,
+        mcd->checksum, mcd->flag, mcd->write_generation, mcd->dirty,
+        mcd->rx_data, mcd->tx_data, result);
+#else
+    (void)mcd; (void)event; (void)result;
+#endif
+}
 
 static void psx_mcd_ensure_parent(const char* path) {
     if (!path)
@@ -141,6 +162,7 @@ int psx_mcd_flush(psx_mcd_t* mcd) {
     } else {
         mcd->dirty = 0;
     }
+    psx_mcd_trace(mcd, "flush", failed);
     free(temp);
     return failed;
 }
@@ -160,6 +182,11 @@ int psx_mcd_init(psx_mcd_t* mcd, const char* path) {
 
     mcd->state = MCD_STATE_TX_HIZ;
     mcd->flag = 0x08;
+#ifdef __ANDROID__
+    char trace_property[PROP_VALUE_MAX] = {0};
+    __system_property_get("debug.armsx.card_trace", trace_property);
+    mcd->host_trace_enabled = strcmp(trace_property, "1") == 0;
+#endif
 
     /* Fresh instance: generation 0, no cached hash, new session. */
     mcd->session_id = psx_mcd_new_session_id();
@@ -228,7 +255,10 @@ int psx_mcd_init(psx_mcd_t* mcd, const char* path) {
     return 0;
 }
 
-uint8_t psx_mcd_read(psx_mcd_t* mcd) {
+/* The pending/latched reply is packed into the existing serialized FIFO
+   field: bit 0 ready, bit 1 pending TX, bit 2 valid latch, bits 8..15 reply.
+   Old states contain only 0/1, so their next read follows the legacy path. */
+static uint8_t psx_mcd_clock_response(psx_mcd_t* mcd) {
     switch (mcd->state) {
         case MCD_STATE_TX_HIZ: mcd->tx_data = 0xff; break;
         case MCD_STATE_TX_FLG:
@@ -317,6 +347,7 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
 
             // printf("mcd read %02x\n", 'G');
 
+            psx_mcd_trace(mcd, "read_complete", 'G');
             return 'G';
         } break;
 
@@ -383,7 +414,9 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
 
             // printf("mcd read %02x\n", 'G');
 
-            return mcd->msb >= 4 ? 0xff : (mcd->checksum ? 'N' : 'G');
+            const int result = mcd->msb >= 4 ? 0xff : (mcd->checksum ? 'N' : 'G');
+            psx_mcd_trace(mcd, "write_complete", result);
+            return result;
         } break;
         case MCD_S_STATE_TX_ACK1: mcd->tx_data = 0x5c; break;
         case MCD_S_STATE_TX_ACK2: mcd->tx_data = 0x5d; break;
@@ -408,7 +441,29 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
     return mcd->tx_data;
 }
 
+uint8_t psx_mcd_read(psx_mcd_t* mcd) {
+    if ((mcd->tx_data_ready & 4) && !(mcd->tx_data_ready & 2)) {
+        psx_mcd_trace(mcd, "rx_latched", (mcd->tx_data_ready >> 8) & 0xff);
+        return (uint8_t)(mcd->tx_data_ready >> 8);
+    }
+    const uint8_t reply = psx_mcd_clock_response(mcd);
+    mcd->tx_data_ready = (mcd->tx_data_ready & 1) | 4 | ((unsigned)reply << 8);
+    return reply;
+}
+
 void psx_mcd_write(psx_mcd_t* mcd, uint8_t data) {
+    /* The card advances on serial clocks, not on CPU reads of RX. Complete an
+       unread transfer before replacing its input (notably the checksum echo).
+       Keep this pending bit in the already-serialized FIFO field so a state
+       taken between TX and RX retains it without changing the state layout. */
+    if (mcd->tx_data_ready & 2) {
+        psx_mcd_trace(mcd, "advance_unread", mcd->rx_data);
+        (void)psx_mcd_read(mcd);
+    }
+    if (mcd->mode == 'W' && mcd->pending_bytes <= 3 &&
+        mcd->state >= MCD_W_STATE_RX_DATA && mcd->state <= MCD_W_STATE_TX_MEB)
+        psx_mcd_trace(mcd, "tx_tail", data);
+    mcd->tx_data_ready |= 2;
     mcd->rx_data = data;
 
     switch (mcd->state) {
@@ -427,6 +482,8 @@ void psx_mcd_write(psx_mcd_t* mcd, uint8_t data) {
         case MCD_W_STATE_RX_CHK: /* Don't care */ break;
         case MCD_W_STATE_RX_CHK2: /* Don't care */ break;
     }
+    if (mcd->state == MCD_R_STATE_RX_LSB || mcd->state == MCD_W_STATE_RX_LSB)
+        psx_mcd_trace(mcd, "command", 0);
 #ifdef ARMSX_DIAGNOSTIC_BUILD
     if (mcd->state == MCD_R_STATE_RX_LSB || mcd->state == MCD_W_STATE_RX_LSB) {
         uint32_t count = ++mcd->diagnostic_transfers;
@@ -439,10 +496,12 @@ void psx_mcd_write(psx_mcd_t* mcd, uint8_t data) {
 }
 
 int psx_mcd_query(psx_mcd_t* mcd) {
-    return mcd->tx_data_ready;
+    return mcd->tx_data_ready & 1;
 }
 
 void psx_mcd_reset(psx_mcd_t* mcd) {
+    if (mcd->state != MCD_STATE_TX_HIZ)
+        psx_mcd_trace(mcd, "deselect_incomplete", 0);
     mcd->state = MCD_STATE_TX_HIZ;
     mcd->tx_data_ready = 0;
     mcd->pending_bytes = 0;

@@ -121,7 +121,9 @@ static int mcd_open_command(psx_mcd_t* mcd, char command) {
 
     /* Card ID handshake: 0x5a then 0x5d. TX_ID2 routes on mode to
        MCD_R_STATE_RX_MSB or MCD_W_STATE_RX_MSB. */
+    psx_mcd_write(mcd, 0);
     psx_mcd_read(mcd);
+    psx_mcd_write(mcd, 0);
     psx_mcd_read(mcd);
 
     /* Sector address, MSB then LSB. The card shifts it left 7 into a byte
@@ -164,16 +166,22 @@ static int mcd_read_sector(psx_mcd_t* mcd, uint16_t sector) {
     if (mcd->state != MCD_R_STATE_TX_ACK1)
         return 0;
 
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 4; i++) {
+        psx_mcd_write(mcd, 0);
         psx_mcd_read(mcd);
+    }
 
     if (mcd->state != MCD_R_STATE_TX_DATA)
         return 0;
 
-    for (i = 0; i < 128; i++)
+    for (i = 0; i < 128; i++) {
+        psx_mcd_write(mcd, 0);
         psx_mcd_read(mcd);
+    }
 
+    psx_mcd_write(mcd, 0);
     psx_mcd_read(mcd); /* checksum */
+    psx_mcd_write(mcd, 0);
     psx_mcd_read(mcd); /* 'G' end marker; returns the card to TX_HIZ */
 
     return mcd->state == MCD_STATE_TX_HIZ;

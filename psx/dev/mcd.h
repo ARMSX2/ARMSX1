@@ -52,7 +52,7 @@ typedef struct {
     char mode;
     int state;
     uint8_t tx_data;
-    int tx_data_ready;
+    int tx_data_ready; /* ready/pending/latch flags + last reply; see mcd.c */
     uint8_t checksum;
 
     /*
@@ -73,6 +73,8 @@ typedef struct {
     int dirty;
     uint32_t flush_cycles;
     uint32_t diagnostic_transfers;
+    int host_trace_enabled;
+    uint32_t host_trace_events;
 } psx_mcd_t;
 
 psx_mcd_t* psx_mcd_create(void);

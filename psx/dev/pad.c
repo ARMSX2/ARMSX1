@@ -206,6 +206,9 @@ void pad_write_tx(psx_pad_t* pad, uint16_t data) {
                 return;
             }
 
+            if (data == DEST_MCD)
+                psx_mcd_write(mcd, (uint8_t)data);
+
             if (pad->ctrl & CTRL_ACIE)
                 pad->cycles_until_irq = JOY_IRQ_DELAY;
         }
