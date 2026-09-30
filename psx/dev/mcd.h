@@ -73,8 +73,6 @@ typedef struct {
     int dirty;
     uint32_t flush_cycles;
     uint32_t diagnostic_transfers;
-    int host_trace_enabled;
-    uint32_t host_trace_events;
 } psx_mcd_t;
 
 psx_mcd_t* psx_mcd_create(void);
