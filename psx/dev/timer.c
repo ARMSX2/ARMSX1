@@ -343,9 +343,12 @@ void psx_timer_update(psx_timer_t* timer, int cyc) {
     timer->prev_hblank = timer->hblank;
     timer->prev_vblank = timer->vblank;
 
-    timer_update_timer0(timer, 2);
-    timer_update_timer1(timer, 2);
-    timer_update_timer2(timer, 2);
+    // Use the same elapsed device cycles as GPU/SPU/CD-ROM. Charging a fixed
+    // two cycles per instruction makes root counters run slow during expensive
+    // instructions and lets timer-driven animation drift behind the audio.
+    timer_update_timer0(timer, cyc);
+    timer_update_timer1(timer, cyc);
+    timer_update_timer2(timer, cyc);
 }
 
 void psxe_gpu_hblank_event_cb(psx_gpu_t* gpu) {

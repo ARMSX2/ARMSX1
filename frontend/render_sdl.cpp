@@ -228,6 +228,38 @@ void ApplyScaleMode(SdlRenderer* self, bool linear) {
     self->scale_mode = wanted;
 }
 
+void ClearBackground(SdlRenderer* self, const SDL_Rect& dst, int out_w, int out_h,
+                     int rotation) {
+    SDL_SetRenderDrawColor(self->renderer, 0, 0, 0, 255);
+    // Only the adopted Mali opaque scanout can overwrite the image area without
+    // a clear. Clear its borders every frame, including single-pixel rounding
+    // gaps (682x511 in a 682x512 output). Leaving these untouched would retain
+    // old pixels after an aspect/size change; clearing the whole output wastes
+    // a full CPU pass for that one row.
+    const bool inside = out_w > 0 && out_h > 0 && dst.x >= 0 && dst.y >= 0 &&
+        dst.w > 0 && dst.h > 0 && dst.x <= out_w && dst.y <= out_h &&
+        dst.w <= out_w - dst.x && dst.h <= out_h - dst.y;
+    if (self->mali_native_pixels && rotation == 0 && inside) {
+        SDL_Rect bars[4];
+        int count = 0;
+        if (dst.y) bars[count++] = {0, 0, out_w, dst.y};
+        const int bottom = dst.y + dst.h;
+        if (bottom < out_h) bars[count++] = {0, bottom, out_w, out_h - bottom};
+        if (dst.x) bars[count++] = {0, dst.y, dst.x, dst.h};
+        const int right = dst.x + dst.w;
+        if (right < out_w) bars[count++] = {right, dst.y, out_w - right, dst.h};
+        if (!count) return;
+        SDL_BlendMode blend;
+        if (SDL_GetRenderDrawBlendMode(self->renderer, &blend) == 0 &&
+            SDL_SetRenderDrawBlendMode(self->renderer, SDL_BLENDMODE_NONE) == 0) {
+            const int result = SDL_RenderFillRects(self->renderer, bars, count);
+            SDL_SetRenderDrawBlendMode(self->renderer, blend);
+            if (result == 0) return;
+        }
+    }
+    SDL_RenderClear(self->renderer);
+}
+
 void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params) {
     SdlRenderer* self = Self(base);
     if (!self->renderer || !self->texture) {
@@ -284,16 +316,8 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
         src_ptr = &src;
     }
 
-    // The adopted Mali software texture is opaque RGBA32. When it covers the
-    // complete output, clearing those same pixels first is a redundant CPU pass.
-    // Keep the normal clear for bars, rotation, and every other rendering path.
     const int rotation = params ? (params->rotation & 3) : 0;
-    const bool covers_output = dst.x == 0 && dst.y == 0 &&
-        dst.w == out_w && dst.h == out_h && out_w > 0 && out_h > 0;
-    if (!(self->mali_native_pixels && rotation == 0 && covers_output)) {
-        SDL_SetRenderDrawColor(self->renderer, 0, 0, 0, 255);
-        SDL_RenderClear(self->renderer);
-    }
+    ClearBackground(self, dst, out_w, out_h, rotation);
     timing.mark(0);
 
     /* [video] display_rotation. SDL_RenderCopyEx maps src onto dst and THEN spins the result
