@@ -104,9 +104,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
-import coil.size.Precision
+import com.armsx2.ui.common.FallbackCoverImage
 import com.armsx2.CustomCovers
 import com.armsx2.GameInfo
 import com.armsx2.i18n.str
@@ -1195,35 +1194,16 @@ private fun GameCover(
     val use3d = CoverArtStyle.use3d.value
     val customCoverMap = LocalCustomCoverMap.current
     val custom = remember(game.uri, customCoverMap) { CustomCovers.matchIn(customCoverMap, game) }
-    val model = custom ?: game.coverUrl
-    val request = remember(model, use3d) {
-        ImageRequest.Builder(context)
-            .data(model)
-            // Square, matching the source. 360x500 was the PS2 request shape; against a
-            // 500x500 PS1 cover with ContentScale.Fit it letterboxed the art inside the slot
-            // on top of the slot itself being too tall.
-            .size(500, 500)
-            .precision(Precision.INEXACT)
-            .allowHardware(true)
-            .crossfade(false)
-            .build()
+    val models = remember(custom, game, use3d, CustomCovers.version.value) {
+        listOfNotNull(custom) + game.coverUrls
     }
-    Box(modifier.clip(RoundedCornerShape(cornerRadius))) {
-        if (model == null) {
-            CoverPlaceholder(game.displayTitle(EnglishTitles.enabled.value), game.serial, showText = placeholderText)
-        } else {
-            // No fill behind the art: 3D box-art PNGs are transparent around the
-            // angled case, and any backing shows as a dark/coloured "notch" at the
-            // top. Keeping it transparent lets the case sit directly on the shelf.
-            SubcomposeAsyncImage(
-                model = request,
-                contentDescription = game.displayTitle(EnglishTitles.enabled.value),
-                modifier = Modifier.fillMaxSize(),
-                contentScale = contentScale,
-                loading = { CoverPlaceholder(game.displayTitle(EnglishTitles.enabled.value), game.serial, showText = placeholderText) },
-                error = { CoverPlaceholder(game.displayTitle(EnglishTitles.enabled.value), game.serial, showText = placeholderText) },
-            )
-        }
+    FallbackCoverImage(
+        models = models,
+        contentDescription = game.displayTitle(EnglishTitles.enabled.value),
+        modifier = modifier.clip(RoundedCornerShape(cornerRadius)),
+        contentScale = contentScale,
+    ) {
+        CoverPlaceholder(game.displayTitle(EnglishTitles.enabled.value), game.serial, showText = placeholderText)
     }
 }
 

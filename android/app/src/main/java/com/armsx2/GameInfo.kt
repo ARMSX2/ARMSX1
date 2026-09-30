@@ -276,33 +276,22 @@ data class GameInfo(
         titleSort.isNotEmpty() -> titleSort
         else -> title
     }
-    /**
-     * The cover to load, as something Coil accepts. Priority mirrors
-     * [com.armsx2.core.Ps1Covers]: a cover image the user dropped next to the ROM
-     * (`<name>.jpg/png/webp`) wins, then the psx-covers mirror keyed by disc serial, then null →
-     * the caller draws its gradient placeholder. PS1 only: [GamePlatform] has no other member, so
-     * `psx-covers` is the only repo this can ever produce.
-     *
-     * The sibling probe is memoised inside Ps1Covers and pre-warmed by the library scan, so
-     * reading this during composition costs a map lookup.
-     */
-    val coverUrl: String? get() {
-        localCoverPath()?.let { return Uri.fromFile(File(it)).toString() }
-        val s = coverSerial ?: return null
-        // A cover pre-fetched into <DataRoot>/covers beats the network: it renders instantly,
-        // works offline, and survives a cache clear. Only 2D art is stored this way, so the 3D
-        // style still goes to the network for its own URL.
-        if (!CoverArtStyle.use3d.value) {
-            com.armsx2.core.Ps1Covers.downloadedCover(s)?.let { return Uri.fromFile(it).toString() }
+    /** Preferred URL for external consumers. In-app tiles try every candidate on failure. */
+    val coverUrl: String? get() = coverUrls.firstOrNull()
+
+    /** Local art first, then the requested style, falling back to the other style if missing. */
+    val coverUrls: List<String> get() = buildList {
+        localCoverPath()?.let { add(Uri.fromFile(File(it)).toString()) }
+        val s = coverSerial ?: return@buildList
+        if (CoverArtStyle.use3d.value) {
+            add("https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/3d/$s.png")
         }
-        // 3D cases live under covers/3d/*.png; flat 2D scans under
-        // covers/default/*.jpg. Coil decodes by content, so the extension
-        // mismatch on the cached file is fine.
-        return if (CoverArtStyle.use3d.value)
-            "https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/3d/$s.png"
-        else
-            "https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/default/$s.jpg"
-    }
+        com.armsx2.core.Ps1Covers.downloadedCover(s)?.let { add(Uri.fromFile(it).toString()) }
+        add(com.armsx2.core.Ps1Covers.coverUrl(s))
+        if (!CoverArtStyle.use3d.value) {
+            add("https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/3d/$s.png")
+        }
+    }.distinct()
 
     /**
      * The serial to fetch BOX ART with — [serial] where the disc identified itself, otherwise a

@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -22,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
+import coil.size.Precision
 import com.armsx2.CustomCovers
 import com.armsx2.GameInfo
 
@@ -31,16 +33,45 @@ fun GameCoverArt(game: GameInfo, modifier: Modifier = Modifier) {
     val customCover = remember(game.uri, CustomCovers.version.value) {
         CustomCovers.fileFor(context, game)
     }
-    SubcomposeAsyncImage(
-        model = ImageRequest.Builder(context)
-            .data(customCover ?: game.coverUrl)
-            .crossfade(true)
-            .build(),
+    FallbackCoverImage(
+        models = listOfNotNull(customCover) + game.coverUrls,
         contentDescription = game.title,
         modifier = modifier.clip(RoundedCornerShape(14.dp)),
         contentScale = ContentScale.Crop,
-        loading = { GameCoverPlaceholder(game.title, game.serial) },
-        error = { GameCoverPlaceholder(game.title, game.serial) },
+        crossfade = true,
+    ) { GameCoverPlaceholder(game.title, game.serial) }
+}
+
+/** Try each candidate once; reset when the game, custom cover or style changes. */
+@Composable
+fun FallbackCoverImage(
+    models: List<Any>,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Fit,
+    crossfade: Boolean = false,
+    placeholder: @Composable () -> Unit,
+) {
+    val context = LocalContext.current
+    val index = remember(models) { mutableIntStateOf(0) }
+    val attempted = index.intValue
+    val model = models.getOrNull(attempted)
+    val request = remember(context, model, crossfade) {
+        ImageRequest.Builder(context).data(model).size(500, 500)
+            .precision(Precision.INEXACT).allowHardware(true).crossfade(crossfade).build()
+    }
+    SubcomposeAsyncImage(
+        model = request,
+        contentDescription = contentDescription,
+        modifier = modifier,
+        contentScale = contentScale,
+        onError = {
+            if (index.intValue == attempted && attempted < models.lastIndex) {
+                index.intValue = attempted + 1
+            }
+        },
+        loading = { placeholder() },
+        error = { placeholder() },
     )
 }
 

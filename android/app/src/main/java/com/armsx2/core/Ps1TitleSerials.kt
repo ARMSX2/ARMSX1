@@ -21,14 +21,16 @@ import java.util.Locale
  * game's achievements and settings to another. It is used by [com.armsx2.GameInfo.coverSerial] and
  * nothing else, so the worst a wrong entry here can do is show the wrong box art.
  *
- * USA serials only, matched against a `(USA)` region tag (or a name with no region tag at all,
- * which in practice is a USA-only collection). A European or Japanese pressing of the same game
- * has a different serial and therefore different art, so it is left unmatched rather than guessed.
+ * The main table is USA-only (or untagged filenames), with explicit regional exceptions below.
+ * Other regional pressings are left unmatched rather than assigned an unrelated edition.
  */
 object Ps1TitleSerials {
 
     /** Normalised title → serial per disc, disc 1 first. */
     private val BY_TITLE: Map<String, List<String>> = mapOf(
+        "dragonwarriorvii" to listOf("SLUS-01206", "SLUS-01346"),
+        "dragonwarrior7" to listOf("SLUS-01206", "SLUS-01346"),
+        "tekken3" to listOf("SLUS-00402"),
         "xenogears" to listOf("SLUS-00664", "SLUS-00669"),
         "finalfantasyvii" to listOf("SCUS-94163", "SCUS-94164", "SCUS-94165"),
         "finalfantasyviii" to listOf("SLUS-00892", "SLUS-00908", "SLUS-00909", "SLUS-00910"),
@@ -62,6 +64,12 @@ object Ps1TitleSerials {
     fun coverSerialFor(title: String?, name: String?): String? {
         val source = name?.takeIf { it.isNotBlank() } ?: title?.takeIf { it.isNotBlank() } ?: return null
         val stem = source.substringAfterLast('/').substringAfterLast(':').substringBeforeLast('.')
+        // Explicit regional mappings for titles outside the USA fallback table.
+        val key = normalise(stem)
+        val region = REGION_TAG.find(stem)?.groupValues?.get(1)?.lowercase(Locale.US)
+        if (key == "hamsterclubi" && (region == null || region in listOf("japan", "jpn", "jp")))
+            return "SLPS-03266"
+        if (key == "tekken3" && region in listOf("europe", "eur", "pal")) return "SCES-01237"
         if (!regionAllows(stem)) return null
         val discs = BY_TITLE[normalise(stem)]
             ?: title?.let { BY_TITLE[normalise(it)] }
@@ -77,5 +85,5 @@ object Ps1TitleSerials {
     }
 
     private fun normalise(raw: String): String =
-        TAGS.replace(raw, " ").lowercase(Locale.US).replace(NON_ALNUM, "")
+        DISC_TAG.replace(TAGS.replace(raw, " "), " ").lowercase(Locale.US).replace(NON_ALNUM, "")
 }
