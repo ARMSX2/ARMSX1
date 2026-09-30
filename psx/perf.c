@@ -44,3 +44,27 @@ void* g_psx_audio_pcm_probe_context = NULL;
 psx_xa_probe_t g_psx_xa_probe = NULL;
 
 psx_disc_timing_t g_psx_disc_timing;
+
+int g_psx_work_diag_enabled;
+psx_work_diag_t g_psx_work_diag;
+uint64_t (*g_psx_work_clock)(void);
+void psx_work_diag_begin(uint64_t (*clock_fn)(void)) {
+    /* Preserve the prime-period sampling phase across frames, avoiding a
+       repeated sample of the same instruction at every vblank. */
+    uint32_t phase = g_psx_work_diag.cpu_sample_phase;
+    memset(&g_psx_work_diag, 0, sizeof(g_psx_work_diag));
+    g_psx_work_diag.cpu_sample_phase = phase;
+    g_psx_work_clock = clock_fn;
+    g_psx_work_diag_enabled = clock_fn != NULL;
+}
+uint64_t psx_work_diag_start(void) {
+    return g_psx_work_diag_enabled ? g_psx_work_clock() : 0;
+}
+void psx_work_diag_end(unsigned category, uint64_t start) {
+    if (!g_psx_work_diag_enabled || category >= PSX_WORK_COUNT) return;
+    uint64_t elapsed = g_psx_work_clock() - start;
+    g_psx_work_diag.ticks[category] += elapsed;
+    ++g_psx_work_diag.calls[category];
+    if (elapsed > g_psx_work_diag.max_ticks[category])
+        g_psx_work_diag.max_ticks[category] = elapsed;
+}

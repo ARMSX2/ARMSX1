@@ -71,7 +71,14 @@ __attribute__((always_inline)) void psx_update(psx_t* psx) {
        atomic load when nothing is parked. */
     psx_state_service_requests();
 
-    psx_cpu_cycle(psx->cpu);
+    if (g_psx_work_diag_enabled && ++g_psx_work_diag.cpu_sample_phase >= 4093) {
+        g_psx_work_diag.cpu_sample_phase = 0;
+        const uint64_t start = psx_work_diag_start();
+        psx_cpu_cycle(psx->cpu);
+        psx_work_diag_end(PSX_WORK_CPU_SAMPLE, start);
+    } else {
+        psx_cpu_cycle(psx->cpu);
+    }
 
     /* Computed ONCE and shared: every device must be charged the identical amount, or the
        carry would be applied five times over and they would drift apart from each other

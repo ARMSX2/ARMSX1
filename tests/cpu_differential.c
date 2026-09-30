@@ -393,6 +393,33 @@ static int case_shift_matrix(const char* bios_path) {
     return ok;
 }
 
+/* Unsupported opcodes must still occupy a valid cache entry; otherwise a
+   null-handler validity tag would decode them on every execution. */
+static int case_cache_entry_lifetime(const char* bios_path) {
+    psx_t *reference = NULL, *cached = NULL;
+    if (!init_pair(&reference, &cached, bios_path)) return 0;
+    const uint32_t opcodes[] = {0xfc000000u, 0x24020005u};
+    int ok = 1;
+    for (unsigned n = 0; n < 2 && ok; ++n) {
+        psx_bus_write32(reference->bus, TEST_OFFSET, opcodes[n]);
+        psx_bus_write32(cached->bus, TEST_OFFSET, opcodes[n]);
+        psx_cpu_cache_stats_t before = psx_cpu_get_cache_stats(cached->cpu);
+        for (unsigned repeat = 0; repeat < 2 && ok; ++repeat) {
+            reference->cpu->pc = cached->cpu->pc = TEST_PC;
+            reference->cpu->next_pc = cached->cpu->next_pc = TEST_PC + 4;
+            ok = run_steps("cache-entry-lifetime", reference, cached, 1);
+        }
+        psx_cpu_cache_stats_t after = psx_cpu_get_cache_stats(cached->cpu);
+        if (after.misses != before.misses + 1 || after.hits != before.hits + 1) ok = 0;
+        psx_cpu_invalidate_range(cached->cpu, TEST_PC, 4);
+        psx_cpu_cache_stats_t invalidated = psx_cpu_get_cache_stats(cached->cpu);
+        if (invalidated.invalidations != after.invalidations + 1) ok = 0;
+    }
+    psx_destroy(reference); psx_destroy(cached);
+    printf("CPU_DIFFERENTIAL %s case=cache-entry-lifetime\n", ok ? "passed" : "failed");
+    return ok;
+}
+
 int main(void) {
     const char* bios_path = "build/tests/blank-bios.bin";
     if (!write_blank_bios(bios_path)) {
@@ -402,6 +429,7 @@ int main(void) {
 
     if (!case_integer_memory_branch(bios_path) ||
         !case_self_modifying_alias(bios_path) ||
+        !case_cache_entry_lifetime(bios_path) ||
         !case_irq_and_exception(bios_path) ||
         !case_opcode_matrix(bios_path) ||
         !case_shift_matrix(bios_path)) {

@@ -629,4 +629,25 @@ const void* psx_gpu_get_display_surface(psx_gpu_t*, int want_native,
                                         int* out_scale, uint32_t* out_stride_bytes);
 #endif
 
+/* Exact integer equivalent of the renderer's 8-bit float blend followed by
+   RGB555 truncation. Source mask bits are handled by the caller. */
+static inline uint16_t psx_gpu_blend_rgb555(uint16_t back, uint16_t front, int mode) {
+    uint16_t result = 0;
+    for (int shift = 0; shift <= 10; shift += 5) {
+        const int b = (back >> shift) & 31;
+        const int f = (front >> shift) & 31;
+        int v;
+        switch (mode) {
+            case 0: v = (b + f) >> 1; break;
+            case 1: v = b + f; break;
+            case 2: v = b - f; break;
+            default: v = b + (f >> 2); break;
+        }
+        if (v < 0) v = 0;
+        if (v > 31) v = 31;
+        result |= (uint16_t)(v << shift);
+    }
+    return result;
+}
+
 #endif

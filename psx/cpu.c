@@ -16,11 +16,12 @@
 
 typedef int (*psx_cpu_cached_handler_t)(psx_cpu_t*);
 
+/* Keep ARM64 entries at 16 bytes (four per 64-byte cache line). The handler
+   doubles as the validity tag, avoiding eight bytes of flag/alignment overhead. */
 typedef struct {
     uint32_t address;
     uint32_t opcode;
     psx_cpu_cached_handler_t handler;
-    uint8_t valid;
 } psx_cpu_cache_entry_t;
 
 struct psx_cpu_cache_t {
@@ -504,8 +505,8 @@ void psx_cpu_invalidate_range(psx_cpu_t* cpu, uint32_t address, uint32_t size) {
 
     for (uint32_t current = first;; current += 4u) {
         psx_cpu_cache_entry_t* entry = &cpu->cache->entries[psx_cpu_cache_index(current)];
-        if (entry->valid && entry->address == current) {
-            entry->valid = 0;
+        if (entry->handler && entry->address == current) {
+            entry->handler = NULL;
             cpu->cache->stats.invalidations++;
         }
 
@@ -2855,6 +2856,13 @@ static psx_cpu_cached_handler_t psx_cpu_decode(uint32_t opcode) {
     }
 }
 
+/* A null handler marks an invalid cache slot. Unsupported opcodes need a
+   callable entry too, preserving the old zero-cycle fallback and cache hits. */
+static int psx_cpu_cached_unsupported(psx_cpu_t* cpu) {
+    (void)cpu;
+    return 0;
+}
+
 static int psx_cpu_execute_cached(psx_cpu_t* cpu) {
     if (!cpu->cache)
         return psx_cpu_execute(cpu);
@@ -2862,17 +2870,18 @@ static int psx_cpu_execute_cached(psx_cpu_t* cpu) {
     const uint32_t address = psx_bus_physical_address(cpu->saved_pc);
     psx_cpu_cache_entry_t* entry = &cpu->cache->entries[psx_cpu_cache_index(address)];
 
-    if (entry->valid && entry->address == address && entry->opcode == cpu->opcode) {
+    if (entry->handler && entry->address == address && entry->opcode == cpu->opcode) {
         cpu->cache->stats.hits++;
     } else {
         cpu->cache->stats.misses++;
         entry->address = address;
         entry->opcode = cpu->opcode;
         entry->handler = psx_cpu_decode(cpu->opcode);
-        entry->valid = 1;
+        if (!entry->handler)
+            entry->handler = psx_cpu_cached_unsupported;
     }
 
-    return entry->handler ? entry->handler(cpu) : 0;
+    return entry->handler(cpu);
 }
 
 int psx_cpu_execute(psx_cpu_t* cpu) {

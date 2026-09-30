@@ -333,4 +333,21 @@ void psx_audio_diag_set_enabled(int enabled);
 /* Within 68 of int16 full scale in either direction. */
 #define PSX_AUDIO_DIAG_RAILED(v) (((v) >= 32700) || ((v) <= -32700))
 
+/* Bounded host work probe. Separate from emulated-cycle counters and save states.
+   All access is on the emulation thread. Durations are inclusive, so categories
+   (notably sampled CPU dispatch and mapped device work) must not be added. */
+enum { PSX_WORK_CPU_SAMPLE, PSX_WORK_MDEC, PSX_WORK_SPU, PSX_WORK_DISC,
+       PSX_WORK_AUDIO_QUEUE, PSX_WORK_GPU_RASTER, PSX_WORK_COUNT };
+typedef struct {
+    uint64_t ticks[PSX_WORK_COUNT], max_ticks[PSX_WORK_COUNT];
+    uint32_t calls[PSX_WORK_COUNT];
+    uint32_t cpu_sample_phase, slowest_lba;
+} psx_work_diag_t;
+extern int g_psx_work_diag_enabled;
+extern psx_work_diag_t g_psx_work_diag;
+extern uint64_t (*g_psx_work_clock)(void);
+void psx_work_diag_begin(uint64_t (*clock_fn)(void));
+uint64_t psx_work_diag_start(void);
+void psx_work_diag_end(unsigned category, uint64_t start);
+
 #endif

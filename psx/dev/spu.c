@@ -1299,7 +1299,7 @@ static inline float spu_volume_gain(uint16_t reg) {
     return (float)v / 16384.0f;
 }
 
-uint32_t psx_spu_get_sample(psx_spu_t* spu) {
+static uint32_t psx_spu_get_sample_impl(psx_spu_t* spu) {
     spu->even_cycle ^= 1;
 
     int left = 0;
@@ -1587,6 +1587,14 @@ uint32_t psx_spu_get_sample(psx_spu_t* spu) {
 
     return ((uint32_t)(uint16_t)outl) | (((uint32_t)(uint16_t)outr) << 16);
 }
+
+uint32_t psx_spu_get_sample(psx_spu_t* spu) {
+    const uint64_t start = psx_work_diag_start();
+    const uint32_t result = psx_spu_get_sample_impl(spu);
+    psx_work_diag_end(PSX_WORK_SPU, start);
+    return result;
+}
+
 
 /*
     ===========================================================================================

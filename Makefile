@@ -1276,3 +1276,18 @@ $(SHARED_BIN): $(ALL_OBJS_SHARED) $(CHD_BUILD_DEPS) | $(BIN_DIR)
 
 clean:
 	rm -rf "$(BIN_DIR)"
+
+# ARM64 decoder arithmetic and RGB555 blend equivalence gates.
+build/tests/mdec_idct_parity: tests/mdec_idct_parity.c $(TEST_CORE_SOURCES) | $(TEST_CORE_DEPS)
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O3 -DPSXE_DIAG_STDIO_DISABLE -I. -Ipsx $(TEST_CORE_CFLAGS) $^ $(TEST_CORE_LIBS) -lm -o $@
+
+build/tests/gpu_blend_parity: tests/gpu_blend_parity.c psx/dev/gpu.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O3 -I. $< -lm -o $@
+
+.PHONY: test-mdec-idct test-gpu-blend
+test-mdec-idct: build/tests/mdec_idct_parity
+	./$<
+test-gpu-blend: build/tests/gpu_blend_parity
+	./$<

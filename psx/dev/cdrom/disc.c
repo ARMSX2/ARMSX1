@@ -324,11 +324,23 @@ int psx_disc_read(psx_disc_t* disc, uint32_t lba, void* buf) {
        here is every sector the drive actually pulled off the image. */
     PSX_PERF_INC(cdrom_sectors);
 
-    if (!g_psx_audio_diag_enabled)
-        return disc->read_sector(disc->udata, lba, buf);
+    if (!g_psx_audio_diag_enabled) {
+        const uint64_t start = psx_work_diag_start();
+        const uint64_t previous_max = g_psx_work_diag.max_ticks[PSX_WORK_DISC];
+        const int result = disc->read_sector(disc->udata, lba, buf);
+        psx_work_diag_end(PSX_WORK_DISC, start);
+        if (g_psx_work_diag.max_ticks[PSX_WORK_DISC] > previous_max)
+            g_psx_work_diag.slowest_lba = lba;
+        return result;
+    }
+    const uint64_t work_start = psx_work_diag_start();
+    const uint64_t work_max = g_psx_work_diag.max_ticks[PSX_WORK_DISC];
     const uint64_t start = xa_search_clock_ns();
     const int result = disc->read_sector(disc->udata, lba, buf);
     const uint64_t elapsed = xa_search_clock_ns() - start;
+    psx_work_diag_end(PSX_WORK_DISC, work_start);
+    if (g_psx_work_diag.max_ticks[PSX_WORK_DISC] > work_max)
+        g_psx_work_diag.slowest_lba = lba;
     ++g_psx_disc_timing.reads;
     g_psx_disc_timing.total_ns += elapsed;
     if (elapsed > g_psx_disc_timing.max_ns) {

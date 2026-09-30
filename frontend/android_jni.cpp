@@ -641,6 +641,17 @@ void PresentToSurface(void* /*user*/) {
         timing.mark(3);
     }
 
+    static thread_local unsigned window_failures = 0;
+    if ((lock_result != 0 || post_result != 0) &&
+        armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI) {
+        ++window_failures;
+        if (window_failures <= 8 || window_failures % 120 == 0)
+            psxe_diag_pacingf("native_window_error count=%u lock_rc=%d post_rc=%d "
+                "buffer=%dx%d stride=%d format=%d bits=%d",
+                window_failures, lock_result, post_result, buffer.width, buffer.height,
+                buffer.stride, buffer.format, buffer.bits != nullptr);
+    }
+
     timing.finish(timing_stats, "native_window", "setup", "buffer_lock", "buffer_copy", "buffer_post",
                   surface->w, surface->h, buffer.width, buffer.height,
                   lock_result != 0 || post_result != 0,

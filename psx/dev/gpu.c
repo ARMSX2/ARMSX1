@@ -1194,7 +1194,7 @@ static inline int gpu_clip_triangle_edge(int value, int step, int minimum,
     return *first <= *last;
 }
 
-void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, poly_data_t data, int edge) {
+static void gpu_render_triangle_impl(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, poly_data_t data, int edge) {
     gpu_offset_census(gpu);
 
     vertex_t a, b, c, p;
@@ -1371,53 +1371,8 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
                                              (mod >> 16) & 0xff, dither);
             }
 
-            float cr = ((color >> 0 ) & 0x1f) << 3;
-            float cg = ((color >> 5 ) & 0x1f) << 3;
-            float cb = ((color >> 10) & 0x1f) << 3;
-
-            if (transp) {
-                uint16_t back = gpu->vram[x + (y * 1024)];
-
-                float br = ((back >> 0 ) & 0x1f) << 3;
-                float bg = ((back >> 5 ) & 0x1f) << 3;
-                float bb = ((back >> 10) & 0x1f) << 3;
-
-                // Do we use transp or gpustat here?
-                switch (transp_mode) {
-                    case 0: {
-                        cr = (0.5f * br) + (0.5f * cr);
-                        cg = (0.5f * bg) + (0.5f * cg);
-                        cb = (0.5f * bb) + (0.5f * cb);
-                    } break;
-                    case 1: {
-                        cr = br + cr;
-                        cg = bg + cg;
-                        cb = bb + cb;
-                    } break;
-                    case 2: {
-                        cr = br - cr;
-                        cg = bg - cg;
-                        cb = bb - cb;
-                    } break;
-                    case 3: {
-                        cr = br + (0.25 * cr);
-                        cg = bg + (0.25 * cg);
-                        cb = bb + (0.25 * cb);
-                    } break;
-                }
-
-                cr = (cr >= 255.0f) ? 255.0f : ((cr <= 0.0f) ? 0.0f : cr);
-                cg = (cg >= 255.0f) ? 255.0f : ((cg <= 0.0f) ? 0.0f : cg);
-                cb = (cb >= 255.0f) ? 255.0f : ((cb <= 0.0f) ? 0.0f : cb);
-
-                unsigned int ucr = roundf(cr);
-                unsigned int ucg = roundf(cg);
-                unsigned int ucb = roundf(cb);
-
-                uint32_t rgb = ucr | (ucg << 8) | (ucb << 16);
-
-                color = BGR555(rgb);
-            }
+            if (transp)
+                color = psx_gpu_blend_rgb555(gpu->vram[x + y * 1024], color, transp_mode);
 
             /* `force_mask || texel_bit15` (the backend). With the accuracy
                flag off mask_from_texel is 0 and this is byte-identical to `color | mask_set`,
@@ -1427,9 +1382,15 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
     }
 }
 
+void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, poly_data_t data, int edge) {
+    const uint64_t start = psx_work_diag_start();
+    gpu_render_triangle_impl(gpu, v0, v1, v2, data, edge);
+    psx_work_diag_end(PSX_WORK_GPU_RASTER, start);
+}
+
 #define CLAMP(v, d, u) ((v) <= (d)) ? (d) : (((v) >= (u)) ? (u) : (v))
 
-void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
+static void gpu_render_rect_impl(psx_gpu_t* gpu, rect_data_t data) {
     uint16_t width, height;
 
     gpu_offset_census(gpu);
@@ -1538,52 +1499,8 @@ void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
                 color = BGR555(data.v0.c);
             }
 
-            float cr = ((color >> 0 ) & 0x1f) << 3;
-            float cg = ((color >> 5 ) & 0x1f) << 3;
-            float cb = ((color >> 10) & 0x1f) << 3;
-
-            if (transp) {
-                uint16_t back = gpu->vram[x + (y * 1024)];
-
-                float br = ((back >> 0 ) & 0x1f) << 3;
-                float bg = ((back >> 5 ) & 0x1f) << 3;
-                float bb = ((back >> 10) & 0x1f) << 3;
-
-                switch (transp_mode) {
-                    case 0: {
-                        cr = (0.5f * br) + (0.5f * cr);
-                        cg = (0.5f * bg) + (0.5f * cg);
-                        cb = (0.5f * bb) + (0.5f * cb);
-                    } break;
-                    case 1: {
-                        cr = br + cr;
-                        cg = bg + cg;
-                        cb = bb + cb;
-                    } break;
-                    case 2: {
-                        cr = br - cr;
-                        cg = bg - cg;
-                        cb = bb - cb;
-                    } break;
-                    case 3: {
-                        cr = br + (0.25f * cr);
-                        cg = bg + (0.25f * cg);
-                        cb = bb + (0.25f * cb);
-                    } break;
-                }
-
-                cr = (cr >= 255.0f) ? 255.0f : ((cr <= 0.0f) ? 0.0f : cr);
-                cg = (cg >= 255.0f) ? 255.0f : ((cg <= 0.0f) ? 0.0f : cg);
-                cb = (cb >= 255.0f) ? 255.0f : ((cb <= 0.0f) ? 0.0f : cb);
-
-                unsigned int ucr = roundf(cr);
-                unsigned int ucg = roundf(cg);
-                unsigned int ucb = roundf(cb);
-
-                uint32_t rgb = ucr | (ucg << 8) | (ucb << 16);
-
-                color = BGR555(rgb);
-            }
+            if (transp)
+                color = psx_gpu_blend_rgb555(gpu->vram[x + y * 1024], color, transp_mode);
 
             /* `force_mask || texel_bit15` — see the matching write in gpu_render_triangle. */
             gpu->vram[x + (y * 1024)] = color | mask_set | (stp & mask_from_texel);
@@ -1595,6 +1512,12 @@ void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
 
         ++yc;
     }
+}
+
+void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
+    const uint64_t start = psx_work_diag_start();
+    gpu_render_rect_impl(gpu, data);
+    psx_work_diag_end(PSX_WORK_GPU_RASTER, start);
 }
 
 void plotLineLow(psx_gpu_t* gpu, int x0, int y0, int x1, int y1, uint16_t color) {

@@ -284,16 +284,22 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
         src_ptr = &src;
     }
 
-    SDL_SetRenderDrawColor(self->renderer, 0, 0, 0, 255);
-    SDL_RenderClear(self->renderer);
+    // The adopted Mali software texture is opaque RGBA32. When it covers the
+    // complete output, clearing those same pixels first is a redundant CPU pass.
+    // Keep the normal clear for bars, rotation, and every other rendering path.
+    const int rotation = params ? (params->rotation & 3) : 0;
+    const bool covers_output = dst.x == 0 && dst.y == 0 &&
+        dst.w == out_w && dst.h == out_h && out_w > 0 && out_h > 0;
+    if (!(self->mali_native_pixels && rotation == 0 && covers_output)) {
+        SDL_SetRenderDrawColor(self->renderer, 0, 0, 0, 255);
+        SDL_RenderClear(self->renderer);
+    }
     timing.mark(0);
 
     /* [video] display_rotation. SDL_RenderCopyEx maps src onto dst and THEN spins the result
        about dst's centre, so dst must be handed over UNROTATED (width and height swapped
        back) and centred where the rotated rect sits — otherwise a 4:3 image is squeezed into
        the 3:4 box armsx_render_compute_dst() produced and comes out distorted. */
-    const int rotation = params ? (params->rotation & 3) : 0;
-
     if (rotation == 0) {
         SDL_RenderCopy(self->renderer, self->texture, src_ptr, &dst);
     } else {

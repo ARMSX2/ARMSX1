@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 int zigzag[] = {
     0 , 1 , 5 , 6 , 14, 15, 27, 28,
@@ -45,24 +48,48 @@ float scalezag[] = {
 
 void real_idct(int16_t* blk, int16_t* scale) {
     int16_t buf[64];
-
     int16_t* src = blk;
     int16_t* dst = buf;
-
-    for (int pass = 0; pass < 2; pass++) {
-        for (int x = 0; x < 8; x++) {
-            for (int y = 0; y < 8; y++) {
+#if defined(__aarch64__)
+    int16x8_t scaled[8];
+    /* Signed scale division and both pass roundings must retain truncation
+       toward zero, including nonstandard tables supplied by a game. */
+    for (int z = 0; z < 8; ++z) {
+        int16_t row[8];
+        for (int x = 0; x < 8; ++x)
+            row[x] = scale[x + z * 8] / 8;
+        scaled[z] = vld1q_s16(row);
+    }
+#endif
+    for (int pass = 0; pass < 2; ++pass) {
+#if defined(__aarch64__)
+        /* Eight independent outputs, with the same product order as scalar.
+           16x16 -> 32-bit multiply-accumulate avoids horizontal reductions. */
+        for (int y = 0; y < 8; ++y) {
+            int32x4_t lo = vdupq_n_s32(0), hi = vdupq_n_s32(0);
+            for (int z = 0; z < 8; ++z) {
+                const int16_t value = src[y + z * 8];
+                lo = vmlal_n_s16(lo, vget_low_s16(scaled[z]), value);
+                hi = vmlal_n_s16(hi, vget_high_s16(scaled[z]), value);
+            }
+            lo = vaddq_s32(lo, vdupq_n_s32(0xfff));
+            hi = vaddq_s32(hi, vdupq_n_s32(0xfff));
+            lo = vaddq_s32(lo, vandq_s32(vshrq_n_s32(lo, 31), vdupq_n_s32(0x1fff)));
+            hi = vaddq_s32(hi, vandq_s32(vshrq_n_s32(hi, 31), vdupq_n_s32(0x1fff)));
+            vst1q_s16(dst + y * 8, vcombine_s16(vmovn_s32(vshrq_n_s32(lo, 13)),
+                                               vmovn_s32(vshrq_n_s32(hi, 13))));
+        }
+#else
+        for (int x = 0; x < 8; ++x) {
+            for (int y = 0; y < 8; ++y) {
                 int sum = 0;
-
-                for (int z = 0; z < 8; z++)
-                    sum += (int32_t)src[y+z*8] * ((int32_t)scale[x+z*8] / 8);
-                
-                dst[x+y*8] = (sum + 0xfff) / 0x2000;
+                for (int z = 0; z < 8; ++z)
+                    sum += (int32_t)src[y + z * 8] * ((int32_t)scale[x + z * 8] / 8);
+                dst[x + y * 8] = (sum + 0xfff) / 0x2000;
             }
         }
-
+#endif
         int16_t* temp = src;
-
         src = dst;
         dst = temp;
     }
@@ -213,18 +240,22 @@ void yuv_to_rgb(psx_mdec_t* mdec, uint8_t* buf, int xx, int yy) {
 
 void mdec_nop(psx_mdec_t* mdec) { /* Do nothing */ }
 
-static int mdec_grow_output(uint8_t** output, size_t old_size, size_t extra_size) {
-    uint8_t* grown;
-
+static int mdec_grow_output(uint8_t** output, size_t* capacity, size_t old_size, size_t extra_size) {
     if (extra_size > SIZE_MAX - old_size)
         return 0;
-
-    grown = (uint8_t*)realloc(*output, old_size + extra_size);
-
+    const size_t required = old_size + extra_size;
+    if (required <= *capacity)
+        return 1;
+    size_t next = *capacity ? *capacity : extra_size;
+    while (next < required) {
+        if (next > SIZE_MAX / 2) { next = required; break; }
+        next *= 2;
+    }
+    uint8_t* grown = (uint8_t*)realloc(*output, next);
     if (!grown)
         return 0;
-
     *output = grown;
+    *capacity = next;
     return 1;
 }
 
@@ -245,7 +276,7 @@ static void mdec_write_mono_block(const psx_mdec_t* mdec, uint8_t* output) {
     }
 }
 
-void mdec_decode_macroblock(psx_mdec_t* mdec) {
+static void mdec_decode_macroblock_impl(psx_mdec_t* mdec) {
     mdec_input_cursor_t cursor = {
         mdec->input,
         0,
@@ -253,6 +284,7 @@ void mdec_decode_macroblock(psx_mdec_t* mdec) {
     };
     uint8_t* decoded = NULL;
     size_t decoded_size = 0;
+    size_t decoded_capacity = 0;
     size_t block_size = (mdec->output_depth == 0) ? 32u :
                         (mdec->output_depth == 1) ? 64u :
                         (mdec->output_depth == 3) ? 512u : 768u;
@@ -273,7 +305,7 @@ void mdec_decode_macroblock(psx_mdec_t* mdec) {
             if (!rl_decode_block(mdec->yblk, &cursor, mdec->y_quant_table, mdec->scale_table))
                 break;
 
-            if (!mdec_grow_output(&decoded, decoded_size, block_size)) {
+            if (!mdec_grow_output(&decoded, &decoded_capacity, decoded_size, block_size)) {
                 allocation_failed = 1;
                 break;
             }
@@ -291,7 +323,7 @@ void mdec_decode_macroblock(psx_mdec_t* mdec) {
                 !rl_decode_block(mdec->yblk, &cursor, mdec->y_quant_table, mdec->scale_table))
                 break;
 
-            if (!mdec_grow_output(&decoded, decoded_size, block_size)) {
+            if (!mdec_grow_output(&decoded, &decoded_capacity, decoded_size, block_size)) {
                 allocation_failed = 1;
                 break;
             }
@@ -333,6 +365,13 @@ void mdec_decode_macroblock(psx_mdec_t* mdec) {
         free(decoded);
     }
 }
+
+void mdec_decode_macroblock(psx_mdec_t* mdec) {
+    const uint64_t start = psx_work_diag_start();
+    mdec_decode_macroblock_impl(mdec);
+    psx_work_diag_end(PSX_WORK_MDEC, start);
+}
+
 
 void mdec_set_iqtab(psx_mdec_t* mdec) {
     for (size_t i = 0; i < MDEC_QUANT_TABLE_SIZE; i++)

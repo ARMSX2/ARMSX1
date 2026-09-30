@@ -3031,6 +3031,9 @@ class ArmsxSession {
         runahead_prediction_.clear();
         runahead_sequence_.clear();
         runahead_reused_frames_ = 0;
+        g_psx_work_diag_enabled = 0;
+        work_frames_ = work_window_frames_ = 0;
+        work_totals_ = {}; work_worst_ = {}; work_worst_core_ = 0;
         // A capture still open here would leak its FILE* and lose its tail; closing it also
         // clears g_psx_audio_diag_enabled so a fresh session starts unarmed.
         audioDiagEnd();
@@ -3453,6 +3456,80 @@ class ArmsxSession {
         return true;
     }
 
+    // Automatic bounded work breakdown. CPU samples include memory-mapped
+    // device calls; audio queue may include SPU/disc work. Never sum categories.
+    void beginMaliWorkProbe() {
+        const bool enabled = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI
+            && work_frames_ < 10800; // Three minutes at 60 emulated frames/sec.
+        psx_work_diag_begin(enabled ? SDL_GetPerformanceCounter : nullptr);
+        if (enabled && work_frames_ == 0) {
+            psxe_diag_pacingf("work_begin schema=2 source=%s title=%s frame_limit=10800 "
+                "cpu_sample_stride=4093 inclusive_categories=yes",
+                workSourceId(), title_.c_str());
+        }
+    }
+
+    void finishMaliWorkProbe(uint64_t core_ticks) {
+        if (!g_psx_work_diag_enabled) return;
+        g_psx_work_diag_enabled = 0;
+        ++work_frames_;
+        ++work_window_frames_;
+        const auto& frame = g_psx_work_diag;
+        for (unsigned i = 0; i < PSX_WORK_COUNT; ++i) {
+            work_totals_.ticks[i] += frame.ticks[i];
+            work_totals_.calls[i] += frame.calls[i];
+            if (frame.max_ticks[i] > work_totals_.max_ticks[i]) {
+                work_totals_.max_ticks[i] = frame.max_ticks[i];
+                if (i == PSX_WORK_DISC) work_totals_.slowest_lba = frame.slowest_lba;
+            }
+        }
+        if (core_ticks > work_worst_core_) {
+            work_worst_core_ = core_ticks;
+            work_worst_ = frame;
+            work_worst_frame_ = work_frames_;
+        }
+        if (work_window_frames_ < 120 && work_frames_ < 10800) return;
+        const auto avg = [this](unsigned i) {
+            return CounterTicksToMilliseconds(work_totals_.ticks[i]) / work_window_frames_;
+        };
+        psxe_diag_pacingf("work_detail schema=2 source=%s frame=%u frames=%u "
+            "mdec_ms=%.3f spu_ms=%.3f disc_ms=%.3f audio_queue_ms=%.3f "
+            "mdec_calls=%u spu_calls=%u disc_reads=%u disc_max_ms=%.3f slowest_lba=%u "
+            "cpu_sample_calls=%u cpu_sample_mean_us=%.3f cpu_sample_max_us=%.3f "
+            "worst_frame=%u worst_core_ms=%.3f worst_mdec_ms=%.3f worst_spu_ms=%.3f "
+            "worst_disc_ms=%.3f worst_audio_queue_ms=%.3f gpu_raster_ms=%.3f gpu_raster_calls=%u worst_gpu_raster_ms=%.3f inclusive=yes",
+            workSourceId(), work_frames_, work_window_frames_,
+            avg(PSX_WORK_MDEC), avg(PSX_WORK_SPU), avg(PSX_WORK_DISC), avg(PSX_WORK_AUDIO_QUEUE),
+            work_totals_.calls[PSX_WORK_MDEC], work_totals_.calls[PSX_WORK_SPU],
+            work_totals_.calls[PSX_WORK_DISC], CounterTicksToMilliseconds(work_totals_.max_ticks[PSX_WORK_DISC]),
+            work_totals_.slowest_lba, work_totals_.calls[PSX_WORK_CPU_SAMPLE],
+            work_totals_.calls[PSX_WORK_CPU_SAMPLE] ?
+                CounterTicksToMilliseconds(work_totals_.ticks[PSX_WORK_CPU_SAMPLE]) * 1000.0 /
+                    work_totals_.calls[PSX_WORK_CPU_SAMPLE] : 0.0,
+            CounterTicksToMilliseconds(work_totals_.max_ticks[PSX_WORK_CPU_SAMPLE]) * 1000.0,
+            work_worst_frame_, CounterTicksToMilliseconds(work_worst_core_),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_MDEC]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_SPU]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_DISC]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_AUDIO_QUEUE]),
+            avg(PSX_WORK_GPU_RASTER), work_totals_.calls[PSX_WORK_GPU_RASTER],
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_GPU_RASTER]));
+        work_totals_ = {};
+        work_worst_ = {};
+        work_window_frames_ = 0;
+        work_worst_core_ = 0;
+        if (work_frames_ == 10800)
+            psxe_diag_pacingf("work_end source=%s reason=frame_budget", workSourceId());
+    }
+
+    static const char* workSourceId() {
+#ifdef ARMSX_SOURCE_ID
+        return ARMSX_SOURCE_ID;
+#else
+        return "unavailable";
+#endif
+    }
+
     void recordStallTiming(uint64_t start, uint64_t end, uint64_t core,
                            uint64_t upload, uint64_t draw, uint64_t wait) {
         if (!audio_diag_file_) return;
@@ -3573,7 +3650,9 @@ class ArmsxSession {
         psx_cheats_apply(psx_);
 
         const uint64_t audio_start = g_psx_audio_diag_enabled ? SDL_GetPerformanceCounter() : 0;
+        const uint64_t queue_work_start = psx_work_diag_start();
         queueAudioForFrame();
+        psx_work_diag_end(PSX_WORK_AUDIO_QUEUE, queue_work_start);
         if (audio_start) stall_audio_ticks_ = SDL_GetPerformanceCounter() - audio_start;
 
         // The grant ends with the frame it was made for. A frame that reached vblank in fewer
@@ -5736,6 +5815,9 @@ class ArmsxSession {
     int audio_realtime_window_frames_ = 0;
     ArmsxAudioDrcState audio_drc_{1.0, 1.0, 1.0, false};
     ArmsxAudioTimeStretcher audio_time_stretcher_;
+    unsigned work_frames_ = 0, work_window_frames_ = 0, work_worst_frame_ = 0;
+    uint64_t work_worst_core_ = 0;
+    psx_work_diag_t work_totals_{}, work_worst_{};
     std::filesystem::path disc_path_;
     std::filesystem::path exe_path_;
     std::string title_;
@@ -7487,8 +7569,10 @@ class ArmsxApp {
         }
 
         if (session_stepping) {
+            session_.beginMaliWorkProbe();
             session_steps = session_.runFrame();
             if (lag_probe) lag_core_end = SDL_GetPerformanceCounter();
+            session_.finishMaliWorkProbe(lag_core_end ? lag_core_end - lag_work_begin : 0);
             if (!skip_present) {
                 session_.updateTexture(settings_);
             }

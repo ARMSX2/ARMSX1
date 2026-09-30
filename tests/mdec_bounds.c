@@ -182,7 +182,23 @@ static void test_reset_drops_live_buffers(void) {
     psx_mdec_destroy(mdec);
 }
 
+static void test_many_macroblocks_then_partial(void) {
+    enum { complete = 300, halfwords = complete * 12 + 6 };
+    uint16_t* stream = malloc(halfwords * sizeof(*stream));
+    psx_mdec_t* mdec = new_mdec();
+    CHECK(stream != NULL);
+    fill_minimal_blocks(stream, halfwords / 2, 0xfe00);
+    write_decode(mdec, 2, stream, halfwords);
+    CHECK(mdec->output != NULL);
+    CHECK(mdec->output_words_remaining == complete * 768 / 4);
+    for (size_t i = 0; i < complete * 768; ++i)
+        CHECK(mdec->output[i] == 0x80);
+    free(stream);
+    psx_mdec_destroy(mdec);
+}
+
 int main(void) {
+    test_many_macroblocks_then_partial();
     test_exact_color_macroblock();
     test_partial_color_macroblocks();
     test_complete_then_partial();
