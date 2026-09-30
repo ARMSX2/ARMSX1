@@ -189,8 +189,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val recents = repository.recentGames(base.allGames)
         val recentOrder = recents.mapIndexed { index, game -> game.uri.toString() to index }.toMap()
         val forceEn = com.armsx2.EnglishTitles.enabled.value
+        val query = base.query.trim()
         val filtered = base.allGames.filter { game ->
-            val query = base.query.trim()
             // Exclude games the user marked hidden (long-press → Hide), unless "Show hidden" is on.
             (com.armsx2.HiddenGames.showHidden.value || !com.armsx2.HiddenGames.isHidden(game)) &&
                 (query.isBlank() ||
@@ -202,17 +202,32 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     game.serial?.contains(query, ignoreCase = true) == true ||
                     game.extension.contains(query, ignoreCase = true))
         }
+        // A broad contains-match remains useful ("bandicoot" finds "Crash Bandicoot"), but a
+        // single letter such as "C" should first show titles beginning with C. Without this rank,
+        // an earlier alphabetic title containing the letter in its subtitle can appear first and
+        // make the search look broken.
+        fun prefixRank(game: GameInfo): Int = if (query.isBlank() ||
+            game.title.startsWith(query, ignoreCase = true) ||
+            game.titleEn.startsWith(query, ignoreCase = true) ||
+            game.titleSort.startsWith(query, ignoreCase = true) ||
+            game.serial?.startsWith(query, ignoreCase = true) == true
+        ) 0 else 1
         // sortKey(), not the displayed title: a Japanese title sorts by its kana reading
         // (GameDB name-sort), because sorting the kanji sorts by codepoint — which is the
         // "sort by name-sort" half of issue #338.
         val sorted = when (base.sort) {
-            HomeSort.Title -> filtered.sortedBy { it.sortKey(forceEn).lowercase() }
+            HomeSort.Title -> filtered.sortedWith(
+                compareBy<GameInfo> { prefixRank(it) }
+                    .thenBy { it.sortKey(forceEn).lowercase() },
+            )
             HomeSort.RecentlyPlayed -> filtered.sortedWith(
-                compareBy<GameInfo> { recentOrder[it.uri.toString()] ?: Int.MAX_VALUE }
+                compareBy<GameInfo> { prefixRank(it) }
+                    .thenBy { recentOrder[it.uri.toString()] ?: Int.MAX_VALUE }
                     .thenBy { it.sortKey(forceEn).lowercase() },
             )
             HomeSort.Compatibility -> filtered.sortedWith(
-                compareByDescending<GameInfo> { it.compatibility }
+                compareBy<GameInfo> { prefixRank(it) }
+                    .thenByDescending { it.compatibility }
                     .thenBy { it.sortKey(forceEn).lowercase() },
             )
         }

@@ -147,14 +147,14 @@ object LibraryChromePreferences {
     private const val RecentsKey = "ui.library.showRecents"
     private const val OpacityKey = "ui.library.opacity"
 
-    val showSearch = mutableStateOf(false)
+    val showSearch = mutableStateOf(true)
     val showRecents = mutableStateOf(true)
     // Card/list translucency over the wallpaper, as a percent (20–100). 100 = the old
     // fully-opaque look; lower lets the library background show through the game rows.
     val libraryOpacity = mutableStateOf(100)
 
     fun load() {
-        showSearch.value = MainActivityRuntime.prefs.getBoolean(SearchKey, false)
+        showSearch.value = MainActivityRuntime.prefs.getBoolean(SearchKey, true)
         showRecents.value = MainActivityRuntime.prefs.getBoolean(RecentsKey, true)
         libraryOpacity.value = MainActivityRuntime.prefs.getInt(OpacityKey, 100).coerceIn(20, 100)
     }

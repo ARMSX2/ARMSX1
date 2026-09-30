@@ -257,6 +257,11 @@ fun HomeScreen(
             LaunchedEffect(estimatedColumns) { HomeInputController.setColumnCount(estimatedColumns) }
 
             val gridState = rememberLazyGridState()
+            // A new query is a new result set. Keeping the previous lazy-grid position can land
+            // halfway through that set and hide the strongest matches above the keyboard.
+            LaunchedEffect(state.query) {
+                if (state.query.isNotBlank()) gridState.scrollToItem(0)
+            }
             val density = LocalDensity.current
             LaunchedEffect(gridState) {
                 var lastFrame = withFrameNanos { it }

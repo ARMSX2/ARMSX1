@@ -28,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.draw.clip
@@ -167,6 +168,12 @@ object LibraryKeyboard {
     @Composable
     fun Overlay(scope: BoxScope) {
         if (!visible.value) return
+        val compact = LocalConfiguration.current.screenHeightDp <= 500
+        val outerPadding = if (compact) 6.dp else 10.dp
+        val innerPadding = if (compact) 8.dp else 12.dp
+        val rowSpacing = if (compact) 3.dp else 6.dp
+        val keySpacing = if (compact) 3.dp else 5.dp
+        val keyHeight = if (compact) 38.dp else 52.dp
         with(scope) {
         // Dim the library behind, and swallow stray taps so they don't hit covers.
         Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.5f)).clickable(enabled = false) {})
@@ -174,32 +181,45 @@ object LibraryKeyboard {
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(10.dp),
+                .padding(outerPadding),
             shape = RoundedCornerShape(22.dp),
             color = MaterialTheme.colorScheme.surface,
             shadowElevation = 18.dp,
         ) {
             Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                Modifier.padding(innerPadding),
+                verticalArrangement = Arrangement.spacedBy(rowSpacing),
             ) {
                 if (useSystemIme.value) {
                     SystemImeField()
                     return@Column
                 }
-                Text(
-                    text = text.value.ifEmpty { placeholder.value },
-                    color = if (text.value.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.onSurface,
-                    fontSize = 18.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-                )
+                Surface(
+                    modifier = Modifier.fillMaxWidth().height(if (compact) 40.dp else 48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("⌕", fontSize = if (compact) 18.sp else 21.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = text.value.ifEmpty { placeholder.value },
+                            color = if (text.value.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onPrimaryContainer,
+                            fontSize = if (compact) 16.sp else 18.sp,
+                            fontWeight = if (text.value.isEmpty()) FontWeight.Normal else FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 10.dp),
+                        )
+                    }
+                }
                 rows.forEachIndexed { r, keys ->
                     Row(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(keySpacing),
                     ) {
                         keys.forEachIndexed { c, key ->
                             KeyCap(
@@ -207,6 +227,8 @@ object LibraryKeyboard {
                                 selected = (row.intValue == r && col.intValue == c) ||
                                     (key == SHIFT && shifted.value),
                                 weight = weightOf(key),
+                                height = keyHeight,
+                                compact = compact,
                                 onClick = {
                                     row.intValue = r
                                     col.intValue = c
@@ -254,12 +276,19 @@ object LibraryKeyboard {
     }
 
     @Composable
-    private fun RowScope.KeyCap(label: String, selected: Boolean, weight: Float, onClick: () -> Unit) {
+    private fun RowScope.KeyCap(
+        label: String,
+        selected: Boolean,
+        weight: Float,
+        height: androidx.compose.ui.unit.Dp,
+        compact: Boolean,
+        onClick: () -> Unit,
+    ) {
         Box(
             modifier = Modifier
                 .weight(weight)
-                .height(52.dp)
-                .clip(RoundedCornerShape(11.dp))
+                .height(height)
+                .clip(RoundedCornerShape(if (compact) 9.dp else 11.dp))
                 .background(
                     if (selected) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.surfaceVariant,
@@ -272,7 +301,11 @@ object LibraryKeyboard {
                 color = if (selected) MaterialTheme.colorScheme.onPrimary
                 else MaterialTheme.colorScheme.onSurface,
                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                fontSize = if (label.length > 1) 14.sp else 18.sp,
+                fontSize = if (label.length > 1) {
+                    if (compact) 12.sp else 14.sp
+                } else {
+                    if (compact) 16.sp else 18.sp
+                },
                 maxLines = 1,
             )
         }
