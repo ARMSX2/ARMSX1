@@ -828,8 +828,11 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     // from the ACTIVE scope: if this game pins the key that was just changed, the row snaps back to
     // the pinned value instead of lying about having applied. Ps1PerGameNotice below names those
     // keys and offers to drop them, so the "why did nothing happen" question is answered on screen.
-    val editPs1: ((com.armsx2.config.Ps1Settings) -> com.armsx2.config.Ps1Settings) -> Unit = { transform ->
-        runCatching { com.armsx2.config.Ps1SettingsStore.update(context, null, transform) }
+    fun writePs1(
+        gameKey: String?,
+        transform: (com.armsx2.config.Ps1Settings) -> com.armsx2.config.Ps1Settings,
+    ) {
+        runCatching { com.armsx2.config.Ps1SettingsStore.update(context, gameKey, transform) }
         ps1 = runCatching { com.armsx2.config.Ps1SettingsStore.active(context) }.getOrDefault(ps1)
         // A full-file rewrite moves nothing in [runtime], but Ps1Pacing caches that table, so
         // drop and re-push it rather than leave a cache that could disagree with the file.
@@ -837,6 +840,18 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         com.armsx2.core.Ps1Pacing.push(context)
         com.armsx2.core.Ps1Display.push(context)
         com.armsx2.core.Ps1Emulation.push(context)
+    }
+    val editPs1: ((com.armsx2.config.Ps1Settings) -> com.armsx2.config.Ps1Settings) -> Unit =
+        { transform -> writePs1(null, transform) }
+
+    // Resolution is different from the other default-oriented rows above: the user is looking at
+    // one running game's output and expects the selected multiplier to survive its restart. If the
+    // title already has a per-game graphics layer, writing global makes that layer immediately win
+    // and the 2x/3x chip snaps back to 1x. Persist both `renderer` and `internal_scale` at the active
+    // game's tier (falling back to global for BIOS/direct boots without an identity).
+    val editRunningResolution:
+        ((com.armsx2.config.Ps1Settings) -> com.armsx2.config.Ps1Settings) -> Unit = { transform ->
+        writePs1(com.armsx2.config.Ps1SettingsStore.activeGameKey, transform)
     }
 
     com.armsx2.ui.settings.Ps1PerGameNotice(context)
@@ -917,7 +932,11 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         title = str("renderer.upscale.label"),
         options = listOf(1 to "Native") + (2..8).map { it to "${it}x" },
         selected = if (ps1.hwRasterizer) ps1.internalScale.coerceIn(1, 8) else 1,
-        onSelect = { scale -> editPs1 { it.copy(hwRasterizer = scale > 1, internalScale = scale) } },
+        onSelect = { scale ->
+            editRunningResolution {
+                it.copy(hwRasterizer = scale > 1, internalScale = scale)
+            }
+        },
     )
 
     // DISPLAY MODE — the other half of the report. It used to write Settings.aspectRatio, whose

@@ -282,25 +282,39 @@ fun Ps1VideoTab() {
         )
         SettingsDivider()
 
-        if (s.hwRasterizer) {
-            val resetScaleInternal: (() -> Unit)? =
-                if (s.internalScale != Ps1Settings().internalScale) {
-                    { editor.update { it.copy(internalScale = Ps1Settings().internalScale) } }
-                } else {
-                    null
+        // Keep this control visible even when the software rasteriser is active. Previously the
+        // user could change the unrelated display/window scale and reasonably believe that was
+        // PS1 rendering resolution, while the actual Internal Resolution row was hidden. Choosing
+        // 2x or higher now selects the only renderer capable of honouring it; returning to Native
+        // restores the classic software path. Persist both fields in one edit so a per-game layer
+        // cannot retain one half of an impossible renderer/scale combination.
+        val resetScaleInternal: (() -> Unit)? =
+            if (s.hwRasterizer || s.internalScale != Ps1Settings().internalScale) {
+                {
+                    editor.update {
+                        it.copy(hwRasterizer = false, internalScale = Ps1Settings().internalScale)
+                    }
                 }
-            IntSliderRow(
-                label = str("renderer.internalRes.label"),
-                value = s.internalScale.coerceIn(1, 8),
-                min = 1,
-                max = 8,
-                description = str("renderer.internalRes.description"),
-                valueFormatter = { "${it}x" },
-                onReset = resetScaleInternal,
-                onChange = { v -> editor.update { it.copy(internalScale = v) } },
-            )
-            SettingsDivider()
-        }
+            } else {
+                null
+            }
+        IntSliderRow(
+            label = str("renderer.internalRes.label"),
+            value = if (s.hwRasterizer) s.internalScale.coerceIn(1, 8) else 1,
+            min = 1,
+            max = 8,
+            description = str("renderer.internalRes.description"),
+            valueFormatter = { if (it == 1) "Native" else "${it}x" },
+            onReset = resetScaleInternal,
+            onChange = { v ->
+                editor.update { it.copy(hwRasterizer = v > 1, internalScale = v) }
+                println(
+                    "@@PS1_RESOLUTION@@ scale=$v renderer=" +
+                        if (v > 1) "hardware" else "software",
+                )
+            },
+        )
+        SettingsDivider()
 
         // ---- Device output --------------------------------------------------------------------
         // HOST levers: they act on the phone's output surface and clock policy, not on the

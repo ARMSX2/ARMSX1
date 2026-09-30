@@ -387,6 +387,7 @@ typedef struct {
 
     GLuint rt_tex, rt_fbo;
     GLuint vram_tex;
+    uint16_t* uploaded_vram; /* Last CPU upload, used only while host VRAM is authoritative. */
     GLuint vram_fbo;                   /* vram_tex as a TARGET:  row 1's GPU->GPU resolve */
     int    vram_fbo_state;             /* 0 untried, 1 complete, -1 unusable */
     GLuint scratch_tex, scratch_fbo;   /* GP0(80) needs a bounce; GL forbids self-blit */
@@ -1623,6 +1624,19 @@ static void gl_release(hw_gl_t* g) {
 
 /* ---- vram texture sync ---------------------------------------------------------------- */
 
+static int gl_uploaded_region_matches(const hw_gl_t* g, int x, int y, int w, int h) {
+    if (!g->uploaded_vram || g->gpu_own || w <= 0 || h <= 0 ||
+        x < 0 || y < 0 || x + w > 1024 || y + h > 512)
+        return 0;
+    for (int row = y; row < y + h; row++) {
+        const size_t offset = (size_t)row * 1024 + x;
+        if (memcmp(g->uploaded_vram + offset, g->gpu->vram + offset,
+                   (size_t)w * sizeof(uint16_t)) != 0)
+            return 0;
+    }
+    return 1;
+}
+
 /* Uploads every dirty tile that overlaps the requested rectangle and clears those bits.
    Called only when a textured primitive is about to sample a region host VRAM has written
    since the last sync — the framebuffer being permanently dirty costs nothing as long as
@@ -1702,6 +1716,14 @@ static void gl_sync_vram(hw_gl_t* g, int x, int y, int w, int h) {
 
             g->gl.TexSubImage2D(GL_TEXTURE_2D, 0, px, py, pw, ph, GL_RED_INTEGER,
                                 GL_UNSIGNED_SHORT, vram + px + (size_t)py * 1024);
+
+            if (g->uploaded_vram && !g->gpu_own) {
+                for (int row = py; row < py + ph; row++) {
+                    const size_t offset = (size_t)row * 1024 + px;
+                    memcpy(g->uploaded_vram + offset, vram + offset,
+                           (size_t)pw * sizeof(uint16_t));
+                }
+            }
 
             g->stat_syncs++;
             g->stat_sync_px += (uint32_t)(pw * ph);
@@ -2316,16 +2338,31 @@ static void gl_repl_resolve(hw_gl_t* g, psx_gpu_t* gpu) {
     g->cur_repl[3] = 0;
 }
 
-/* Region of VRAM a textured primitive reads: the whole texture page plus the CLUT row.
-   Deliberately coarse — narrowing it to the primitive's UV box is a later optimisation and
-   being too WIDE only costs an unnecessary sync, never correctness. */
-static void gl_note_sample(hw_gl_t* g, uint16_t texp, uint16_t clut) {
+/* Region of VRAM a textured primitive reads, plus its complete CLUT. A zero-sized
+   footprint requests the conservative whole-page path. */
+static void gl_note_sample(hw_gl_t* g, uint16_t texp, uint16_t clut,
+                           int u, int v, int width, int height) {
     int tpx = (texp & 0xf) << 6;
     int tpy = (texp & 0x10) << 4;
     int depth = (texp >> 7) & 3;
     int clutx = (clut & 0x3f) << 4;
     int cluty = (clut >> 6) & 0x1ff;
     int words = (depth == 0) ? 64 : ((depth == 1) ? 128 : 256);
+    int rows = 256;
+
+    /* The caller supplies an inclusive texel footprint for sprites and nearest-filtered
+       polygons. Retain the whole page for texture windows and UV wrapping. Include every
+       packed word touched by the primitive and retain the full palette below. */
+    if (!g->gpu->texw_mx && !g->gpu->texw_my &&
+        width > 0 && height > 0 && u >= 0 && v >= 0 &&
+        u < 256 && v < 256 && width <= 256 - u && height <= 256 - v) {
+        const int shift = depth == 0 ? 2 : (depth == 1 ? 1 : 0);
+        const int first_word = u >> shift;
+        words = ((u + width - 1) >> shift) - first_word + 1;
+        tpx = (tpx + first_word) & 1023;
+        tpy += v;
+        rows = height;
+    }
 
     if (g->dbg_geom && (g->frames == 3500) && (g->geom_left > 0)) {
         g->geom_left--;
@@ -2343,10 +2380,10 @@ static void gl_note_sample(hw_gl_t* g, uint16_t texp, uint16_t clut) {
     int count = 0;
     const int page_width = words < 1024 - tpx ? words : 1024 - tpx;
     regions[count][0] = tpx; regions[count][1] = tpy;
-    regions[count][2] = page_width; regions[count++][3] = 256;
+    regions[count][2] = page_width; regions[count++][3] = rows;
     if (page_width < words) {
         regions[count][0] = 0; regions[count][1] = tpy;
-        regions[count][2] = words - page_width; regions[count++][3] = 256;
+        regions[count][2] = words - page_width; regions[count++][3] = rows;
     }
     if (depth < 2) {
         const int entries = depth == 0 ? 16 : 256;
@@ -2360,7 +2397,10 @@ static void gl_note_sample(hw_gl_t* g, uint16_t texp, uint16_t clut) {
     }
     for (int i = 0; i < count; ++i) {
         const int* r = regions[i];
-        if (tiles_intersects(&g->dirty, r[0], r[1], r[2], r[3])) {
+        /* A dirty tile can contain an unchanged palette or texture. Do not clear its
+           dirty bit here: another primitive may need the changed part of that tile. */
+        if (tiles_intersects(&g->dirty, r[0], r[1], r[2], r[3]) &&
+            !gl_uploaded_region_matches(g, r[0], r[1], r[2], r[3])) {
             gl_flush(g);
             gl_sync_vram(g, r[0], r[1], r[2], r[3]);
         }
@@ -2727,8 +2767,21 @@ static void gl_triangle(hw_gl_t* g, psx_gpu_t* gpu, const poly_data_t* poly,
     if (!g->dbg_defer_dirty)
         gl_mark_drawn(g, xmin, ymin, xmax - xmin, ymax - ymin);
 
-    if (poly->attrib & PA_TEXTURED)
-        gl_note_sample(g, poly->texp, poly->clut);
+    if (poly->attrib & PA_TEXTURED) {
+        if (g_opt_texture_filter == 0) {
+            /* The shader clamps interpolated UV to these vertex extrema before nearest
+               sampling, including PGXP. Both endpoints can be sampled. Filtered modes
+               retain whole-page tracking because their kernels read neighbouring texels. */
+            const int u0 = gl_min3(a.tx, b.tx, c.tx);
+            const int v0 = gl_min3(a.ty, b.ty, c.ty);
+            const int u1 = gl_max3(a.tx, b.tx, c.tx);
+            const int v1 = gl_max3(a.ty, b.ty, c.ty);
+            gl_note_sample(g, poly->texp, poly->clut, u0, v0,
+                           u1 - u0 + 1, v1 - v0 + 1);
+        } else {
+            gl_note_sample(g, poly->texp, poly->clut, 0, 0, 0, 0);
+        }
+    }
 
     if (pgxp) {
         /* Precise coords are pre-offset SXY space; apply the drawing offset exactly as the
@@ -2967,7 +3020,7 @@ static void gl_draw_rect(psx_gpu_backend_t* be, psx_gpu_t* gpu, const rect_data_
         gl_mark_drawn(g, x0, y0, x1 - x0, y1 - y0);
 
     if (data.attrib & RA_TEXTURED)
-        gl_note_sample(g, texp, data.clut);
+        gl_note_sample(g, texp, data.clut, data.v0.tx, data.v0.ty, width, height);
 
     gl_emit_quad(g, x0, y0, x1, y1, data.v0.c, data.v0.tx, data.v0.ty,
                  texp, data.clut, flags, mode);
@@ -5087,7 +5140,10 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
             return NULL;
         }
 
-        g->prog_draw = gl_link(g, kDrawVS, draw_fs, kDrawAttribs, 10, "draw");
+        /* Bind every input, including PGXP weights and replacement metadata. Leaving
+           either unbound lets the driver swap their locations and corrupt texturing. */
+        g->prog_draw = gl_link(g, kDrawVS, draw_fs, kDrawAttribs,
+                               (int)(sizeof(kDrawAttribs) / sizeof(kDrawAttribs[0])), "draw");
         free(draw_fs);
     }
 
@@ -5171,6 +5227,11 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
     g->gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     g->gl.TexImage2D(GL_TEXTURE_2D, 0, GL_R16UI, 1024, 512, 0, GL_RED_INTEGER,
                      GL_UNSIGNED_SHORT, gpu->vram);
+    if (!g->gpu_own) {
+        g->uploaded_vram = (uint16_t*)malloc(1024u * 512u * sizeof(uint16_t));
+        if (g->uploaded_vram)
+            memcpy(g->uploaded_vram, gpu->vram, 1024u * 512u * sizeof(uint16_t));
+    }
 
     g->gl.GenBuffers(1, &g->vbo);
     g->gl.GenVertexArrays(1, &g->vao);
@@ -5310,6 +5371,7 @@ release_libraries:
     free(g->ranges);
     free(g->readback);
     free(g->native_rb);
+    free(g->uploaded_vram);
 
     if (g->egl_library)
         dlclose(g->egl_library);
