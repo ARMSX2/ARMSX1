@@ -8,11 +8,6 @@
 
 #include "../psx/dev/gpu.h"
 #include "../psx/dev/gpu_backend.h"
-#include "../psx/perf.h"
-#include "../frontend/gpu_hw.h"
-#include "../frontend/gpu_hw_rt.h"
-#include "../frontend/gpu_pgxp.h"
-#include "../psx/pgxp.h"
 
 void log_log(int level, const char* file, int line, const char* format, ...) {
     (void)level;
@@ -26,29 +21,10 @@ void psx_ic_irq(psx_ic_t* ic, int id) {
     (void)id;
 }
 
-/* psx/dev/gpu.c carries save-state code that pulls in psx/state.c, which in turn wants
-   every other device in the machine. None of it is exercised here, so it is stubbed
-   rather than linked. */
-void psx_sw_u8(psx_state_writer_t* w, uint8_t v) { (void)w; (void)v; }
-void psx_sw_u16(psx_state_writer_t* w, uint16_t v) { (void)w; (void)v; }
-void psx_sw_u32(psx_state_writer_t* w, uint32_t v) { (void)w; (void)v; }
-void psx_sw_i32(psx_state_writer_t* w, int32_t v) { (void)w; (void)v; }
-void psx_sw_f32(psx_state_writer_t* w, float v) { (void)w; (void)v; }
-void psx_sw_u16_array(psx_state_writer_t* w, const uint16_t* v, size_t n) { (void)w; (void)v; (void)n; }
-uint8_t psx_sr_u8(psx_state_reader_t* r) { (void)r; return 0; }
-uint16_t psx_sr_u16(psx_state_reader_t* r) { (void)r; return 0; }
-uint32_t psx_sr_u32(psx_state_reader_t* r) { (void)r; return 0; }
-int32_t psx_sr_i32(psx_state_reader_t* r) { (void)r; return 0; }
-float psx_sr_f32(psx_state_reader_t* r) { (void)r; return 0.0f; }
-void psx_sr_u16_array(psx_state_reader_t* r, uint16_t* v, size_t n) { (void)r; (void)v; (void)n; }
-
-
-
 #include "../frontend/gpu_hw_gl.c"
 void psxe_diag_logf(const char* tag,const char* fmt,...) { va_list a; va_start(a,fmt); vprintf(fmt,a); puts(""); va_end(a); }
 const char* psxe_diag_log_path(void) { return NULL; }
 int armsx_render_active_name(char* b,int n) { snprintf(b,n,"OpenGL ES (system)");return 1; }
-bool armsx_renderer_adopt_gl_texture(armsx_renderer_t* r,unsigned int t,int w,int h,uint32_t f) {return false;}
 /* Run on Android with a real GLES driver. Include the backend above so these checks
    render directly, without the software shadow hiding missing primitives. */
 int main(void) {
