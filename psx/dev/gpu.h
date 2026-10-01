@@ -310,6 +310,9 @@ void psx_gpu_update(psx_gpu_t*, int);
 void gpu_render_triangle(psx_gpu_t*, vertex_t, vertex_t, vertex_t, poly_data_t, int);
 void gpu_render_rect(psx_gpu_t*, rect_data_t);
 void gpu_render_flat_line(psx_gpu_t*, vertex_t, vertex_t, uint32_t);
+typedef void (*psx_gpu_line_pixel_fn)(void*, psx_gpu_t*, int, int, uint16_t, uint8_t);
+void psx_gpu_raster_line(psx_gpu_t*, vertex_t, vertex_t, uint16_t, uint8_t,
+                         psx_gpu_line_pixel_fn, void*);
 uint16_t gpu_fetch_texel(psx_gpu_t*, uint16_t, uint16_t, uint32_t, uint32_t, uint16_t, uint16_t, int);
 /* Used unconditionally by polygons (gpu.c:359) — sprites point-sample instead. A backend
    has to call the same one the software path would to stay pixel-identical at 1x. */

@@ -593,7 +593,7 @@ static void rt_plot_line_low(armsx_hw_rt_t* rt, psx_gpu_t* gpu, int x0, int y0, 
     int d = (2 * dy) - dx;
     int y = y0;
 
-    for (int x = x0; x < x1; x++) {
+    for (int x = x0; x <= x1; x++) {
         rt_plot(rt, gpu, x, y, color);
 
         if (d > 0) {
@@ -618,7 +618,7 @@ static void rt_plot_line_high(armsx_hw_rt_t* rt, psx_gpu_t* gpu, int x0, int y0,
     int d = (2 * dx) - dy;
     int x = x0;
 
-    for (int y = y0; y < y1; y++) {
+    for (int y = y0; y <= y1; y++) {
         rt_plot(rt, gpu, x, y, color);
 
         if (d > 0) {
@@ -630,14 +630,36 @@ static void rt_plot_line_high(armsx_hw_rt_t* rt, psx_gpu_t* gpu, int x0, int y0,
     }
 }
 
+static void rt_plot_line_pixel(void* context, psx_gpu_t* gpu, int x, int y,
+                               uint16_t color, uint8_t command) {
+    armsx_hw_rt_t* rt = (armsx_hw_rt_t*)context;
+    if (command & 0x02) {
+        const uint16_t back = rt->rt[(y * rt->scale) * rt->rt_w + x * rt->scale];
+        color = psx_gpu_blend_rgb555(back, color, (gpu->gpustat >> 5) & 3);
+    }
+    rt_plot(rt, gpu, x, y, color);
+}
+
 static void rt_draw_line(psx_gpu_backend_t* be, psx_gpu_t* gpu,
-                         const vertex_t* in0, const vertex_t* in1, uint16_t color) {
+                         const vertex_t* in0, const vertex_t* in1,
+                         uint16_t color, uint8_t command) {
     armsx_hw_rt_t* rt = rt_self(be);
+
+    if (command & 0x12) {
+        psx_gpu_raster_line(gpu, *in0, *in1, color, command,
+                            rt_plot_line_pixel, rt);
+        return;
+    }
 
     int x0 = in0->x + gpu->off_x;
     int y0 = in0->y + gpu->off_y;
     int x1 = in1->x + gpu->off_x;
     int y1 = in1->y + gpu->off_y;
+
+    if (x0 == x1 && y0 == y1) {
+        rt_plot(rt, gpu, x0, y0, color);
+        return;
+    }
 
     if (abs(y1 - y0) < abs(x1 - x0)) {
         if (x0 > x1) {

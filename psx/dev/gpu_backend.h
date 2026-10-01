@@ -61,11 +61,10 @@ typedef struct psx_gpu_backend {
                       const struct poly_data_t* poly);
     void (*draw_rect)(struct psx_gpu_backend* be, struct psx_gpu_t* gpu,
                       const struct rect_data_t* rect);
-    /* Flat only. gpu_render_flat_line() discards v1's colour (gpu.c:1252) and applies
-       neither dithering nor blending; polylines are parsed but never drawn (gpu.c:1193). */
+    /* The command byte carries shading and semi-transparency for lines. */
     void (*draw_line)(struct psx_gpu_backend* be, struct psx_gpu_t* gpu,
                       const struct vertex_t* v0, const struct vertex_t* v1,
-                      uint16_t color_bgr555);
+                      uint16_t color_bgr555, uint8_t command);
 
     /* ---- VRAM transfers, all in NATIVE coordinates ---- */
 

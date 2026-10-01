@@ -3055,7 +3055,7 @@ static void gl_line_low(hw_gl_t* g, int x0, int y0, int x1, int y1, uint32_t col
     d = (2 * dy) - dx;
     y = y0;
 
-    for (x = x0; x < x1; x++) {
+    for (x = x0; x <= x1; x++) {
         gl_plot(g, x, y, color24);
 
         if (d > 0) {
@@ -3078,7 +3078,7 @@ static void gl_line_high(hw_gl_t* g, int x0, int y0, int x1, int y1, uint32_t co
     d = (2 * dx) - dy;
     x = x0;
 
-    for (y = y0; y < y1; y++) {
+    for (y = y0; y <= y1; y++) {
         gl_plot(g, x, y, color24);
 
         if (d > 0) {
@@ -3090,8 +3090,20 @@ static void gl_line_high(hw_gl_t* g, int x0, int y0, int x1, int y1, uint32_t co
     }
 }
 
+static void gl_plot_line_pixel(void* context, psx_gpu_t* gpu, int x, int y,
+                               uint16_t color, uint8_t command) {
+    hw_gl_t* g = (hw_gl_t*)context;
+    uint32_t color24 = (uint32_t)((color & 0x1f) << 3) |
+                       (uint32_t)((((color >> 5) & 0x1f) << 3) << 8) |
+                       (uint32_t)((((color >> 10) & 0x1f) << 3) << 16);
+    gl_emit_quad(g, x, y, x + 1, y + 1, color24, 0, 0, 0, 0,
+                 (command & 0x02) ? GLF_TRANSP : 0,
+                 (uint16_t)((gpu->gpustat >> 5) & 3));
+}
+
 static void gl_draw_line(psx_gpu_backend_t* be, psx_gpu_t* gpu,
-                         const vertex_t* pv0, const vertex_t* pv1, uint16_t color_bgr555) {
+                         const vertex_t* pv0, const vertex_t* pv1,
+                         uint16_t color_bgr555, uint8_t command) {
     hw_gl_t* g = gl_self(be);
     int x0 = pv0->x + gpu->off_x;
     int y0 = pv0->y + gpu->off_y;
@@ -3120,6 +3132,17 @@ static void gl_draw_line(psx_gpu_backend_t* be, psx_gpu_t* gpu,
        target owns the result and the mark belongs in gpu_dirty. */
     gl_write_flush(g, lo_x, lo_y, hi_x - lo_x + 1, hi_y - lo_y + 1);
     gl_mark_drawn(g, lo_x, lo_y, hi_x - lo_x + 1, hi_y - lo_y + 1);
+
+    if (command & 0x12) {
+        psx_gpu_raster_line(gpu, *pv0, *pv1, color_bgr555, command,
+                            gl_plot_line_pixel, g);
+        return;
+    }
+
+    if (x0 == x1 && y0 == y1) {
+        gl_plot(g, x0, y0, color24);
+        return;
+    }
 
     if (abs(y1 - y0) < abs(x1 - x0)) {
         if (x0 > x1) gl_line_low(g, x1, y1, x0, y0, color24);

@@ -155,7 +155,7 @@ static void emit_rect(psx_gpu_t* gpu, const rect_data_t* rect) {
 static void emit_line(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, uint16_t color) {
     gpu->gpustat |= g_test_force_gpustat;
     if (gpu->backend && gpu->backend->draw_line)
-        gpu->backend->draw_line(gpu->backend, gpu, &v0, &v1, color);
+        gpu->backend->draw_line(gpu->backend, gpu, &v0, &v1, color, 0x40);
 
     gpu_render_flat_line(gpu, v0, v1, color);
 }
@@ -295,6 +295,7 @@ static void draw_corpus(psx_gpu_t* gpu) {
     /* Lines: shallow, steep and reversed, so both Bresenham branches run. */
     emit_line(gpu, (vertex_t){.x = 70, .y = 60}, (vertex_t){.x = 300, .y = 130}, 0x7c1f);
     emit_line(gpu, (vertex_t){.x = 290, .y = 220}, (vertex_t){.x = 110, .y = 55}, 0x03ff);
+    emit_line(gpu, (vertex_t){.x = 315, .y = 125}, (vertex_t){.x = 315, .y = 125}, 0x7fffu);
 
     /* Transfers. fill and copy go through the same hooks gpu.c calls. */
     if (gpu->backend && gpu->backend->fill_vram)
@@ -1124,12 +1125,75 @@ static int check_polyline_long_still_terminates(void) {
     return failed;
 }
 
+static int check_single_pixel_line(void) {
+    const char* name = "single-pixel-line";
+    psx_gpu_t* gpu = make_gpu();
+    int failed = 0;
+
+    if (!gpu) {
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=allocation\n", name);
+        return 1;
+    }
+
+    gpu_render_flat_line(gpu, (vertex_t){.x = 37, .y = 43},
+                         (vertex_t){.x = 37, .y = 43}, 0x7fffu);
+    if (gpu->vram[37 + 43 * 1024] != 0x7fffu)
+        failed = 1;
+
+    /* The draw area still clips the point exactly as it clips ordinary lines. */
+    gpu->draw_x2 = 36;
+    gpu_render_flat_line(gpu, (vertex_t){.x = 37, .y = 44},
+                         (vertex_t){.x = 37, .y = 44}, 0x7fffu);
+    if (gpu->vram[37 + 44 * 1024] != 0)
+        failed = 1;
+
+    if (failed)
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=point-or-clip\n", name);
+    else
+        printf("GPU_PARITY passed case=%s\n", name);
+
+    psx_gpu_destroy(gpu);
+    return failed;
+}
+
+static int check_shaded_transparent_line(void) {
+    const char* name = "shaded-transparent-line";
+    psx_gpu_t* gpu = make_gpu();
+    int failed = 0;
+
+    if (!gpu) {
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=allocation\n", name);
+        return 1;
+    }
+
+    /* Crash 2's stars use GP0(52): a black start and gray finish, often only
+       one pixel apart. Mode B+F must preserve the gray endpoint. */
+    gpu->gpustat = (gpu->gpustat & ~0x60u) | 0x20u;
+    psx_gpu_write32(gpu, 0x00, 0x52000000u);
+    psx_gpu_write32(gpu, 0x00, 0x00320032u);
+    psx_gpu_write32(gpu, 0x00, 0x00808080u);
+    psx_gpu_write32(gpu, 0x00, 0x00320033u);
+    if (gpu->vram[50 + 50 * 1024] != 0 ||
+        gpu->vram[51 + 50 * 1024] != 0x4210u)
+        failed = 1;
+
+    if (failed)
+        fprintf(stderr, "GPU_PARITY failed case=%s reason=missing-shaded-endpoint\n", name);
+    else
+        printf("GPU_PARITY passed case=%s\n", name);
+
+    psx_gpu_destroy(gpu);
+    return failed;
+}
+
 static int run_polyline_overrun_case(void) {
     int failed = 0;
 
     failed |= check_polyline_unterminated();
     failed |= check_polyline_aimed_at_draw_state();
     failed |= check_polyline_long_still_terminates();
+    failed |= check_single_pixel_line();
+    failed |= check_shaded_transparent_line();
 
     return failed;
 }

@@ -1531,7 +1531,7 @@ void plotLineLow(psx_gpu_t* gpu, int x0, int y0, int x1, int y1, uint16_t color)
     int d = (2 * dy) - dx;
     int y = y0;
 
-    for (int x = x0; x < x1; x++) {
+    for (int x = x0; x <= x1; x++) {
         int bc = (x >= gpu->draw_x1) && (x <= gpu->draw_x2) &&
                  (y >= gpu->draw_y1) && (y <= gpu->draw_y2);
 
@@ -1558,7 +1558,7 @@ void plotLineHigh(psx_gpu_t* gpu, int x0, int y0, int x1, int y1, uint16_t color
     int d = (2 * dx) - dy;
     int x = x0;
 
-    for (int y = y0; y < y1; y++) {
+    for (int y = y0; y <= y1; y++) {
         int bc = (x >= gpu->draw_x1) && (x <= gpu->draw_x2) &&
                  (y >= gpu->draw_y1) && (y <= gpu->draw_y2);
 
@@ -1575,6 +1575,14 @@ void plotLineHigh(psx_gpu_t* gpu, int x0, int y0, int x1, int y1, uint16_t color
 }
 
 void plotLine(psx_gpu_t* gpu, int x0, int y0, int x1, int y1, uint16_t color) {
+    /* Overlapping PS1 line vertices still plot one pixel. */
+    if (x0 == x1 && y0 == y1) {
+        if (x0 >= 0 && x0 < 1024 && y0 >= 0 && y0 < 512 &&
+            x0 >= gpu->draw_x1 && x0 <= gpu->draw_x2 &&
+            y0 >= gpu->draw_y1 && y0 <= gpu->draw_y2)
+            gpu->vram[x0 + y0 * 1024] = color;
+        return;
+    }
     if (abs(y1 - y0) < abs(x1 - x0)) {
         if (x0 > x1) {
             plotLineLow(gpu, x1, y1, x0, y0, color);
@@ -1603,6 +1611,52 @@ void gpu_render_flat_line(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, uint32_t col
         max(abs(v1.x - v0.x), abs(v1.y - v0.y)), 1);
 
     plotLine(gpu, v0.x, v0.y, v1.x, v1.y, color);
+}
+
+/* Line pixels include both vertices. Crash 2's intro uses very short Gouraud
+   semi-transparent lines for its stars; treating those as flat black lines
+   erases the entire effect. Keep the walk shared by the three rasterizers. */
+void psx_gpu_raster_line(psx_gpu_t* gpu, vertex_t v0, vertex_t v1,
+                         uint16_t flat_color, uint8_t command,
+                         psx_gpu_line_pixel_fn plot, void* context) {
+    int x0 = v0.x + gpu->off_x, y0 = v0.y + gpu->off_y;
+    const int x1 = v1.x + gpu->off_x, y1 = v1.y + gpu->off_y;
+    const int dx = abs(x1 - x0), dy = abs(y1 - y0);
+    const int steps = max(dx, dy);
+    const int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int error = dx - dy;
+
+    for (int i = 0; i <= steps; i++) {
+        uint16_t color = flat_color;
+        if (command & 0x10) {
+            const int n = steps ? steps : 1;
+            const int r0 = v0.c & 255, r1 = v1.c & 255;
+            const int g0 = (v0.c >> 8) & 255, g1 = (v1.c >> 8) & 255;
+            const int b0 = (v0.c >> 16) & 255, b1 = (v1.c >> 16) & 255;
+            const int r = (r0 * (n - i) + r1 * i + n / 2) / n;
+            const int g = (g0 * (n - i) + g1 * i + n / 2) / n;
+            const int b = (b0 * (n - i) + b1 * i + n / 2) / n;
+            color = (uint16_t)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10));
+        }
+        if (x0 >= 0 && x0 < 1024 && y0 >= 0 && y0 < 512 &&
+            x0 >= gpu->draw_x1 && x0 <= gpu->draw_x2 &&
+            y0 >= gpu->draw_y1 && y0 <= gpu->draw_y2)
+            plot(context, gpu, x0, y0, color, command);
+        if (x0 == x1 && y0 == y1)
+            break;
+        const int twice = error * 2;
+        if (twice > -dy) { error -= dy; x0 += sx; }
+        if (twice <  dx) { error += dx; y0 += sy; }
+    }
+}
+
+static void gpu_plot_line_pixel(void* context, psx_gpu_t* gpu, int x, int y,
+                                uint16_t color, uint8_t command) {
+    (void)context;
+    uint16_t* dst = &gpu->vram[x + y * 1024];
+    if (command & 0x02)
+        color = psx_gpu_blend_rgb555(*dst, color, (gpu->gpustat >> 5) & 3);
+    *dst = color;
 }
 
 void gpu_render_flat_rectangle(psx_gpu_t* gpu, vertex_t v, uint32_t w, uint32_t h, uint32_t color) {
@@ -2208,6 +2262,24 @@ void gpu_poly(psx_gpu_t* gpu) {
     }
 }
 
+static void gpu_line_segment(psx_gpu_t* gpu, vertex_t v0, vertex_t v1,
+                             uint32_t color, uint8_t command) {
+    if (gpu->dbg_file) {
+        gpu->dbg_prims++;
+        gpu_dump_prim_line(gpu, &v0, &v1, command);
+    }
+
+#ifdef USE_HARDWARE
+    if (GPU_BACKEND_HAS(gpu, draw_line))
+        gpu->backend->draw_line(gpu->backend, gpu, &v0, &v1,
+                                BGR555(color), command);
+
+    if (!GPU_BACKEND_HAS(gpu, draw_line) || GPU_BACKEND_SHADOWS(gpu))
+#endif
+        psx_gpu_raster_line(gpu, v0, v1, BGR555(color), command,
+                            gpu_plot_line_pixel, NULL);
+}
+
 void gpu_line(psx_gpu_t* gpu) {
     switch (gpu->state) {
         case GPU_STATE_RECV_CMD: {
@@ -2304,19 +2376,8 @@ void gpu_line(psx_gpu_t* gpu) {
                     v1.y = gpu->buf[2] >> 16;
                 }
 
-                if (gpu->dbg_file) {
-                    gpu->dbg_prims++;
-                    gpu_dump_prim_line(gpu, &v0, &v1, (uint8_t)(gpu->buf[0] >> 24));
-                }
-
-#ifdef USE_HARDWARE
-                if (GPU_BACKEND_HAS(gpu, draw_line))
-                    gpu->backend->draw_line(gpu->backend, gpu, &v0, &v1,
-                                            BGR555(gpu->buf[0] & 0xffffff));
-
-                if (!GPU_BACKEND_HAS(gpu, draw_line) || GPU_BACKEND_SHADOWS(gpu))
-#endif
-                    gpu_render_flat_line(gpu, v0, v1, BGR555(gpu->buf[0] & 0xffffff));
+                gpu_line_segment(gpu, v0, v1, gpu->buf[0] & 0xffffff,
+                                 (uint8_t)(gpu->buf[0] >> 24));
 
                 gpu->state = GPU_STATE_RECV_CMD;
             }
