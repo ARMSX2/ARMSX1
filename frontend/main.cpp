@@ -3400,6 +3400,7 @@ class ArmsxSession {
        advance and by runahead's re-simulated frames, so the two cannot diverge. Returns the
        instruction count. */
     std::uint32_t stepOneFrame() {
+        const uint64_t loop_begin = core_split_enabled_ ? SDL_GetPerformanceCounter() : 0;
         const std::uint64_t start_vblank = vblank_counter_;
         std::uint32_t steps = 0;
 
@@ -3413,6 +3414,8 @@ class ArmsxSession {
                 break;
             }
         }
+
+        if (loop_begin) instruction_loop_ticks_ += SDL_GetPerformanceCounter() - loop_begin;
 
         return steps;
     }
@@ -3551,7 +3554,11 @@ class ArmsxSession {
                       g_psx_disc_timing.max_ns / 1e6, g_psx_disc_timing.slowest_lba);
     }
 
+    uint64_t instructionLoopTicks() const { return instruction_loop_ticks_; }
+
     std::uint32_t runFrame() {
+        core_split_enabled_ = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+        instruction_loop_ticks_ = 0;
         stall_audio_ticks_ = 0;
         if (!psx_ || paused_) {
             return 0;
@@ -5778,6 +5785,8 @@ class ArmsxSession {
     // One-shot capture state; see runAudioDiag(). All emulation thread.
     FILE* audio_diag_file_ = nullptr;
     static constexpr size_t kAudioDiagXaLimit = 16u * 1024u * 1024u;
+    bool core_split_enabled_ = false;
+    uint64_t instruction_loop_ticks_ = 0;
     uint64_t stall_capture_start_ = 0, stall_last_start_ = 0, stall_audio_ticks_ = 0;
     unsigned stall_frames_ = 0;
     std::vector<uint8_t> audio_diag_xa_;
@@ -7572,6 +7581,23 @@ class ArmsxApp {
             session_.beginMaliWorkProbe();
             session_steps = session_.runFrame();
             if (lag_probe) lag_core_end = SDL_GetPerformanceCounter();
+            if (lag_probe && armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI) {
+                const uint64_t core = lag_core_end - lag_work_begin;
+                const uint64_t instructions = session_.instructionLoopTicks();
+                core_split_ticks_ += core;
+                instruction_split_ticks_ += instructions;
+                if (++core_split_frames_ >= 120) {
+                    psxe_diag_pacingf("core_split frames=%u instruction_loop_ms=%.3f "
+                        "outside_loop_ms=%.3f core_ms=%.3f inclusive=yes wall_time=yes",
+                        core_split_frames_,
+                        CounterTicksToMilliseconds(instruction_split_ticks_) / core_split_frames_,
+                        CounterTicksToMilliseconds(core_split_ticks_ > instruction_split_ticks_ ?
+                            core_split_ticks_ - instruction_split_ticks_ : 0) / core_split_frames_,
+                        CounterTicksToMilliseconds(core_split_ticks_) / core_split_frames_);
+                    core_split_frames_ = 0;
+                    core_split_ticks_ = instruction_split_ticks_ = 0;
+                }
+            }
             session_.finishMaliWorkProbe(lag_core_end ? lag_core_end - lag_work_begin : 0);
             if (!skip_present) {
                 session_.updateTexture(settings_);
@@ -8597,6 +8623,8 @@ class ArmsxApp {
     std::array<uint64_t, 6> lag_sum_{}, lag_max_{};
     uint64_t lag_window_start_ = 0, lag_prev_end_ = 0;
     unsigned lag_samples_ = 0, lag_intervals_ = 0, lag_long_intervals_ = 0, lag_not_presented_ = 0;
+    unsigned core_split_frames_ = 0;
+    uint64_t core_split_ticks_ = 0, instruction_split_ticks_ = 0;
     bool mali_pacing_active_ = false;
     uint64_t next_frame_deadline_ = 0;
     uint64_t frame_period_ticks_ = 0;

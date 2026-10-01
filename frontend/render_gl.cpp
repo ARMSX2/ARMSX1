@@ -635,9 +635,17 @@ bool CreateQuad(GlRenderer* self) {
     change, teardown from a different thread) would otherwise fail exactly this way. The
     rebind counter keeps any such migration visible in the log instead of silent.
 */
-bool EnsureContextCurrent(GlRenderer* self) {
+#if defined(ARMSX_GL_HAVE_EGL)
+bool GlEnsureWindowSurface(GlRenderer* self);
+#endif
+
+bool EnsureContextCurrent(GlRenderer* self, bool ensure_window = true) {
 #if defined(ARMSX_GL_HAVE_EGL)
     if (self->use_egl) {
+        // Refresh before upload/draw: checking only at swap draws into the abandoned window.
+        if (ensure_window && !GlEnsureWindowSurface(self)) {
+            return false;
+        }
         if (self->egl.GetCurrentContext() == self->egl_context &&
             self->egl.GetCurrentSurface(EGL_DRAW) == self->egl_surface) {
             return true;
@@ -1487,7 +1495,7 @@ void OpShutdown(armsx_renderer_t* base) {
 
     /* Deleting objects needs the context on THIS thread too, and teardown does not
        necessarily run on the thread that presented. */
-    EnsureContextCurrent(self);
+    EnsureContextCurrent(self, false);
 
     if (self->gl.DeleteTextures && self->texture) {
         self->gl.DeleteTextures(1, &self->texture);
