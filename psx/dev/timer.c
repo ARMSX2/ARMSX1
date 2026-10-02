@@ -288,14 +288,20 @@ void timer_handle_irq(psx_timer_t* timer, int i) {
 }
 
 float timer_get_dotclock_div(psx_timer_t* timer) {
-    static const float dmode_dotclk_div_table[] = {
-        10.0f, 8.0f, 5.0f, 4.0f
+    /* Constant-fold the complete ratio, preserving the original order of
+       float operations. This path can run for every CPU instruction when
+       timer 0 uses the dot clock; dividing by a table load prevents folding. */
+    static const float dmode_dotclk_ratio_table[] = {
+        11.0f / 7.0f / 10.0f,
+        11.0f / 7.0f / 8.0f,
+        11.0f / 7.0f / 5.0f,
+        11.0f / 7.0f / 4.0f
     };
 
     if (timer->gpu->display_mode & 0x40) {
         return 11.0f / 7.0f / 7.0f;
     } else {
-        return 11.0f / 7.0f / dmode_dotclk_div_table[timer->gpu->display_mode & 0x3];
+        return dmode_dotclk_ratio_table[timer->gpu->display_mode & 0x3];
     }
 }
 
