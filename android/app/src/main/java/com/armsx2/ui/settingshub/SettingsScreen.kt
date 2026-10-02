@@ -1,6 +1,9 @@
 package com.armsx2.ui.settingshub
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -41,11 +44,17 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -94,6 +103,37 @@ object SettingsCategoryNav {
     /** -1 = previous tab, +1 = next. Null whenever the settings screen isn't showing. */
     @Volatile
     var cycle: ((Int) -> Unit)? = null
+    var reorderKey: ((Int, Boolean) -> Boolean)? = null
+    var reorderMove: ((Int) -> Boolean)? = null
+}
+
+private object SettingsTabOrder {
+    val order = mutableStateOf(settingsSections().map { it.category })
+    private var loaded = false
+    fun load(context: android.content.Context) {
+        if (loaded) return
+        val defaults = settingsSections().map { it.category }
+        val stored = context.getSharedPreferences("ARMSX2", 0)
+            .getString("ui.settingsTabOrder", "").orEmpty().split(',')
+            .mapNotNull { name -> defaults.find { it.name == name } }.distinct()
+        order.value = stored + defaults.filterNot { it in stored }
+        loaded = true
+    }
+    fun move(category: SettingsCategory, target: SettingsCategory) {
+        val current = order.value
+        val from = current.indexOf(category)
+        val to = current.indexOf(target)
+        if (from < 0 || to < 0 || from == to) return
+        val next = current.toMutableList()
+        next.remove(category)
+        val targetIndex = next.indexOf(target)
+        next.add(targetIndex + if (from < to) 1 else 0, category)
+        order.value = next
+    }
+    fun save(context: android.content.Context) {
+        context.getSharedPreferences("ARMSX2", 0).edit()
+            .putString("ui.settingsTabOrder", order.value.joinToString(",") { it.name }).apply()
+    }
 }
 
 /** Retains the settings page's scroll offset across close/reopen. The selected category already
@@ -164,6 +204,9 @@ fun SettingsScreen(
         }
         pendingJump = null
     }
+    val tabContext = LocalContext.current
+    remember(tabContext) { SettingsTabOrder.load(tabContext) }
+    val tabOrder = SettingsTabOrder.order.value
     val ui = viewModel.uiState.value
     val contentReady = ui.game?.uri?.toString() == scopeGame?.uri?.toString()
     val displayedCategory = if (scopeGame != null && ui.category == SettingsCategory.General) {
@@ -177,9 +220,9 @@ fun SettingsScreen(
     // chip row doesn't show. About is always skipped: it navigates to another screen, which
     // is not what flicking a shoulder button should do.
     val gameSpecific = scopeGame != null
-    DisposableEffect(displayedCategory, gameSpecific) {
+    DisposableEffect(displayedCategory, gameSpecific, tabOrder) {
         SettingsCategoryNav.cycle = { direction ->
-            val tabs = settingsSections().map { it.category }.filterNot {
+            val tabs = tabOrder.filterNot {
                 it == SettingsCategory.About ||
                     (gameSpecific && it == SettingsCategory.General) ||
                     (!gameSpecific && it == SettingsCategory.Info)
@@ -367,16 +410,86 @@ private fun SettingsCategoryBar(
     // tab (Skins / Advanced, past On-Screen) unregistered and unreachable, so
     // the controller got stuck at the last visible tab. A plain Row composes them all;
     // each selected chip's bringIntoView then scrolls it into view as the selector moves.
-    val sections = settingsSections().filterNot {
+    val sections = SettingsTabOrder.order.value.mapNotNull { category ->
+        settingsSections().find { it.category == category }
+    }.filterNot {
         // General is redundant per-game (redirects to Performance); Info only makes
         // sense for a specific game, so hide it in the global settings.
         (gameSpecific && it.category == SettingsCategory.General) ||
             (!gameSpecific && it.category == SettingsCategory.Info) ||
             (gameSpecific && it.category == SettingsCategory.About)
     }
-    Box(Modifier.fillMaxWidth()) {
+    val context = LocalContext.current
+    val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val bounds = remember { mutableMapOf<SettingsCategory, Rect>() }
+    var viewportBounds by remember { mutableStateOf<Rect?>(null) }
+    var moving by remember { mutableStateOf<SettingsCategory?>(null) }
+    var originalOrder by remember { mutableStateOf<List<SettingsCategory>?>(null) }
+    val visibleTabs = sections.map { it.category }
+    fun begin(category: SettingsCategory) {
+        originalOrder = SettingsTabOrder.order.value
+        moving = category
+        com.armsx2.ui.settings.SettingsControllerNav.selectById("settings.chip.${category.name}")
+    }
+    fun finish(save: Boolean) {
+        if (save) SettingsTabOrder.save(context)
+        else originalOrder?.let { SettingsTabOrder.order.value = it }
+        moving = null
+        originalOrder = null
+    }
+    fun move(direction: Int) {
+        val category = moving ?: return
+        val current = visibleTabs.indexOf(category)
+        visibleTabs.getOrNull(current + direction)?.let {
+            SettingsTabOrder.move(category, it)
+            com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.NAV)
+        }
+    }
+    DisposableEffect(visibleTabs, moving) {
+        SettingsCategoryNav.reorderKey = { code, down ->
+            if (moving == null) {
+                val focused = com.armsx2.ui.settings.SettingsControllerNav.currentSelectedId()
+                val tab = visibleTabs.find { focused == "settings.chip.${it.name}" }
+                if (code == android.view.KeyEvent.KEYCODE_BUTTON_Y && tab != null) {
+                    if (down) begin(tab)
+                    true
+                } else false
+            } else {
+                if (down) when (code) {
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT -> move(-1)
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> move(1)
+                    android.view.KeyEvent.KEYCODE_BUTTON_Y,
+                    android.view.KeyEvent.KEYCODE_BUTTON_A,
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                    android.view.KeyEvent.KEYCODE_ENTER -> finish(true)
+                    android.view.KeyEvent.KEYCODE_BUTTON_B,
+                    android.view.KeyEvent.KEYCODE_BACK -> finish(false)
+                }
+                true
+            }
+        }
+        SettingsCategoryNav.reorderMove = { direction ->
+            if (moving != null) { if (direction != 0) move(direction); true } else false
+        }
+        onDispose {
+            SettingsCategoryNav.reorderKey = null
+            SettingsCategoryNav.reorderMove = null
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            // An interrupted drag/move must not leave an unsaved order behind.
+            originalOrder?.let { SettingsTabOrder.order.value = it }
+        }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Text(if (moving != null) "Move tab: ◀ / ▶ · A or Y to save · B to cancel"
+            else "Hold a tab to drag · Y to move",
+            Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelMedium)
         Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 6.dp),
+            modifier = Modifier.onGloballyPositioned { viewportBounds = it.boundsInRoot() }
+                .horizontalScroll(scroll).padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Edge spacing belongs to the scrollable CONTENT, not its viewport. This
@@ -384,46 +497,80 @@ private fun SettingsCategoryBar(
             Spacer(Modifier.size(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 sections.forEach { section ->
-                    val active = section.category == selected
-                    // Keep the SELECTED chip on-screen. controllerFocusable's bringIntoView
-                    // fires on FOCUS, but L1/R1 changes the selection without moving focus —
-                    // so past roughly Network the active tab scrolled off the right edge and
-                    // you were flicking blind. Requesting it whenever selection lands here
-                    // covers both the shoulder path and a touch tap.
-                    val bringIntoView = remember { BringIntoViewRequester() }
-                    LaunchedEffect(active) {
-                        if (active) runCatching { bringIntoView.bringIntoView() }
-                    }
-                    FilterChip(
-                        modifier = Modifier.height(36.dp)
-                            .bringIntoViewRequester(bringIntoView)
-                            .controllerFocusable(
-                                "settings.chip.${section.category.name}",
-                                RoundedCornerShape(11.dp),
-                                onConfirm = { onSelect(section.category) },
+                    key(section.category) {
+                        val active = section.category == selected
+                        // Keep the SELECTED chip on-screen. controllerFocusable's bringIntoView
+                        // fires on FOCUS, but L1/R1 changes the selection without moving focus —
+                        // so past roughly Network the active tab scrolled off the right edge and
+                        // you were flicking blind. Requesting it whenever selection lands here
+                        // covers both the shoulder path and a touch tap.
+                        val bringIntoView = remember { BringIntoViewRequester() }
+                        LaunchedEffect(active, moving, visibleTabs) {
+                            if (moving == section.category || (active && moving == null))
+                                runCatching { bringIntoView.bringIntoView() }
+                        }
+                        val dragPosition = remember { floatArrayOf(0f) }
+                        FilterChip(
+                            modifier = Modifier.height(36.dp)
+                                .onGloballyPositioned { bounds[section.category] = it.boundsInRoot() }
+                                .pointerInput(section.category) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { offset ->
+                                            begin(section.category)
+                                            dragPosition[0] = (bounds[section.category]?.left ?: 0f) + offset.x
+                                        },
+                                        onDragEnd = { finish(true) },
+                                        onDragCancel = { finish(false) },
+                                        onDrag = { change, amount ->
+                                            change.consume()
+                                            dragPosition[0] += amount.x
+                                            val target = visibleTabs.filter { it != section.category }
+                                                .firstOrNull { bounds[it]?.let { rect ->
+                                                    dragPosition[0] >= rect.left && dragPosition[0] <= rect.right
+                                                } == true }
+                                            target?.let { SettingsTabOrder.move(section.category, it) }
+                                            // Keep dragging at the viewport edge to reach off-screen tabs.
+                                            val edge = 48.dp.toPx()
+                                            viewportBounds?.let { viewport ->
+                                                if (dragPosition[0] < viewport.left + edge || dragPosition[0] > viewport.right - edge) {
+                                                    scope.launch { scroll.scrollBy(amount.x) }
+                                                }
+                                            }
+                                        },
+                                    )
+                                }
+                                .then(if (moving == section.category)
+                                    Modifier.border(3.dp, Color(0xFFFFC93C), RoundedCornerShape(11.dp))
+                                    else Modifier)
+                                .bringIntoViewRequester(bringIntoView)
+                                .controllerFocusable(
+                                    "settings.chip.${section.category.name}",
+                                    RoundedCornerShape(11.dp),
+                                    onConfirm = { if (moving == null) onSelect(section.category) },
+                                ),
+                            selected = active,
+                            onClick = { if (moving == null) onSelect(section.category) },
+                            label = { Text(categoryTitle(section.category), maxLines = 1, style = MaterialTheme.typography.labelLarge) },
+                            leadingIcon = {
+                                Box(Modifier.size(17.dp), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        section.glyph,
+                                        fontSize = 13.sp,
+                                        color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            },
+                            shape = RoundedCornerShape(11.dp),
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = Color.Transparent,
+                                labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                iconColor = MaterialTheme.colorScheme.primary,
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
                             ),
-                        selected = active,
-                        onClick = { onSelect(section.category) },
-                        label = { Text(categoryTitle(section.category), maxLines = 1, style = MaterialTheme.typography.labelLarge) },
-                        leadingIcon = {
-                            Box(Modifier.size(17.dp), contentAlignment = Alignment.Center) {
-                                Text(
-                                    section.glyph,
-                                    fontSize = 13.sp,
-                                    color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        },
-                        shape = RoundedCornerShape(11.dp),
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = Color.Transparent,
-                            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            iconColor = MaterialTheme.colorScheme.primary,
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                            selectedLeadingIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        ),
-                    )
+                        )
+                    }
                 }
             }
             Spacer(Modifier.size(8.dp))

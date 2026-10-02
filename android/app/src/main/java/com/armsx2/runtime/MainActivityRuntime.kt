@@ -3559,6 +3559,13 @@ open class MainActivityRuntime : ComponentActivity() {
             }
             return true
         }
+        if (com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null &&
+            !com.armsx2.navigation.UiNavigator.drawerOpen.value &&
+            !com.armsx2.ui.home.LibraryKeyboard.visible.value &&
+            !com.armsx2.ui.settingshub.SettingsSearch.visible.value &&
+            com.armsx2.ui.settingshub.SettingsCategoryNav.reorderKey?.invoke(
+                kc, event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) == true
+        ) return true
         // Reserve Start for the main UI menu before Android/Compose can treat
         // it as a generic confirm button and launch the selected game.
         if (kc == KeyEvent.KEYCODE_BUTTON_START && controllerDrivesFrontend()) {
@@ -4778,6 +4785,9 @@ open class MainActivityRuntime : ComponentActivity() {
                 // sweeps a value.
                 com.armsx2.ui.common.ShaderParamsEditor.move(dx, dy)
             }
+            com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null &&
+                !com.armsx2.navigation.UiNavigator.drawerOpen.value &&
+                com.armsx2.ui.settingshub.SettingsCategoryNav.reorderMove?.invoke(dx) == true -> Unit
             com.armsx2.ui.MemoryCardManager.visible.value -> {
                 // Memcard dialog: 2D spatial nav (Slot 1 / Slot 2 / Delete across,
                 // cards down). Driven by the hold-repeat job so a held direction
