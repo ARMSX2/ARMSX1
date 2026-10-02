@@ -4289,7 +4289,15 @@ class ArmsxSession {
     // (frontend/render.h). The aspect decision stays here because it is a *settings* concern;
     // the letterbox math itself is shared by every backend (armsx_render_compute_dst).
     void draw(const FrontendSettings& settings) {
-        if (!frame_uploaded_ || !render_) {
+        if (!render_) return;
+        // GP1(03h) blanks scanout while the BIOS or game rebuilds its display.
+        // Keep VRAM uploads running, but never expose that intermediate image.
+        // The whole-VRAM debug view intentionally bypasses console blanking.
+        if (!debug_view_ && psx_ && psx_->gpu && (psx_->gpu->gpustat & 0x00800000u)) {
+            armsx_renderer_present_blank(render_);
+            return;
+        }
+        if (!frame_uploaded_) {
             return;
         }
 

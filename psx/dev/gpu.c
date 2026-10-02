@@ -922,7 +922,7 @@ void psx_gpu_init(psx_gpu_t* gpu, psx_ic_t* ic) {
     memset(gpu->empty, 0, PSX_GPU_VRAM_SIZE);
 
     gpu->state = GPU_STATE_RECV_CMD;
-    gpu->gpustat |= 0x800000;
+    gpu->gpustat |= 0x802000;
 
     // Default window size, this is not normally needed
     gpu->display_mode = 1;
@@ -3436,6 +3436,8 @@ void psx_gpu_write32(psx_gpu_t* gpu, uint32_t offset, uint32_t value) {
                                  | ((value & 0x40u) << 10)
                                  | ((value & 0x80u) << 7);
 
+                    if (!(value & 0x20u)) gpu->gpustat |= 0x00002000u;
+
                     GPU_HW_DEBUG(
                         "gp1-display-mode value=%08x display_mode=0x%08x video_standard=%s",
                         value,
@@ -3507,7 +3509,12 @@ void gpu_hblank_event(psx_gpu_t* gpu) {
     const int scans_per_frame = psx_gpu_is_pal_mode(gpu) ? GPU_SCANS_PER_FRAME_PAL : GPU_SCANS_PER_FRAME_NTSC;
 
     if (gpu->line < scans_per_vdraw) {
-        if (gpu->line & 1) {
+        /* GPUSTAT.31 is scanline parity in 240-line output, but field
+           parity in 480-line interlace. BIOS VSync polling relies on this. */
+        const int high_res_interlace = (gpu->gpustat & 0x00480000u) == 0x00480000u;
+        const int odd = high_res_interlace ? ((gpu->gpustat >> 13) & 1u)
+                                          : (gpu->line & 1);
+        if (odd) {
             gpu->gpustat |= 1 << 31;
         } else {
             gpu->gpustat &= ~(1 << 31);
@@ -3560,7 +3567,14 @@ void gpu_hblank_event(psx_gpu_t* gpu) {
             gpu->event_cb_table[GPU_EVENT_VBLANK_END](gpu);
 
         gpu->line = 0;
+        /* Field survives vblank even though GPUSTAT.31 is blanked there.
+           It is already part of the serialized GPUSTAT save-state word. */
+        if (gpu->gpustat & 0x00400000u)
+            gpu->gpustat ^= 0x00002000u;
+        else
+            gpu->gpustat |= 0x00002000u;
     } else if (gpu->line == scans_per_vdraw) {
+        gpu->gpustat &= ~0x80000000u;
         /* The one frame boundary the core exposes, so it is also where the marker-armed
            primitive dump opens and closes its single-frame capture. */
         gpu_dump_vblank(gpu);
@@ -3893,6 +3907,8 @@ int psx_gpu_load_state(psx_gpu_t* gpu, psx_state_reader_t* r) {
                  | ((gpu->display_mode & 0x3fu) << 17)
                  | ((gpu->display_mode & 0x40u) << 10)
                  | ((gpu->display_mode & 0x80u) << 7);
+
+    if (!(gpu->display_mode & 0x20u)) gpu->gpustat |= 0x00002000u;
 
     gpu->draw_x1 = psx_sr_u32(r);
     gpu->draw_y1 = psx_sr_u32(r);
