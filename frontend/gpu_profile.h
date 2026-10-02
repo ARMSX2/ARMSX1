@@ -179,8 +179,11 @@ int armsx_gpu_profile_force_fbfetch(const char* value);
 
 const armsx_gpu_profile_t* armsx_gpu_profile_get(void);
 
-/* Thor Adreno 740 / Qualcomm driver: pace immediately before presenting and prefer
-   supported Vulkan MAILBOX. Other GPU/driver combinations keep their existing path. */
+/* Thor frame scheduling shared by software and GL presentation paths, including
+   the software bridge's GPU probe which has no driver identity yet. */
+int armsx_gpu_profile_prefers_pre_present_pacing(void);
+/* Thor Adreno 740 / Qualcomm driver: prefer supported Vulkan MAILBOX.
+   Other GPU/driver combinations keep their existing presentation mode. */
 int armsx_gpu_profile_prefers_vulkan_mailbox(void);
 
 /* One line suitable for the log and the OSD, e.g.

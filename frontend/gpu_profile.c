@@ -476,6 +476,15 @@ const armsx_gpu_profile_t* armsx_gpu_profile_get(void)
     return &g_profile;
 }
 
+int armsx_gpu_profile_prefers_pre_present_pacing(void) {
+    const armsx_gpu_profile_t* p = armsx_gpu_profile_get();
+    /* Thor's software bridge identifies the GPU before a driver API exists.
+       Keep known alternate Vulkan drivers outside this scheduling policy. */
+    return p->vendor == ARMSX_GPU_VENDOR_ADRENO && p->model == 740 &&
+        (p->driver == ARMSX_GPU_DRIVER_QUALCOMM_PROPRIETARY ||
+         p->driver == ARMSX_GPU_DRIVER_UNKNOWN);
+}
+
 int armsx_gpu_profile_prefers_vulkan_mailbox(void)
 {
     const armsx_gpu_profile_t* p = armsx_gpu_profile_get();

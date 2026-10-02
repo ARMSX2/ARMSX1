@@ -7529,9 +7529,11 @@ class ArmsxApp {
         uint64_t lag_wait = 0, lag_core_end = 0;
         const bool pace_before_present = armsx_mali_frame_pacing_active(
             armsx_gpu_profile_get()->vendor, session_.valid() && !session_.paused())
-            || (armsx_gpu_profile_prefers_vulkan_mailbox()
-                && settings_.gpu_backend == GpuBackend::Vulkan && settings_.vsync_enabled
-                && session_.valid() && !session_.paused());
+            || (session_.valid() && !session_.paused() &&
+                ((settings_.gpu_backend == GpuBackend::Vulkan && settings_.vsync_enabled &&
+                  armsx_gpu_profile_prefers_vulkan_mailbox()) ||
+                 (settings_.gpu_backend != GpuBackend::Vulkan &&
+                  armsx_gpu_profile_prefers_pre_present_pacing())));
         if (pace_before_present != mali_pacing_active_) {
             mali_pacing_active_ = pace_before_present;
             resetFramePacing("Presentation pacing changed");

@@ -91,6 +91,16 @@ int main(void) {
     check("probe leaves driver unknown", p->driver, ARMSX_GPU_DRIVER_UNKNOWN);
     check("Mali dual-source disabled", p->dual_source_blend, 0);
 
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_host_hint("Adreno (TM) 740");
+    check("Thor software shares pacing", armsx_gpu_profile_prefers_pre_present_pacing(), 1);
+    check("software probe cannot select mailbox", armsx_gpu_profile_prefers_vulkan_mailbox(), 0);
+    armsx_gpu_profile_note_gl("Qualcomm", "Adreno (TM) 740", "OpenGL ES 3.2 V@0676");
+    check("Thor GL shares pacing", armsx_gpu_profile_prefers_pre_present_pacing(), 1);
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_vk(0x5143u, 18, "Adreno (TM) 740", "turnip", "Mesa");
+    check("Turnip scheduling unchanged", armsx_gpu_profile_prefers_pre_present_pacing(), 0);
+
     /* 6. THE OVERRIDE MUST NOT DISCARD FACTS: force "mali" on a MediaTek device. */
     armsx_gpu_profile_reset();
     armsx_gpu_profile_override("mali");

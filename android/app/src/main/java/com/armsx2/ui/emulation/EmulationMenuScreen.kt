@@ -844,12 +844,10 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     val editPs1: ((com.armsx2.config.Ps1Settings) -> com.armsx2.config.Ps1Settings) -> Unit =
         { transform -> writePs1(null, transform) }
 
-    // Resolution is different from the other default-oriented rows above: the user is looking at
-    // one running game's output and expects the selected multiplier to survive its restart. If the
-    // title already has a per-game graphics layer, writing global makes that layer immediately win
-    // and the 2x/3x chip snaps back to 1x. Persist both `renderer` and `internal_scale` at the active
-    // game's tier (falling back to global for BIOS/direct boots without an identity).
-    val editRunningResolution:
+    // Renderer and resolution choices target the running game. Persist them at its
+    // active tier so an existing per-game override cannot cancel an explicit choice.
+    // BIOS/direct boots without a game identity keep editing the global layer.
+    val editRunningGraphics:
         ((com.armsx2.config.Ps1Settings) -> com.armsx2.config.Ps1Settings) -> Unit = { transform ->
         writePs1(com.armsx2.config.Ps1SettingsStore.activeGameKey, transform)
     }
@@ -861,7 +859,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         options = com.armsx2.config.Ps1Settings.GPU_BACKENDS
             .zip(com.armsx2.config.Ps1Settings.GPU_BACKEND_LABELS),
         selected = ps1.gpuBackend,
-        onSelect = { token -> editPs1 { it.copy(gpuBackend = token) } },
+        onSelect = { token -> editRunningGraphics { it.copy(gpuBackend = token) } },
     )
 
     // What is GENUINELY running, straight from the renderer that survived the fallback ladder
@@ -933,7 +931,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         options = listOf(1 to "Native") + (2..8).map { it to "${it}x" },
         selected = if (ps1.hwRasterizer) ps1.internalScale.coerceIn(1, 8) else 1,
         onSelect = { scale ->
-            editRunningResolution {
+            editRunningGraphics {
                 it.copy(hwRasterizer = scale > 1, internalScale = scale)
             }
         },

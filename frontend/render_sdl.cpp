@@ -25,7 +25,7 @@ struct SdlRenderer {
     int texture_width = 0;
     int texture_height = 0;
     Uint32 texture_format = SDL_PIXELFORMAT_UNKNOWN;
-    bool mali_native_pixels = false;
+    bool native_rgba_pixels = false;
     int scale_mode = -1; /* -1 unset, 0 nearest, 1 linear */
 
     char driver_name[64] = {0};
@@ -68,7 +68,7 @@ void DestroyTexture(SdlRenderer* self) {
     self->texture_height = 0;
     self->texture_format = SDL_PIXELFORMAT_UNKNOWN;
     self->scale_mode = -1;
-    self->mali_native_pixels = false;
+    self->native_rgba_pixels = false;
 }
 
 /* "Software" for the plain path (which is what the Android host's blit bridge adopts), and
@@ -148,29 +148,28 @@ bool OpUploadFrame(armsx_renderer_t* base,
         DestroyTexture(self);
         // The Android host uses an RGBA32 surface. Matching it enables SDL's
         // fast scaler instead of converting every destination pixel in the blit.
-        // Only PS1 opaque scanout formats on the adopted Mali software path qualify.
+        // Only PS1 opaque scanout formats on the adopted software bridge qualify.
 #if defined(__ANDROID__)
-        self->mali_native_pixels = !self->owns_renderer && !self->accelerated &&
-            armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI &&
+        self->native_rgba_pixels = !self->owns_renderer && !self->accelerated &&
             (sdl_format == SDL_PIXELFORMAT_BGR555 || sdl_format == SDL_PIXELFORMAT_RGB24);
 #endif
-        const Uint32 storage_format = self->mali_native_pixels ? SDL_PIXELFORMAT_RGBA32 : sdl_format;
+        const Uint32 storage_format = self->native_rgba_pixels ? SDL_PIXELFORMAT_RGBA32 : sdl_format;
         self->texture = SDL_CreateTexture(self->renderer, storage_format, SDL_TEXTUREACCESS_STREAMING,
                                           width, height);
-        if (self->texture && self->mali_native_pixels) {
+        if (self->texture && self->native_rgba_pixels) {
             // PS1 scanout is opaque; the new alpha channel must not enable blending.
             if (SDL_SetTextureBlendMode(self->texture, SDL_BLENDMODE_NONE) != 0) {
                 SDL_DestroyTexture(self->texture);
                 self->texture = nullptr;
             }
         }
-        if (!self->texture && self->mali_native_pixels) {
-            self->mali_native_pixels = false;
+        if (!self->texture && self->native_rgba_pixels) {
+            self->native_rgba_pixels = false;
             self->texture = SDL_CreateTexture(self->renderer, sdl_format,
                                               SDL_TEXTUREACCESS_STREAMING, width, height);
         }
-        if (self->mali_native_pixels) {
-            psxe_diag_pacingf("mali_software_upload format=%s storage=RGBA32 size=%dx%d blend=none",
+        if (self->native_rgba_pixels) {
+            psxe_diag_pacingf("software_native_upload format=%s storage=RGBA32 size=%dx%d blend=none",
                               SDL_GetPixelFormatName(sdl_format), width, height);
         }
         if (!self->texture) {
@@ -200,7 +199,7 @@ bool OpUploadFrame(armsx_renderer_t* base,
     SDL_Rect dirty{0, dirty_first_row, width, dirty_last_row - dirty_first_row + 1};
     const auto* source = static_cast<const Uint8*>(pixels);
     if (dirty.h <= 0) return true;
-    if (self->mali_native_pixels) {
+    if (self->native_rgba_pixels) {
         void* destination = nullptr;
         int destination_pitch = 0;
         if (SDL_LockTexture(self->texture, &dirty, &destination, &destination_pitch) != 0)
@@ -231,7 +230,7 @@ void ApplyScaleMode(SdlRenderer* self, bool linear) {
 void ClearBackground(SdlRenderer* self, const SDL_Rect& dst, int out_w, int out_h,
                      int rotation) {
     SDL_SetRenderDrawColor(self->renderer, 0, 0, 0, 255);
-    // Only the adopted Mali opaque scanout can overwrite the image area without
+    // Only the adopted software bridge opaque scanout can overwrite the image area without
     // a clear. Clear its borders every frame, including single-pixel rounding
     // gaps (682x511 in a 682x512 output). Leaving these untouched would retain
     // old pixels after an aspect/size change; clearing the whole output wastes
@@ -239,7 +238,7 @@ void ClearBackground(SdlRenderer* self, const SDL_Rect& dst, int out_w, int out_
     const bool inside = out_w > 0 && out_h > 0 && dst.x >= 0 && dst.y >= 0 &&
         dst.w > 0 && dst.h > 0 && dst.x <= out_w && dst.y <= out_h &&
         dst.w <= out_w - dst.x && dst.h <= out_h - dst.y;
-    if (self->mali_native_pixels && rotation == 0 && inside) {
+    if (self->native_rgba_pixels && rotation == 0 && inside) {
         SDL_Rect bars[4];
         int count = 0;
         if (dst.y) bars[count++] = {0, 0, out_w, dst.y};

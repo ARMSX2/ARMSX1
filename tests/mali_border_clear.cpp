@@ -25,7 +25,7 @@ static std::vector<unsigned char> Render(SDL_Renderer* renderer, SDL_Surface* su
     if (optimized) {
         SdlRenderer self;
         self.renderer = renderer;
-        self.mali_native_pixels = mali;
+        self.native_rgba_pixels = mali;
         ClearBackground(&self, dst, surface->w, surface->h, rotation);
     } else {
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);

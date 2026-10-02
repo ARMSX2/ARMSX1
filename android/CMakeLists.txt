@@ -8,6 +8,9 @@ set(SDL_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_STATIC OFF CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 add_subdirectory("${REPO}/third_party/SDL" SDL)
+# Software scaling, conversion and audio callbacks are real-time work even in
+# a debuggable APK. Keep symbols, but avoid shipping SDL's unoptimized Debug loop.
+target_compile_options(SDL2 PRIVATE "$<$<CONFIG:Debug>:-O3>")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(MINIZ_ARCHIVE_APIS ON CACHE BOOL "" FORCE)
 set(MINIZ_STDIO ON CACHE BOOL "" FORCE)
