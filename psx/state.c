@@ -1672,13 +1672,12 @@ int psx_state_slot_info(int slot, const char* base_dir, char* out_disc_path, siz
     return 1;
 }
 
-void psx_state_service_requests(void) {
-    int op = PSX_STATE_LOAD(g_state_request);
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static void state_execute_request(int op) {
     int result;
     psx_t* psx;
-
-    if (op != PSX_STATE_OP_SAVE && op != PSX_STATE_OP_LOAD)
-        return;
 
     int expected = op;
     if (!PSX_STATE_CAS(g_state_request, expected, STATE_REQUEST_EXECUTING))
@@ -1700,6 +1699,14 @@ void psx_state_service_requests(void) {
 
     PSX_STATE_STORE(g_state_result, result);
     PSX_STATE_STORE(g_state_request, STATE_REQUEST_DONE);
+}
+
+void psx_state_service_requests(void) {
+    // Keep this instruction-boundary poll small enough for cross-file inlining.
+    // The rare save/load operation retains the existing CAS/claim handshake.
+    const int op = PSX_STATE_LOAD(g_state_request);
+    if (op == PSX_STATE_OP_SAVE || op == PSX_STATE_OP_LOAD)
+        state_execute_request(op);
 }
 
 int psx_state_request_slot(int op, int slot, const char* base_dir, int timeout_ms) {

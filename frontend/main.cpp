@@ -7528,11 +7528,14 @@ class ArmsxApp {
         const uint64_t lag_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
         uint64_t lag_wait = 0, lag_core_end = 0;
         const bool pace_before_present = armsx_mali_frame_pacing_active(
-            armsx_gpu_profile_get()->vendor, session_.valid() && !session_.paused());
+            armsx_gpu_profile_get()->vendor, session_.valid() && !session_.paused())
+            || (armsx_gpu_profile_prefers_vulkan_mailbox()
+                && settings_.gpu_backend == GpuBackend::Vulkan && settings_.vsync_enabled
+                && session_.valid() && !session_.paused());
         if (pace_before_present != mali_pacing_active_) {
             mali_pacing_active_ = pace_before_present;
-            resetFramePacing("Mali experimental pacing changed");
-            psxe_diag_logf("renderer", "Mali experimental pacing active=%d", pace_before_present);
+            resetFramePacing("Presentation pacing changed");
+            psxe_diag_logf("renderer", "Pre-present pacing active=%d", pace_before_present);
         }
         if (!pace_before_present) waitForFrameDeadline(currentTargetFrameRate());
         const uint64_t lag_work_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;

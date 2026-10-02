@@ -179,6 +179,10 @@ int armsx_gpu_profile_force_fbfetch(const char* value);
 
 const armsx_gpu_profile_t* armsx_gpu_profile_get(void);
 
+/* Thor Adreno 740 / Qualcomm driver: pace immediately before presenting and prefer
+   supported Vulkan MAILBOX. Other GPU/driver combinations keep their existing path. */
+int armsx_gpu_profile_prefers_vulkan_mailbox(void);
+
 /* One line suitable for the log and the OSD, e.g.
    "Adreno 740 (gen 7, Qualcomm proprietary) fbfetch=yes push-desc=yes". */
 void armsx_gpu_profile_describe(char* out, size_t out_size);

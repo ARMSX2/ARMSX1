@@ -476,6 +476,13 @@ const armsx_gpu_profile_t* armsx_gpu_profile_get(void)
     return &g_profile;
 }
 
+int armsx_gpu_profile_prefers_vulkan_mailbox(void)
+{
+    const armsx_gpu_profile_t* p = armsx_gpu_profile_get();
+    return p->vendor == ARMSX_GPU_VENDOR_ADRENO && p->model == 740
+        && p->driver == ARMSX_GPU_DRIVER_QUALCOMM_PROPRIETARY;
+}
+
 const char* armsx_gpu_profile_vendor_name(armsx_gpu_vendor_t vendor)
 {
     switch (vendor) {

@@ -646,6 +646,10 @@ __attribute__((always_inline)) void psx_cpu_cycle(psx_cpu_t* cpu) {
         psx_cpu_exception(cpu, CAUSE_RI);
     }
 
+    // Ordinary handlers return the legacy two-cycle base. Charge one base cycle
+    // here, leaving explicit GTE latencies and fetched bus delays intact. Both
+    // CPU engines share this accounting point.
+    if (cyc == 2) cyc = 1;
     cpu->last_cycles += cyc;
     cpu->total_cycles += cpu->last_cycles;
 

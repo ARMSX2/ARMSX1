@@ -708,9 +708,17 @@ bool CreateSwapchain(VkRenderer* self) {
                                                             &present_mode_count, present_modes.data());
     }
 
-    /* FIFO is always available and is the vsync-on mode. Without vsync prefer IMMEDIATE,
-       then MAILBOX. */
+    /* FIFO is the synchronized fallback. The tested Thor driver prefers MAILBOX
+       when supported. Without vsync prefer IMMEDIATE, then MAILBOX. */
     VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    if (self->vsync && armsx_gpu_profile_prefers_vulkan_mailbox()) {
+        for (VkPresentModeKHR candidate : present_modes) {
+            if (candidate == VK_PRESENT_MODE_MAILBOX_KHR) {
+                present_mode = candidate;
+                break;
+            }
+        }
+    }
     if (!self->vsync) {
         for (VkPresentModeKHR candidate : present_modes) {
             if (candidate == VK_PRESENT_MODE_IMMEDIATE_KHR) {

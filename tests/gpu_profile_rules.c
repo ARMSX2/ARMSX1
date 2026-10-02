@@ -22,6 +22,7 @@ int main(void) {
     check("fbfetch gl", p->fbfetch_gl, 1);
     check("fbfetch vk roaa off", p->fbfetch_vk_roaa, 0);
     check("single attachment", p->single_fbfetch_attachment, 1);
+    check("Thor Vulkan pacing", armsx_gpu_profile_prefers_vulkan_mailbox(), 1);
 
     /* 2. Same GPU on Turnip — opposite conclusions on BOTH driver-keyed gates. */
     armsx_gpu_profile_reset();
@@ -29,6 +30,7 @@ int main(void) {
     p = armsx_gpu_profile_get();
     printf("adreno-turnip\n");
     check("driver", p->driver, ARMSX_GPU_DRIVER_MESA_TURNIP);
+    check("Turnip pacing unchanged", armsx_gpu_profile_prefers_vulkan_mailbox(), 0);
     check("push-desc disabled", p->avoid_push_descriptors, 1);
     check("fbfetch vk roaa on", p->fbfetch_vk_roaa, 1);
 
@@ -38,6 +40,7 @@ int main(void) {
     p = armsx_gpu_profile_get();
     printf("adreno-650\n");
     check("no persistent map", p->avoid_persistent_buffer_map, 1);
+    check("650 pacing unchanged", armsx_gpu_profile_prefers_vulkan_mailbox(), 0);
     armsx_gpu_profile_reset();
     armsx_gpu_profile_note_gl("Qualcomm", "Adreno (TM) 660", "OpenGL ES 3.2 V@0490");
     check("660 keeps persistent map", armsx_gpu_profile_get()->avoid_persistent_buffer_map, 0);
@@ -60,6 +63,7 @@ int main(void) {
     p = armsx_gpu_profile_get();
     printf("mediatek-mali\n");
     check("mediatek", p->is_mediatek, 1);
+    check("Mali pacing unchanged", armsx_gpu_profile_prefers_vulkan_mailbox(), 0);
     check("fbfetch gl off", p->fbfetch_gl, 0);
     check("fbfetch vk off", p->fbfetch_vk_roaa, 0);
     check("driverInfo kept", strcmp(p->driver_info, "r44p1"), 0);
@@ -112,6 +116,7 @@ int main(void) {
     p = armsx_gpu_profile_get();
     printf("unknown-gpu\n");
     check("vendor unknown", p->vendor, ARMSX_GPU_VENDOR_UNKNOWN);
+    check("unknown pacing unchanged", armsx_gpu_profile_prefers_vulkan_mailbox(), 0);
     check("fbfetch gl assumed ok", p->fbfetch_gl, 1);
     check("push-desc allowed", p->avoid_push_descriptors, 0);
     check("macros always on", p->shader_helpers_must_be_macros, 1);
