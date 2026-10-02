@@ -7751,12 +7751,14 @@ class ArmsxApp {
                     return n ? CounterTicksToMilliseconds(lag_sum_[i]) / n : 0.0;
                 };
                 psxe_diag_pacingf(
-                    "gpu=%s model=%d driver=%s target_fps=%.3f mode=pre-draw samples=%u "
+                    "gpu=%s model=%d driver=%s backend=%s presentation_driver=%s target_fps=%.3f mode=pre-draw samples=%u "
                     "core_ms=%.2f/%.2f upload_finish_ms=%.2f/%.2f wait_ms=%.2f/%.2f "
                     "draw_swap_ms=%.2f/%.2f other_ms=%.2f/%.2f loop_interval_ms=%.2f/%.2f "
                     "long_intervals=%u not_presented=%u (pairs=avg/max; CPU wall time, not display timestamps)",
                     armsx_gpu_profile_get()->name, armsx_gpu_profile_get()->model,
-                    armsx_gpu_profile_get()->driver_info, currentTargetFrameRate(), lag_samples_,
+                    armsx_gpu_profile_get()->driver_info,
+                    armsx_render_backend_name(armsx_renderer_backend(render_)),
+                    armsx_renderer_driver_name(render_), currentTargetFrameRate(), lag_samples_,
                     avg(0), CounterTicksToMilliseconds(lag_max_[0]),
                     avg(1), CounterTicksToMilliseconds(lag_max_[1]),
                     avg(2), CounterTicksToMilliseconds(lag_max_[2]),

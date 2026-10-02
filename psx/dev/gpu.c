@@ -1383,6 +1383,11 @@ static void gpu_render_triangle_impl(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, v
 }
 
 void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, poly_data_t data, int edge) {
+    /* Avoid two out-of-line probe calls after the profiling budget expires. */
+    if (!g_psx_work_diag_enabled) {
+        gpu_render_triangle_impl(gpu, v0, v1, v2, data, edge);
+        return;
+    }
     const uint64_t start = psx_work_diag_start();
     gpu_render_triangle_impl(gpu, v0, v1, v2, data, edge);
     psx_work_diag_end(PSX_WORK_GPU_RASTER, start);
@@ -1515,6 +1520,11 @@ static void gpu_render_rect_impl(psx_gpu_t* gpu, rect_data_t data) {
 }
 
 void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
+    /* Avoid two out-of-line probe calls after the profiling budget expires. */
+    if (!g_psx_work_diag_enabled) {
+        gpu_render_rect_impl(gpu, data);
+        return;
+    }
     const uint64_t start = psx_work_diag_start();
     gpu_render_rect_impl(gpu, data);
     psx_work_diag_end(PSX_WORK_GPU_RASTER, start);

@@ -69,6 +69,18 @@ def isDiscordSdkAvailable = file("${project.projectDir}/libs/discord_partner_sdk
 def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.1.0').toString()
 def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '1').toString() as Integer
 
+// Keep locally built and CI APKs identifiable in exported diagnostics.
+def armsxSourceCommit = (project.findProperty('armsx.sourceCommit') ?: System.getenv('GITHUB_SHA') ?: '').toString()
+if (!armsxSourceCommit) {
+    try {
+        def sourceProcess = new ProcessBuilder('git', 'rev-parse', 'HEAD')
+            .directory(rootProject.projectDir).redirectErrorStream(true).start()
+        def sourceOutput = sourceProcess.inputStream.getText('UTF-8').trim()
+        if (sourceProcess.waitFor() == 0) armsxSourceCommit = sourceOutput
+    } catch (Exception ignored) { }
+}
+if (!(armsxSourceCommit ==~ /[0-9a-fA-F]{40,64}/)) armsxSourceCommit = 'unknown'
+
 android {
     if (windowsNativeBuild) {
         ndkVersion rootProject.ext.ndkVersion
@@ -94,6 +106,7 @@ android {
         versionCode armsxVersionCode
         versionName armsxVersionName
         buildConfigField "boolean", "DIAGNOSTIC_BUILD", diagnosticBuild.toString()
+        buildConfigField "String", "SOURCE_COMMIT", "\"${armsxSourceCommit}\""
         vectorDrawables.useSupportLibrary = true
         // STORAGE_ALL_FILES is declared per flavor below. Game libraries never need it: they use
         // persisted SAF grants. Only the sideload build exposes an optional arbitrary writable

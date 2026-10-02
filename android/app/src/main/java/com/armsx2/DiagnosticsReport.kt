@@ -145,6 +145,7 @@ object DiagnosticsReport {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             w.appendLine("soc: ${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}")
         }
+        w.appendLine("source commit: ${BuildConfig.SOURCE_COMMIT}")
         w.appendLine("diagnostic build: ${BuildConfig.DIAGNOSTIC_BUILD}")
         w.appendLine("abis: ${Build.SUPPORTED_ABIS.joinToString()}")
         w.appendLine("page size: ${runCatching { Os.sysconf(OsConstants._SC_PAGESIZE) }.getOrDefault(-1L)}")
