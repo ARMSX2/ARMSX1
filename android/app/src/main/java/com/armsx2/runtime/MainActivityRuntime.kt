@@ -3540,6 +3540,25 @@ open class MainActivityRuntime : ComponentActivity() {
             // so Compose's binder and the in-game lookup both see the same real key.
             return super.dispatchKeyEvent(event)
         }
+        // Inline confirmations own input ahead of the library and drawer.
+        val confirmNav = com.armsx2.ui.settings.SettingsControllerNav
+        val confirmLayer = confirmNav.activeLayer.value
+        if (confirmLayer?.startsWith("confirm-overlay:") == true && controllerDrivesFrontend()) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                when (kc) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> confirmNav.moveSpatial(-1, 0)
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> confirmNav.moveSpatial(1, 0)
+                    KeyEvent.KEYCODE_DPAD_UP -> confirmNav.move(-1)
+                    KeyEvent.KEYCODE_DPAD_DOWN -> confirmNav.move(1)
+                    KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER,
+                    KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> confirmNav.confirm()
+                    KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK -> {
+                        if (confirmNav.selectById("$confirmLayer.cancel")) confirmNav.confirm()
+                    }
+                }
+            }
+            return true
+        }
         // Reserve Start for the main UI menu before Android/Compose can treat
         // it as a generic confirm button and launch the selected game.
         if (kc == KeyEvent.KEYCODE_BUTTON_START && controllerDrivesFrontend()) {
@@ -4737,6 +4756,11 @@ open class MainActivityRuntime : ComponentActivity() {
         // Mirror the key-event routing priority so the analog stick drives every
         // surface the D-pad does.
         when {
+            com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value
+                ?.startsWith("confirm-overlay:") == true -> {
+                val nav = com.armsx2.ui.settings.SettingsControllerNav
+                if (dx != 0) nav.moveSpatial(dx, 0) else nav.move(dy)
+            }
             com.armsx2.ui.home.LibraryKeyboard.visible.value -> {
                 // Controller search keyboard owns the stick/HAT/D-pad while it's up
                 // (this is the RP6 path — its D-pad arrives here as a HAT axis).

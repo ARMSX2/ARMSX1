@@ -117,7 +117,6 @@ import com.armsx2.ui.common.RoundAction
 import com.armsx2.ui.common.SearchField
 import com.armsx2.ui.common.SectionTitle
 import com.armsx2.ui.common.StatusChip
-import com.armsx2.ui.settings.controllerFocusable
 import kotlin.math.abs
 
 private val LocalCustomCoverMap = staticCompositionLocalOf<Map<String, java.io.File>> { emptyMap() }
@@ -284,6 +283,7 @@ fun HomeScreen(
                 emptyList()
             }
             LaunchedEffect(shownRecents) {
+                HomeInputController.setClearRecentsAction { showClearRecentsConfirm = true }
                 HomeInputController.setRecents(shownRecents.size) { i ->
                     shownRecents.getOrNull(i)?.let(viewModel::launch)
                 }
@@ -501,11 +501,9 @@ fun HomeScreen(
                                 val clearAll = { showClearRecentsConfirm = true }
                                 Surface(
                                     onClick = clearAll,
-                                    modifier = Modifier.controllerFocusable(
-                                        controllerId = "home.recents.clearAll",
-                                        shape = RoundedCornerShape(12.dp),
-                                        onConfirm = clearAll,
-                                    ),
+                                    modifier = if (HomeInputController.zone.value == HomeZone.RecentsHeader) {
+                                        Modifier.border(2.5.dp, Color(0xFF3DA5FF), RoundedCornerShape(12.dp))
+                                    } else Modifier,
                                     shape = RoundedCornerShape(12.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
                                 ) {
@@ -1249,7 +1247,7 @@ private fun CoverPlaceholder(title: String, serial: String?, showText: Boolean) 
 }
 
 /** Vertical focus zones of the library screen, stacked top→bottom. */
-enum class HomeZone { Toolbar, Search, Recents, Grid }
+enum class HomeZone { Toolbar, Search, RecentsHeader, Recents, Grid }
 
 object HomeInputController {
     private var owner: HomeViewModel? = null
@@ -1261,8 +1259,8 @@ object HomeInputController {
     // data-driven (owner.selectedIndex); the Recently-Played row and the top toolbar
     // (refresh / sort / layout / 2D-3D / background + the leading menu button) sit
     // above it and can't share that index space, so each is its own zone. From the
-    // grid's top row, Up steps into Recents (if shown), then Up again into the
-    // Toolbar; Down walks back down. Left/Right move within the focused row. A fires
+    // grid's top row, Up steps into Recents (if shown), then its Clear All header,
+    // Search and Toolbar; Down walks back down. Left/Right move within the focused row. A fires
     // the highlighted item. HomeScreen reads `zone` + `toolbarIndex` / `recentIndex`
     // to draw the highlight and registers the toolbar actions + recents launcher.
     val zone = mutableStateOf(HomeZone.Grid)
@@ -1270,6 +1268,7 @@ object HomeInputController {
     val recentIndex = mutableIntStateOf(0)
     private var toolbarActions: List<() -> Unit> = emptyList()
     private var recentCount = 0
+    private var clearRecentsAction: (() -> Unit)? = null
     private var recentLauncher: ((Int) -> Unit)? = null
     private var searchAvailable = false
     private var searchConfirm: (() -> Unit)? = null
@@ -1292,6 +1291,7 @@ object HomeInputController {
         if (owner === viewModel) {
             owner = null
             openMenu = null
+            clearRecentsAction = null
             scrollVelocity.floatValue = 0f
             zone.value = HomeZone.Grid
         }
@@ -1304,13 +1304,15 @@ object HomeInputController {
      *  order (leading menu button first). */
     fun setToolbarActions(actions: List<() -> Unit>) { toolbarActions = actions }
 
+    fun setClearRecentsAction(action: () -> Unit) { clearRecentsAction = action }
+
     /** HomeScreen registers the currently-shown Recently-Played games (0 when the
      *  shelf is hidden, e.g. while searching). */
     fun setRecents(count: Int, launcher: (Int) -> Unit) {
         recentCount = count
         recentLauncher = launcher
         if (recentIndex.intValue >= count) recentIndex.intValue = (count - 1).coerceAtLeast(0)
-        if (count == 0 && zone.value == HomeZone.Recents) zone.value = HomeZone.Grid
+        if (count == 0 && (zone.value == HomeZone.Recents || zone.value == HomeZone.RecentsHeader)) zone.value = HomeZone.Grid
     }
 
     /** HomeScreen registers whether the search field is shown (only once the library
@@ -1350,7 +1352,7 @@ object HomeInputController {
                 // returns to the grid.
                 !toolbarAtBottom && dy > 0 -> zone.value = when {
                     searchAvailable -> HomeZone.Search
-                    recentCount > 0 -> HomeZone.Recents
+                    recentCount > 0 -> HomeZone.RecentsHeader
                     else -> HomeZone.Grid
                 }
                 toolbarAtBottom && dy < 0 -> zone.value = HomeZone.Grid
@@ -1359,14 +1361,18 @@ object HomeInputController {
             }
             HomeZone.Search -> when {
                 dy < 0 -> if (!toolbarAtBottom && toolbarActions.isNotEmpty()) zone.value = HomeZone.Toolbar
-                dy > 0 -> zone.value = if (recentCount > 0) HomeZone.Recents else HomeZone.Grid
+                dy > 0 -> zone.value = if (recentCount > 0) HomeZone.RecentsHeader else HomeZone.Grid
             }
-            HomeZone.Recents -> when {
+            HomeZone.RecentsHeader -> when {
+                dy > 0 -> zone.value = HomeZone.Recents
                 dy < 0 -> zone.value = when {
                     searchAvailable -> HomeZone.Search
                     !toolbarAtBottom && toolbarActions.isNotEmpty() -> HomeZone.Toolbar
-                    else -> HomeZone.Recents
+                    else -> HomeZone.RecentsHeader
                 }
+            }
+            HomeZone.Recents -> when {
+                dy < 0 -> zone.value = HomeZone.RecentsHeader
                 dy > 0 -> zone.value = HomeZone.Grid
                 dx != 0 && recentCount > 0 ->
                     recentIndex.intValue = (recentIndex.intValue + dx).coerceIn(0, recentCount - 1)
@@ -1407,6 +1413,7 @@ object HomeInputController {
         when (zone.value) {
             HomeZone.Toolbar -> toolbarActions.getOrNull(toolbarIndex.intValue)?.invoke()
             HomeZone.Search -> searchConfirm?.invoke()
+            HomeZone.RecentsHeader -> clearRecentsAction?.invoke()
             HomeZone.Recents -> recentLauncher?.invoke(recentIndex.intValue)
             HomeZone.Grid -> {
                 val game = viewModel.selectedGame() ?: return false
