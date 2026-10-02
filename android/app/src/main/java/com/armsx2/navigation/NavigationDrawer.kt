@@ -47,8 +47,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import android.content.res.Configuration
@@ -169,6 +171,22 @@ fun NavigationDrawer(
 
 @Composable
 private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, onDismiss: () -> Unit) {
+    val controllerNav = com.armsx2.ui.settings.SettingsControllerNav
+    DisposableEffect(Unit) {
+        val previousLayer = controllerNav.activeLayer.value
+        controllerNav.activeLayer.value = "drawer"
+        controllerNav.clearSelection()
+        onDispose {
+            controllerNav.activeLayer.value = previousLayer
+            controllerNav.clearSelection()
+        }
+    }
+    LaunchedEffect(Unit) {
+        var attempts = 0
+        while (!controllerNav.selectById("drawer.Home") && attempts++ < 10) {
+            withFrameNanos {}
+        }
+    }
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val context = LocalContext.current
     // Exit moved here from the library overflow menu; it keeps its confirmation, which is the whole
@@ -319,7 +337,7 @@ private fun DrawerRow(
     Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-            .controllerFocusable(controllerId, RoundedCornerShape(18.dp), onConfirm = onClick),
+            .controllerFocusable(controllerId, RoundedCornerShape(18.dp), onConfirm = onClick, layer = "drawer"),
         shape = RoundedCornerShape(18.dp),
         color = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
     ) {

@@ -308,7 +308,7 @@ internal object SettingsControllerNav {
             // nowhere useful on the card grid.
             var rowY: Float? = null
             for ((id, p) in positions) {
-                if (id == curId || registry[id] == null) continue
+                if (id == curId || !inActiveLayer(id)) continue
                 val py = p.first
                 if (dy < 0 && py >= cy - rowTol) continue   // need a row strictly above
                 if (dy > 0 && py <= cy + rowTol) continue   // need a row strictly below
@@ -323,7 +323,7 @@ internal object SettingsControllerNav {
                 var bestId: String? = null
                 var bestDx = Float.MAX_VALUE
                 for ((id, p) in positions) {
-                    if (id == curId || registry[id] == null) continue
+                    if (id == curId || !inActiveLayer(id)) continue
                     if (abs(p.first - ry) > rowTol) continue
                     val d = abs(p.second - cx)
                     if (d < bestDx) { bestDx = d; bestId = id }
@@ -335,7 +335,7 @@ internal object SettingsControllerNav {
             var bestId: String? = null
             var bestScore = Float.MAX_VALUE
             for ((id, p) in positions) {
-                if (id == curId || registry[id] == null) continue
+                if (id == curId || !inActiveLayer(id)) continue
                 val ddx = p.second - cx
                 val ddy = p.first - cy
                 val inDir = if (dx > 0) ddx > 1f && abs(ddy) < rowTol

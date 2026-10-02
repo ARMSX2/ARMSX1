@@ -3540,6 +3540,21 @@ open class MainActivityRuntime : ComponentActivity() {
             // so Compose's binder and the in-game lookup both see the same real key.
             return super.dispatchKeyEvent(event)
         }
+        // Reserve Start for the main UI menu before Android/Compose can treat
+        // it as a generic confirm button and launch the selected game.
+        if (kc == KeyEvent.KEYCODE_BUTTON_START && controllerDrivesFrontend()) {
+            if (!WindowImpl.overlayVisible.value &&
+                WindowImpl.inGameScreen.value == null &&
+                !com.armsx2.ui.MemoryCardManager.visible.value &&
+                com.armsx2.navigation.UiNavigator.route.value == com.armsx2.navigation.AppRoute.Home &&
+                event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0
+            ) {
+                val drawer = com.armsx2.navigation.UiNavigator.drawerOpen
+                drawer.value = !drawer.value
+            }
+            // Consume both edges and repeat events on all frontend surfaces.
+            return true
+        }
         // L1/R1 flick between settings tabs (as the old Refresh UI did). Handled here, not in
         // Compose, because a shoulder button never reaches a Composable — the overlay nav
         // further down consumes gamepad keys first (same reason the capture handlers above
