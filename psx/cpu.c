@@ -203,6 +203,7 @@ psx_cpu_t* psx_cpu_create(void) {
     }
 
     cpu->execution_mode = PSX_CPU_CACHED_INTERPRETER;
+    cpu->base_instruction_cycles = 1;
     return cpu;
 }
 
@@ -449,10 +450,12 @@ int psx_cpu_load_state(psx_cpu_t* cpu, psx_state_reader_t* r) {
 void psx_cpu_init(psx_cpu_t* cpu, psx_bus_t* bus) {
     struct psx_cpu_cache_t* cache = cpu->cache;
     psx_cpu_execution_mode_t execution_mode = cpu->execution_mode;
+    unsigned base_instruction_cycles = cpu->base_instruction_cycles;
 
     memset(cpu, 0, sizeof(psx_cpu_t));
 
     cpu->cache = cache;
+    psx_cpu_set_base_instruction_cycles(cpu, base_instruction_cycles);
     cpu->execution_mode = execution_mode == PSX_CPU_INTERPRETER
         ? PSX_CPU_INTERPRETER
         : PSX_CPU_CACHED_INTERPRETER;
@@ -468,6 +471,10 @@ void psx_cpu_init(psx_cpu_t* cpu, psx_bus_t* bus) {
 
     cpu->cop0_r[COP0_SR] = 0x10900000;
     cpu->cop0_r[COP0_PRID] = 0x00000002;
+}
+
+void psx_cpu_set_base_instruction_cycles(psx_cpu_t* cpu, unsigned cycles) {
+    if (cpu) cpu->base_instruction_cycles = cycles == 2 ? 2 : 1;
 }
 
 void psx_cpu_set_execution_mode(psx_cpu_t* cpu, psx_cpu_execution_mode_t mode) {
@@ -646,10 +653,10 @@ __attribute__((always_inline)) void psx_cpu_cycle(psx_cpu_t* cpu) {
         psx_cpu_exception(cpu, CAUSE_RI);
     }
 
-    // Ordinary handlers return the legacy two-cycle base. Charge one base cycle
-    // here, leaving explicit GTE latencies and fetched bus delays intact. Both
-    // CPU engines share this accounting point.
-    if (cyc == 2) cyc = 1;
+    // Both engines share the host's base-cycle compatibility policy. Mali can
+    // retain the earlier two-cycle accounting without changing Thor's one-cycle
+    // path. Explicit GTE latencies and fetched bus delays remain intact.
+    if (cyc == 2) cyc = cpu->base_instruction_cycles;
     cpu->last_cycles += cyc;
     cpu->total_cycles += cpu->last_cycles;
 

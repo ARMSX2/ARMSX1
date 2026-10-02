@@ -158,6 +158,16 @@ int main(void) {
     check("vk roaa trusted on turnip", p->fbfetch_vk_roaa, 1);
     check("push-desc disabled on turnip", p->avoid_push_descriptors, 1);
 
+    armsx_gpu_profile_reset();
+    check("unknown CPU base unchanged", armsx_gpu_profile_cpu_base_cycles(), 1);
+    armsx_gpu_profile_note_gl("Qualcomm", "Adreno (TM) 740", "OpenGL ES 3.2 V@0676");
+    check("Thor CPU base unchanged", armsx_gpu_profile_cpu_base_cycles(), 1);
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_vk(0x13B5u, 9, "Mali-G615 MC6", "ARM proprietary", "r44p1");
+    check("RG477V CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    armsx_gpu_profile_note_gl("ARM", "Mali-G615 MC6", "OpenGL ES 3.2");
+    check("Mali policy survives API detection", armsx_gpu_profile_cpu_base_cycles(), 2);
+
     printf(fails ? "\nGPU_PROFILE %d check(s) FAILED\n" : "\nGPU_PROFILE all checks passed\n", fails);
     return fails ? 1 : 0;
 }

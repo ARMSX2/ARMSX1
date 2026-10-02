@@ -182,6 +182,8 @@ const armsx_gpu_profile_t* armsx_gpu_profile_get(void);
 /* Thor frame scheduling shared by software and GL presentation paths, including
    the software bridge's GPU probe which has no driver identity yet. */
 int armsx_gpu_profile_prefers_pre_present_pacing(void);
+/* Mali compatibility: restore pre-regression CPU base-cycle accounting. */
+unsigned armsx_gpu_profile_cpu_base_cycles(void);
 /* Thor Adreno 740 / Qualcomm driver: prefer supported Vulkan MAILBOX.
    Other GPU/driver combinations keep their existing presentation mode. */
 int armsx_gpu_profile_prefers_vulkan_mailbox(void);

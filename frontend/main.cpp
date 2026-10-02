@@ -2558,6 +2558,15 @@ class ArmsxSession {
             return false;
         }
 
+#if defined(__ANDROID__)
+        const unsigned cpu_base_cycles = armsx_gpu_profile_cpu_base_cycles();
+#else
+        const unsigned cpu_base_cycles = 1;
+#endif
+        psx_cpu_set_base_instruction_cycles(psx_get_cpu(psx_), cpu_base_cycles);
+        psxe_diag_logf("cpu", "base_instruction_cycles=%u timing_path=%s gpu_vendor=%s",
+            cpu_base_cycles, cpu_base_cycles == 2 ? "mali-compat" : "standard",
+            armsx_gpu_profile_vendor_name(armsx_gpu_profile_get()->vendor));
         psx_cpu_set_execution_mode(psx_get_cpu(psx_), settings.cpu_engine);
         psxe_diag_logf("cpu", "execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
         ARMSX_BOOTLOG("core: CPU execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));

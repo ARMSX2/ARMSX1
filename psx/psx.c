@@ -71,6 +71,7 @@ __attribute__((always_inline)) void psx_update(psx_t* psx) {
        atomic load when nothing is parked. */
     psx_state_service_requests();
 
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
     if (g_psx_work_diag_enabled && ++g_psx_work_diag.cpu_sample_phase >= 4093) {
         g_psx_work_diag.cpu_sample_phase = 0;
         const uint64_t start = psx_work_diag_start();
@@ -79,6 +80,11 @@ __attribute__((always_inline)) void psx_update(psx_t* psx) {
     } else {
         psx_cpu_cycle(psx->cpu);
     }
+#else
+    /* Keep instruction-frequency sampling out of ordinary builds, including
+       when automatic Mali frame-level diagnostics are active. */
+    psx_cpu_cycle(psx->cpu);
+#endif
 
     /* Computed ONCE and shared: every device must be charged the identical amount, or the
        carry would be applied five times over and they would drift apart from each other

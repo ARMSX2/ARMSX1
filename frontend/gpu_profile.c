@@ -485,6 +485,11 @@ int armsx_gpu_profile_prefers_pre_present_pacing(void) {
          p->driver == ARMSX_GPU_DRIVER_UNKNOWN);
 }
 
+unsigned armsx_gpu_profile_cpu_base_cycles(void)
+{
+    return armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI ? 2u : 1u;
+}
+
 int armsx_gpu_profile_prefers_vulkan_mailbox(void)
 {
     const armsx_gpu_profile_t* p = armsx_gpu_profile_get();
