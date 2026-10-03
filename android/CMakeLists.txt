@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 project(armsx_android LANGUAGES C CXX)
+# Keep the native engine's configuration identical across APK variants. The
+# working Android Debug engine already has explicit -O3/ThinLTO below; changing
+# the dependency flags and NDEBUG in AGP's RelWithDebInfo configuration produces
+# a different engine. Java shrinking and APK debuggability remain controlled by
+# Gradle's release build type.
+foreach(ARMSX_NATIVE_CONFIG RELEASE RELWITHDEBINFO)
+    set(CMAKE_C_FLAGS_${ARMSX_NATIVE_CONFIG} "${CMAKE_C_FLAGS_DEBUG}")
+    set(CMAKE_CXX_FLAGS_${ARMSX_NATIVE_CONFIG} "${CMAKE_CXX_FLAGS_DEBUG}")
+endforeach()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_link_options("-Wl,-z,max-page-size=16384" "-Wl,-z,common-page-size=16384")
@@ -8,9 +17,10 @@ set(SDL_SHARED ON CACHE BOOL "" FORCE)
 set(SDL_STATIC OFF CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 add_subdirectory("${REPO}/third_party/SDL" SDL)
-# Software scaling, conversion and audio callbacks are real-time work even in
-# a debuggable APK. Keep symbols, but avoid shipping SDL's unoptimized Debug loop.
-target_compile_options(SDL2 PRIVATE "$<$<CONFIG:Debug>:-O3>")
+# Software scaling, conversion and audio callbacks are real-time work in every
+# APK. AGP uses RelWithDebInfo for release, whose default -O2 otherwise makes
+# SDL less optimized than the working Debug build. Keep -O3 in all variants.
+target_compile_options(SDL2 PRIVATE -O3)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(MINIZ_ARCHIVE_APIS ON CACHE BOOL "" FORCE)
 set(MINIZ_STDIO ON CACHE BOOL "" FORCE)
