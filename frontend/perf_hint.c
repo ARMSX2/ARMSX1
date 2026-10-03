@@ -18,11 +18,13 @@
 #if defined(__ANDROID__)
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -313,10 +315,51 @@ static atomic_int s_affinity_host_owned;
    thread starts at 0 here and applies from scratch, which is also correct for the off case: a
    thread that was never pinned has nothing to release. */
 static __thread int s_affinity_applied_mode_p1;
+static __thread int s_fastest_priority_owned;
+static __thread int s_fastest_original_priority;
+
+static void armsx_fastest_restore_priority(void)
+{
+    if (!s_fastest_priority_owned) {
+        return;
+    }
+
+    /* Do not overwrite a priority another Android component changed later. */
+    errno = 0;
+    const int current = getpriority(PRIO_PROCESS, 0);
+    if (errno == 0 && current == -4 &&
+        setpriority(PRIO_PROCESS, 0, s_fastest_original_priority) != 0) {
+        log_warn("Affinity: could not restore emulation thread priority");
+    }
+    s_fastest_priority_owned = 0;
+}
+
+static void armsx_fastest_raise_priority(void)
+{
+    /* The opt-in single-core path is sensitive to short scheduling delays.
+       Use Android's display priority (-4), retaining CFS and all emulated
+       clocks. This is per-thread on Android, not a process-wide boost. */
+    errno = 0;
+    const int current = getpriority(PRIO_PROCESS, 0);
+    if (errno != 0 || current <= -4) {
+        return;
+    }
+    if (setpriority(PRIO_PROCESS, 0, -4) != 0) {
+        log_warn("Affinity: display priority unavailable; retaining thread priority");
+        return;
+    }
+    s_fastest_original_priority = current;
+    s_fastest_priority_owned = 1;
+    log_info("Affinity: fastest-core emulation thread priority %d -> -4", current);
+}
 static int s_affinity_topology_ready;
 static int s_affinity_topology_usable;
+static int s_fastest_topology_ready;
+static __thread int s_fastest_mask_applied;
+static __thread unsigned s_fastest_verify_frames;
 static cpu_set_t s_affinity_all;         /* the mask this process started with */
-static cpu_set_t s_affinity_performance; /* the top-frequency cluster within it */
+static cpu_set_t s_affinity_performance; /* top tier plus its adjacent performance tier */
+static cpu_set_t s_affinity_fastest;     /* the highest-frequency tier only */
 
 static long armsx_read_cpu_max_freq(int cpu)
 {
@@ -337,6 +380,44 @@ static long armsx_read_cpu_max_freq(int cpu)
 
     fclose(file);
     return khz > 0 ? khz : 0;
+}
+
+static void armsx_fastest_detect_topology(void)
+{
+    if (s_fastest_topology_ready) {
+        return;
+    }
+    s_fastest_topology_ready = 1;
+    CPU_ZERO(&s_affinity_fastest);
+
+    /* Android may give a newly started thread a transient affinity mask that
+       excludes the prime core. That mask is placement, not its cpuset limit.
+       The explicit FASTEST option detects the hardware independently; the
+       kernel still enforces online CPUs and cpuset permissions when applied.
+       Keep the original mask for Off/All and the existing Performance mode. */
+    long top = 0;
+    /* CPU-count APIs can themselves reflect the inherited affinity mask on
+       Android. Inspect the bounded kernel CPU nodes instead. */
+    for (int cpu = 0; cpu < ARMSX_AFFINITY_MAX_CPUS; ++cpu) {
+        const long freq = armsx_read_cpu_max_freq(cpu);
+        if (freq <= 0 || freq < top) {
+            continue;
+        }
+        char path[128];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/online", cpu);
+        FILE* online_file = fopen(path, "r");
+        int online = 1;
+        if (online_file) {
+            if (fscanf(online_file, "%d", &online) != 1) online = 1;
+            fclose(online_file);
+        }
+        if (!online) continue;
+        if (freq > top) {
+            CPU_ZERO(&s_affinity_fastest);
+            top = freq;
+        }
+        CPU_SET(cpu, &s_affinity_fastest);
+    }
 }
 
 /* Group the CPUs this process may use by their maximum frequency and take the top group as
@@ -454,7 +535,8 @@ static int armsx_affinity_normalize(int mode)
         return ARMSX_AFFINITY_PERFORMANCE;
     }
 
-    if (mode == ARMSX_AFFINITY_PERFORMANCE || mode == ARMSX_AFFINITY_ALL) {
+    if (mode == ARMSX_AFFINITY_PERFORMANCE || mode == ARMSX_AFFINITY_ALL ||
+        mode == ARMSX_AFFINITY_FASTEST) {
         return mode;
     }
 
@@ -488,7 +570,27 @@ void armsx_affinity_apply_emulation_thread(void)
     const cpu_set_t* want;
 
     if (mode == applied) {
+        /* Vendor scheduling can replace a mask after startup. Check only the
+           explicit FASTEST option, once per 32 frames, instead of trusting a
+           cached mode forever. Leave system cpuset restrictions authoritative. */
+        if (mode == ARMSX_AFFINITY_FASTEST && s_fastest_mask_applied &&
+            (s_fastest_verify_frames++ & 31u) == 0) {
+            cpu_set_t current;
+            if (sched_getaffinity(0, sizeof(current), &current) == 0 &&
+                !CPU_EQUAL(&current, &s_affinity_fastest)) {
+                if (sched_setaffinity(0, sizeof(current), &s_affinity_fastest) != 0) {
+                    s_fastest_mask_applied = 0;
+                    armsx_fastest_restore_priority();
+                    log_warn("Affinity: fastest core no longer permitted; retaining system placement");
+                }
+            }
+        }
         return;
+    }
+
+    if (mode != ARMSX_AFFINITY_FASTEST) {
+        s_fastest_mask_applied = 0;
+        armsx_fastest_restore_priority();
     }
 
     /* The default. Nothing has been pinned, so there is nothing to undo and no reason to go
@@ -500,6 +602,9 @@ void armsx_affinity_apply_emulation_thread(void)
     }
 
     armsx_affinity_detect_topology();
+    if (mode == ARMSX_AFFINITY_FASTEST) {
+        armsx_fastest_detect_topology();
+    }
 
     if (mode == ARMSX_AFFINITY_OFF) {
         /* Off does not mean "restore": a mode this thread never applied has nothing to undo,
@@ -515,7 +620,13 @@ void armsx_affinity_apply_emulation_thread(void)
         return;
     }
 
-    if (mode == ARMSX_AFFINITY_PERFORMANCE && s_affinity_topology_usable) {
+    if (mode == ARMSX_AFFINITY_FASTEST &&
+        CPU_COUNT(&s_affinity_fastest) > 0) {
+        // Opt-in: the emulator has one busy instruction thread. A widened big-core
+        // mask can still place it on a slower tier that misses every deadline.
+        // Select the detected top tier, retaining multiple cores if tied.
+        want = &s_affinity_fastest;
+    } else if (mode == ARMSX_AFFINITY_PERFORMANCE && s_affinity_topology_usable) {
         want = &s_affinity_performance;
     } else if (CPU_COUNT(&s_affinity_all) > 0) {
         /* ALL, and the fallback for PERFORMANCE on a device whose clusters could not be told
@@ -533,6 +644,11 @@ void armsx_affinity_apply_emulation_thread(void)
     } else {
         log_info("Affinity: emulation thread pinned to %d core(s) (mode %d)",
                  CPU_COUNT(want), mode);
+        if (mode == ARMSX_AFFINITY_FASTEST && want == &s_affinity_fastest) {
+            s_fastest_mask_applied = 1;
+            s_fastest_verify_frames = 0;
+            armsx_fastest_raise_priority();
+        }
     }
 
     s_affinity_applied_mode_p1 = mode + 1;

@@ -124,6 +124,8 @@ struct psx_gpu_t {
     void* udata[4];
 
     uint16_t* vram;
+    /* Host policy only; never serialized in a save state. */
+    int defer_software_shading;
     uint16_t* empty;
     int display_enable;
 

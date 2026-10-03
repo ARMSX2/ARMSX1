@@ -1140,8 +1140,9 @@ object ControllerMappings {
         invalidateRuntimeCaches()
     }
 
-    /** Bind a two-button combo: [modCode] held + [keyCode] pressed. */
+    /** Bind two distinct buttons; either button may be pressed first. */
     fun bindHotkeyCombo(h: SysHotkey, modCode: Int, keyCode: Int) {
+        require(modCode != KeyEvent.KEYCODE_UNKNOWN && keyCode != KeyEvent.KEYCODE_UNKNOWN && modCode != keyCode)
         MainActivityRuntime.prefs.edit {
             putInt(h.prefKey, keyCode)
                 .putInt(h.prefKey + MOD_SUFFIX, modCode)
@@ -1229,17 +1230,12 @@ object ControllerMappings {
         }?.action
     }
 
-    /** Combo-aware match for the just-pressed [keyCode] given the set of
-     *  currently-held physical keys. Combos (modifier held) win over a plain
-     *  single binding on the same key, so e.g. Select+R1 fires its action
-     *  instead of a bare-R1 binding while Select is held. */
+    /** Order-independent chord match. A completed pair wins over a single binding. */
     fun matchHotkey(keyCode: Int, heldKeys: Set<Int>): SysHotkey? {
         if (keyCode == KeyEvent.KEYCODE_UNKNOWN) return null
         val bindings = runtimeBindings().hotkeys
         bindings.firstOrNull {
-            it.keyCode == keyCode &&
-                it.modifierCode != KeyEvent.KEYCODE_UNKNOWN &&
-                heldKeys.contains(it.modifierCode)
+            HotkeyChordPolicy.matches(it.keyCode, it.modifierCode, keyCode, heldKeys)
         }?.let { return it.action }
         return bindings.firstOrNull {
             it.keyCode == keyCode && it.modifierCode == KeyEvent.KEYCODE_UNKNOWN
@@ -1252,6 +1248,14 @@ object ControllerMappings {
             runtimeBindings().hotkeys.any {
                 it.keyCode == keyCode || it.modifierCode == keyCode
             }
+
+    fun hotkeyButtonCodes(action: SysHotkey): Set<Int> =
+        setOf(hotkeyCode(action), hotkeyModCode(action)).filter { it != KeyEvent.KEYCODE_UNKNOWN }.toSet()
+
+    fun participatesInHotkeyCombo(keyCode: Int): Boolean =
+        keyCode != KeyEvent.KEYCODE_UNKNOWN && runtimeBindings().hotkeys.any {
+            it.modifierCode != KeyEvent.KEYCODE_UNKNOWN && (it.keyCode == keyCode || it.modifierCode == keyCode)
+        }
 
     fun matchesSingleHotkey(action: SysHotkey, keyCode: Int): Boolean =
         runtimeBindings().hotkeys.any {
@@ -1278,26 +1282,36 @@ object ControllerMappings {
     // for a single bind, or two together for a combo. Observed for UI feedback.
     val captureHotkey = mutableStateOf<SysHotkey?>(null)
 
-    /** Ordered buffer of buttons pressed during an active capture (≤2 used). */
-    val captureKeys = mutableListOf<Int>()
+    private val hotkeyCapture = HotkeyCapturePolicy()
+    val captureButtons = mutableStateOf<List<Int>>(emptyList())
 
-    /**
-     * eventTime (uptimeMillis) of the first DOWN in the current capture. Used to
-     * reject a 2nd keycode that arrives near-simultaneously — some controllers
-     * emit two keycodes for one physical press, which would otherwise be misread
-     * as a 2-button combo and make single-button hotkeys impossible to bind.
-     */
-    var captureFirstDownMs = 0L
+    fun resetHotkeyCaptureButtons() {
+        hotkeyCapture.reset()
+        captureButtons.value = emptyList()
+    }
+
+    fun captureHotkeyButton(event: KeyEvent): CapturedHotkey? {
+        val result = when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                hotkeyCapture.down(event.keyCode, event.deviceId, event.scanCode, event.repeatCount != 0)
+                null
+            }
+            KeyEvent.ACTION_UP -> hotkeyCapture.up(event.keyCode, event.deviceId)
+            else -> null
+        }
+        captureButtons.value = hotkeyCapture.codes
+        return result
+    }
 
     /** Start capturing a (re)binding for [h]. */
     fun beginHotkeyCapture(h: SysHotkey) {
-        captureKeys.clear()
+        resetHotkeyCaptureButtons()
         captureHotkey.value = h
     }
 
     /** End the current capture session. */
     fun endHotkeyCapture() {
-        captureKeys.clear()
+        resetHotkeyCaptureButtons()
         captureHotkey.value = null
         hotkeyBindTick.value++
     }

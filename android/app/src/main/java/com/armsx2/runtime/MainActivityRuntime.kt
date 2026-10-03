@@ -112,12 +112,6 @@ private const val UI_KEY_AXIS_SUPPRESS_MS = 220L
 private const val NAV_REPEAT_INITIAL_MS = 340L
 private const val NAV_REPEAT_INTERVAL_MS = 110L
 
-// During a hotkey capture, a 2nd keycode arriving within this window of the
-// first DOWN is treated as part of the SAME physical press (some controllers
-// emit two codes per button) rather than a deliberate modifier+key combo.
-// A real combo is a held first button + a later second press, well past this.
-private const val COMBO_MIN_GAP_MS = 40L
-
 open class MainActivityRuntime : ComponentActivity() {
     private var lastUiNavCode = 0
     private var lastUiNavAt = 0L
@@ -545,6 +539,13 @@ open class MainActivityRuntime : ComponentActivity() {
                         if (vmStopInProgress) 0L else NativeApp.prepareVMRun().also { vmNativeRunToken = it }
                     }
                     if (token == 0L) false else try {
+                        // Every launch path reaches this gate, including the normal PS1
+                        // library/SAF path, restart and Swap Game. Apply the resolved host
+                        // scheduling policy before the native emulation thread begins.
+                        val scheduling = com.armsx2.config.ConfigStore.resolveForGame(
+                            if (kind == "BIOS") null else currentGame.value?.settingsKey,
+                        )
+                        NativeApp.setAffinityMode(scheduling.affinityMode)
                         NativeApp.runVMThreadForSession(prepared.launchPath, token)
                     } finally {
                         NativeApp.releaseVMRun(token)
@@ -806,8 +807,6 @@ open class MainActivityRuntime : ComponentActivity() {
                     // per-game ∘ global.
                     val bootCfg = com.armsx2.config.ConfigStore
                         .resolveForGame(currentGame.value?.settingsKey)
-                    // Read by VMManager::SetEmuThreadAffinities during boot.
-                    runCatching { NativeApp.setAffinityMode(bootCfg.affinityMode) }
                     // The hold itself waits for the VM to come up. BIOS boots skip it.
                     if (bootCfg.autoProgressiveScan)
                         startAutoProgressiveScanHold()
@@ -2692,6 +2691,7 @@ open class MainActivityRuntime : ComponentActivity() {
             turboHandler.post { resetPadState() }
             return
         }
+        com.armsx2.ui.emulation.EmulationMenuInputController.cancelConfirm(reset = true)
         runCatching { NativeApp.resetPadState() }
         controllerHolds.reset(::releaseControllerHold)
         // Turbo autofire: kill the timers first, or a queued runnable re-presses after the reset.
@@ -2725,9 +2725,12 @@ open class MainActivityRuntime : ComponentActivity() {
         captureHatX = 0
         captureHatY = 0
         captureHeldSynth.clear()
-        ControllerMappings.captureKeys.clear()
-        ControllerMappings.captureFirstDownMs = 0L
+        ControllerMappings.resetHotkeyCaptureButtons()
         heldKeys.clear()
+        runtimeHotkeyConsumed.clear()
+        pendingSingleHotkeys.clear()
+        axisHotkeyHeld.clear()
+        deviceHeldKeys.clear()
     }
 
     /** Apply the user's Emulation Screen Orientation choice, resolved per-game (∘ global).
@@ -3405,6 +3408,12 @@ open class MainActivityRuntime : ComponentActivity() {
     // (e.g. Select + R1) — kept current at the top of dispatchKeyEvent so a
     // combo's modifier can be checked the instant its main key is pressed.
     private val heldKeys = HashSet<Int>()
+    private val deviceHeldKeys = HashMap<Int, MutableSet<Int>>()
+    private val runtimeHotkeyConsumed = HashSet<Pair<Int, Int>>()
+    private val pendingSingleHotkeys = HashMap<Pair<Int, Int>, ControllerMappings.SysHotkey>()
+    private val axisHotkeyHeld = HashMap<Int, MutableSet<Int>>()
+
+    private fun hotkeyOwnsButton(deviceId: Int, code: Int) = (deviceId to code) in runtimeHotkeyConsumed
 
     // Hold-BACK-to-exit (Dolphin-style) timer. Instance-scoped because
     // dispatchKeyEvent is an Activity method; the posted runnable is cancelled on
@@ -3456,10 +3465,15 @@ open class MainActivityRuntime : ComponentActivity() {
             )
         }
         val kc = event.keyCode
+        val deviceKeys = deviceHeldKeys.getOrPut(event.deviceId) { HashSet() }
+        val newKeyPress = event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 && kc !in deviceKeys
+        val keyIdentity = event.deviceId to kc
+        val deferredSingle = if (event.action == KeyEvent.ACTION_UP) pendingSingleHotkeys.remove(keyIdentity) else null
+        val consumedRelease = event.action == KeyEvent.ACTION_UP && runtimeHotkeyConsumed.remove(keyIdentity)
         if (kc != KeyEvent.KEYCODE_UNKNOWN) {
             when (event.action) {
-                KeyEvent.ACTION_DOWN -> heldKeys.add(kc)
-                KeyEvent.ACTION_UP -> heldKeys.remove(kc)
+                KeyEvent.ACTION_DOWN -> { heldKeys.add(kc); deviceKeys.add(kc) }
+                KeyEvent.ACTION_UP -> { heldKeys.remove(kc); deviceKeys.remove(kc) }
             }
         }
         // Track the active gamepad so PS2 rumble routes to its vibrator.
@@ -3472,6 +3486,8 @@ open class MainActivityRuntime : ComponentActivity() {
         logControllerKey(event)
         if (event.action == KeyEvent.ACTION_UP &&
             controllerHolds.release(event.deviceId, kc, ::releaseControllerHold)) return true
+        if (consumedRelease && deferredSingle == null) return true
+        if (event.action == KeyEvent.ACTION_DOWN && !newKeyPress && keyIdentity in runtimeHotkeyConsumed) return true
         // #254 Emulated USB keyboard. When a game runs with the USB HID keyboard
         // attached (Settings.usbKeyboard, e.g. EQOA / Konami-keyboard titles),
         // forward physical/Bluetooth keyboard key events to it. Gated so it only
@@ -3490,34 +3506,13 @@ open class MainActivityRuntime : ComponentActivity() {
         // bind a combo (first = modifier, second = main key).
         val capturing = ControllerMappings.captureHotkey.value
         if (capturing != null) {
-            if (kc != KeyEvent.KEYCODE_UNKNOWN) {
-                val buf = ControllerMappings.captureKeys
-                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    if (buf.isEmpty()) {
-                        // First button of this capture.
-                        buf.add(kc)
-                        ControllerMappings.captureFirstDownMs = event.eventTime
-                    } else if (!buf.contains(kc) &&
-                        event.eventTime - ControllerMappings.captureFirstDownMs >= COMBO_MIN_GAP_MS
-                    ) {
-                        // A distinct 2nd button pressed deliberately (held the first,
-                        // then pressed this) → modifier combo. The time gate rejects a
-                        // 2nd keycode fired ~instantly by one physical press (some pads
-                        // emit two codes per button), which would otherwise block
-                        // single-button binds entirely.
-                        buf.add(kc)
-                        ControllerMappings.bindHotkeyCombo(capturing, buf[0], buf[1])
-                        ControllerMappings.endHotkeyCapture()
-                    }
-                } else if (event.action == KeyEvent.ACTION_UP) {
-                    // Released before a second button arrived → single-button bind.
-                    if (buf.size == 1 && buf.contains(kc)) {
-                        ControllerMappings.bindHotkey(capturing, buf[0])
-                        ControllerMappings.endHotkeyCapture()
-                    }
-                }
+            ControllerMappings.captureHotkeyButton(event)?.let { binding ->
+                if (binding.modifierCode == KeyEvent.KEYCODE_UNKNOWN)
+                    ControllerMappings.bindHotkey(capturing, binding.keyCode)
+                else ControllerMappings.bindHotkeyCombo(capturing, binding.modifierCode, binding.keyCode)
+                ControllerMappings.endHotkeyCapture()
             }
-            return true // swallow down + up while capturing
+            return true // Capture owns both presses AND all their releases.
         }
         // Pad-button capture (Controls screen): bind here — like the hotkey capture above —
         // instead of via Compose's onPreviewKeyEvent, because the bind prompt is no longer a
@@ -3568,8 +3563,12 @@ open class MainActivityRuntime : ComponentActivity() {
         ) return true
         // Reserve Start for the main UI menu before Android/Compose can treat
         // it as a generic confirm button and launch the selected game.
-        if (kc == KeyEvent.KEYCODE_BUTTON_START && controllerDrivesFrontend()) {
-            if (!WindowImpl.overlayVisible.value &&
+        if (kc == KeyEvent.KEYCODE_BUTTON_START && controllerDrivesFrontend() &&
+            !com.armsx2.ui.home.CollectionsInputController.active()) {
+            if (WindowImpl.showLibrary.value &&
+                event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                WindowImpl.dismissGameLibrary()
+            } else if (!WindowImpl.overlayVisible.value &&
                 WindowImpl.inGameScreen.value == null &&
                 !com.armsx2.ui.MemoryCardManager.visible.value &&
                 com.armsx2.navigation.UiNavigator.route.value == com.armsx2.navigation.AppRoute.Home &&
@@ -3685,6 +3684,9 @@ open class MainActivityRuntime : ComponentActivity() {
         // with Done — the keyboard block above owns input while it's up). D-pad moves the result
         // selection, A jumps to the setting, Y re-opens the keyboard, B closes. Owns the pad so
         // nothing leaks to the settings screen behind.
+        if (com.armsx2.ui.home.CollectionsInputController.active()) {
+            return com.armsx2.ui.home.CollectionsInputController.key(event)
+        }
         if (com.armsx2.ui.settingshub.SettingsSearch.visible.value) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                 when (kc) {
@@ -3773,7 +3775,7 @@ open class MainActivityRuntime : ComponentActivity() {
         }
         if (WindowImpl.overlayVisible.value) {
             // Pause menu two-zone nav (EmulationMenuInputController): the left tab
-            // column is walked with Up/Down (Right steps into the content pane); the
+            // rail is walked with Up/Down (Left steps into the content pane); the
             // content pane's controls are SettingsControllerNav registry items that
             // move()/confirm() drive. L1/R1 cycle tabs from anywhere; Y jumps to the
             // Options tab; B backs out (content → tabs → resume). Edge-triggered.
@@ -3786,11 +3788,12 @@ open class MainActivityRuntime : ComponentActivity() {
                 KeyEvent.KEYCODE_DPAD_DOWN -> { if (down) emu.move(0, 1); true }
                 KeyEvent.KEYCODE_BUTTON_L1 -> { if (down) emu.tab(-1); true }
                 KeyEvent.KEYCODE_BUTTON_R1 -> { if (down) emu.tab(1); true }
+                KeyEvent.KEYCODE_BUTTON_X -> { if (down) emu.nextOption(); true }
                 KeyEvent.KEYCODE_BUTTON_Y -> { if (down) emu.open(com.armsx2.ui.emulation.EmulationMenuTab.Options); true }
                 KeyEvent.KEYCODE_BUTTON_A,
                 KeyEvent.KEYCODE_DPAD_CENTER,
                 KeyEvent.KEYCODE_ENTER,
-                KeyEvent.KEYCODE_NUMPAD_ENTER -> { if (down) emu.confirm(); true }
+                KeyEvent.KEYCODE_NUMPAD_ENTER -> { emu.confirmKey(event); true }
                 KeyEvent.KEYCODE_BUTTON_B,
                 KeyEvent.KEYCODE_BACK -> { if (down) emu.back(); true }
                 else -> false
@@ -3798,6 +3801,21 @@ open class MainActivityRuntime : ComponentActivity() {
             if (handled) return true
         }
         if (controllerDrivesFrontend()) {
+            val library = com.armsx2.ui.emulation.GameLibraryInputController
+            if (library.active()) {
+                val firstDown = event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0
+                when (kc) {
+                    KeyEvent.KEYCODE_DPAD_UP -> if (firstDown) library.move(-1)
+                    KeyEvent.KEYCODE_DPAD_DOWN -> if (firstDown) library.move(1)
+                    KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> Unit
+                    KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER,
+                    KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> if (firstDown) library.confirm()
+                    KeyEvent.KEYCODE_BUTTON_Y -> if (firstDown) library.search()
+                    KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK -> if (firstDown) WindowImpl.dismissGameLibrary()
+                    else -> return super.dispatchKeyEvent(event)
+                }
+                return true
+            }
             // Library COVER grid/list/shelf gets the dedicated data-driven spatial
             // model (HomeInputController). It must yield when something is layered
             // ON TOP of the library — the nav drawer, an in-game manager screen, or
@@ -3877,8 +3895,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     KeyEvent.KEYCODE_BUTTON_A,
                     KeyEvent.KEYCODE_DPAD_CENTER,
                     KeyEvent.KEYCODE_ENTER,
-                    KeyEvent.KEYCODE_NUMPAD_ENTER -> event.action != KeyEvent.ACTION_DOWN ||
-                        com.armsx2.ui.home.HomeInputController.confirm()
+                    KeyEvent.KEYCODE_NUMPAD_ENTER -> com.armsx2.ui.home.HomeInputController.confirmKey(event)
                     KeyEvent.KEYCODE_BUTTON_B,
                     KeyEvent.KEYCODE_BACK -> event.action != KeyEvent.ACTION_DOWN ||
                         com.armsx2.ui.home.HomeInputController.back()
@@ -3939,12 +3956,34 @@ open class MainActivityRuntime : ComponentActivity() {
         // Runtime: bound system hotkeys. Caught here so back-button bindings work
         // (and aren't eaten by the back handler).
         if (eState.value == EmuState.RUNNING && !controllerDrivesFrontend()) {
-            val down = event.action == KeyEvent.ACTION_DOWN
-            // Combo-aware: on key-up the main key is already out of heldKeys, so
-            // re-add it for the match (FAST_FORWARD needs to recognise its own
-            // release). heldKeys still carries the modifier either way.
-            val matchKeys = if (down) heldKeys else heldKeys + kc
-            when (ControllerMappings.matchHotkey(kc, matchKeys)) {
+            val down = newKeyPress || deferredSingle != null
+            val hotkey = deferredSingle ?: ControllerMappings.matchHotkey(kc,
+                if (event.action == KeyEvent.ACTION_DOWN) deviceKeys else deviceKeys + kc)
+            if (newKeyPress && hotkey != null) {
+                val codes = ControllerMappings.hotkeyButtonCodes(hotkey)
+                if (codes.size == 1 && ControllerMappings.participatesInHotkeyCombo(kc) &&
+                    hotkey !in setOf(ControllerMappings.SysHotkey.FAST_FORWARD,
+                        ControllerMappings.SysHotkey.REWIND, ControllerMappings.SysHotkey.GYRO_HOLD)) {
+                    // One-shot singles sharing a chord button fire on release only
+                    // if the second button never completes that chord.
+                    pendingSingleHotkeys[keyIdentity] = hotkey
+                    runtimeHotkeyConsumed.add(keyIdentity)
+                    return true
+                }
+                codes.forEach { code ->
+                    pendingSingleHotkeys.remove(event.deviceId to code)
+                    runtimeHotkeyConsumed.add(event.deviceId to code)
+                    if (codes.size == 2) {
+                        controllerHolds.release(event.deviceId, code, ::releaseControllerHold)
+                        // The first component may already be held in the game.
+                        // Release its gameplay mapping before the shortcut takes over.
+                        dispatchGameplayKey(KeyEvent(event.downTime, event.eventTime,
+                            KeyEvent.ACTION_UP, code, 0, event.metaState, event.deviceId,
+                            0, event.flags, event.source))
+                    }
+                }
+            }
+            when (hotkey) {
                 // Pressure modifier is a hold, handled (and consumed) earlier in
                 // dispatchKeyEvent; it never reaches this one-shot action switch.
                 ControllerMappings.SysHotkey.PRESSURE_MOD -> {}
@@ -3993,13 +4032,13 @@ open class MainActivityRuntime : ComponentActivity() {
                 }
                 ControllerMappings.SysHotkey.GYRO_HOLD -> {
                     if (down && !vmStopInProgress && event.repeatCount == 0 && controllerHolds.press(
-                            event.deviceId, kc, ControllerHoldTracker.Action.GYRO))
+                            event.deviceId, kc, ControllerHoldTracker.Action.GYRO, ControllerMappings.hotkeyButtonCodes(ControllerMappings.SysHotkey.GYRO_HOLD)))
                         gyroActive.value = true
                     return true
                 }
                 ControllerMappings.SysHotkey.FAST_FORWARD -> {
                     if (down && !vmStopInProgress && event.repeatCount == 0 && controllerHolds.press(
-                            event.deviceId, kc, ControllerHoldTracker.Action.FAST_FORWARD)) {
+                            event.deviceId, kc, ControllerHoldTracker.Action.FAST_FORWARD, ControllerMappings.hotkeyButtonCodes(ControllerMappings.SysHotkey.FAST_FORWARD))) {
                         fastForwardToggleActive = false
                         applyFastForward(true)
                     }
@@ -4020,7 +4059,7 @@ open class MainActivityRuntime : ComponentActivity() {
                             )
                             return true
                         }
-                        if (controllerHolds.press(event.deviceId, kc, ControllerHoldTracker.Action.REWIND))
+                        if (controllerHolds.press(event.deviceId, kc, ControllerHoldTracker.Action.REWIND, ControllerMappings.hotkeyButtonCodes(ControllerMappings.SysHotkey.REWIND)))
                             com.armsx2.core.Ps1Emulation.setRewindActive(true)
                     }
                     return true
@@ -4496,8 +4535,12 @@ open class MainActivityRuntime : ComponentActivity() {
             // ever dispatched for it, so also purge it from heldKeys or a stale
             // direction would satisfy combo-modifier checks forever after.
             heldKeys.removeAll(captureHeldSynth)
+            deviceHeldKeys[ev.deviceId]?.removeAll(captureHeldSynth)
             captureHeldSynth.clear()
         }
+        val frontendBeforeAxisHotkey = controllerDrivesFrontend()
+        dispatchBoundAxisHotkeys(ev)
+        if (!frontendBeforeAxisHotkey && controllerDrivesFrontend()) return true
         if (com.armsx2.ui.MemoryCardManager.visible.value) {
             handleMemcardControllerMotion(ev)
             return true
@@ -4534,7 +4577,6 @@ open class MainActivityRuntime : ComponentActivity() {
                 leftStick = false, port = port)
             // Fire any ARMSX2 hotkey bound (Hotkeys tab) to a stick DIRECTION — lets an
             // unused stick trigger Quick Save/Load etc. The stick still drives the pad.
-            fireStickHotkeys(ev, port)
             // D-pad: the physical HAT *and* any stick remapped to D-pad drive the
             // same four PAD buttons. Combine every source and write each direction
             // once — otherwise the centered HAT released the stick-as-D-pad press
@@ -4734,7 +4776,7 @@ open class MainActivityRuntime : ComponentActivity() {
             nav.drawerOpen.value -> nav.drawerOpen.value = false
             WindowImpl.inGameScreen.value != null -> WindowImpl.dismissInGameScreen()
             WindowImpl.showLibrary.value && !onHome -> nav.back()
-            WindowImpl.showLibrary.value -> WindowImpl.showLibrary.value = false
+            WindowImpl.showLibrary.value -> WindowImpl.dismissGameLibrary()
             !onHome -> nav.back()
             // Root library home with nothing above it: B opens the nav drawer
             // (mirrors the cover-grid B handled in HomeInputController.back()).
@@ -4772,6 +4814,13 @@ open class MainActivityRuntime : ComponentActivity() {
                 // Controller search keyboard owns the stick/HAT/D-pad while it's up
                 // (this is the RP6 path — its D-pad arrives here as a HAT axis).
                 com.armsx2.ui.home.LibraryKeyboard.move(dx, dy)
+            }
+            com.armsx2.ui.home.CollectionsInputController.active() -> {
+                if (dy != 0) com.armsx2.ui.home.CollectionsInputController.move(dy)
+                else if (dx != 0) com.armsx2.ui.home.CollectionsInputController.moveHorizontal(dx)
+            }
+            com.armsx2.ui.emulation.GameLibraryInputController.active() -> {
+                if (dy != 0) com.armsx2.ui.emulation.GameLibraryInputController.move(dy)
             }
             com.armsx2.ui.settingshub.SettingsSearch.visible.value -> {
                 // Settings-search result browse (keyboard dismissed): vertical list nav.
@@ -5000,6 +5049,47 @@ open class MainActivityRuntime : ComponentActivity() {
      *  events now carry real uptimeMillis timestamps, so hold-direction-then-press-
      *  button and hold-button-then-push-direction both bind combos, and a push
      *  released with nothing else still binds the plain single direction. */
+    /** Only configured shortcuts use this bridge; ordinary analog input keeps its existing path. */
+    private fun dispatchBoundAxisHotkeys(ev: MotionEvent) {
+        val want = linkedSetOf<Int>()
+        fun add(code: Int, active: Boolean) {
+            if (active && ControllerMappings.isHotkeyKeyOrModifier(code)) want.add(code)
+        }
+        val x = ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X)
+        val y = ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y)
+        add(KeyEvent.KEYCODE_DPAD_LEFT, x < -UI_HAT_DEAD)
+        add(KeyEvent.KEYCODE_DPAD_RIGHT, x > UI_HAT_DEAD)
+        add(KeyEvent.KEYCODE_DPAD_UP, y < -UI_HAT_DEAD)
+        add(KeyEvent.KEYCODE_DPAD_DOWN, y > UI_HAT_DEAD)
+        add(KeyEvent.KEYCODE_BUTTON_L2, ControllerMotion.trigger(ev,
+            MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE) > STICK_DIGITAL_THRESHOLD)
+        add(KeyEvent.KEYCODE_BUTTON_R2, ControllerMotion.trigger(ev,
+            MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS,
+            rightTriggerExtraAxis(ev.deviceId)) > STICK_DIGITAL_THRESHOLD)
+        val (rightX, rightY) = rightStickAxes(ev.deviceId)
+        for (left in booleanArrayOf(true, false)) {
+            val sx = ControllerMotion.centered(ev, if (left) MotionEvent.AXIS_X else rightX)
+            val sy = ControllerMotion.centered(ev, if (left) MotionEvent.AXIS_Y else rightY)
+            add(ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.LEFT), sx < -STICK_DIGITAL_THRESHOLD)
+            add(ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.RIGHT), sx > STICK_DIGITAL_THRESHOLD)
+            add(ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.UP), sy < -STICK_DIGITAL_THRESHOLD)
+            add(ControllerMappings.stickHotkeyKeyCode(left, ControllerMappings.StickDir.DOWN), sy > STICK_DIGITAL_THRESHOLD)
+        }
+        val held = axisHotkeyHeld.getOrPut(ev.deviceId) { HashSet() }
+        val now = SystemClock.uptimeMillis()
+        for (code in held.filter { it !in want }) {
+            held.remove(code)
+            dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, 0, ev.deviceId, 0, 0, ev.source))
+        }
+        if (eState.value != EmuState.RUNNING || controllerDrivesFrontend()) return
+        for (code in want) {
+            if (held.add(code)) {
+                dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, 0, ev.deviceId, 0, 0, ev.source))
+                if (controllerDrivesFrontend()) break
+            }
+        }
+    }
+
     private val captureHeldSynth = HashSet<Int>()
     private fun handleCaptureMotion(ev: MotionEvent): Boolean {
         // Desired engaged-direction set for this event: at most one per HAT axis
@@ -5015,6 +5105,11 @@ open class MainActivityRuntime : ComponentActivity() {
         // here is why its directions could never be bound.
         val (capRightX, capRightY) = rightStickAxes(ev.deviceId)
         captureStickCode(ev, capRightX, capRightY, false).takeIf { it != 0 }?.let { want.add(it) }
+        if (ControllerMotion.trigger(ev, MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE) > STICK_DIGITAL_THRESHOLD)
+            want.add(KeyEvent.KEYCODE_BUTTON_L2)
+        if (ControllerMotion.trigger(ev, MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS,
+                rightTriggerExtraAxis(ev.deviceId)) > STICK_DIGITAL_THRESHOLD)
+            want.add(KeyEvent.KEYCODE_BUTTON_R2)
         captureHatX = dx
         captureHatY = dy
         val now = SystemClock.uptimeMillis()
@@ -5025,17 +5120,18 @@ open class MainActivityRuntime : ComponentActivity() {
             // Re-enter dispatchKeyEvent (not super) so it reaches the hotkey
             // capture AND, while padCapturing, falls through to Compose's
             // onPreviewKeyEvent which records the pad bind.
-            dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0))
+            dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, 0, ev.deviceId, 0, 0, ev.source))
         }
         for (code in want) {
             if (captureHeldSynth.add(code))
-                dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0))
+                dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0, 0, ev.deviceId, 0, 0, ev.source))
         }
         // Binding may have completed mid-loop (endHotkeyCapture); drop any held
         // state so the next capture session starts clean (incl. heldKeys, since no
         // UP will ever arrive for these synthetic codes).
         if (ControllerMappings.captureHotkey.value == null && !ControllerMappings.padCapturing.value) {
             heldKeys.removeAll(captureHeldSynth)
+            deviceHeldKeys[ev.deviceId]?.removeAll(captureHeldSynth)
             captureHeldSynth.clear()
         }
         return true
@@ -5322,43 +5418,6 @@ open class MainActivityRuntime : ComponentActivity() {
     // crossing fires exactly once (re-armed on release).
     private val stickHotkeyHeld = Array(8) { HashSet<Int>() } // per unified pad slot (multitap)
 
-    /** Fire any SysHotkey bound (Hotkeys tab) to a stick DIRECTION, edge-triggered. The
-     *  stick still drives the pad, so this is meant for sticks/directions a game doesn't
-     *  use. Reuses [stickHotkeyHeld] — the reserved 1000+ stick-hotkey keycodes don't
-     *  collide with the Custom-mode 300+ codes also tracked there. */
-    private fun fireStickHotkeys(ev: MotionEvent, port: Int) {
-        fireStickHotkeyAxis(ev, MotionEvent.AXIS_X, MotionEvent.AXIS_Y, true, port)
-        val (hkRightX, hkRightY) = rightStickAxes(ev.deviceId)
-        fireStickHotkeyAxis(ev, hkRightX, hkRightY, false, port)
-    }
-    private fun fireStickHotkeyAxis(ev: MotionEvent, axisX: Int, axisY: Int, left: Boolean, port: Int) {
-        val x = ControllerMotion.centered(ev, axisX)
-        val y = ControllerMotion.centered(ev, axisY)
-        val held = stickHotkeyHeld[port]
-        val dirs = arrayOf(
-            ControllerMappings.StickDir.UP to -y, ControllerMappings.StickDir.DOWN to y,
-            ControllerMappings.StickDir.LEFT to -x, ControllerMappings.StickDir.RIGHT to x,
-        )
-        for ((dir, value) in dirs) {
-            val code = ControllerMappings.stickHotkeyKeyCode(left, dir)
-            if (value > STICK_DIGITAL_THRESHOLD) {
-                // Mirror the held direction into heldKeys so it can serve as the
-                // MODIFIER of a stick+button combo hotkey (dispatchKeyEvent's
-                // matchHotkey consults heldKeys when the button arrives).
-                heldKeys.add(code)
-                if (held.add(code)) {
-                    // Edge: fire a hotkey with this direction as its MAIN key —
-                    // combo-aware (e.g. "hold Select + push R-Stick Up"), falling
-                    // back to a plain single-direction binding.
-                    ControllerMappings.matchHotkey(code, heldKeys)?.let { runStickHotkey(it) }
-                }
-            } else {
-                heldKeys.remove(code)
-                held.remove(code)
-            }
-        }
-    }
-
     /** Fire an ARMSX2 hotkey from a non-key source (a CUSTOM stick direction crossing
      *  its threshold — edge-triggered, treated as a single press). Hold-type hotkeys
      *  (FAST_FORWARD hold, PRESSURE_MOD) are no-ops here — a stick edge has no hold
@@ -5463,8 +5522,10 @@ open class MainActivityRuntime : ComponentActivity() {
         // When the D-pad drives the left stick, the HAT is folded into the stick
         // in dispatchStick — ignore it here so it doesn't ALSO press the d-pad.
         val dpadAsStick = ControllerMappings.dpadAsLeftStick()
-        val hatX = if (dpadAsStick) 0f else ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X)
-        val hatY = if (dpadAsStick) 0f else ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y)
+        val rawHatX = if (dpadAsStick) 0f else ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_X)
+        val rawHatY = if (dpadAsStick) 0f else ControllerMotion.centered(ev, MotionEvent.AXIS_HAT_Y)
+        val hatX = if (hotkeyOwnsButton(ev.deviceId, if (rawHatX > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT)) 0f else rawHatX
+        val hatY = if (hotkeyOwnsButton(ev.deviceId, if (rawHatY > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP)) 0f else rawHatY
         val hatActive = hatX != 0f || hatY != 0f
         // "Stick as D-pad" preset (StickMode.DPAD, opt-in): a stick in DPAD mode drives
         // the PS2 d-pad through THIS single change-tracked owner (folded via foldStick
@@ -5582,7 +5643,8 @@ open class MainActivityRuntime : ComponentActivity() {
         // so the trigger is disabled; otherwise drive the resolved (possibly remapped) code.
         val target = ControllerMappings.targetForPhysical(code, port) ?: return
         val raw = ControllerMotion.trigger(event, axisA, axisB, axisC)
-        val out = if (raw <= TRIGGER_DEAD) 0f else (raw - TRIGGER_DEAD) / (1f - TRIGGER_DEAD)
+        val out = if (hotkeyOwnsButton(event.deviceId, code) || raw <= TRIGGER_DEAD) 0f
+            else (raw - TRIGGER_DEAD) / (1f - TRIGGER_DEAD)
         if (target in 110..123) {
             // Trigger bound to a PS2 STICK direction ("(send)" rows): contribute the
             // proportional pressure to the merge layer so it can't be released by
@@ -5656,6 +5718,7 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     override fun onPause() {
+        com.armsx2.ui.home.HomeInputController.finishTileMove()
         // Leaving the foreground: whatever was held gets no UP event (Android stops
         // delivering to us), so drop every pad bit or the game keeps running with a
         // direction/button stuck down when we come back.
@@ -5736,7 +5799,11 @@ open class MainActivityRuntime : ComponentActivity() {
      *  Without this, a button held as the shade is pulled down stays pressed forever. */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) resetPadState()
+        if (!hasFocus) {
+            com.armsx2.ui.emulation.EmulationMenuInputController.cancelConfirm(reset = true)
+            com.armsx2.ui.emulation.QuickMenuOrder.finish(false)
+            resetPadState()
+        }
     }
 
     override fun onResume() {

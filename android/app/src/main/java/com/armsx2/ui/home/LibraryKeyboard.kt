@@ -1,4 +1,7 @@
 package com.armsx2.ui.home
+import com.armsx2.ui.common.selectionOutline
+
+import com.armsx2.ui.common.padFocusRing
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -224,8 +227,8 @@ object LibraryKeyboard {
                         keys.forEachIndexed { c, key ->
                             KeyCap(
                                 label = glyphOf(key),
-                                selected = (row.intValue == r && col.intValue == c) ||
-                                    (key == SHIFT && shifted.value),
+                                selected = row.intValue == r && col.intValue == c,
+                                latched = key == SHIFT && shifted.value,
                                 weight = weightOf(key),
                                 height = keyHeight,
                                 compact = compact,
@@ -264,7 +267,7 @@ object LibraryKeyboard {
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { ime?.hide(); close() }),
-            modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            modifier = Modifier.fillMaxWidth().focusRequester(focus).padFocusRing(),
         )
         // Summon the IME with the field, and make sure it goes away with the overlay — otherwise a
         // dismissed keyboard leaves the system IME covering the library.
@@ -279,6 +282,7 @@ object LibraryKeyboard {
     private fun RowScope.KeyCap(
         label: String,
         selected: Boolean,
+        latched: Boolean,
         weight: Float,
         height: androidx.compose.ui.unit.Dp,
         compact: Boolean,
@@ -290,15 +294,16 @@ object LibraryKeyboard {
                 .height(height)
                 .clip(RoundedCornerShape(if (compact) 9.dp else 11.dp))
                 .background(
-                    if (selected) MaterialTheme.colorScheme.primary
+                    if (latched) MaterialTheme.colorScheme.primaryContainer
                     else MaterialTheme.colorScheme.surfaceVariant,
                 )
+                .selectionOutline(selected, RoundedCornerShape(if (compact) 9.dp else 11.dp))
                 .clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = label,
-                color = if (selected) MaterialTheme.colorScheme.onPrimary
+                color = if (latched) MaterialTheme.colorScheme.onPrimaryContainer
                 else MaterialTheme.colorScheme.onSurface,
                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                 fontSize = if (label.length > 1) {

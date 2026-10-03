@@ -1029,7 +1029,7 @@ static void cdrom_trace_command_response(psx_cdrom_t* cdrom) {
     cdrom->trace_exec++;
 }
 
-void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
+__attribute__((always_inline)) void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
     if (cdrom->xa_start_phase > 0 && cycles > 0)
         cdrom->xa_start_age_cycles += (unsigned)cycles;
     /* Before every early return below: the disc keeps spinning whether or not the controller

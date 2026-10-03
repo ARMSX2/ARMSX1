@@ -19,8 +19,7 @@ enum class EmulationMenuTab(val titleKey: String) {
     Controls("tab.controls"),
     Options("action.settings"),
     Achievements("ra.title"),
-    // No Friends tab. It lived at the end of a rail that scrolls, so reaching it meant knowing it
-    // was there and then hunting for it — it is a header button with its own overlay instead.
+    // Discord opens its panel from the Session menu, below Screenshot.
 }
 
 data class EmulationMenuUiState(
@@ -59,8 +58,10 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
         private set
 
     var dismissHandler: (() -> Unit)? = null
+    var discordHandler: (() -> Unit)? = null
 
     fun load(initialTab: EmulationMenuTab?) {
+        QuickMenuOrder.load(getApplication())
         val settings = InGameOverlay.settingsState.value
         // The PS1 core's own settings.toml, for the rows backed by Ps1Settings rather than
         // by the PS2-era Settings object above.
@@ -117,7 +118,7 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun cycleTab(delta: Int) {
-        val tabs = EmulationMenuTab.entries
+        val tabs = QuickMenuOrder.tabOrder()
         val current = tabs.indexOf(state.value.tab)
         selectTab(tabs[(current + delta).floorMod(tabs.size)])
     }
@@ -144,15 +145,22 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
                 1 -> { MainActivityRuntime.instance?.toggleFastForward(); resume() }
                 2 -> MainActivityRuntime.resetGame()
                 3 -> MainActivityRuntime.promptSwapDisc()
-                4 -> MainActivityRuntime.closeGame()
-                5 -> {
-                    MainActivityRuntime.instance?.let { com.armsx2.Screenshots.capture(it.applicationContext) }
-                    com.armsx2.ui.GameOsd.toast("Screenshot saved")
-                    resume()
+                else -> {
+                    val discs = MainActivityRuntime.playlistDiscs()
+                    when (val action = state.value.selectedAction - 4) {
+                        in discs.indices -> MainActivityRuntime.swapToPlaylistDisc(discs[action])
+                        discs.size -> swapGame()
+                        discs.size + 1 -> MainActivityRuntime.closeGame()
+                        discs.size + 2 -> {
+                            MainActivityRuntime.instance?.let { com.armsx2.Screenshots.capture(it.applicationContext) }
+                            com.armsx2.ui.GameOsd.toast("Screenshot saved")
+                            resume()
+                        }
+                        // Repeated presses scrub further back without resuming.
+                        discs.size + 3 -> openDiscord()
+                        discs.size + 4 -> if (state.value.rewindEnabled) rewindStepBack()
+                    }
                 }
-                // Only present when rewind is on, matching SessionPane's list. Deliberately
-                // does NOT resume — repeated presses scrub further back.
-                6 -> if (state.value.rewindEnabled) rewindStepBack()
             }
             // Graphics, Fixes and Performance are registry-driven panes — every control in them
             // registers with SettingsControllerNav and the router drives it directly — so there is
@@ -191,6 +199,10 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
     fun resumeImmediately() {
         InGameOverlay.toggle()
     }
+
+    fun openDiscord() { discordHandler?.invoke() }
+
+    fun swapGame() = com.armsx2.ui.WindowImpl.openGameLibrary()
 
     /**
      * Item 3: the in-game compact menu only exposes a reduced set of settings. This opens the
@@ -379,11 +391,10 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun actionCount(tab: EmulationMenuTab): Int = when (tab) {
-        // MUST match SessionPane's action list length. This was 4 against a list of 5, so the pad
-        // could never reach Close at all. Now 6 (Resume, Fast-Forward, Restart, Swap Disc, Close,
-        // Screenshot), plus Rewind when [emulation] rewind is on — which is exactly when
-        // SessionPane appends its row.
-        EmulationMenuTab.Session -> if (state.value.rewindEnabled) 7 else 6
+        // Resume, Fast-Forward, Restart, Swap Disc, playlist discs, Swap Game, Close,
+        // Screenshot, Discord, then optional Rewind; keep indices aligned with SessionPane.
+        EmulationMenuTab.Session -> 8 + MainActivityRuntime.playlistDiscs().size +
+            if (state.value.rewindEnabled) 1 else 0
         // 0 for the three registry-driven panes: their rows are SettingsControllerNav items, not
         // indices into an action grid, so a non-zero count here would move a selection nothing
         // draws. Graphics was 4 against the old four-entry renderer picker.
@@ -408,12 +419,10 @@ object EmulationMenuInputController {
     private var owner: EmulationMenuViewModel? = null
     private var pendingTab: EmulationMenuTab? = null
 
-    // Two-zone nav. The pause menu is a vertical TAB column on the left and a
-    // CONTENT pane on the right. `inContent` = false means the D-pad walks the tab
-    // column (Up/Down between tabs, which switches the shown pane); Right (or A)
-    // steps into the content pane, where every control is a SettingsControllerNav
-    // registry item and the router drives it (Up/Down move, Left/Right adjust, A
-    // confirm). B (or Left off the first control) returns to the tab column.
+    // Two-zone navigation: the tab rail is on the RIGHT of the content pane.
+    // Up/Down choose tabs, Left (or A) enters the selected tab's options.
+    // Within options, Left moves/adjusts left, X moves/adjusts right, and Right
+    // (or B) returns directly to the tab rail without changing the chosen tab.
     val inContent = androidx.compose.runtime.mutableStateOf(false)
     private val nav get() = com.armsx2.ui.settings.SettingsControllerNav
 
@@ -426,7 +435,55 @@ object EmulationMenuInputController {
     // is on top visually, so it has to be on top for input too.
     var overlayDismiss: (() -> Unit)? = null
 
+    // MenuPage owns the actual ScrollState. A boundary press can reveal header/footer
+    // content beyond the selectable controls, without changing the highlighted option.
+    var onVerticalNavigation: ((Int, Boolean) -> Unit)? = null
+
+    private val confirmPress = MenuConfirmPress()
+    private val confirmHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var confirmHold: Runnable? = null
+
+    fun cancelConfirm(reset: Boolean = false) {
+        confirmHold?.let(confirmHandler::removeCallbacks)
+        confirmHold = null
+        if (reset) confirmPress.reset() else confirmPress.cancel()
+    }
+
+    /** Down only arms the press. The first release activates, unless the hold claimed it. */
+    fun confirmKey(event: android.view.KeyEvent) {
+        when (event.action) {
+            android.view.KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && confirmPress.down(event.keyCode)) {
+                val viewModel = owner
+                val target = if (overlayDismiss == null && nav.activeLayer.value == null) {
+                    if (!inContent.value) viewModel?.state?.value?.tab?.let { MenuMoveTarget("tabs", it.name) }
+                    else nav.menuMoveTarget()
+                } else null
+                if (target != null && QuickMenuOrder.moving == null) {
+                    val hold = Runnable {
+                        confirmHold = null
+                        if (owner === viewModel && com.armsx2.ui.WindowImpl.overlayVisible.value &&
+                            overlayDismiss == null && nav.activeLayer.value == null) {
+                            confirmPress.held()
+                            QuickMenuOrder.begin(target)
+                        }
+                    }
+                    confirmHold = hold
+                    confirmHandler.postDelayed(hold, android.view.ViewConfiguration.getLongPressTimeout().toLong())
+                }
+            }
+            android.view.KeyEvent.ACTION_UP -> {
+                if (!confirmPress.matches(event.keyCode)) return
+                confirmHold?.let(confirmHandler::removeCallbacks)
+                confirmHold = null
+                if (confirmPress.up(event.keyCode, event.isCanceled)) {
+                    if (QuickMenuOrder.moving != null) QuickMenuOrder.finish(true) else confirm()
+                }
+            }
+        }
+    }
+
     fun bind(viewModel: EmulationMenuViewModel) {
+        cancelConfirm(reset = true)
         owner = viewModel
         viewModel.load(pendingTab)
         pendingTab = null
@@ -434,10 +491,16 @@ object EmulationMenuInputController {
     }
 
     fun unbind(viewModel: EmulationMenuViewModel) {
-        if (owner === viewModel) owner = null
+        if (owner === viewModel) {
+            cancelConfirm(reset = true)
+            QuickMenuOrder.finish(false)
+            owner = null
+        }
     }
 
     fun open(tab: EmulationMenuTab = EmulationMenuTab.Session) {
+        cancelConfirm()
+        QuickMenuOrder.finish(false)
         pendingTab = tab
         if (!com.armsx2.ui.WindowImpl.overlayVisible.value) InGameOverlay.open()
         owner?.selectTab(tab)
@@ -450,12 +513,22 @@ object EmulationMenuInputController {
         nav.move(1) // select the first content control so the highlight appears
     }
 
+    fun focusTabs() {
+        cancelConfirm()
+        exitContent()
+    }
+
     private fun exitContent() {
         inContent.value = false
         nav.clearSelection()
     }
 
     fun move(dx: Int, dy: Int): Boolean {
+        cancelConfirm()
+        if (QuickMenuOrder.moving != null) {
+            QuickMenuOrder.step(if (dy != 0) dy else dx)
+            return true
+        }
         // A panel is over the menu: everything is registry nav, there is no tab column to walk.
         if (overlayDismiss != null) {
             when {
@@ -466,25 +539,39 @@ object EmulationMenuInputController {
         }
         val viewModel = owner ?: return false
         if (!inContent.value) {
-            // Tab column (vertical): Up/Down switch tabs; Right steps into content.
+            // Tab rail: Left moves into the content displayed beside it.
             when {
                 dy < 0 -> viewModel.cycleTab(-1)
                 dy > 0 -> viewModel.cycleTab(1)
-                dx > 0 -> enterContent()
+                dx < 0 -> enterContent()
             }
             return true
         }
-        // Content pane: registry-driven.
+        // Content pane: registry-driven. An extra press at an edge scrolls the full pane.
         when {
-            dy != 0 -> nav.moveSpatial(0, dy)
-            dx < 0 -> if (!nav.adjust(-1) && !nav.moveSpatial(-1, 0)) exitContent()
-            dx > 0 -> if (!nav.adjust(1)) nav.moveSpatial(1, 0)
+            dy != 0 -> {
+                val moved = nav.moveSpatial(0, dy)
+                onVerticalNavigation?.invoke(dy, moved)
+            }
+            dx < 0 -> if (!nav.adjust(-1)) nav.moveSpatial(-1, 0)
+            dx > 0 -> exitContent()
         }
+        return true
+    }
+
+    /** Right is reserved for returning to tabs; X keeps all horizontal choices/values reachable. */
+    fun nextOption(): Boolean {
+        owner ?: return false
+        cancelConfirm()
+        if (overlayDismiss != null || QuickMenuOrder.moving != null) return true
+        if (inContent.value && !nav.adjust(1)) nav.moveSpatial(1, 0)
         return true
     }
 
     /** L1 / R1 always cycle tabs, snapping back to the tab column. */
     fun tab(delta: Int): Boolean {
+        cancelConfirm()
+        if (QuickMenuOrder.moving != null) { QuickMenuOrder.step(delta); return true }
         // Swallowed while a panel is up: the tabs are behind it, and silently switching the pane
         // you cannot see is worse than doing nothing.
         if (overlayDismiss != null) return true
@@ -503,6 +590,8 @@ object EmulationMenuInputController {
     }
 
     fun back(): Boolean {
+        cancelConfirm()
+        if (QuickMenuOrder.moving != null) { QuickMenuOrder.finish(false); return true }
         // Back closes the panel, not the menu behind it.
         overlayDismiss?.let { dismiss -> dismiss(); return true }
         if (inContent.value) { exitContent(); return true }

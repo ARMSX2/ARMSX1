@@ -12,6 +12,7 @@ apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 def repoDebugKeystore = file("debug.keystore")
 def hasRepoDebugKeystore = repoDebugKeystore.exists()
 def diagnosticBuild = providers.gradleProperty('armsx.diagnostics').map { it.toBoolean() }.getOrElse(false)
+def frameTimingBuild = providers.gradleProperty('armsx.frameTiming').map { it.toBoolean() }.getOrElse(false)
 def windowsNativeBuild = System.getProperty('os.name').toLowerCase().contains('windows')
 
 // ---- Discord rich presence ----------------------------------------------------------------
@@ -93,7 +94,8 @@ android {
         if (windowsNativeBuild) {
             externalNativeBuild { cmake {
                 arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
-                if (diagnosticBuild) arguments '-DARMSX_DIAGNOSTIC_BUILD=ON'
+                arguments "-DARMSX_DIAGNOSTIC_BUILD=${diagnosticBuild ? 'ON' : 'OFF'}"
+                arguments "-DARMSX_FRAME_TIMING_BUILD=${frameTimingBuild ? 'ON' : 'OFF'}"
             } }
         }
         // applicationId stays com.nanodata.armsx so SDL_GetPrefPath / libarmsx / the JNI binding

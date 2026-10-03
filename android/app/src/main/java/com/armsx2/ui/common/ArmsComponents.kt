@@ -6,7 +6,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -242,18 +241,15 @@ fun RoundAction(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val actionBorder = if (framed || focused || selected) {
-        BorderStroke(
-            width = if (focused) 2.dp else 1.dp,
-            color = when {
-                focused -> MaterialTheme.colorScheme.primary
-                selected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.76f)
-                else -> MaterialTheme.colorScheme.outline.copy(alpha = if (subtleFrame) 0.30f else 0.58f)
-            },
-        )
-    } else {
-        null
-    }
+    val highlighted = selected || (focused &&
+        !com.armsx2.ui.settings.SettingsControllerNav.hasSelection() &&
+        com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null &&
+        !com.armsx2.ui.home.LibraryKeyboard.visible.value &&
+        !com.armsx2.ui.settingshub.SettingsSearch.visible.value)
+    val actionBorder = if (framed) BorderStroke(
+        1.dp,
+        MaterialTheme.colorScheme.outline.copy(alpha = if (subtleFrame) 0.30f else 0.58f),
+    ) else null
     val actionColor = when {
         selected -> MaterialTheme.colorScheme.primaryContainer
         framed -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (subtleFrame) 0.58f else 1f)
@@ -265,7 +261,7 @@ fun RoundAction(
         modifier = Modifier
             .size(buttonSize)
             .semantics { contentDescription = description }
-            .focusable(interactionSource = interaction),
+            .selectionOutline(highlighted, buttonShape),
         shape = buttonShape,
         color = actionColor,
         border = actionBorder,
@@ -340,10 +336,10 @@ fun SearchField(
 ) {
     Surface(
         onClick = onClick,
-        modifier = modifier.height(56.dp),
+        modifier = modifier.height(56.dp).selectionOutline(selected, RoundedCornerShape(18.dp)).padFocusRing(RoundedCornerShape(18.dp)),
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+        border = null,
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -395,6 +391,7 @@ fun EmptyState(
             if (actionLabel != null && onAction != null) {
                 Spacer(Modifier.height(18.dp))
                 OutlinedButton(
+                    modifier = Modifier.padFocusRing(RoundedCornerShape(14.dp)),
                     onClick = onAction,
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),

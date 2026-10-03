@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -23,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.armsx2.config.Settings
@@ -37,10 +39,8 @@ import androidx.core.content.edit
  * tapping a row arms it, and the next button seen by MainActivityRuntime.dispatchKeyEvent
  * is bound to it.
  *
- * PS1 port: the list is now [ControllerMappings.ps1Hotkeys] — menu/pause, fast-forward
- * toggle, screenshot, reset, close game, quit. Save/load state, slot cycle, texture dump,
- * resolution ±, achievements, slow motion, OSD cycle, pressure modifier and the on-screen
- * keyboard were dropped because the ARMSX core implements none of them.
+ * Lists [ControllerMappings.ps1Hotkeys], the actions implemented by the PS1 runtime.
+ * The binding rows are shared with the quick menu's Controls pane.
  */
 @Composable
 fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
@@ -51,67 +51,7 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         modifier = Modifier
             .fillMaxWidth(),
     ) {
-        Text(
-            str("hotkeys.header"),
-            color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
-        )
-        HelpText(
-            str("hotkeys.help"),
-        )
-        // PS1 port: only the hotkeys the ARMSX core can actually serve are listed. The
-        // SysHotkey enum itself is unchanged (MainActivityRuntime has exhaustive `when`
-        // blocks over it); ControllerMappings.ps1Hotkeys documents the kept/dropped split.
-        ControllerMappings.ps1Hotkeys.forEach { hk ->
-            @Suppress("UNUSED_EXPRESSION") ControllerMappings.hotkeyBindTick.value
-            val capturing = ControllerMappings.captureHotkey.value == hk
-            val binding = ControllerMappings.hotkeyLabel(hk)
-            val unset = binding.isEmpty()
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(64.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(rowAura())
-                    .clickable { ControllerMappings.beginHotkeyCapture(hk) }
-                    .controllerFocusable(
-                        controllerId = "hotkey:${hk.name}",
-                        onConfirm = { ControllerMappings.beginHotkeyCapture(hk) },
-                    )
-                    .padding(horizontal = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(hk.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.weight(1f))
-                if (!unset && !capturing) {
-                    Text(
-                        str("hotkeys.clear"),
-                        color = Color(0xFFFF6B6B),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .clickable {
-                                ControllerMappings.clearHotkey(hk)
-                                ControllerMappings.hotkeyBindTick.value++
-                            }
-                            .padding(end = 10.dp),
-                    )
-                }
-                Text(
-                    when {
-                        capturing -> str("hotkeys.capturePrompt")
-                        unset -> str("hotkeys.notSet")
-                        else -> binding
-                    },
-                    color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            SettingsDivider()
-        }
+        HotkeyBindings()
         // #384: the Android system Back button / gesture opens the in-game menu (like Nether/Eden).
         // For devices where Back is hijacked (e.g. Assistant), bind any button to the "Menu / Pause"
         // hotkey above instead. Controller Circle is unaffected.
@@ -142,5 +82,84 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         }
         SettingsDivider()
         @Suppress("UNUSED_EXPRESSION") Box(Modifier.height(6.dp))
+    }
+}
+
+/** Shared with the in-game Controls pane; both screens edit the same persisted bindings. */
+@Composable
+fun HotkeyBindings(showHeader: Boolean = true) {
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { ControllerMappings.endHotkeyCapture() }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        if (showHeader) Text(
+            str("hotkeys.header"),
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+        )
+        HelpText(
+            str("hotkeys.help"),
+        )
+        // PS1 port: only the hotkeys the ARMSX core can actually serve are listed. The
+        // SysHotkey enum itself is unchanged (MainActivityRuntime has exhaustive `when`
+        // blocks over it); ControllerMappings.ps1Hotkeys documents the kept/dropped split.
+        ControllerMappings.ps1Hotkeys.forEach { hk ->
+            @Suppress("UNUSED_EXPRESSION") ControllerMappings.hotkeyBindTick.value
+            val capturing = ControllerMappings.captureHotkey.value == hk
+            val binding = ControllerMappings.hotkeyLabel(hk)
+            val unset = binding.isEmpty()
+            val clearOrCancel: () -> Unit = {
+                if (capturing) ControllerMappings.endHotkeyCapture() else {
+                    ControllerMappings.clearHotkey(hk)
+                    ControllerMappings.hotkeyBindTick.value++
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 72.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(rowAura())
+                    .clickable { ControllerMappings.beginHotkeyCapture(hk) }
+                    .controllerFocusable(
+                        controllerId = "hotkey:${hk.name}",
+                        onConfirm = { ControllerMappings.beginHotkeyCapture(hk) },
+                    )
+                    .padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f).padding(vertical = 10.dp)) {
+                    Text(hk.label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold)
+                    Text(
+                        when {
+                            capturing -> if (ControllerMappings.captureButtons.value.isEmpty()) str("hotkeys.capturePrompt")
+                                else ControllerMappings.captureButtons.value.joinToString(" + ", transform = ControllerMappings::labelForKey) +
+                                    " — " + str("hotkeys.releasePrompt")
+                            unset -> str("hotkeys.notSet")
+                            else -> binding
+                        },
+                        color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
+                        fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (!unset || capturing) {
+                    Text(
+                        str(if (capturing) "action.cancel" else "hotkeys.clear"),
+                        color = Color(0xFFFF6B6B),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable(onClick = clearOrCancel)
+                            .controllerFocusable("hotkey.clear:${hk.name}", onConfirm = clearOrCancel)
+                            .padding(end = 10.dp),
+                    )
+                }
+            }
+            SettingsDivider()
+        }
     }
 }

@@ -1,5 +1,8 @@
 package com.armsx2.ui.settings
 
+import com.armsx2.ui.common.selectionOutline
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
@@ -91,7 +94,6 @@ import androidx.core.content.edit
  * tab uses.
  */
 
-private val focusBlue = Color(0xFF3DA5FF)
 
 val LocalSettingsScrollState = staticCompositionLocalOf<ScrollState?> { null }
 
@@ -111,6 +113,7 @@ internal object SettingsControllerNav {
         val onLeft: (() -> Unit)?,
         val onRight: (() -> Unit)?,
         val layer: String? = null,
+        val menuMoveTarget: com.armsx2.ui.emulation.MenuMoveTarget? = null,
     )
 
     // Exclusive input layer. When non-null (e.g. the nav drawer is open), only
@@ -145,7 +148,28 @@ internal object SettingsControllerNav {
     /** The id of the currently highlighted control (null if none). Screens read
      *  this to react to WHICH control is focused — e.g. the settings hub snaps its
      *  scroll to the very top when a category chip regains focus. */
+    fun menuMoveTarget(): com.armsx2.ui.emulation.MenuMoveTarget? = selectedItem()?.menuMoveTarget
+
     fun currentSelectedId(): String? = selectedId.value
+
+    /** Capture input ownership at opening time; closing must not read the popup's live flag. */
+    fun claimLayer(layer: String): () -> Unit {
+        val previousLayer = activeLayer.value
+        val previousSelection = selectedId.value
+        activeLayer.value = layer
+        clearSelection()
+        var released = false
+        return {
+            if (!released) {
+                released = true
+                if (activeLayer.value == layer) {
+                    activeLayer.value = previousLayer
+                    clearSelection()
+                    previousSelection?.let(::selectById)
+                }
+            }
+        }
+    }
 
     fun setPosition(id: String, x: Float, y: Float) {
         positions[id] = y to x
@@ -194,10 +218,11 @@ internal object SettingsControllerNav {
         onLeft: (() -> Unit)? = null,
         onRight: (() -> Unit)? = null,
         layer: String? = null,
+        menuMoveTarget: com.armsx2.ui.emulation.MenuMoveTarget? = null,
     ) {
         // Upsert — replacing an existing key keeps its insertion order (stable
         // visual order) while refreshing the closures to the current value.
-        registry[id] = Item(id, onConfirm, onLeft, onRight, layer)
+        registry[id] = Item(id, onConfirm, onLeft, onRight, layer, menuMoveTarget)
         if (selectedId.value == id)
             selectedIndex.intValue = orderedIds().indexOf(id)
     }
@@ -382,7 +407,7 @@ internal object SettingsControllerNav {
         return true
     }
 
-    fun isSelected(id: String): Boolean = selectedId.value == id
+    fun isSelected(id: String): Boolean = selectedId.value == id && inActiveLayer(id)
 
     private fun selectedItem(): Item? {
         val ids = orderedIds()
@@ -429,6 +454,7 @@ internal fun Modifier.controllerFocusable(
     onRight: (() -> Unit)? = null,
     layer: String? = null,
 ): Modifier = composed {
+    val menuMoveTarget = com.armsx2.ui.emulation.LocalMenuMoveTarget.current
     var focused by remember { mutableStateOf(false) }
     val bringIntoView = remember { BringIntoViewRequester() }
     if (controllerId != null) {
@@ -443,6 +469,7 @@ internal fun Modifier.controllerFocusable(
                 onLeft = onLeft,
                 onRight = onRight,
                 layer = layer,
+                menuMoveTarget = menuMoveTarget,
             )
         }
         DisposableEffect(controllerId) {
@@ -494,20 +521,14 @@ internal fun Modifier.controllerFocusable(
                 else -> false
             }
         }
-        .then(
-            if (focused || selected) {
-                // Driver-safe selection ring: solid inner + translucent outer border. We
-                // deliberately avoid Modifier.shadow with a custom ambient/spot color here —
-                // Adreno / Mali / Turnip drivers frequently ignore the tint and render the
-                // elevation shadow as an ugly opaque BLACK box behind the row (visible only
-                // under controller nav, which is what sets `selected`; touch never does).
-                // Borders render identically on every driver.
-                Modifier
-                    .border(3.dp, focusBlue.copy(alpha = 0.30f), shape)
-                    .border(1.5.dp, focusBlue, shape)
-            } else {
-                Modifier
-            }
+        .selectionOutline(
+            (selected || (focused && !SettingsControllerNav.hasSelection() &&
+                layer == SettingsControllerNav.activeLayer.value)) &&
+                !com.armsx2.ui.home.LibraryKeyboard.visible.value &&
+                !com.armsx2.ui.settingshub.SettingsSearch.visible.value &&
+                !com.armsx2.ui.common.ShaderParamsEditor.visible,
+            shape,
+            1.5.dp,
         )
         .focusable()
 }
@@ -754,6 +775,7 @@ fun IntSliderRow(
                     // this through the slider's confirm, so a second focus stop per
                     // modified parameter would only pad the D-pad walk.
                     Surface(
+                        modifier = Modifier.padFocusRing(RoundedCornerShape(12.dp)),
                         onClick = onResetSfx ?: onReset,
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
@@ -1057,7 +1079,7 @@ fun SegmentedRow(
                                 if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
                                 RoundedCornerShape(12.dp),
                             )
-                            .clickable { emit(idx) }
+                            .padFocusRing().clickable { emit(idx) }
                             .padding(horizontal = 13.dp, vertical = 8.dp),
                     ) {
                         Text(
@@ -1146,7 +1168,7 @@ fun SegmentedGridRow(
                                         if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
                                         RoundedCornerShape(12.dp),
                                     )
-                                    .clickable { onChange(idx) }
+                                    .padFocusRing().clickable { onChange(idx) }
                                     .padding(horizontal = 7.dp, vertical = 8.dp),
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -1183,7 +1205,7 @@ private fun InfoHint(title: String, message: String) {
             .size(22.dp)
             .clip(androidx.compose.foundation.shape.CircleShape)
             .background(MaterialTheme.colorScheme.primaryContainer)
-            .clickable { open = true },
+            .padFocusRing().clickable { open = true },
         contentAlignment = Alignment.Center,
     ) {
         Text("i", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
@@ -1209,7 +1231,7 @@ private fun InfoHint(title: String, message: String) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = { open = false }) { Text(str("action.close")) }
+                TextButton(onClick = { open = false }, modifier = Modifier.padFocusRing()) { Text(str("action.close")) }
             },
         )
     }

@@ -1,5 +1,7 @@
 package com.armsx2.ui.settings
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -431,7 +433,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .clickable {
+                            .padFocusRing().clickable {
                                 val nv = !turbo.value
                                 turbo.value = nv
                                 ControllerMappings.setTurboAction(action, editPlayer.intValue, nv)
@@ -541,7 +543,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                         color = Color(0xFFFF6B6B),
                         fontSize = 12.sp,
                         modifier = Modifier
-                            .clickable { ControllerMappings.deleteProfile(name) }
+                            .padFocusRing().clickable { ControllerMappings.deleteProfile(name) }
                             .padding(horizontal = 8.dp, vertical = 6.dp),
                     )
                 }
@@ -568,7 +570,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                         focusedBorderColor = Colors.pasx2_blue,
                         unfocusedBorderColor = Color(0xFF444455),
                     ),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).padFocusRing(),
                 )
                 val save: () -> Unit = {
                     if (ControllerMappings.saveProfile(newName.value, editPlayer.intValue, liveEditSerial()))
@@ -890,7 +892,7 @@ private fun StickDirPickerRow(
             fontSize = 15.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier
-                .clickable { clear() }
+                .padFocusRing().clickable { clear() }
                 .padding(horizontal = 8.dp, vertical = 2.dp),
         )
         Spacer(Modifier.width(4.dp))
@@ -955,7 +957,7 @@ private fun StickTargetPickerDialog(
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text(str("action.cancel"), color = Colors.pasx2_blue) }
+            TextButton(modifier = Modifier.padFocusRing(), onClick = onDismiss) { Text(str("action.cancel"), color = Colors.pasx2_blue) }
         },
     )
 }
@@ -965,7 +967,7 @@ private fun StickPickItem(label: String, selected: Boolean, onClick: () -> Unit)
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .padFocusRing().clickable { onClick() }
             .padding(vertical = 8.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1162,7 +1164,7 @@ internal fun MacrosSection(
                             str("pad.action.clear"),
                             color = Color(0xFFFF6B6B), fontSize = 14.sp, fontWeight = FontWeight.Bold,
                             modifier = Modifier
-                                .clickable { TouchControls.clearMacroPhysicalCode(mid) }
+                                .padFocusRing().clickable { TouchControls.clearMacroPhysicalCode(mid) }
                                 .padding(end = 10.dp),
                         )
                     }
@@ -1238,7 +1240,7 @@ private fun MacroConfigDialog(
                         Modifier
                             .fillMaxWidth()
                             .height(52.dp)
-                            .clickable { if (on) selected.remove(t.code) else selected.add(t.code) }
+                            .padFocusRing().clickable { if (on) selected.remove(t.code) else selected.add(t.code) }
                             .padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -1254,13 +1256,13 @@ private fun MacroConfigDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = {
+            TextButton(modifier = Modifier.padFocusRing(), onClick = {
                 TouchControls.setMacroCodes(macroId, selected.toList())
                 onSaved()
                 onDismiss()
             }) { Text(str("action.save")) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(str("action.cancel")) } },
+        dismissButton = { TextButton(modifier = Modifier.padFocusRing(), onClick = onDismiss) { Text(str("action.cancel")) } },
     )
 }
 
@@ -1297,7 +1299,7 @@ private fun PadBindingRow(
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
-                    .clickable(onClick = onClear)
+                    .padFocusRing().clickable(onClick = onClear)
                     .padding(end = 10.dp),
             )
         }

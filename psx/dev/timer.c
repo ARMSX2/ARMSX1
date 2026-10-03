@@ -345,7 +345,7 @@ static inline void timer_update_timer2(psx_timer_t* timer, int cyc) {
     timer_handle_irq(timer, 2);
 }
 
-void psx_timer_update(psx_timer_t* timer, int cyc) {
+__attribute__((always_inline)) void psx_timer_update(psx_timer_t* timer, int cyc) {
     timer->prev_hblank = timer->hblank;
     timer->prev_vblank = timer->vblank;
 

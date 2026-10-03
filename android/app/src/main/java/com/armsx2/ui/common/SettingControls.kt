@@ -87,7 +87,7 @@ private fun SettingInfoHint(title: String, description: String) {
             .size(22.dp)
             .clip(androidx.compose.foundation.shape.CircleShape)
             .background(MaterialTheme.colorScheme.primaryContainer)
-            .clickable { open = true },
+            .padFocusRing().clickable { open = true },
         contentAlignment = Alignment.Center,
     ) {
         Text("i", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
@@ -97,7 +97,7 @@ private fun SettingInfoHint(title: String, description: String) {
             onDismissRequest = { open = false },
             title = { Text(title) },
             text = { Text(description) },
-            confirmButton = { TextButton(onClick = { open = false }) { Text(str("action.close")) } },
+            confirmButton = { TextButton(modifier = Modifier.padFocusRing(), onClick = { open = false }) { Text(str("action.close")) } },
         )
     }
 }

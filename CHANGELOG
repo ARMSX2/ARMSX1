@@ -1,6 +1,31 @@
 ARMSX1 — Changelog
 ==================
 
+Unreleased
+----------
+
+Library and controller menus
+  * Custom collections can appear as Home tiles and in the in-game Swap Game library.
+    Collection folders expand horizontally on Home and can use custom images.
+  * Hold A to arrange Home folder tiles with Left/Right, or hold and drag on touch.
+    Saved tile positions survive restarting the app; short presses open folders.
+  * In-game menu tabs and options can be reordered with controller holds or touch.
+    Selection outlines follow the active control, and controller scrolling reaches
+    the ends of menus. Discord has its own entry below Screenshot.
+  * Swap Game shows the library and search while the current game stays paused.
+    Controller hotkeys support single buttons and two-button combinations.
+  * Closing Discord restores menu controls, and launching a game preserves the
+    library background colour during the transition.
+
+Android performance
+  * Fastest-core placement detects the highest CPU tier even when Android gives
+    the emulation thread a restricted initial affinity mask. It rechecks placement
+    periodically and restores its original priority when that mode is disabled.
+  * Mali software drawing skips unused shading and clips scaled triangle spans
+    without changing pixel coverage. These drawing optimizations remain Mali-only.
+  * Automatic Mali work reports sample briefly at intervals, reducing diagnostic
+    overhead while retaining rasterizer details for investigating frame dips.
+
 0.1.3
 -----
 

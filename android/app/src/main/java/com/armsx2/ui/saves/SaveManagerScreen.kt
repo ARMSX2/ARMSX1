@@ -1,5 +1,7 @@
 package com.armsx2.ui.saves
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -104,7 +106,7 @@ fun SaveManagerScreen(onBack: () -> Unit, viewModel: SaveManagerViewModel = view
             title = { Text(str("savestate.title.loadManage")) },
             text = { Text(message) },
             confirmButton = {
-                TextButton(onClick = viewModel::dismissMessage) { Text(str("action.ok")) }
+                TextButton(modifier = Modifier.padFocusRing(), onClick = viewModel::dismissMessage) { Text(str("action.ok")) }
             },
         )
     }

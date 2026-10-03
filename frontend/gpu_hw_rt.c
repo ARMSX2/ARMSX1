@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "../psx/log.h"
+#include "../psx/perf.h"
 
 /*
     Everything below is a scale-parameterised clone of the three live rasterizers in
@@ -55,6 +56,7 @@ typedef struct {
     psx_gpu_t* gpu;
 
     int scale;
+    int span_clipping;
     uint16_t* rt;          /* 1024*S x 512*S, BGR555, same packing as gpu->vram */
     int rt_w, rt_h;        /* in render-target pixels */
 } armsx_hw_rt_t;
@@ -78,6 +80,29 @@ static int rt_max3(int a, int b, int c) {
 /* ------------------------------------------------------------------------------------
    Polygons — mirrors gpu_render_triangle (gpu.c:251-449)
    ------------------------------------------------------------------------------------ */
+
+/* A fixed row's accepted edge pixels form a prefix, suffix or the whole row.
+   Locate the exact transition with the original expression and top-left rule.
+   Keep integer and PGXP floating-point coverage separate. */
+#define RT_DEFINE_SPAN_CLIP(name, coord_type) \
+static int name(coord_type ax, coord_type ay, coord_type bx, coord_type by, \
+                int y, int* first, int* last) { \
+    const int first_in = !RT_TL(RT_EDGE(ax, ay, bx, by, *first, y), ax, ay, bx, by); \
+    const int last_in = !RT_TL(RT_EDGE(ax, ay, bx, by, *last, y), ax, ay, bx, by); \
+    if (first_in && last_in) return 1; \
+    if (!first_in && !last_in) return 0; \
+    int lo = *first, hi = *last; \
+    while (lo < hi) { \
+        const int mid = lo + (hi - lo) / 2; \
+        const int inside = !RT_TL(RT_EDGE(ax, ay, bx, by, mid, y), ax, ay, bx, by); \
+        if (inside == first_in) lo = mid + 1; else hi = mid; \
+    } \
+    if (first_in) *last = lo - 1; else *first = lo; \
+    return *first <= *last; \
+}
+RT_DEFINE_SPAN_CLIP(rt_clip_span_int, int)
+RT_DEFINE_SPAN_CLIP(rt_clip_span_float, float)
+#undef RT_DEFINE_SPAN_CLIP
 
 static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
                                vertex_t v0, vertex_t v1, vertex_t v2,
@@ -189,7 +214,20 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
     if (x_end > (clip_x2 + 1)) x_end = clip_x2 + 1;
 
     for (int y = y_begin; y < y_end; y++) {
-        for (int x = x_begin; x < x_end; x++) {
+        int first = x_begin, last = x_end - 1;
+        if (first > last) continue;
+        if (rt->span_clipping && x_end - x_begin >= 16) {
+            if (pgxp) {
+                if (!rt_clip_span_float(pbx, pby, pcx, pcy, y, &first, &last) ||
+                    !rt_clip_span_float(pcx, pcy, pax, pay, y, &first, &last) ||
+                    !rt_clip_span_float(pax, pay, pbx, pby, y, &first, &last)) continue;
+            } else {
+                if (!rt_clip_span_int(sbx, sby, scx, scy, y, &first, &last) ||
+                    !rt_clip_span_int(scx, scy, sax, say, y, &first, &last) ||
+                    !rt_clip_span_int(sax, say, sbx, sby, y, &first, &last)) continue;
+            }
+        }
+        for (int x = first; x <= last; x++) {
             /* Both PER-PIXEL, and both for the same reason — see transp_default above and
                psx_gpu_mask_from_texel(). */
             int transp = transp_default;
@@ -355,6 +393,11 @@ static void rt_render_triangle(armsx_hw_rt_t* rt, psx_gpu_t* gpu,
 
 static void rt_draw_poly(psx_gpu_backend_t* be, psx_gpu_t* gpu, const poly_data_t* poly) {
     armsx_hw_rt_t* rt = rt_self(be);
+    /* Native VRAM and this PGXP/scaled target are separate CPU drawing passes.
+       Include both in sampled Mali raster timings; previously only native
+       drawing was measured, hiding the expensive fallback in core time. */
+    const int timed = rt->span_clipping && g_psx_work_diag_enabled;
+    const uint64_t start = timed ? psx_work_diag_start() : 0;
 
     /* Same split as gpu_poly (gpu.c:1166-1171). */
     if (poly->attrib & PA_QUAD) {
@@ -363,6 +406,10 @@ static void rt_draw_poly(psx_gpu_backend_t* be, psx_gpu_t* gpu, const poly_data_
     } else {
         rt_render_triangle(rt, gpu, poly->v[0], poly->v[1], poly->v[2], poly);
     }
+    if (timed)
+        psx_work_diag_raster_end((poly->attrib & PA_TEXTURED)
+            ? ((poly->attrib & PA_SHADED) ? PSX_WORK_RASTER_SHADED_TEXTURED : PSX_WORK_RASTER_TEXTURED)
+            : PSX_WORK_RASTER_PLAIN, start);
 }
 
 /* ------------------------------------------------------------------------------------
@@ -817,6 +864,10 @@ psx_gpu_backend_t* armsx_hw_rt_create(psx_gpu_t* gpu, int scale) {
              ((size_t)rt->rt_w * (size_t)rt->rt_h * sizeof(uint16_t)) >> 20);
 
     return &rt->base;
+}
+
+void armsx_hw_rt_set_span_clipping(psx_gpu_backend_t* backend, int enabled) {
+    if (backend) rt_self(backend)->span_clipping = enabled != 0;
 }
 
 void armsx_hw_rt_destroy(psx_gpu_backend_t* backend) {

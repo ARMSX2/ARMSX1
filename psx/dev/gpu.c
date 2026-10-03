@@ -1299,7 +1299,19 @@ static void gpu_render_triangle_impl(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, v
             uint16_t color = 0;
             uint32_t mod   = 0;
 
-            if (data.attrib & PA_SHADED) {
+            uint16_t early_texel = 0;
+            const int sample_first = gpu->defer_software_shading && (data.attrib & PA_TEXTURED);
+            /* Transparent texels and raw textures never use interpolated vertex colour.
+               Point sampling stays identical, including live VRAM feedback reads. */
+            if (sample_first) {
+                float tx = ((z0 * a.tx) + (z1 * b.tx) + (z2 * c.tx)) / area;
+                float ty = ((z0 * a.ty) + (z1 * b.ty) + (z2 * c.ty)) / area;
+                early_texel = psx_gpu_filter_active(gpu)
+                    ? gpu_fetch_texel_bilinear(gpu, tx, ty, tpx, tpy, clutx, cluty, depth)
+                    : gpu_fetch_texel_f(gpu, tx, ty, tpx, tpy, clutx, cluty, depth);
+                if (!early_texel) continue;
+            }
+            if ((data.attrib & PA_SHADED) && !(sample_first && (data.attrib & PA_RAW))) {
                 float cr = (z0 * ((a.c >>  0) & 0xff) + z1 * ((b.c >>  0) & 0xff) + z2 * ((c.c >>  0) & 0xff)) / area;
                 float cg = (z0 * ((a.c >>  8) & 0xff) + z1 * ((b.c >>  8) & 0xff) + z2 * ((c.c >>  8) & 0xff)) / area;
                 float cb = (z0 * ((a.c >> 16) & 0xff) + z1 * ((b.c >> 16) & 0xff) + z2 * ((c.c >> 16) & 0xff)) / area;
@@ -1325,6 +1337,8 @@ static void gpu_render_triangle_impl(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, v
                 ? g_psx_gpu_dither_kernel[(x & 3) + ((y & 3) * 4)] : 0;
 
             if (data.attrib & PA_TEXTURED) {
+                uint16_t texel = early_texel;
+                if (!sample_first) {
                 float tx = ((z0 * a.tx) + (z1 * b.tx) + (z2 * c.tx)) / area;
                 float ty = ((z0 * a.ty) + (z1 * b.ty) + (z2 * c.ty)) / area;
 
@@ -1333,10 +1347,11 @@ static void gpu_render_triangle_impl(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, v
                    boundaries — the smearing reported on Silent Hill's foliage. Filtering is an
                    enhancement the user opts into via [video] texture_filter; it is not the
                    console's behaviour, and all three rasterizers agree on this. */
-                uint16_t texel = psx_gpu_filter_active(gpu)
+                texel = psx_gpu_filter_active(gpu)
                     ? gpu_fetch_texel_bilinear(gpu, tx, ty, tpx, tpy, clutx, cluty, depth)
                     : gpu_fetch_texel_f(gpu, tx, ty, tpx, tpy, clutx, cluty, depth);
 
+                }
                 if (!texel)
                     continue;
 
@@ -1390,7 +1405,9 @@ void gpu_render_triangle(psx_gpu_t* gpu, vertex_t v0, vertex_t v1, vertex_t v2, 
     }
     const uint64_t start = psx_work_diag_start();
     gpu_render_triangle_impl(gpu, v0, v1, v2, data, edge);
-    psx_work_diag_end(PSX_WORK_GPU_RASTER, start);
+    psx_work_diag_raster_end((data.attrib & PA_TEXTURED)
+        ? ((data.attrib & PA_SHADED) ? PSX_WORK_RASTER_SHADED_TEXTURED : PSX_WORK_RASTER_TEXTURED)
+        : PSX_WORK_RASTER_PLAIN, start);
 }
 
 #define CLAMP(v, d, u) ((v) <= (d)) ? (d) : (((v) >= (u)) ? (u) : (v))
@@ -1527,7 +1544,7 @@ void gpu_render_rect(psx_gpu_t* gpu, rect_data_t data) {
     }
     const uint64_t start = psx_work_diag_start();
     gpu_render_rect_impl(gpu, data);
-    psx_work_diag_end(PSX_WORK_GPU_RASTER, start);
+    psx_work_diag_raster_end(PSX_WORK_RASTER_RECT, start);
 }
 
 void plotLineLow(psx_gpu_t* gpu, int x0, int y0, int x1, int y1, uint16_t color) {

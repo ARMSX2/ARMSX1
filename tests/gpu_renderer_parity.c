@@ -2533,7 +2533,80 @@ static int run_pgxp_render_case(int scale) {
     return failed;
 }
 
+static uint32_t span_seed = 0x61485327u;
+static uint32_t span_word(void) {
+    span_seed = span_seed * 1664525u + 1013904223u;
+    return span_seed;
+}
+static int run_span_corpus(void) {
+    for (int scale = 1; scale <= 4; ++scale) {
+        psx_gpu_t *reference = make_gpu(), *candidate = make_gpu();
+        if (!reference || !candidate) return 1;
+        for (size_t j = 0; j < PSX_GPU_VRAM_SIZE / 2; ++j)
+            reference->vram[j] = candidate->vram[j] = (uint16_t)span_word();
+        psx_gpu_backend_t *a = armsx_hw_rt_create(reference, scale);
+        psx_gpu_backend_t *b = armsx_hw_rt_create(candidate, scale);
+        if (!a || !b) return 1;
+        armsx_hw_rt_set_span_clipping(b, 1);
+        uint32_t stride_a, stride_b;
+        const uint16_t *pixels_a = a->display_buffer(a, 0, 0, &stride_a);
+        const uint16_t *pixels_b = b->display_buffer(b, 0, 0, &stride_b);
+        for (unsigned n = 0; n < 256; ++n) {
+            psx_gpu_set_accuracy_flags(reference, 15);
+            psx_gpu_set_accuracy_flags(candidate, 15);
+            reference->gpustat = candidate->gpustat = ((n & 1) ? 0x1000 : 0) | ((n & 2) ? 0x800 : 0);
+            reference->off_x = candidate->off_x = n % 7 - 3;
+            reference->off_y = candidate->off_y = n % 9 - 4;
+            reference->draw_x1 = candidate->draw_x1 = n % 13;
+            reference->draw_y1 = candidate->draw_y1 = n % 11;
+            reference->draw_x2 = candidate->draw_x2 = 180 - n % 17;
+            reference->draw_y2 = candidate->draw_y2 = 140 - n % 19;
+            reference->texw_mx = candidate->texw_mx = (n & 16) ? 0x38 : 0;
+            reference->texw_my = candidate->texw_my = (n & 32) ? 0x18 : 0;
+            reference->texw_ox = candidate->texw_ox = 8;
+            reference->texw_oy = candidate->texw_oy = 24;
+            psx_gpu_set_texture_filter(reference, (n & 64) != 0);
+            psx_gpu_set_texture_filter(candidate, (n & 64) != 0);
+            poly_data_t p = {0};
+            p.attrib = ((n & 1) ? PA_TEXTURED : 0) | ((n & 2) ? PA_SHADED : 0) |
+                ((n & 4) ? PA_TRANSP : 0) | ((n & 8) ? PA_RAW : 0);
+            p.texp = (n % 8) | ((n % 3) << 7) | (((n >> 3) & 3) << 5);
+            p.clut = (500 << 6) | 16;
+            for (unsigned v = 0; v < 3; ++v) {
+                p.v[v].x = (int)(span_word() % 220) - 20;
+                p.v[v].y = (int)(span_word() % 180) - 20;
+                p.v[v].tx = span_word() & 255; p.v[v].ty = span_word() & 255;
+                p.v[v].c = span_word() & 0xffffff;
+            }
+            if (n % 4 == 0) {
+                p.v[1].x = p.v[0].x + 100; p.v[1].y = p.v[0].y + 80;
+                p.v[2].x = p.v[1].x + 1; p.v[2].y = p.v[1].y;
+            }
+            if (n % 16 == 1) p.v[2] = p.v[1];
+            if (n % 16 == 2) p.v[1].y = p.v[0].y;
+            if (n % 16 == 3) p.v[1].x = p.v[0].x;
+            for (unsigned v = 0; v < 3; ++v) {
+                p.v[v].px = p.v[v].x + ((int)(span_word() % 2049) - 1024) / 1024.0f;
+                p.v[v].py = p.v[v].y + ((int)(span_word() % 2049) - 1024) / 1024.0f;
+                p.v[v].pw = 100 + span_word() % 400;
+                p.v[v].precise_valid = (n & 128) != 0;
+            }
+            for (unsigned r = 0; r < 8; ++r) a->draw_poly(a, reference, &p);
+            for (unsigned r = 0; r < 8; ++r) b->draw_poly(b, candidate, &p);
+            if (stride_a != stride_b || memcmp(pixels_a, pixels_b, (size_t)stride_a * 512 * scale)) {
+                fprintf(stderr, "CPU_SPAN failed scale=%d case=%u\n", scale, n);
+                return 1;
+            }
+        }
+        printf("GPU_PARITY passed case=cpu-span-clipping-%dx (256 native/PGXP triangles)\n", scale);
+        armsx_hw_rt_destroy(a); armsx_hw_rt_destroy(b);
+        psx_gpu_destroy(reference); psx_gpu_destroy(candidate);
+    }
+    return 0;
+}
+
 int main(void) {
+    if (run_span_corpus()) return 1;
     int failed = 0;
     failed |= run_pgxp_cache_case();
     for (int scale = 1; scale <= 4; ++scale)

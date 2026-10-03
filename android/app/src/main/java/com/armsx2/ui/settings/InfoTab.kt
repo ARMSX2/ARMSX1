@@ -1,5 +1,7 @@
 package com.armsx2.ui.settings
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -223,7 +225,7 @@ private fun InfoRow(label: String, value: String, clipboard: ClipboardManager) {
                 "⧉",
                 modifier = Modifier
                     .padding(start = 8.dp)
-                    .clickable { clipboard.setText(AnnotatedString(value)) },
+                    .padFocusRing().clickable { clipboard.setText(AnnotatedString(value)) },
                 color = MaterialTheme.colorScheme.primary,
             )
         }

@@ -15,11 +15,12 @@ static int reference_inside(vertex_t a, vertex_t b, int x, int y) {
     return value > 0 || (value == 0 && !(b.y > a.y || (b.y == a.y && b.x < a.x)));
 }
 
-static void check_coverage(void) {
+static void check_coverage(int fast) {
     psx_gpu_t* gpu = psx_gpu_create();
     uint16_t* expected = malloc(PSX_GPU_VRAM_SIZE);
     assert(gpu && expected);
     psx_gpu_init(gpu, NULL);
+    gpu->defer_software_shading = fast;
     unsigned state = 0x817fdeu;
     for (int n = 0; n < 128; ++n) {
         poly_data_t p = {0};
@@ -85,8 +86,8 @@ static unsigned random_word(void) {
     seed = seed * 1664525u + 1013904223u;
     return seed;
 }
-int main(void) {
-    check_coverage();
+int main(int argc, char** argv) {
+    check_coverage(argc > 1 && argv[1][0] == 's');
     /* Recorded from the pre-optimisation strict-FP software renderer. */
     static const uint64_t expected[] = {
         0xd89eeba45dcbf2eeull, 0x2f6f56e008fcfa69ull,
@@ -96,6 +97,7 @@ int main(void) {
     };
     psx_gpu_t* g = psx_gpu_create(); assert(g);
     psx_gpu_init(g, NULL);
+    g->defer_software_shading = argc > 1 && argv[1][0] == 's';
     uint64_t digest = 14695981039346656037ull;
     double render_ms = 0;
     for (int i=0; i<512; ++i) {

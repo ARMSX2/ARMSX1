@@ -376,7 +376,9 @@ data class Settings(
      *  a normal input elsewhere, and titles that ignore the prompt gain nothing from holding it. */
     val autoProgressiveScan: Boolean = false,
     /** Affinity Control Mode (EXPERIMENTAL, default 0 = off).
-     *  0 Off (scheduler decides) · 1 Performance cores · 2 All cores.
+     *  0 Off (scheduler decides) · 1 Performance cores · 2 All cores · 3 Fastest core.
+     *  Fastest core keeps only the detected highest-frequency tier; it does not widen a
+     *  single prime core to slower cores. It is opt-in for devices that miss deadlines there.
      *
      *  RE-MAPPED for this port. The PS2 build's 1-6 ordered the EE/VU/GS threads and its
      *  consumer was VMManager::SetEmuThreadAffinities; a PlayStation emulator has one

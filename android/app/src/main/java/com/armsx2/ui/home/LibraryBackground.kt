@@ -8,8 +8,8 @@ import com.armsx2.runtime.MainActivityRuntime
 
 /**
  * Optional user-chosen library background (#9). Stores a persisted content URI;
- * when unset the library falls back to the bundled default XMB-wave still image
- * (R.drawable.library_bg_xmb, drawn in HomeScreen). The user can pick a still image
+ * when unset the library uses the animated XMB wave with a colour-matched fallback
+ * during GL startup/teardown. The user can pick a still image
  * or an animated GIF/WebP (Coil handles both); `clear()` reverts to the default.
  * (The background used to be a looping MP4 but that hurt performance, so it's a
  * static image now.)

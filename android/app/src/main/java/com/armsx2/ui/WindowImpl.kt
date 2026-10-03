@@ -64,6 +64,19 @@ object WindowImpl {
         resumeIfPaused()
     }
 
+    fun openGameLibrary() {
+        inGameScreen.value = null
+        showLibrary.value = true
+        overlayVisible.value = false
+        MainActivityRuntime.pauseForOverlay()
+    }
+
+    fun dismissGameLibrary() {
+        com.armsx2.ui.home.LibraryKeyboard.close()
+        showLibrary.value = false
+        resumeIfPaused()
+    }
+
     private fun resumeIfPaused() {
         // Deliberately NOT gated on eState == PAUSED any more. eState is driven by
         // Host::OnVMPaused/OnVMResumed, which fire at the very END of VMManager::SetState — after
@@ -108,30 +121,10 @@ object WindowImpl {
                 // for the touch controls below it.
                 GameOsdOverlay()
 
-            if (showLibrary.value && MainActivityRuntime.eState.value == EmuState.RUNNING && !overlayVisible.value) {
-                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.56f))) {
-                    // The stopped library is composed at MainActivityRuntime's root below.
-                    // During the STOPPED -> RUNNING + showLibrary transition, giving this
-                    // overlay a distinct slot identity prevents Compose from moving HomeScreen's
-                    // AndroidView (the XMB TextureView) into a second AndroidViewHolder while
-                    // the first holder still owns it: Android then throws "child already has a
-                    // parent" on the main thread.
-                    androidx.compose.runtime.key("library-overlay") {
-                        com.armsx2.navigation.AppNavigation()
-                    }
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(16.dp)
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { showLibrary.value = false },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("✕", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
-                    }
-                }
+            if (showLibrary.value &&
+                (MainActivityRuntime.eState.value == EmuState.RUNNING || MainActivityRuntime.eState.value == EmuState.PAUSED) &&
+                !overlayVisible.value) {
+                com.armsx2.ui.emulation.GameLibraryDrawer()
             }
 
             if (overlayVisible.value) {

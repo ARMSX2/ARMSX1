@@ -1,4 +1,5 @@
 package com.armsx2.ui.news
+import com.armsx2.ui.common.padFocusRing
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -231,7 +232,7 @@ private fun ReleaseCard(item: News.Item, initiallyExpanded: Boolean) {
                     // clickable in its own right even though the whole card toggles too — it looks
                     // like a link, so it has to behave like one.
                     modifier = Modifier
-                        .clickable(onClick = toggle)
+                        .padFocusRing().clickable(onClick = toggle)
                         .padding(vertical = 4.dp),
                 )
             }

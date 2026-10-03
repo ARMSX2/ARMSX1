@@ -337,7 +337,12 @@ void psx_audio_diag_set_enabled(int enabled);
    All access is on the emulation thread. Durations are inclusive, so categories
    (notably sampled CPU dispatch and mapped device work) must not be added. */
 enum { PSX_WORK_CPU_SAMPLE, PSX_WORK_MDEC, PSX_WORK_SPU, PSX_WORK_DISC,
-       PSX_WORK_AUDIO_QUEUE, PSX_WORK_GPU_RASTER, PSX_WORK_COUNT };
+       PSX_WORK_AUDIO_QUEUE, PSX_WORK_GPU_RASTER,
+       PSX_WORK_CDROM_UPDATE, PSX_WORK_GPU_UPDATE, PSX_WORK_PAD_UPDATE,
+       PSX_WORK_TIMER_UPDATE, PSX_WORK_DMA_UPDATE, PSX_WORK_SPU_TICK,
+       PSX_WORK_RASTER_TEXTURED, PSX_WORK_RASTER_SHADED_TEXTURED,
+       PSX_WORK_RASTER_PLAIN, PSX_WORK_RASTER_RECT,
+       PSX_WORK_COUNT };
 typedef struct {
     uint64_t ticks[PSX_WORK_COUNT], max_ticks[PSX_WORK_COUNT];
     uint32_t calls[PSX_WORK_COUNT];
@@ -349,5 +354,8 @@ extern uint64_t (*g_psx_work_clock)(void);
 void psx_work_diag_begin(uint64_t (*clock_fn)(void));
 uint64_t psx_work_diag_start(void);
 void psx_work_diag_end(unsigned category, uint64_t start);
+
+/* Records total raster time and subtype using one clock read. */
+void psx_work_diag_raster_end(unsigned category, uint64_t start);
 
 #endif

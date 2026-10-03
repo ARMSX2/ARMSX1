@@ -40,6 +40,10 @@ extern "C" {
    case the caller stays on the software rasterizer. The GPU does not take ownership. */
 psx_gpu_backend_t* armsx_hw_rt_create(psx_gpu_t* gpu, int scale);
 
+/* Host-only optimisation for a backend returned by armsx_hw_rt_create().
+   Preserves PGXP, masks and texture sampling. NULL-safe. */
+void armsx_hw_rt_set_span_clipping(psx_gpu_backend_t* backend, int enabled);
+
 /* Destroys a backend from armsx_hw_rt_create(). Call psx_gpu_set_backend(gpu, NULL)
    first. NULL-safe. */
 void armsx_hw_rt_destroy(psx_gpu_backend_t* backend);

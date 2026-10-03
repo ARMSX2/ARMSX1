@@ -1,5 +1,7 @@
 package com.armsx2.ui.about
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -150,7 +152,7 @@ private fun ProjectCard(
     val accent = if (secondary) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
     Surface(
         onClick = onOpen,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().padFocusRing(RoundedCornerShape(20.dp)),
         shape = RoundedCornerShape(20.dp),
         color = accent.copy(alpha = 0.10f),
         border = BorderStroke(1.dp, accent.copy(alpha = 0.46f)),

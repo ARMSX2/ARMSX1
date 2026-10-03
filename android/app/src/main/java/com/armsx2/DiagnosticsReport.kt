@@ -170,7 +170,7 @@ object DiagnosticsReport {
         section(w, "previous audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt.previous"))
         section(w, "audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt"))
         section(w, "previous automatic Mali pacing", File(context.filesDir, "logs/armsx.log.pacing.previous"))
-        section(w, "automatic Mali pacing (independent of core logging)", File(context.filesDir, "logs/armsx.log.pacing"))
+        section(w, "automatic Mali pacing and FPS dips (independent of core logging)", File(context.filesDir, "logs/armsx.log.pacing"))
         section(w, "previous device session", File(context.filesDir, "logs/device.previous.log"))
         section(w, "device lifecycle, controller and native logs", File(context.filesDir, "logs/device.log"))
         section(w, "session.log — frontend stdout/stderr", File(externalLogs, "session.log"))

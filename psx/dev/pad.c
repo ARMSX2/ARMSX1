@@ -636,7 +636,7 @@ int psx_pad_mcd_fingerprint(psx_pad_t* pad, int slot, uint64_t* out_hash,
     return 1;
 }
 
-void psx_pad_update(psx_pad_t* pad, int cyc) {
+__attribute__((always_inline)) void psx_pad_update(psx_pad_t* pad, int cyc) {
     if ((pad->trace_pending || pad->trace_open) && cyc > 0) {
         pad->trace_cycles += (unsigned)cyc;
         if (pad->trace_cycles >= PAD_TRACE_INTERVAL_CYCLES) {

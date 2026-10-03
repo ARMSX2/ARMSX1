@@ -514,7 +514,7 @@ void psx_dma_do_otc(psx_dma_t* dma) {
     dma->otc.bcr = 0;
 }
 
-void psx_dma_update(psx_dma_t* dma, int cyc) {
+__attribute__((always_inline)) void psx_dma_update(psx_dma_t* dma, int cyc) {
     if (dma->cdrom_irq_delay) {
         dma->cdrom_irq_delay = 0;
 

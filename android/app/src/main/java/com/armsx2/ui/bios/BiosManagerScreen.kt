@@ -1,5 +1,7 @@
 package com.armsx2.ui.bios
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -139,11 +141,11 @@ fun BiosManagerScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Bio
             title = { Text(str("action.delete")) },
             text = { Text(item.file.name) },
             confirmButton = {
-                TextButton(onClick = { viewModel.delete(item); deleteTarget = null }) {
+                TextButton(modifier = Modifier.padFocusRing(), onClick = { viewModel.delete(item); deleteTarget = null }) {
                     Text(str("action.delete"), color = MaterialTheme.colorScheme.error)
                 }
             },
-            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text(str("action.cancel")) } },
+            dismissButton = { TextButton(modifier = Modifier.padFocusRing(), onClick = { deleteTarget = null }) { Text(str("action.cancel")) } },
         )
     }
     state.error?.let { error ->
@@ -151,7 +153,7 @@ fun BiosManagerScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Bio
             onDismissRequest = viewModel::dismissError,
             title = { Text(str("setup.page.bios.title")) },
             text = { Text(error) },
-            confirmButton = { TextButton(onClick = viewModel::dismissError) { Text(str("action.ok")) } },
+            confirmButton = { TextButton(modifier = Modifier.padFocusRing(), onClick = viewModel::dismissError) { Text(str("action.ok")) } },
         )
     }
 }
@@ -195,6 +197,7 @@ private fun BiosActionsMenu(
 @Composable
 private fun BiosActionMenuItem(glyph: String, label: String, onClick: () -> Unit) {
     DropdownMenuItem(
+        modifier = Modifier.padFocusRing(),
         text = {
             Text(
                 text = label,

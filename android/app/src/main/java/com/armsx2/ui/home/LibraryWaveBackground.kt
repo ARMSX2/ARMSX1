@@ -34,7 +34,7 @@ import kotlin.math.sin
  * offscreen passes. The readability scrim is applied by HomeScreen on top, same as for the GL wave.
  */
 @Composable
-fun LibraryWaveBackground(modifier: Modifier = Modifier) {
+fun LibraryWaveBackground(modifier: Modifier = Modifier, animated: Boolean = true) {
     // Colour picker + RGB toggle, read as Compose state so a live change recolours immediately.
     val colorArgb by LibraryBackgroundColorPreferences.color
     val rgbCycle by LibraryBackgroundColorPreferences.rgbCycle
@@ -42,7 +42,8 @@ fun LibraryWaveBackground(modifier: Modifier = Modifier) {
     // Elapsed seconds, ticked once per frame. Driven off the animation clock (not a recomposition
     // loop) so only the Canvas draw re-runs each frame, not the whole tree.
     val timeSec = remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(animated) {
+        if (!animated) return@LaunchedEffect
         var start = 0L
         withInfiniteAnimationFrameNanos { start = it }
         while (true) {
@@ -55,7 +56,7 @@ fun LibraryWaveBackground(modifier: Modifier = Modifier) {
     Canvas(modifier) {
         val t = timeSec.floatValue
         // Base colour: the RGB cycle sweeps the hue wheel (~28s/turn, matching the GL peripheral
-        // vibe); otherwise the picked colour, or the built-in royal blue when unset.
+        // vibe); otherwise the picked colour, or the built-in ARMSX1 orange when unset.
         val base: Color = when {
             rgbCycle -> Color.hsv(((t / 28f) * 360f) % 360f, 0.72f, 0.96f)
             colorArgb == 0 -> DEFAULT_WAVE
@@ -66,7 +67,7 @@ fun LibraryWaveBackground(modifier: Modifier = Modifier) {
 }
 
 /** The built-in wave colour — matches XmbGlView.BG_BOT / LibraryBackgroundColorPreferences default. */
-private val DEFAULT_WAVE = Color(0xFF2E75F5)
+private val DEFAULT_WAVE = Color(LibraryBackgroundColorPreferences.DefaultDisplayColor)
 
 private fun DrawScope.drawWaveScene(t: Float, base: Color) {
     val w = size.width

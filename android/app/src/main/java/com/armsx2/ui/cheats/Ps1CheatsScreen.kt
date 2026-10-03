@@ -1,4 +1,5 @@
 package com.armsx2.ui.cheats
+import com.armsx2.ui.common.padFocusRing
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -350,7 +351,7 @@ private fun Notice(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
                         .background(tint.copy(alpha = 0.16f))
-                        .clickable {
+                        .padFocusRing().clickable {
                             com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.RESET)
                             onAction()
                         }

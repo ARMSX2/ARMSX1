@@ -261,7 +261,7 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = viewModel()) {
             onDismissRequest = viewModel::dismissError,
             title = { Text(str("setup.welcome.heading")) },
             text = { Text(message) },
-            confirmButton = { TextButton(onClick = viewModel::dismissError) { Text(str("action.ok")) } },
+            confirmButton = { TextButton(modifier = Modifier.padFocusRing(), onClick = viewModel::dismissError) { Text(str("action.ok")) } },
         )
     }
 }
@@ -511,7 +511,7 @@ private fun BiosPage(state: OnboardingUiState, compact: Boolean, onPick: () -> U
                             onClick = { onSelectBios(candidate) },
                         )
                     }
-                    OutlinedButton(onClick = onPick, modifier = Modifier.fillMaxWidth()) { Text(str("setup.button.pickDifferentFolder")) }
+                    OutlinedButton(onClick = onPick, modifier = Modifier.fillMaxWidth().padFocusRing()) { Text(str("setup.button.pickDifferentFolder")) }
                 }
             }
             else -> {
@@ -524,13 +524,13 @@ private fun BiosPage(state: OnboardingUiState, compact: Boolean, onPick: () -> U
                     if (compact) {
                         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             BiosDetails(state)
-                            OutlinedButton(onClick = onPick, modifier = Modifier.fillMaxWidth()) { Text(str("setup.button.pickDifferentFolder")) }
+                            OutlinedButton(onClick = onPick, modifier = Modifier.fillMaxWidth().padFocusRing()) { Text(str("setup.button.pickDifferentFolder")) }
                         }
                     } else {
                         Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) { BiosDetails(state) }
                             Spacer(Modifier.width(14.dp))
-                            OutlinedButton(onClick = onPick) { Text(str("setup.button.choose")) }
+                            OutlinedButton(modifier = Modifier.padFocusRing(), onClick = onPick) { Text(str("setup.button.choose")) }
                         }
                     }
                 }
@@ -551,7 +551,7 @@ private fun BiosPage(state: OnboardingUiState, compact: Boolean, onPick: () -> U
 private fun BiosOptionRow(candidate: BiosCandidate, selected: Boolean, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().padFocusRing(RoundedCornerShape(16.dp)),
         shape = RoundedCornerShape(16.dp),
         color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
         border = BorderStroke(
@@ -614,11 +614,11 @@ private fun GamesPage(state: OnboardingUiState, onAdd: () -> Unit, onRemove: (St
                         Text("▦", color = MaterialTheme.colorScheme.primary, fontSize = 20.sp)
                         Spacer(Modifier.width(12.dp))
                         Text(label, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        TextButton(onClick = { onRemove(raw) }) { Text(str("setup.button.remove"), color = MaterialTheme.colorScheme.error) }
+                        TextButton(modifier = Modifier.padFocusRing(), onClick = { onRemove(raw) }) { Text(str("setup.button.remove"), color = MaterialTheme.colorScheme.error) }
                     }
                 }
             }
-            OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth().padFocusRing(RoundedCornerShape(14.dp)), shape = RoundedCornerShape(14.dp)) {
                 Text(if (state.gameFolders.isEmpty()) str("setup.button.pickRomsFolder") else str("setup.button.addAnotherFolder"))
             }
         }
@@ -737,7 +737,7 @@ private fun NavigationBar(
             Button(
                 onClick = onBack,
                 enabled = !busy,
-                modifier = Modifier.defaultMinSize(minHeight = 56.dp),
+                modifier = Modifier.defaultMinSize(minHeight = 56.dp).padFocusRing(RoundedCornerShape(14.dp)),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.filledTonalButtonColors(),
             ) { Text(str("action.back")) }
@@ -752,7 +752,7 @@ private fun NavigationBar(
         Button(
             onClick = onNext,
             enabled = canContinue && !busy,
-            modifier = Modifier.defaultMinSize(minHeight = 56.dp),
+            modifier = Modifier.defaultMinSize(minHeight = 56.dp).padFocusRing(RoundedCornerShape(14.dp)),
             shape = RoundedCornerShape(14.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
         ) {

@@ -428,12 +428,13 @@ fun Ps1VideoTab() {
             }
             SettingsDivider()
 
-            // 0 off · 1 performance cores · 2 all cores. Stored in the lifted Settings (which
+            // 0 off · 1 performance cores · 2 all cores · 3 fastest core. Stored in the lifted Settings (which
             // already carried affinityMode and already pushes it before runVMThread); native
             // also applies it live, so the row does not need a reboot to take effect.
             val affinityIndex = when (host.affinityMode) {
                 1, 7 -> 1
                 2 -> 2
+                3 -> 3
                 else -> 0
             }
             SegmentedRow(
@@ -442,6 +443,7 @@ fun Ps1VideoTab() {
                     str("common.off"),
                     str("renderer.affinity.performanceCores"),
                     str("renderer.affinity.allCores"),
+                    str("renderer.affinity.fastestCore"),
                 ),
                 selectedIndex = affinityIndex,
                 description = str("renderer.affinity.description"),

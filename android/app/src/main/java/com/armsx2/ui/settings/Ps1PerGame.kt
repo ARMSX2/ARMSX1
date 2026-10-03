@@ -1,4 +1,5 @@
 package com.armsx2.ui.settings
+import com.armsx2.ui.common.padFocusRing
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -335,7 +336,7 @@ private fun MarkerChip(text: String, tint: androidx.compose.ui.graphics.Color, o
             .border(1.dp, tint.copy(alpha = 0.45f), shape)
             .then(
                 if (onClick == null) Modifier
-                else Modifier.clickable {
+                else Modifier.padFocusRing().clickable {
                     com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.RESET)
                     onClick()
                 },

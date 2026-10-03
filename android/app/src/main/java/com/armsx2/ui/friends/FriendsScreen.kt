@@ -87,7 +87,7 @@ fun FriendsScreen(onBack: () -> Unit) {
  * lives in [DiscordPresence], so two copies would be two things to keep in step for no gain.
  */
 @Composable
-fun FriendsPanel(modifier: Modifier = Modifier) {
+fun FriendsPanel(modifier: Modifier = Modifier, controllerLayer: String? = null) {
     val status by DiscordPresence.status
     val friends by DiscordPresence.friends
     val error by DiscordPresence.error
@@ -155,6 +155,7 @@ fun FriendsPanel(modifier: Modifier = Modifier) {
                             onClick = { DiscordPresence.signOut() },
                             modifier = Modifier.controllerFocusable(
                                 "friends.signout",
+                                layer = controllerLayer,
                                 onConfirm = { DiscordPresence.signOut() },
                             ),
                         ) { Text(str("friends.disconnect")) }
@@ -185,6 +186,7 @@ fun FriendsPanel(modifier: Modifier = Modifier) {
                             onClick = { DiscordPresence.cancelConnect() },
                             modifier = Modifier.controllerFocusable(
                                 "friends.cancelConnect",
+                                layer = controllerLayer,
                                 onConfirm = { DiscordPresence.cancelConnect() },
                             ),
                         ) { Text(str("friends.cancel")) }
@@ -194,6 +196,7 @@ fun FriendsPanel(modifier: Modifier = Modifier) {
                         onClick = { DiscordPresence.authorize() },
                         modifier = Modifier.controllerFocusable(
                             "friends.connect",
+                                layer = controllerLayer,
                             onConfirm = { DiscordPresence.authorize() },
                         ),
                     ) { Text(str("friends.connect")) }

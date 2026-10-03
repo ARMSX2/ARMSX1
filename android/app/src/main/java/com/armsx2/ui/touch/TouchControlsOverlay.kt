@@ -23,6 +23,8 @@
 
 package com.armsx2.ui.touch
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -2057,7 +2059,7 @@ private fun ToolbarChip(label: String, onClick: () -> Unit) {
         Modifier
             .clip(RoundedCornerShape(8.dp))
             .background(Color(0xFF1F1F2C))
-            .clickable(onClick = onClick)
+            .padFocusRing().clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
         Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -2071,7 +2073,7 @@ private fun PanelSizeButton(label: String, onClick: () -> Unit) {
         Modifier
             .clip(RoundedCornerShape(8.dp))
             .background(Color(0xFF1F1F2C))
-            .clickable(onClick = onClick)
+            .padFocusRing().clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 2.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -2136,7 +2138,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(6.dp))
                         .background(if (active) Colors.pasx2_blue.copy(alpha = 0.35f) else Color(0xFF202030))
-                        .clickable { TouchControls.switchProfile(p.name) }
+                        .padFocusRing().clickable { TouchControls.switchProfile(p.name) }
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -2152,7 +2154,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                             color = Color(0xFFFF6B6B),
                             fontSize = 11.sp,
                             modifier = Modifier
-                                .clickable { TouchControls.deleteProfile(p.name) }
+                                .padFocusRing().clickable { TouchControls.deleteProfile(p.name) }
                                 .padding(horizontal = 6.dp),
                         )
                     }
@@ -2176,7 +2178,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                         focusedBorderColor = Colors.pasx2_blue,
                         unfocusedBorderColor = Color(0xFF444455),
                     ),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).padFocusRing(),
                 )
                 Box(
                     Modifier
@@ -2197,7 +2199,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                     .align(Alignment.End)
                     .clip(RoundedCornerShape(6.dp))
                     .background(Color(0xFF333344))
-                    .clickable(onClick = onDismiss)
+                    .padFocusRing().clickable(onClick = onDismiss)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 Text(str("action.close"), color = Color.White, fontSize = 12.sp)

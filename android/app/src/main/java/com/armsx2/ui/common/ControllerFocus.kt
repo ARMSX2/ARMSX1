@@ -15,6 +15,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.LaunchedEffect
 
@@ -30,12 +31,25 @@ import androidx.compose.runtime.LaunchedEffect
  * a sensible control instead of being spent waking the focus system.
  */
 
-private val FocusRingColor = Color(0xFF3DA5FF)
+val SelectionBlue = Color(0xFF3DA5FF)
+
+/** The same outline for registry navigation, library selection and Compose focus. */
+fun Modifier.selectionOutline(
+    selected: Boolean,
+    shape: Shape = RoundedCornerShape(14.dp),
+    width: androidx.compose.ui.unit.Dp = 2.5.dp,
+): Modifier = composed {
+    val windowFocused = LocalWindowInfo.current.isWindowFocused
+    this.then(if (selected && windowFocused) Modifier
+        .border(width + 2.dp, SelectionBlue.copy(alpha = 0.30f), shape)
+        .border(width, SelectionBlue, shape)
+    else Modifier)
+}
 
 /**
- * Visible focus ring drawn when this element (or a focusable child of it) holds
+ * Visible focus ring drawn when this control holds
  * gamepad focus. Place it BEFORE the element's own `.clickable`/`.background` so the
- * ring reads against the fill. Safe on any element that is (or contains) a
+ * ring reads against the fill. Safe on any element that is a
  * focusable — for a non-focusable element it simply never lights up.
  */
 fun Modifier.padFocusRing(
@@ -44,19 +58,8 @@ fun Modifier.padFocusRing(
 ): Modifier = composed {
     var focused by remember { mutableStateOf(false) }
     this
-        .onFocusChanged { focused = it.isFocused || it.hasFocus }
-        .then(
-            if (focused)
-                // Driver-safe focus ring: solid inner + translucent outer border. We avoid
-                // Modifier.shadow with a custom ambient/spot color — Adreno / Mali / Turnip
-                // drivers commonly ignore the tint and render the elevation shadow as an
-                // opaque BLACK box (visible only under controller focus, which is what lights
-                // this up; touch never does). Borders render identically on every driver.
-                Modifier
-                    .border(width + 2.dp, FocusRingColor.copy(alpha = 0.30f), shape)
-                    .border(width, FocusRingColor, shape)
-            else Modifier,
-        )
+        .onFocusChanged { focused = it.isFocused }
+        .selectionOutline(focused, shape, width)
 }
 
 /**

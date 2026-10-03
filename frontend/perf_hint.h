@@ -9,8 +9,8 @@
     kernel is willing to clock them. Both are OFF by default and both are inert everywhere
     except Android — on any other platform every function below compiles to an empty body.
 
-    NEITHER IS A MEASURED WIN. They are levers to be A/B'd on a device; nothing in this file
-    may be described as a speed-up until someone has numbers. See the notes on each half.
+    They are levers to be A/B'd on each device; measured gains on one device are not a
+    universal speed-up. See the notes on each half.
 
     ---- 1. ADPF (Android Dynamic Performance Framework) -------------------------------------
 
@@ -62,13 +62,15 @@
       * the librashader chain builder and the RetroAchievements HTTP workers are one-shot
         background work. Pinning them to the performance cluster puts them in direct
         contention with the emulation thread, which is the opposite of the intent.
+    FASTEST additionally requests display priority for the emulation thread only, preserving
+    an already higher priority. Switching to any other mode restores its original priority.
 */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Affinity modes. 0/1/2 are this port's set; 7 is accepted as an alias for 1 because the
+/* Affinity modes. 0/1/2/3 are this port's set; 7 is accepted as an alias for 1 because the
    Android front-end inherited its numbering from the PS2 build, whose modes 1..6 ordered the
    EE/VU/GS threads — three threads a PlayStation emulator does not have. Anything else is
    treated as OFF. */
@@ -76,6 +78,7 @@ enum {
     ARMSX_AFFINITY_OFF = 0,          /* scheduler decides (default) */
     ARMSX_AFFINITY_PERFORMANCE = 1,  /* pin the emulation thread to the top-frequency cluster */
     ARMSX_AFFINITY_ALL = 2,          /* explicit full mask; undoes a previous pin */
+    ARMSX_AFFINITY_FASTEST = 3,      /* highest-frequency tier, without widening */
     ARMSX_AFFINITY_PERFORMANCE_ALT = 7
 };
 
@@ -120,8 +123,8 @@ int armsx_affinity_mode(void);
 void armsx_affinity_set_default_mode(int mode);
 
 /* Apply the current mode to the CALLING thread. Cheap enough to call once per frame: it is an
-   atomic load and a comparison unless the mode actually changed, which is what gives the
-   setting a live apply instead of a boot-only one. */
+   atomic load and a comparison unless the mode actually changed. FASTEST also verifies its
+   mask once per 32 frames so transient vendor placement does not leave it on slower cores. */
 void armsx_affinity_apply_emulation_thread(void);
 
 #ifdef __cplusplus

@@ -389,7 +389,7 @@ private fun Header(preset: String) {
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
                 .clip(RoundedCornerShape(10.dp))
-                .clickable { ShaderParamsEditor.close() }
+                .padFocusRing(RoundedCornerShape(10.dp)).clickable { ShaderParamsEditor.close() }
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         )
     }
@@ -427,10 +427,9 @@ private fun ActionRow(label: String, enabled: Boolean, selected: Boolean, onClic
                 if (selected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f)
                 else Color.Transparent
             )
-            .border(
-                width = if (selected) 1.dp else 0.dp,
-                color = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = RoundedCornerShape(8.dp),
+            .selectionOutline(
+                selected && ShaderParamsEditor.confirmReset.value == null && !LibraryKeyboard.visible.value,
+                RoundedCornerShape(8.dp),
             )
             .clickable(enabled = enabled) { onClick() }
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -466,10 +465,9 @@ private fun ParamRow(
                 if (selected) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f)
                 else Color.Transparent
             )
-            .border(
-                width = if (selected) 1.dp else 0.dp,
-                color = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = RoundedCornerShape(8.dp),
+            .selectionOutline(
+                selected && ShaderParamsEditor.confirmReset.value == null && !LibraryKeyboard.visible.value,
+                RoundedCornerShape(8.dp),
             )
             .clickable { onSelect() }
             .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
@@ -509,6 +507,7 @@ private fun StepButton(label: String, onClick: () -> Unit) {
             .size(36.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+            .padFocusRing(RoundedCornerShape(8.dp))
             .clickable { onClick() },
         contentAlignment = Alignment.Center,
     ) {
@@ -578,7 +577,8 @@ private fun ConfirmButton(label: String, highlighted: Boolean, destructive: Bool
         Modifier
             .clip(RoundedCornerShape(10.dp))
             .background(if (highlighted) tint.copy(alpha = 0.24f) else Color.Transparent)
-            .border(1.dp, if (highlighted) tint else tint.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+            .border(1.dp, tint.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+            .selectionOutline(highlighted, RoundedCornerShape(10.dp))
             .clickable { onClick() }
             .padding(horizontal = 22.dp, vertical = 11.dp),
     ) {

@@ -1,5 +1,7 @@
 package com.armsx2.ui.achievements
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -132,7 +134,7 @@ fun AchievementsScreen(onBack: () -> Unit, viewModel: AchievementsViewModel = vi
             onDismissRequest = viewModel::dismissError,
             title = { Text("RetroAchievements") },
             text = { Text(error) },
-            confirmButton = { TextButton(onClick = viewModel::dismissError) { Text(str("action.ok")) } },
+            confirmButton = { TextButton(modifier = Modifier.padFocusRing(), onClick = viewModel::dismissError) { Text(str("action.ok")) } },
         )
     }
 
@@ -146,11 +148,11 @@ fun AchievementsScreen(onBack: () -> Unit, viewModel: AchievementsViewModel = vi
             title = { Text(str(if (enabling) "ra.hardcore.enable.title" else "ra.hardcore.disable.title")) },
             text = { Text(str(if (enabling) "ra.hardcore.enable.body" else "ra.hardcore.disable.body")) },
             confirmButton = {
-                TextButton(onClick = viewModel::confirmToggleHardcore) {
+                TextButton(modifier = Modifier.padFocusRing(), onClick = viewModel::confirmToggleHardcore) {
                     Text(str(if (enabling) "ra.hardcore.enable.confirm" else "ra.hardcore.disable.confirm"))
                 }
             },
-            dismissButton = { TextButton(onClick = viewModel::cancelToggleHardcore) { Text(str("action.cancel")) } },
+            dismissButton = { TextButton(modifier = Modifier.padFocusRing(), onClick = viewModel::cancelToggleHardcore) { Text(str("action.cancel")) } },
         )
     }
 }

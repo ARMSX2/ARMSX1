@@ -68,3 +68,16 @@ void psx_work_diag_end(unsigned category, uint64_t start) {
     if (elapsed > g_psx_work_diag.max_ticks[category])
         g_psx_work_diag.max_ticks[category] = elapsed;
 }
+
+void psx_work_diag_raster_end(unsigned category, uint64_t start) {
+    if (!g_psx_work_diag_enabled || category < PSX_WORK_RASTER_TEXTURED || category > PSX_WORK_RASTER_RECT) return;
+    const uint64_t duration = g_psx_work_clock() - start;
+    const unsigned categories[2] = {PSX_WORK_GPU_RASTER, category};
+    for (unsigned i = 0; i < 2; ++i) {
+        unsigned c = categories[i];
+        g_psx_work_diag.ticks[c] += duration;
+        ++g_psx_work_diag.calls[c];
+        if (duration > g_psx_work_diag.max_ticks[c])
+            g_psx_work_diag.max_ticks[c] = duration;
+    }
+}

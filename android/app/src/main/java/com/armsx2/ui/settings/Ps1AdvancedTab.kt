@@ -38,14 +38,14 @@ private val LOG_LEVEL_KEYS = listOf(
  * startup and nothing in the launcher writes them today.
  */
 @Composable
-fun Ps1AdvancedTab() {
+fun Ps1AdvancedTab(reorderable: Boolean = false) {
     val context = LocalContext.current
     val editor = rememberPs1SettingsEditor()
     val s = editor.value
     val scroll = settingsScrollState()
-    ControllerAutoScroll(scroll)
+    if (!reorderable) ControllerAutoScroll(scroll)
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    val content: @Composable () -> Unit = {
         Text(
             str("advanced.intro"),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -58,11 +58,13 @@ fun Ps1AdvancedTab() {
         // quiet key when logging_enabled is absent — and this writer always emits both. So each
         // row here sets the pair; writing just one of them would produce a toggle that flips in
         // the UI and changes nothing at launch.
-        ToggleRow(
-            str("advanced.logging.label"),
-            s.loggingEnabled,
-            description = str("advanced.logging.description"),
-        ) { v -> editor.update { it.copy(loggingEnabled = v, quiet = !v) } }
+        com.armsx2.ui.emulation.MenuOrderItem("advanced.logging.label") {
+            ToggleRow(
+                str("advanced.logging.label"),
+                s.loggingEnabled,
+                description = str("advanced.logging.description"),
+            ) { v -> editor.update { it.copy(loggingEnabled = v, quiet = !v) } }
+        }
         SettingsDivider()
 
         val defaultLevel = Ps1Settings().logLevel
@@ -72,57 +74,71 @@ fun Ps1AdvancedTab() {
             } else {
                 null
             }
-        IntSliderRow(
-            label = str("advanced.logLevel.label"),
-            value = s.logLevel.coerceIn(0, 5),
-            min = 0,
-            max = 5,
-            description = str("advanced.logLevel.description"),
-            valueFormatter = { level ->
-                LOG_LEVEL_KEYS.getOrNull(level)?.let { I18n.get(it) } ?: level.toString()
-            },
-            onReset = resetLevel,
-            onChange = { v -> editor.update { it.copy(logLevel = v) } },
-        )
+        com.armsx2.ui.emulation.MenuOrderItem("advanced.logLevel.label") {
+            IntSliderRow(
+                label = str("advanced.logLevel.label"),
+                value = s.logLevel.coerceIn(0, 5),
+                min = 0,
+                max = 5,
+                description = str("advanced.logLevel.description"),
+                valueFormatter = { level ->
+                    LOG_LEVEL_KEYS.getOrNull(level)?.let { I18n.get(it) } ?: level.toString()
+                },
+                onReset = resetLevel,
+                onChange = { v -> editor.update { it.copy(logLevel = v) } },
+            )
+        }
         SettingsDivider()
 
-        ToggleRow(
-            str("advanced.quiet.label"),
-            s.quiet,
-            description = str("advanced.quiet.description"),
-        ) { v -> editor.update { it.copy(quiet = v, loggingEnabled = !v) } }
+        com.armsx2.ui.emulation.MenuOrderItem("advanced.quiet.label") {
+            ToggleRow(
+                str("advanced.quiet.label"),
+                s.quiet,
+                description = str("advanced.quiet.description"),
+            ) { v -> editor.update { it.copy(quiet = v, loggingEnabled = !v) } }
+        }
         SettingsDivider()
 
-        Ps1InfoRow(
-            label = str("advanced.expansionRom.label"),
-            value = s.expansionRom,
-            description = str("advanced.expansionRom.description"),
-        )
-        Ps1InfoRow(
-            label = str("advanced.defaultExe.label"),
-            value = s.defaultPsxExe,
-            description = str("advanced.defaultExe.description"),
-        )
-        Ps1InfoRow(
-            label = str("advanced.settingsFile.label"),
-            value = Ps1Config.settingsFile(context).absolutePath,
-            description = str("advanced.settingsFile.description"),
-        )
+        com.armsx2.ui.emulation.MenuOrderItem("advanced.expansionRom.label") {
+            Ps1InfoRow(
+                label = str("advanced.expansionRom.label"),
+                value = s.expansionRom,
+                description = str("advanced.expansionRom.description"),
+            )
+        }
+        com.armsx2.ui.emulation.MenuOrderItem("advanced.defaultExe.label") {
+            Ps1InfoRow(
+                label = str("advanced.defaultExe.label"),
+                value = s.defaultPsxExe,
+                description = str("advanced.defaultExe.description"),
+            )
+        }
+        com.armsx2.ui.emulation.MenuOrderItem("advanced.settingsFile.label") {
+            Ps1InfoRow(
+                label = str("advanced.settingsFile.label"),
+                value = Ps1Config.settingsFile(context).absolutePath,
+                description = str("advanced.settingsFile.description"),
+            )
+        }
         SettingsDivider()
 
-        Ps1ActionRow(
-            label = str("advanced.reset.label"),
-            controllerId = "ps1.advanced.reset",
-            description = str("advanced.reset.description"),
-        ) {
-            val d = Ps1Settings()
-            editor.update {
-                it.copy(
-                    loggingEnabled = d.loggingEnabled,
-                    logLevel = d.logLevel,
-                    quiet = !d.loggingEnabled,
-                )
+        com.armsx2.ui.emulation.MenuOrderItem("advanced.reset.label") {
+            Ps1ActionRow(
+                label = str("advanced.reset.label"),
+                controllerId = "ps1.advanced.reset",
+                description = str("advanced.reset.description"),
+            ) {
+                val d = Ps1Settings()
+                editor.update {
+                    it.copy(
+                        loggingEnabled = d.loggingEnabled,
+                        logLevel = d.logLevel,
+                        quiet = !d.loggingEnabled,
+                    )
+                }
             }
         }
     }
+    if (reorderable) com.armsx2.ui.emulation.MenuOrderColumn("Fixes/options", spacing = 0.dp, content = content)
+    else Column(modifier = Modifier.fillMaxWidth()) { content() }
 }

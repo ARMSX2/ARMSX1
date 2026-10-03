@@ -1,5 +1,7 @@
 package com.armsx2.ui.settings
 
+import com.armsx2.ui.common.padFocusRing
+
 import androidx.compose.foundation.BorderStroke
 import android.os.Build
 import android.content.SharedPreferences
@@ -816,7 +818,7 @@ private fun BackupRestoreRows() {
     }
     OutlinedButton(
         onClick = { logPicker.launch("armsx-report-${com.armsx2.BuildConfig.VERSION_NAME}.txt") },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().padFocusRing(),
     ) {
         Text(str("app.logs.export"))
     }

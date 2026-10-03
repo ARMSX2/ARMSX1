@@ -1,6 +1,11 @@
 package com.armsx2.ui.home
+import com.armsx2.ui.common.selectionOutline
+import com.armsx2.ui.common.SelectionBlue
+
+import com.armsx2.ui.common.padFocusRing
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -14,6 +19,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -63,11 +69,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameNanos
@@ -81,6 +89,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import com.armsx2.CoverArtStyle
 import com.armsx2.EnglishTitles
@@ -120,6 +129,9 @@ import com.armsx2.ui.common.StatusChip
 import kotlin.math.abs
 
 private val LocalCustomCoverMap = staticCompositionLocalOf<Map<String, java.io.File>> { emptyMap() }
+private data class HomeFolderEntry(val key: String, val label: String,
+    val game: GameInfo? = null, val expanded: Boolean? = null, val glyph: String = "▤",
+    val edit: (() -> Unit)? = null, val action: () -> Unit)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -129,6 +141,33 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = viewModel(),
 ) {
+    com.armsx2.data.library.GameCollections.ensureLoaded()
+    val collections = com.armsx2.data.library.GameCollections.items.value
+    val collectionId = com.armsx2.data.library.GameCollections.selectedId.value
+    val activeCollection = collections.find { it.id == collectionId }
+    var foldersExpanded by remember { mutableStateOf(false) }
+    var expandedCollectionId by remember { mutableStateOf<String?>(null) }
+    var collectionsOpen by remember { mutableStateOf(false) }
+    var collectionGame by remember { mutableStateOf<GameInfo?>(null) }
+    var editingCollectionId by remember { mutableStateOf<String?>(null) }
+    var creatingCollection by remember { mutableStateOf(false) }
+    fun openCollections(game: GameInfo? = null, editId: String? = null, create: Boolean = false) {
+        collectionGame = game
+        editingCollectionId = editId
+        creatingCollection = create
+        collectionsOpen = true
+    }
+    fun toggleFolders() {
+        com.armsx2.data.library.GameCollections.select(null)
+        foldersExpanded = !foldersExpanded
+        expandedCollectionId = null
+        HomeInputController.collectionIndex.intValue = 0
+    }
+    fun toggleCollection(id: String) {
+        com.armsx2.data.library.GameCollections.select(null)
+        expandedCollectionId = if (expandedCollectionId == id) null else id
+    }
+    LaunchedEffect(collections, collectionId) { viewModel.collectionsChanged() }
     val state = viewModel.state.value
     val directories = MainActivityRuntime.romsDirs.value
     val nativeReady = MainActivityRuntime.nativeReady.value
@@ -139,6 +178,68 @@ fun HomeScreen(
     var showExitConfirm by remember { mutableStateOf(false) }
     var menuGame by remember { mutableStateOf<GameInfo?>(null) }
     var showClearRecentsConfirm by remember { mutableStateOf(false) }
+    val editFolderLabel = str("collections.edit")
+    val folderEntries = buildList {
+        fun addFolder(item: com.armsx2.data.library.GameCollection) {
+            val members = state.allGames.filter { it.uri.toString() in item.gameUris }
+            add(HomeFolderEntry(item.id, item.name, expanded = expandedCollectionId == item.id,
+                edit = { openCollections(editId = item.id) }) { toggleCollection(item.id) })
+            if (expandedCollectionId == item.id) {
+                if (members.isEmpty()) add(HomeFolderEntry("${item.id}/add-games", editFolderLabel, glyph = "+") {
+                    openCollections(editId = item.id)
+                })
+                members.forEach { game ->
+                    add(HomeFolderEntry("${item.id}/${game.uri}", game.displayTitle(EnglishTitles.enabled.value),
+                        game = game, edit = { menuGame = game }) { viewModel.launch(game) })
+                }
+            }
+        }
+        com.armsx2.data.library.GameCollections.homeTileKeys().forEach { key ->
+            if (key == com.armsx2.data.library.CollectionPolicy.HomeFolderKey) {
+                add(HomeFolderEntry(key, str("collections.title"), expanded = foldersExpanded,
+                    edit = { openCollections(editId = key) }, action = ::toggleFolders))
+                if (foldersExpanded) {
+                    add(HomeFolderEntry("new-collection", str("collections.create"), glyph = "+") {
+                        openCollections(create = true)
+                    })
+                    collections.filterNot { it.onHome }.forEach(::addFolder)
+                }
+            } else collections.find { it.id == key }?.let(::addFolder)
+        }
+    }
+    SideEffect {
+        HomeInputController.setCollectionActions(
+            if (state.initialized) folderEntries.map { it.action } else emptyList(),
+            folderEntries.map { it.edit }, keys = folderEntries.map { it.key }, collapse = {
+                when {
+                    expandedCollectionId != null -> {
+                        HomeInputController.collectionIndex.intValue = folderEntries.indexOfFirst {
+                            it.key == expandedCollectionId
+                        }.coerceAtLeast(0)
+                        expandedCollectionId = null
+                        true
+                    }
+                    foldersExpanded -> { foldersExpanded = false; HomeInputController.collectionIndex.intValue = 0; true }
+                    else -> false
+                }
+            })
+    }
+    // Custom library navigation yields its outline to drawers, prompts and the keyboard.
+    val libraryFocus = !collectionsOpen && !overflowMenu && menuGame == null && !showClearRecentsConfirm &&
+        !LibraryKeyboard.visible.value &&
+        com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null &&
+        !com.armsx2.ui.settings.SettingsControllerNav.hasSelection()
+    val gridFocus = libraryFocus && HomeInputController.zone.value == HomeZone.Grid
+    val drawerOpen = com.armsx2.navigation.UiNavigator.drawerOpen.value
+    LaunchedEffect(libraryFocus, drawerOpen) {
+        if (!libraryFocus || drawerOpen) HomeInputController.finishTileMove()
+    }
+    // A collection is a library sub-view. Dialogs and the drawer keep their own Back.
+    BackHandler(enabled = (activeCollection != null || foldersExpanded || expandedCollectionId != null ||
+        HomeInputController.movingTile.value != null) && libraryFocus &&
+        !com.armsx2.navigation.UiNavigator.drawerOpen.value) {
+        HomeInputController.back()
+    }
     // #9 custom library background — inert until the user picks an image.
     LaunchedEffect(Unit) { LibraryBackground.ensureLoaded(); CoverArtStyle.load() }
     val backgroundPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
@@ -176,24 +277,18 @@ fun HomeScreen(
                 // a procedural PPSSPP-style animated background drawn on the hardware 2D Canvas (no
                 // GLES3, runs anywhere) that reads the SAME colour prefs as the GL wave, so Mali users
                 // finally get an animated, recolourable backdrop instead of the old fixed GIF. The
-                // bundled still is the cheap floor shown during GL startup (and, once the wave is up,
-                // sits hidden behind it). Custom backgrounds below override all of this.
+                // static colour-matched fallback stays beneath the GL view during startup and
+                // teardown. Custom backgrounds below override all of this.
                 if (LibraryBackground.animated2D.value) {
                     // User opted into the lightweight 2D animated wave everywhere (#Luminz) — the same
                     // backdrop GL-fail devices get; skip the GLES3 XmbGlView entirely.
                     LibraryWaveBackground(Modifier.fillMaxSize())
                 } else {
                     var xmbGlState by remember { mutableStateOf<Boolean?>(null) } // null=starting, true=up, false=failed
-                    if (xmbGlState == false) {
-                        LibraryWaveBackground(Modifier.fillMaxSize())
-                    } else {
-                        Image(
-                            painter = painterResource(R.drawable.library_bg_xmb),
-                            contentDescription = null,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop,
-                        )
-                    }
+                    // The TextureView can briefly become transparent on launch/rotation.
+                    // Keep the user's colours beneath it instead of exposing the bundled blue
+                    // image. Freeze the fallback while GL works so there is only one animation.
+                    LibraryWaveBackground(Modifier.fillMaxSize(), animated = xmbGlState == false)
                     AndroidView(
                         factory = { XmbGlView(it).apply { onGlStatus = { ok -> xmbGlState = ok } } },
                         modifier = Modifier.fillMaxSize(),
@@ -227,7 +322,20 @@ fun HomeScreen(
             )
         },
     ) {
-        BoxWithConstraints(modifier.fillMaxSize()) {
+        if (collectionsOpen) {
+            CollectionsOverlay(state.allGames, collectionGame, embedded = true,
+                initialEditingId = editingCollectionId, initialCreate = creatingCollection) {
+                val editedIndex = folderEntries.indexOfFirst { it.key == editingCollectionId }
+                if (editedIndex >= 0) {
+                    HomeInputController.collectionIndex.intValue = editedIndex
+                    HomeInputController.zone.value = HomeZone.Collections
+                }
+                collectionsOpen = false
+                collectionGame = null
+                editingCollectionId = null
+                creatingCollection = false
+            }
+        } else BoxWithConstraints(modifier.fillMaxSize()) {
             val compact = maxWidth < 600.dp
             // Adaptive cells alone give a tablet MORE columns rather than BIGGER art, so scale the
             // cell width. Bigger cells mean bigger covers and fewer, better-spaced columns. Opt-in:
@@ -297,7 +405,9 @@ fun HomeScreen(
             // so normal browsing never followed the selector.)
             val allGamesHeaderShown = shownRecents.isNotEmpty() &&
                 state.initialized && state.visibleGames.isNotEmpty()
-            LaunchedEffect(state.selectedIndex, state.visibleGames.size, state.layout, HomeInputController.zone.value) {
+            val toolbarBottom = ToolbarPositionPreferences.atBottom.value
+            LaunchedEffect(state.selectedIndex, state.visibleGames.size, state.layout, HomeInputController.zone.value,
+                state.initialized, showSearch, shownRecents.size, toolbarBottom) {
                 if (HomeInputController.zone.value != HomeZone.Grid) return@LaunchedEffect
                 // Don't follow (and thus don't scroll away from the top) until the user
                 // has actually navigated — otherwise a cold open snaps the grid to the
@@ -305,8 +415,9 @@ fun HomeScreen(
                 if (!HomeInputController.userNavigated) return@LaunchedEffect
                 val sel = state.selectedIndex
                 if (sel < 0 || state.visibleGames.isEmpty()) return@LaunchedEffect
-                val leading = 1 + // toolbar
+                val leading = (if (toolbarBottom) 0 else 1) + // toolbar
                     (if (state.initialized && showSearch) 1 else 0) + // search field
+                    (if (state.initialized) 1 else 0) + // collections row
                     (if (shownRecents.isNotEmpty()) 1 else 0) + // recents section
                     (if (allGamesHeaderShown) 1 else 0) // All Games header
                 val cols = estimatedColumns.coerceAtLeast(1)
@@ -334,36 +445,38 @@ fun HomeScreen(
             // Toolbar position is an App setting. At the top it's the first grid item;
             // at the bottom it's a pinned bar (identical rounded-pill shape). The grid
             // reserves the matching inset so nothing hides behind whichever edge it's on.
-            val toolbarBottom = ToolbarPositionPreferences.atBottom.value
             LaunchedEffect(toolbarBottom) { HomeInputController.setToolbarAtBottom(toolbarBottom) }
             val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
             val navBarBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             val libraryToolbar: @Composable (Boolean) -> Unit = { bottomEdge ->
+                val leadingAction: () -> Unit = if (activeCollection != null) {
+                    { HomeInputController.returnToLibrary(); Unit }
+                } else onOpenMenu
                 // Register the toolbar button actions (left→right order) so the
                 // controller's toolbar zone can fire them, and read the highlight
                 // state so the focused button lights up.
                 HomeInputController.setToolbarActions(
                     listOf(
-                        onOpenMenu,
+                        leadingAction,
                         { viewModel.refresh() },
                         { viewModel.toggleLayout() },
                         { overflowMenu = true },
                     ),
                 )
-                val tb = HomeInputController.zone.value == HomeZone.Toolbar
+                val tb = libraryFocus && HomeInputController.zone.value == HomeZone.Toolbar
                 val tbi = HomeInputController.toolbarIndex.intValue
                 ArmsTopBar(
-                    title = str("games.section.library"),
+                    title = activeCollection?.name ?: str("games.section.library"),
                     subtitle = if (state.scanning) {
                         str("games.scanningRoms")
                     } else {
-                        "${str("games.library.totalGames")}: ${state.allGames.size}"
+                        "${str("games.library.totalGames")}: ${if (activeCollection == null) state.allGames.size else state.allGames.count { it.uri.toString() in activeCollection.gameUris }}"
                     },
                     leading = {
                         RoundAction(
-                            "☰",
-                            str("games.overflow.openNavigation"),
-                            onOpenMenu,
+                            if (activeCollection != null) "←" else "☰",
+                            if (activeCollection != null) str("collections.all") else str("games.overflow.openNavigation"),
+                            leadingAction,
                             selected = tb && tbi == 0,
                             framed = true,
                             buttonSize = 44.dp,
@@ -407,7 +520,7 @@ fun HomeScreen(
                                 "⋮",
                                 str("games.toolbar.more"),
                                 { overflowMenu = true },
-                                selected = overflowMenu || tb && tbi == 3,
+                                selected = tb && tbi == 3,
                                 framed = false,
                             )
                             LibraryOverflowMenu(
@@ -422,6 +535,7 @@ fun HomeScreen(
                                 onDismiss = { overflowMenu = false },
                                 onOpenNavigation = onOpenMenu,
                                 onSort = viewModel::setSort,
+                                onCollections = { foldersExpanded = true; com.armsx2.data.library.GameCollections.select(null) },
                                 onToggleCoverStyle = { CoverArtStyle.set(!CoverArtStyle.use3d.value) },
                                 onToggleGridNames = { GridLabels.set(!GridLabels.show.value) },
                                 onToggleCustomNames = { com.armsx2.CustomNames.set(!com.armsx2.CustomNames.enabled.value) },
@@ -437,13 +551,13 @@ fun HomeScreen(
                                     title = { Text(str("games.exit.title")) },
                                     text = { Text(str("games.exit.message")) },
                                     confirmButton = {
-                                        TextButton(onClick = {
+                                        TextButton(modifier = Modifier.padFocusRing(), onClick = {
                                             showExitConfirm = false
                                             MainActivityRuntime.exitApp()
                                         }) { Text(str("games.toolbar.exit")) }
                                     },
                                     dismissButton = {
-                                        TextButton(onClick = { showExitConfirm = false }) {
+                                        TextButton(modifier = Modifier.padFocusRing(), onClick = { showExitConfirm = false }) {
                                             Text(str("action.cancel"))
                                         }
                                     },
@@ -478,13 +592,62 @@ fun HomeScreen(
                             onClick = { LibraryKeyboard.open(viewModel.state.value.query, viewModel::setQuery, searchPlaceholder) },
                             placeholder = searchPlaceholder,
                             modifier = Modifier.fillMaxWidth(),
-                            selected = HomeInputController.zone.value == HomeZone.Search,
+                            selected = libraryFocus && HomeInputController.zone.value == HomeZone.Search,
                         )
                     }
                 }
 
+                if (state.initialized) {
+                    item(key = "home-collections", span = { GridItemSpan(maxLineSpan) }) {
+                        val focused = libraryFocus && HomeInputController.zone.value == HomeZone.Collections
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                SectionTitle(str("collections.title"), modifier = Modifier.weight(1f))
+                                if (focused) {
+                                    folderEntries.getOrNull(HomeInputController.collectionIndex.intValue)?.edit?.let { edit ->
+                                        TextButton(onClick = { HomeInputController.finishTileMove(); edit() }) {
+                                            Text(str("collections.edit"))
+                                        }
+                                    }
+                                }
+                            }
+                            if (focused && HomeInputController.movingTile.value != null) {
+                                Text(str("collections.moveControls"), style = MaterialTheme.typography.labelMedium)
+                                Row {
+                                    TextButton(onClick = { HomeInputController.moveTile(-1) }) { Text("←") }
+                                    TextButton(onClick = { HomeInputController.moveTile(1) }) { Text("→") }
+                                    TextButton(onClick = { HomeInputController.finishTileMove() }) { Text(str("collections.done")) }
+                                }
+                            }
+                            Spacer(Modifier.height(9.dp))
+                            val rowState = rememberLazyListState()
+                            val index = HomeInputController.collectionIndex.intValue
+                            LaunchedEffect(index, focused, folderEntries.size) {
+                                if (focused) rowState.animateScrollToItem(index.coerceIn(0, folderEntries.lastIndex))
+                            }
+                            LazyRow(state = rowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                itemsIndexed(folderEntries, key = { _, item -> item.key }) { i, item ->
+                                    if (item.game != null) RecentGameCard(item.game, focused && index == i,
+                                        onClick = item.action, onDetails = { item.edit?.invoke() })
+                                    else CollectionHomeTile(focused && index == i, label = item.label,
+                                        onEdit = item.edit, glyph = item.glyph, expanded = item.expanded,
+                                        artworkKey = item.key,
+                                        moving = HomeInputController.movingTile.value == item.key,
+                                        onBeginMove = if (item.key in com.armsx2.data.library.GameCollections.homeTileKeys())
+                                            { { HomeInputController.beginTileMove(item.key) } } else null,
+                                        onMove = { direction -> HomeInputController.moveTile(direction) },
+                                        onClick = {
+                                            if (HomeInputController.movingTile.value != null) HomeInputController.finishTileMove()
+                                            else item.action()
+                                        })
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (shownRecents.isNotEmpty()) {
-                    val recentsSelected = HomeInputController.zone.value == HomeZone.Recents
+                    val recentsSelected = libraryFocus && HomeInputController.zone.value == HomeZone.Recents
                     val recentSel = if (recentsSelected) HomeInputController.recentIndex.intValue else -1
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         Column {
@@ -501,9 +664,10 @@ fun HomeScreen(
                                 val clearAll = { showClearRecentsConfirm = true }
                                 Surface(
                                     onClick = clearAll,
-                                    modifier = if (HomeInputController.zone.value == HomeZone.RecentsHeader) {
-                                        Modifier.border(2.5.dp, Color(0xFF3DA5FF), RoundedCornerShape(12.dp))
-                                    } else Modifier,
+                                    modifier = Modifier.selectionOutline(
+                                        libraryFocus && HomeInputController.zone.value == HomeZone.RecentsHeader,
+                                        RoundedCornerShape(12.dp),
+                                    ),
                                     shape = RoundedCornerShape(12.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
                                 ) {
@@ -594,7 +758,7 @@ fun HomeScreen(
                         }
                     }
                 } else if (state.visibleGames.isEmpty()) {
-                    emptyLibrary(state.query.isBlank())
+                    emptyLibrary(state.query.isBlank(), activeCollection != null) { toggleFolders() }
                 } else if (state.layout == LibraryLayout.Shelf) {
                     // Fill each plank: chunk by how many covers fit the shelf width.
                     val shelfCoverW = ((if (compact) 84f else 100f) * coverScale).dp
@@ -613,7 +777,7 @@ fun HomeScreen(
                             // Every row lays out on the same perShelf-slot grid, so a
                             // short last row keeps its covers packed left in sequence.
                             slotsPerRow = perShelf,
-                            selectedIndex = state.selectedIndex,
+                            selectedIndex = if (gridFocus) state.selectedIndex else -1,
                             startIndex = rowIndex * perShelf,
                             onLaunch = { viewModel.launch(it) },
                             onDetails = { menuGame = it },
@@ -640,7 +804,7 @@ fun HomeScreen(
                         if (state.layout == LibraryLayout.Grid) {
                             GameGridCard(
                                 game = game,
-                                selected = index == state.selectedIndex,
+                                selected = gridFocus && index == state.selectedIndex,
                                 onSelect = { viewModel.setSelection(index) },
                                 onLaunch = { viewModel.launch(game) },
                                 onDetails = { menuGame = game },
@@ -648,7 +812,7 @@ fun HomeScreen(
                         } else {
                             GameListCard(
                                 game = game,
-                                selected = index == state.selectedIndex,
+                                selected = gridFocus && index == state.selectedIndex,
                                 onClick = { viewModel.setSelection(index); viewModel.launch(game) },
                                 onDetails = { menuGame = game },
                             )
@@ -736,6 +900,10 @@ fun HomeScreen(
                     menuGame = null
                     viewModel.launch(game)
                 }
+                GameMenuAction("▤", str("collections.title")) {
+                    menuGame = null
+                    openCollections(game = game)
+                }
                 GameMenuAction("⚙", str("action.settings")) {
                     menuGame = null
                     onOpenGameSettings(game)
@@ -790,7 +958,7 @@ fun HomeScreen(
 private fun GameMenuAction(glyph: String, label: String, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().padFocusRing(RoundedCornerShape(18.dp)),
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)),
@@ -819,6 +987,7 @@ private fun LibraryOverflowMenu(
     onDismiss: () -> Unit,
     onOpenNavigation: () -> Unit,
     onSort: (HomeSort) -> Unit,
+    onCollections: () -> Unit,
     onToggleCoverStyle: () -> Unit,
     onToggleGridNames: () -> Unit,
     onToggleCustomNames: () -> Unit,
@@ -850,6 +1019,8 @@ private fun LibraryOverflowMenu(
             color = MaterialTheme.colorScheme.primary,
             fontWeight = FontWeight.Bold,
         )
+        LibraryOverflowItem("▤", str("collections.title")) { closeThen(onCollections) }
+        OverflowSeparator()
         LibraryOverflowItem(
             glyph = "A–Z",
             label = str("games.overflow.sortTitle"),
@@ -986,17 +1157,17 @@ private fun LibraryOverflowItem(
                 trailing != null -> Text(trailing, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
             }
         },
-        modifier = Modifier.padding(horizontal = 6.dp),
+        modifier = Modifier.padding(horizontal = 6.dp).padFocusRing(),
     )
 }
 
-private fun LazyGridScope.emptyLibrary(noFolders: Boolean) {
+private fun LazyGridScope.emptyLibrary(noFolders: Boolean, collection: Boolean = false, onCollections: () -> Unit = {}) {
     item(span = { GridItemSpan(maxLineSpan) }) {
         EmptyState(
-            title = if (noFolders) str("games.empty.noFolders.title") else str("games.search.placeholder"),
-            message = if (noFolders) str("games.empty.noFolders.body") else str("games.search.hint"),
-            actionLabel = if (noFolders) str("games.toolbar.setup") else null,
-            onAction = if (noFolders) MainActivityRuntime::reopenSetup else null,
+            title = if (collection) str("collections.empty") else if (noFolders) str("games.empty.noFolders.title") else str("games.search.placeholder"),
+            message = if (collection) str("collections.emptyHint") else if (noFolders) str("games.empty.noFolders.body") else str("games.search.hint"),
+            actionLabel = if (collection) str("collections.title") else if (noFolders) str("games.toolbar.setup") else null,
+            onAction = if (collection) onCollections else if (noFolders) MainActivityRuntime::reopenSetup else null,
             modifier = Modifier.fillMaxWidth().height(260.dp),
         )
     }
@@ -1021,7 +1192,7 @@ private fun GameGridCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(coverAspectRatio())
-                .coverFrame(selected, 2.dp, MaterialTheme.colorScheme.primary),
+                .coverFrame(selected, 2.5.dp),
         )
         if (GridLabels.show.value) {
             Spacer(Modifier.height(4.dp))
@@ -1045,7 +1216,7 @@ private fun GameListCard(game: GameInfo, selected: Boolean, onClick: () -> Unit,
         color = MaterialTheme.colorScheme.surface.copy(alpha = LibraryChromePreferences.libraryOpacity.value / 100f),
         border = BorderStroke(
             if (selected) 2.dp else 1.dp,
-            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.42f),
+            if (selected) SelectionBlue else MaterialTheme.colorScheme.outline.copy(alpha = 0.42f),
         ),
     ) {
         Row(Modifier.padding(7.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1072,10 +1243,80 @@ private fun RecentGameCard(game: GameInfo, selected: Boolean = false, onClick: (
         GameCover(
             game,
             Modifier.fillMaxWidth().aspectRatio(coverAspectRatio())
-                .coverFrame(selected, 2.5.dp, Color(0xFF3DA5FF)),
+                .coverFrame(selected, 2.5.dp),
         )
         Spacer(Modifier.height(5.dp))
         Text(game.displayTitle(EnglishTitles.enabled.value), style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Cover-sized folders shared by Home shortcuts and the full-page collections browser. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun CollectionHomeTile(selected: Boolean, label: String? = null,
+    onEdit: (() -> Unit)? = null, glyph: String = "▤", expanded: Boolean? = null,
+    artworkKey: String? = null, moving: Boolean = false,
+    onBeginMove: (() -> Unit)? = null, onMove: ((Int) -> Unit)? = null, onClick: () -> Unit) {
+    val artworkVersion = com.armsx2.data.library.FolderArtwork.version.intValue
+    val artwork = remember(artworkKey, artworkVersion) {
+        artworkKey?.let(com.armsx2.data.library.FolderArtwork::image)
+    }
+    var artworkFailed by remember(artwork) { mutableStateOf(false) }
+    val beginMove by rememberUpdatedState(onBeginMove)
+    val moveTile by rememberUpdatedState(onMove)
+    val drag = if (onBeginMove != null) Modifier.pointerInput(artworkKey) {
+        var distance = 0f
+        detectDragGesturesAfterLongPress(
+            onDragStart = { distance = 0f; beginMove?.invoke() },
+            onDrag = { change, amount ->
+                change.consume()
+                distance += amount.x
+                val step = 64.dp.toPx()
+                while (abs(distance) >= step) {
+                    val direction = if (distance > 0) 1 else -1
+                    moveTile?.invoke(direction)
+                    distance -= direction * step
+                }
+            },
+            onDragEnd = { distance = 0f }, onDragCancel = { distance = 0f })
+    } else Modifier
+    Column(Modifier.width(102.dp).then(drag).combinedClickable(onClick = onClick,
+        onLongClick = if (onBeginMove == null) onEdit else null)) {
+        val primary = MaterialTheme.colorScheme.primaryContainer
+        val secondary = MaterialTheme.colorScheme.secondaryContainer
+        Box(Modifier.fillMaxWidth().aspectRatio(coverAspectRatio()).coverFrame(selected, 2.5.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Brush.linearGradient(listOf(primary, secondary)))
+            .then(if (moving) Modifier.border(3.dp, SelectionBlue, RoundedCornerShape(12.dp)) else Modifier),
+            contentAlignment = Alignment.Center) {
+            if (artwork != null && !artworkFailed) {
+                AsyncImage(model = artwork, contentDescription = label ?: str("collections.title"),
+                    modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+                    onError = { artworkFailed = true })
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
+                    Color.Transparent, Color.Black.copy(alpha = 0.75f)))))
+                Text(label ?: str("collections.title"),
+                    Modifier.align(Alignment.BottomCenter).padding(horizontal = 8.dp, vertical = 14.dp),
+                    style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color.White)
+            }
+            expanded?.let {
+                Text(if (it) "−" else "+", Modifier.align(Alignment.TopEnd).padding(end = 8.dp),
+                    fontSize = 24.sp, color = if (artwork != null && !artworkFailed) Color.White else MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+            if (artwork == null || artworkFailed) Column(horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(glyph, fontSize = 24.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                Spacer(Modifier.height(16.dp))
+                Text(label ?: str("collections.title"), style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 2,
+                    overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            }
+        }
+        Spacer(Modifier.height(5.dp))
+        Text(label ?: str("collections.title"), style = MaterialTheme.typography.labelMedium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -1171,10 +1412,10 @@ private fun coverAspectRatio(): Float = 1f
  * cover; do the same here, so 3D gets a selection frame and nothing else.
  */
 @Composable
-private fun Modifier.coverFrame(selected: Boolean, selectedWidth: Dp, selectedColor: Color): Modifier {
+private fun Modifier.coverFrame(selected: Boolean, selectedWidth: Dp): Modifier {
     val idle = !CoverArtStyle.use3d.value
     return when {
-        selected -> this.border(selectedWidth, selectedColor, RoundedCornerShape(12.dp))
+        selected -> this.selectionOutline(true, RoundedCornerShape(12.dp), selectedWidth)
         idle -> this.border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.42f), RoundedCornerShape(12.dp))
         else -> this
     }
@@ -1247,7 +1488,7 @@ private fun CoverPlaceholder(title: String, serial: String?, showText: Boolean) 
 }
 
 /** Vertical focus zones of the library screen, stacked top→bottom. */
-enum class HomeZone { Toolbar, Search, RecentsHeader, Recents, Grid }
+enum class HomeZone { Toolbar, Search, Collections, RecentsHeader, Recents, Grid }
 
 object HomeInputController {
     private var owner: HomeViewModel? = null
@@ -1255,18 +1496,28 @@ object HomeInputController {
     private var columns = 3
     val scrollVelocity = mutableFloatStateOf(0f)
 
-    // Three vertical zones stacked above the cover grid. The grid itself is
+    // Separate vertical zones stacked above the cover grid. The grid itself is
     // data-driven (owner.selectedIndex); the Recently-Played row and the top toolbar
     // (refresh / sort / layout / 2D-3D / background + the leading menu button) sit
     // above it and can't share that index space, so each is its own zone. From the
     // grid's top row, Up steps into Recents (if shown), then its Clear All header,
-    // Search and Toolbar; Down walks back down. Left/Right move within the focused row. A fires
+    // Collections, Search and Toolbar; Down walks back down. Left/Right move within the focused row. A fires
     // the highlighted item. HomeScreen reads `zone` + `toolbarIndex` / `recentIndex`
     // to draw the highlight and registers the toolbar actions + recents launcher.
     val zone = mutableStateOf(HomeZone.Grid)
     val toolbarIndex = mutableIntStateOf(0)
+    val collectionIndex = mutableIntStateOf(0)
     val recentIndex = mutableIntStateOf(0)
     private var toolbarActions: List<() -> Unit> = emptyList()
+    private var collectionActions: List<() -> Unit> = emptyList()
+    private var collectionEditActions: List<(() -> Unit)?> = emptyList()
+    private var collectionKeys: List<String> = emptyList()
+    val movingTile = mutableStateOf<String?>(null)
+    private val confirmPress = com.armsx2.ui.emulation.MenuConfirmPress()
+    private val confirmHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var confirmHold: Runnable? = null
+    private var pendingTile: String? = null
+    private var collapseCollection: (() -> Boolean)? = null
     private var recentCount = 0
     private var clearRecentsAction: (() -> Unit)? = null
     private var recentLauncher: ((Int) -> Unit)? = null
@@ -1282,6 +1533,8 @@ object HomeInputController {
     var userNavigated = false
 
     fun bind(viewModel: HomeViewModel, onOpenMenu: () -> Unit) {
+        finishTileMove()
+        confirmPress.reset()
         owner = viewModel
         openMenu = onOpenMenu
         userNavigated = false
@@ -1289,9 +1542,16 @@ object HomeInputController {
 
     fun unbind(viewModel: HomeViewModel) {
         if (owner === viewModel) {
+            finishTileMove()
+            confirmPress.reset()
             owner = null
             openMenu = null
             clearRecentsAction = null
+            collectionActions = emptyList()
+            collectionEditActions = emptyList()
+            collectionKeys = emptyList()
+            collapseCollection = null
+            collectionIndex.intValue = 0
             scrollVelocity.floatValue = 0f
             zone.value = HomeZone.Grid
         }
@@ -1303,6 +1563,83 @@ object HomeInputController {
     /** HomeScreen registers the toolbar button actions here, in visual left→right
      *  order (leading menu button first). */
     fun setToolbarActions(actions: List<() -> Unit>) { toolbarActions = actions }
+
+    fun setCollectionActions(actions: List<() -> Unit>, editActions: List<(() -> Unit)?> = emptyList(),
+        keys: List<String> = emptyList(), collapse: (() -> Boolean)? = null) {
+        collectionActions = actions
+        collectionEditActions = editActions
+        collectionKeys = keys
+        collapseCollection = collapse
+        movingTile.value?.let { id ->
+            val index = keys.indexOf(id)
+            if (index < 0) finishTileMove() else collectionIndex.intValue = index
+        }
+        collectionIndex.intValue = collectionIndex.intValue.coerceIn(0, actions.lastIndex.coerceAtLeast(0))
+        if (actions.isEmpty() && zone.value == HomeZone.Collections) zone.value = HomeZone.Grid
+    }
+
+    private fun cancelTileConfirm() {
+        confirmHold?.let(confirmHandler::removeCallbacks)
+        confirmHold = null
+        pendingTile = null
+        confirmPress.cancel()
+    }
+
+    fun finishTileMove() {
+        cancelTileConfirm()
+        confirmPress.reset()
+        movingTile.value = null
+    }
+
+    fun beginTileMove(id: String) {
+        if (id !in com.armsx2.data.library.GameCollections.homeTileKeys()) return
+        val index = collectionKeys.indexOf(id)
+        if (index < 0) return
+        cancelTileConfirm()
+        movingTile.value = id
+        collectionIndex.intValue = index
+        zone.value = HomeZone.Collections
+    }
+
+    fun moveTile(direction: Int) {
+        val id = movingTile.value ?: return
+        com.armsx2.data.library.GameCollections.moveHomeTile(id, direction)
+    }
+
+    /** Folder taps open on release; a hold claims the press for arranging Home. */
+    fun confirmKey(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_UP && confirmPress.matches(event.keyCode)) {
+            confirmHold?.let(confirmHandler::removeCallbacks)
+            confirmHold = null
+            val id = pendingTile
+            pendingTile = null
+            if (confirmPress.up(event.keyCode, event.isCanceled)) {
+                if (movingTile.value != null) finishTileMove()
+                else if (zone.value == HomeZone.Collections && collectionKeys.getOrNull(collectionIndex.intValue) == id) confirm()
+            }
+            return true
+        }
+        val id = collectionKeys.getOrNull(collectionIndex.intValue)
+        if (zone.value == HomeZone.Collections && (movingTile.value != null ||
+                id in com.armsx2.data.library.GameCollections.homeTileKeys())) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0 && confirmPress.down(event.keyCode)) {
+                pendingTile = id
+                if (movingTile.value == null && id != null) {
+                    val hold = Runnable {
+                        confirmHold = null
+                        if (active() && zone.value == HomeZone.Collections && pendingTile == id &&
+                            collectionKeys.getOrNull(collectionIndex.intValue) == id &&
+                            !com.armsx2.navigation.UiNavigator.drawerOpen.value && !LibraryKeyboard.visible.value &&
+                            com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null) beginTileMove(id)
+                    }
+                    confirmHold = hold
+                    confirmHandler.postDelayed(hold, android.view.ViewConfiguration.getLongPressTimeout().toLong())
+                }
+            }
+            return true
+        }
+        return event.action != android.view.KeyEvent.ACTION_DOWN || event.repeatCount != 0 || confirm()
+    }
 
     fun setClearRecentsAction(action: () -> Unit) { clearRecentsAction = action }
 
@@ -1329,9 +1666,10 @@ object HomeInputController {
 
     /** The chrome zone directly above the grid, honoring which chrome is shown and
      *  whether the toolbar is at the top. Order top→bottom (toolbar-top): Toolbar,
-     *  Search, Recents, Grid. When the toolbar is at the bottom it isn't above. */
+     *  Search, Collections, Recents, Grid. When the toolbar is at the bottom it isn't above. */
     private fun zoneAboveGrid(): HomeZone = when {
         recentCount > 0 -> HomeZone.Recents
+        collectionActions.isNotEmpty() -> HomeZone.Collections
         searchAvailable -> HomeZone.Search
         !toolbarAtBottom && toolbarActions.isNotEmpty() -> HomeZone.Toolbar
         else -> HomeZone.Grid
@@ -1339,11 +1677,17 @@ object HomeInputController {
 
     fun move(dx: Int, dy: Int): Boolean {
         val viewModel = owner ?: return false
+        cancelTileConfirm()
+        if (movingTile.value != null) {
+            if (dx != 0) moveTile(dx)
+            return true
+        }
         userNavigated = true
         // Snapshot the highlight so we blip the nav sound only when it actually moves (not when a
         // press runs into an edge).
         val beforeZone = zone.value
         val beforeToolbar = toolbarIndex.intValue
+        val beforeCollection = collectionIndex.intValue
         val beforeRecent = recentIndex.intValue
         val beforeSel = viewModel.state.value.selectedIndex
         when (zone.value) {
@@ -1352,6 +1696,7 @@ object HomeInputController {
                 // returns to the grid.
                 !toolbarAtBottom && dy > 0 -> zone.value = when {
                     searchAvailable -> HomeZone.Search
+                    collectionActions.isNotEmpty() -> HomeZone.Collections
                     recentCount > 0 -> HomeZone.RecentsHeader
                     else -> HomeZone.Grid
                 }
@@ -1361,11 +1706,23 @@ object HomeInputController {
             }
             HomeZone.Search -> when {
                 dy < 0 -> if (!toolbarAtBottom && toolbarActions.isNotEmpty()) zone.value = HomeZone.Toolbar
+                dy > 0 && collectionActions.isNotEmpty() -> zone.value = HomeZone.Collections
                 dy > 0 -> zone.value = if (recentCount > 0) HomeZone.RecentsHeader else HomeZone.Grid
+            }
+            HomeZone.Collections -> when {
+                dy < 0 -> zone.value = when {
+                    searchAvailable -> HomeZone.Search
+                    !toolbarAtBottom && toolbarActions.isNotEmpty() -> HomeZone.Toolbar
+                    else -> HomeZone.Collections
+                }
+                dy > 0 -> zone.value = if (recentCount > 0) HomeZone.RecentsHeader else HomeZone.Grid
+                dx != 0 && collectionActions.isNotEmpty() ->
+                    collectionIndex.intValue = (collectionIndex.intValue + dx).coerceIn(0, collectionActions.lastIndex)
             }
             HomeZone.RecentsHeader -> when {
                 dy > 0 -> zone.value = HomeZone.Recents
                 dy < 0 -> zone.value = when {
+                    collectionActions.isNotEmpty() -> HomeZone.Collections
                     searchAvailable -> HomeZone.Search
                     !toolbarAtBottom && toolbarActions.isNotEmpty() -> HomeZone.Toolbar
                     else -> HomeZone.RecentsHeader
@@ -1402,6 +1759,7 @@ object HomeInputController {
             }
         }
         if (zone.value != beforeZone || toolbarIndex.intValue != beforeToolbar ||
+            collectionIndex.intValue != beforeCollection ||
             recentIndex.intValue != beforeRecent || viewModel.state.value.selectedIndex != beforeSel
         ) com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.NAV)
         return true
@@ -1413,6 +1771,7 @@ object HomeInputController {
         when (zone.value) {
             HomeZone.Toolbar -> toolbarActions.getOrNull(toolbarIndex.intValue)?.invoke()
             HomeZone.Search -> searchConfirm?.invoke()
+            HomeZone.Collections -> collectionActions.getOrNull(collectionIndex.intValue)?.invoke()
             HomeZone.RecentsHeader -> clearRecentsAction?.invoke()
             HomeZone.Recents -> recentLauncher?.invoke(recentIndex.intValue)
             HomeZone.Grid -> {
@@ -1424,6 +1783,12 @@ object HomeInputController {
     }
 
     fun openSelectedSettings(): Boolean {
+        finishTileMove()
+        if (zone.value == HomeZone.Collections) {
+            val edit = collectionEditActions.getOrNull(collectionIndex.intValue) ?: return false
+            edit()
+            return true
+        }
         val game = owner?.selectedGame() ?: return false
         com.armsx2.navigation.UiNavigator.navigate(com.armsx2.navigation.AppRoute.Settings(game = game))
         return true
@@ -1435,8 +1800,26 @@ object HomeInputController {
         return true
     }
 
+    /** Leave the selected collection without changing its saved contents. */
+    fun returnToLibrary(): Boolean {
+        val viewModel = owner ?: return false
+        if (com.armsx2.data.library.GameCollections.selectedId.value == null) return false
+        com.armsx2.data.library.GameCollections.select(null)
+        viewModel.collectionsChanged()
+        zone.value = HomeZone.Grid
+        userNavigated = false
+        return true
+    }
+
     fun back(): Boolean {
         com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.BACK)
+        if (movingTile.value != null) { finishTileMove(); return true }
+        cancelTileConfirm()
+        if (collapseCollection?.invoke() == true) {
+            zone.value = HomeZone.Collections
+            return true
+        }
+        if (returnToLibrary()) return true
         // B in the Recents / Toolbar zone drops back to the grid; on the grid it
         // opens the nav drawer.
         if (zone.value != HomeZone.Grid) {
@@ -1608,4 +1991,3 @@ private fun ShelfGameCard(game: GameInfo, width: Dp, reflectionHeight: Dp, selec
         }
     }
 }
-

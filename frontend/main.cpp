@@ -2572,6 +2572,9 @@ class ArmsxSession {
         ARMSX_BOOTLOG("core: CPU execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
 
         psx_gpu_t* gpu = psx_get_gpu(psx_);
+#ifdef __ANDROID__
+        gpu->defer_software_shading = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+#endif
 
         {
             uint32_t accuracy = 0;
@@ -2696,6 +2699,12 @@ class ArmsxSession {
                 armsx_hw_gl_use_cpu_fallback(mode, settings.internal_scale))) {
                 hw_rt_backend_ = armsx_hw_rt_create(gpu, settings.internal_scale);
                 hw_rt_is_gl_ = false;
+#ifdef __ANDROID__
+                const bool mali_cpu_spans = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+                armsx_hw_rt_set_span_clipping(hw_rt_backend_, mali_cpu_spans);
+                if (hw_rt_backend_ && mali_cpu_spans)
+                    psxe_diag_logf("renderer", "Mali CPU fallback: exact triangle span clipping active");
+#endif
             }
 
             if (hw_rt_backend_) {
@@ -3041,7 +3050,7 @@ class ArmsxSession {
         runahead_sequence_.clear();
         runahead_reused_frames_ = 0;
         g_psx_work_diag_enabled = 0;
-        work_frames_ = work_window_frames_ = 0;
+        work_frames_ = work_window_frames_ = work_elapsed_frames_ = 0;
         work_totals_ = {}; work_worst_ = {}; work_worst_core_ = 0;
         // A capture still open here would leak its FILE* and lose its tail; closing it also
         // clears g_psx_audio_diag_enabled so a fresh session starts unarmed.
@@ -3471,13 +3480,31 @@ class ArmsxSession {
     // Automatic bounded work breakdown. CPU samples include memory-mapped
     // device calls; audio queue may include SPU/disc work. Never sum categories.
     void beginMaliWorkProbe() {
-        const bool enabled = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI
-            && work_frames_ < 10800; // Three minutes at 60 emulated frames/sec.
+        ++work_elapsed_frames_;
+        // Ordinary Mali builds sample two seconds per thirty seconds from the
+        // start. Per-primitive clock reads should not run throughout gameplay.
+        // Full diagnostic builds retain their larger sample budget.
+        bool sparse_mali = false;
+#if !defined(ARMSX_DIAGNOSTIC_BUILD)
+        sparse_mali = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+#endif
+        const unsigned initial_budget = sparse_mali ? 120 : 10800;
+        const bool periodic = sparse_mali
+            ? ((work_elapsed_frames_ - 1) % 1800) < 120
+            : work_elapsed_frames_ > initial_budget &&
+                ((work_elapsed_frames_ - initial_budget - 1) % 1800) < 120;
+        const bool probe_gpu = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+        const bool enabled = probe_gpu && (work_elapsed_frames_ <= initial_budget || periodic);
         psx_work_diag_begin(enabled ? SDL_GetPerformanceCounter : nullptr);
         if (enabled && work_frames_ == 0) {
-            psxe_diag_pacingf("work_begin schema=2 source=%s title=%s frame_limit=10800 "
-                "cpu_sample_stride=4093 inclusive_categories=yes",
-                workSourceId(), title_.c_str());
+            psxe_diag_pacingf("work_begin schema=5 source=%s title=%s frame_limit=%u "
+                "periodic_sample_frames=120 periodic_interval_frames=1800 "
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+                "cpu_sample_stride=4093 instruction_sampling=enabled inclusive_categories=yes",
+#else
+                "cpu_sample_stride=0 instruction_sampling=disabled inclusive_categories=yes",
+#endif
+                workSourceId(), title_.c_str(), initial_budget);
         }
     }
 
@@ -3498,27 +3525,35 @@ class ArmsxSession {
         if (core_ticks > work_worst_core_) {
             work_worst_core_ = core_ticks;
             work_worst_ = frame;
-            work_worst_frame_ = work_frames_;
+            work_worst_frame_ = work_elapsed_frames_;
         }
-        if (work_window_frames_ < 120 && work_frames_ < 10800) return;
+        if (work_window_frames_ < 120 && work_elapsed_frames_ != 10800) return;
         const auto avg = [this](unsigned i) {
             return CounterTicksToMilliseconds(work_totals_.ticks[i]) / work_window_frames_;
         };
-        psxe_diag_pacingf("work_detail schema=2 source=%s frame=%u frames=%u "
+        const auto sample_us = [this](unsigned i) {
+            return work_totals_.calls[i] ?
+                CounterTicksToMilliseconds(work_totals_.ticks[i]) * 1000.0 /
+                    work_totals_.calls[i] : 0.0;
+        };
+        psxe_diag_pacingf("work_detail schema=4 source=%s frame=%u elapsed_frame=%u frames=%u "
             "mdec_ms=%.3f spu_ms=%.3f disc_ms=%.3f audio_queue_ms=%.3f "
             "mdec_calls=%u spu_calls=%u disc_reads=%u disc_max_ms=%.3f slowest_lba=%u "
             "cpu_sample_calls=%u cpu_sample_mean_us=%.3f cpu_sample_max_us=%.3f "
+            "cdrom_update_us=%.3f gpu_update_us=%.3f pad_update_us=%.3f "
+            "timer_update_us=%.3f dma_update_us=%.3f spu_tick_us=%.3f "
             "worst_frame=%u worst_core_ms=%.3f worst_mdec_ms=%.3f worst_spu_ms=%.3f "
             "worst_disc_ms=%.3f worst_audio_queue_ms=%.3f gpu_raster_ms=%.3f gpu_raster_calls=%u worst_gpu_raster_ms=%.3f inclusive=yes",
-            workSourceId(), work_frames_, work_window_frames_,
+            workSourceId(), work_frames_, work_elapsed_frames_, work_window_frames_,
             avg(PSX_WORK_MDEC), avg(PSX_WORK_SPU), avg(PSX_WORK_DISC), avg(PSX_WORK_AUDIO_QUEUE),
             work_totals_.calls[PSX_WORK_MDEC], work_totals_.calls[PSX_WORK_SPU],
             work_totals_.calls[PSX_WORK_DISC], CounterTicksToMilliseconds(work_totals_.max_ticks[PSX_WORK_DISC]),
             work_totals_.slowest_lba, work_totals_.calls[PSX_WORK_CPU_SAMPLE],
-            work_totals_.calls[PSX_WORK_CPU_SAMPLE] ?
-                CounterTicksToMilliseconds(work_totals_.ticks[PSX_WORK_CPU_SAMPLE]) * 1000.0 /
-                    work_totals_.calls[PSX_WORK_CPU_SAMPLE] : 0.0,
+            sample_us(PSX_WORK_CPU_SAMPLE),
             CounterTicksToMilliseconds(work_totals_.max_ticks[PSX_WORK_CPU_SAMPLE]) * 1000.0,
+            sample_us(PSX_WORK_CDROM_UPDATE), sample_us(PSX_WORK_GPU_UPDATE),
+            sample_us(PSX_WORK_PAD_UPDATE), sample_us(PSX_WORK_TIMER_UPDATE),
+            sample_us(PSX_WORK_DMA_UPDATE), sample_us(PSX_WORK_SPU_TICK),
             work_worst_frame_, CounterTicksToMilliseconds(work_worst_core_),
             CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_MDEC]),
             CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_SPU]),
@@ -3526,12 +3561,28 @@ class ArmsxSession {
             CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_AUDIO_QUEUE]),
             avg(PSX_WORK_GPU_RASTER), work_totals_.calls[PSX_WORK_GPU_RASTER],
             CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_GPU_RASTER]));
+        psxe_diag_pacingf("raster_detail schema=1 source=%s elapsed_frame=%u frames=%u "
+            "textured_ms=%.3f shaded_textured_ms=%.3f plain_ms=%.3f rect_ms=%.3f "
+            "textured_calls=%u shaded_textured_calls=%u plain_calls=%u rect_calls=%u "
+            "worst_frame=%u worst_core_ms=%.3f worst_textured_ms=%.3f "
+            "worst_shaded_textured_ms=%.3f worst_plain_ms=%.3f worst_rect_ms=%.3f",
+            workSourceId(), work_elapsed_frames_, work_window_frames_,
+            avg(PSX_WORK_RASTER_TEXTURED), avg(PSX_WORK_RASTER_SHADED_TEXTURED),
+            avg(PSX_WORK_RASTER_PLAIN), avg(PSX_WORK_RASTER_RECT),
+            work_totals_.calls[PSX_WORK_RASTER_TEXTURED], work_totals_.calls[PSX_WORK_RASTER_SHADED_TEXTURED],
+            work_totals_.calls[PSX_WORK_RASTER_PLAIN], work_totals_.calls[PSX_WORK_RASTER_RECT],
+            work_worst_frame_, CounterTicksToMilliseconds(work_worst_core_),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_TEXTURED]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_SHADED_TEXTURED]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_PLAIN]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_RECT]));
         work_totals_ = {};
         work_worst_ = {};
         work_window_frames_ = 0;
         work_worst_core_ = 0;
-        if (work_frames_ == 10800)
-            psxe_diag_pacingf("work_end source=%s reason=frame_budget", workSourceId());
+        if (work_elapsed_frames_ == 10800)
+            psxe_diag_pacingf("work_periodic source=%s sample_frames=120 interval_frames=1800",
+                workSourceId());
     }
 
     static const char* workSourceId() {
@@ -5842,6 +5893,7 @@ class ArmsxSession {
     ArmsxAudioDrcState audio_drc_{1.0, 1.0, 1.0, false};
     ArmsxAudioTimeStretcher audio_time_stretcher_;
     unsigned work_frames_ = 0, work_window_frames_ = 0, work_worst_frame_ = 0;
+    unsigned work_elapsed_frames_ = 0;
     uint64_t work_worst_core_ = 0;
     psx_work_diag_t work_totals_{}, work_worst_{};
     std::filesystem::path disc_path_;
