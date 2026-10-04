@@ -1210,6 +1210,16 @@ build/tests/gpu_display_height build/tests/gpu_bios_uv_precision: build/tests/%:
 	mkdir -p $(dir $@)
 	$(CC) -std=c11 -O2 -g -fno-fast-math -I. -Ipsx $< -lm -o $@
 
+build/tests/honor_software_profile: tests/honor_software_profile.c frontend/honor_software_profile.h
+	mkdir -p $(dir $@)
+	$(CC) -std=c11 -O2 -Wall -Wextra -I. $< -o $@
+
+.PHONY: test-honor-software
+test-honor-software: build/tests/honor_software_profile build/tests/gpu_triangle_regression
+	./build/tests/honor_software_profile
+	./build/tests/gpu_triangle_regression
+	./build/tests/gpu_triangle_regression shading
+
 test-gpu-bios: build/tests/gpu_bios_font build/tests/gpu_triangle_regression build/tests/gpu_display_height build/tests/gpu_bios_uv_precision
 	./build/tests/gpu_display_height
 	./build/tests/gpu_bios_uv_precision
