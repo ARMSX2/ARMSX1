@@ -346,6 +346,7 @@ val EN: Map<String, String> = mapOf(
     "app.covers" to "Download cover art",
     "app.covers.desc" to "Fetch box art for every game in your library and keep it on disk, so covers show up straight away and work offline.",
     "app.covers.done" to "Downloaded %d covers",
+    "app.covers.incomplete" to "Downloaded %d covers; %s could not be downloaded.",
     "app.covers.upToDate" to "All covers already downloaded",
     "app.covers.none" to "No games found to fetch covers for",
     "app.logs" to "Generate log file",

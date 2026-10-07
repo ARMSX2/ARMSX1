@@ -1436,9 +1436,10 @@ private fun GameCover(
     // skipped when a custom cover wins) so EVERY card — the Recently Played shelf
     // included — is subscribed and re-resolves when the toolbar toggle flips.
     val use3d = CoverArtStyle.use3d.value
+    val catalogueVersion = com.armsx2.CoverCatalogue.version.intValue
     val customCoverMap = LocalCustomCoverMap.current
     val custom = remember(game.uri, customCoverMap) { CustomCovers.matchIn(customCoverMap, game) }
-    val models = remember(custom, game, use3d, CustomCovers.version.value) {
+    val models = remember(custom, game, use3d, CustomCovers.version.value, catalogueVersion) {
         listOfNotNull(custom) + game.coverUrls
     }
     FallbackCoverImage(

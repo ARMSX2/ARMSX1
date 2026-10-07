@@ -1,19 +1,20 @@
 package com.armsx2.core
 
 import java.util.Locale
+import java.io.Reader
 
 /**
  * Last-resort **cover-art only** serial lookup, by No-Intro / Redump dump name.
  *
  * [Ps1DiscId] reads the serial off the disc itself and that is the answer wherever it works. This
- * table exists so a disc it *cannot* read — a `.zip`, an image whose filesystem is damaged, a
- * homebrew-style disc whose boot executable is named `PSX.EXE` — degrades to "cover art still
- * works" instead of a blank tile.
+ * lookup exists so a disc it *cannot* read — SAF metadata-only entries, a `.zip`, or an image
+ * whose filesystem is damaged — can still display art without opening/staging the ROM.
+ * A bundled Libretro/Redump catalogue provides broad regional coverage; the small curated
+ * table below remains a fallback if the catalogue is unavailable.
  *
- * It is no longer the main answer for `.chd`. It used to be, and that was the bug: a CHD never
- * yielded a serial, so covers came from this table — a couple of dozen curated USA titles — and
- * every other CHD in a library got a placeholder. CHDs are now identified through the core's own
- * disc reader, so this is back to being a genuine last resort.
+ * POSIX compressed images can be identified through the core's disc reader. SAF library
+ * scanning deliberately avoids native disc probing, so those rows use the filename catalogue
+ * until the selected game is launched and its actual disc identity becomes available.
  *
  * **Deliberately not fed into [com.armsx2.GameInfo.serial].** That field is the game's IDENTITY:
  * RetroAchievements hashes against it, per-game settings key off it, play time accrues under it.
@@ -21,10 +22,19 @@ import java.util.Locale
  * game's achievements and settings to another. It is used by [com.armsx2.GameInfo.coverSerial] and
  * nothing else, so the worst a wrong entry here can do is show the wrong box art.
  *
- * The main table is USA-only (or untagged filenames), with explicit regional exceptions below.
+ * The curated table is USA-only (or untagged filenames), with explicit regional exceptions below.
  * Other regional pressings are left unmatched rather than assigned an unrelated edition.
  */
 object Ps1TitleSerials {
+
+    @Volatile private var catalogue: Ps1CoverTitleIndex? = null
+
+    /** Called off the UI thread. Existing disc identities and settings are never changed. */
+    fun loadCatalogue(reader: Reader): Int {
+        val index = Ps1CoverTitleIndex(reader)
+        catalogue = index
+        return index.size
+    }
 
     /** Normalised title → serial per disc, disc 1 first. */
     private val BY_TITLE: Map<String, List<String>> = mapOf(
@@ -62,6 +72,7 @@ object Ps1TitleSerials {
      * filename is unavailable.
      */
     fun coverSerialFor(title: String?, name: String?): String? {
+        catalogue?.find(title, name)?.let { return it }
         val source = name?.takeIf { it.isNotBlank() } ?: title?.takeIf { it.isNotBlank() } ?: return null
         val stem = source.substringAfterLast('/').substringAfterLast(':').substringBeforeLast('.')
         // Explicit regional mappings for titles outside the USA fallback table.

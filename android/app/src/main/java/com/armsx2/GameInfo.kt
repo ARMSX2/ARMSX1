@@ -308,8 +308,11 @@ data class GameInfo(
      * the disc like any other container ([com.armsx2.core.Ps1DiscId]), so this is back to being
      * the last resort it was meant to be.
      */
-    val coverSerial: String? get() = serial?.takeIf { it.isNotBlank() }
-        ?: com.armsx2.core.Ps1TitleSerials.coverSerialFor(title, uri.lastPathSegment)
+    val coverSerial: String? get() {
+        CoverCatalogue.version.intValue // Re-resolve cached SAF rows when the bundled index is ready.
+        return serial?.takeIf { it.isNotBlank() }
+            ?: com.armsx2.core.Ps1TitleSerials.coverSerialFor(title, uri.lastPathSegment)
+    }
 
     /** Absolute path of a cover sitting next to this ROM, or null. */
     private fun localCoverPath(): String? {

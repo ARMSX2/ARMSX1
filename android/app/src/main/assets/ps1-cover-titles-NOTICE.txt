@@ -1,0 +1,13 @@
+PS1 cover title index
+
+Attribution: Libretro database contributors and Redump contributors.
+Source: https://github.com/libretro/libretro-database
+Commit: d5bae90b22018ce3c9c5a8eff4141a4768c8dd5f
+Source file: metadat/redump/Sony - PlayStation.dat
+License: Creative Commons Attribution-ShareAlike 4.0 International
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Changes: extracted title, region and serial fields; omitted demo/prototype
+entries and nonstandard serials; deduplicated into a tab-separated asset.
+This derived data remains CC BY-SA 4.0, independent of the application license.
+Rebuild with tools/update_ps1_cover_titles.py.

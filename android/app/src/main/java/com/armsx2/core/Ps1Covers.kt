@@ -187,17 +187,25 @@ object Ps1Covers {
     /**
      * Download every cover that is missing, one at a time. [serials] is deduplicated and blanks
      * are dropped. [onProgress] fires after each attempt with (done, total) so a UI can show
-     * where it is. Returns how many covers were newly fetched.
+     * where it is. Separately counts new covers, existing files and failed downloads.
      *
      * **Blocking.** Call from an IO dispatcher.
      */
-    fun downloadMissing(serials: Collection<String>, onProgress: (Int, Int) -> Unit = { _, _ -> }): Int {
+    data class DownloadResult(val downloaded: Int, val alreadyPresent: Int, val failed: Int)
+
+    fun downloadMissing(serials: Collection<String>, onProgress: (Int, Int) -> Unit = { _, _ -> }): DownloadResult {
         val wanted = serials.mapNotNull { it.takeIf(String::isNotBlank)?.uppercase(Locale.US) }.distinct()
         var fetched = 0
+        var present = 0
+        var failed = 0
         wanted.forEachIndexed { index, serial ->
-            if (downloadedCover(serial) == null && downloadCover(serial)) fetched++
+            when {
+                downloadedCover(serial) != null -> present++
+                downloadCover(serial) -> fetched++
+                else -> { failed++; println("@@ARMSX_COVER_DOWNLOAD@@ serial=$serial failed=true") }
+            }
             onProgress(index + 1, wanted.size)
         }
-        return fetched
+        return DownloadResult(fetched, present, failed)
     }
 }

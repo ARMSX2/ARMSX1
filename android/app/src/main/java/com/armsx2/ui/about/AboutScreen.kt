@@ -133,6 +133,14 @@ fun AboutScreen(onBack: () -> Unit, viewModel: AboutViewModel = viewModel()) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     )
+                    Text(
+                        "Cover title metadata: Libretro / Redump contributors (CC BY-SA 4.0). " +
+                            "Adapted as a title, region and disc index. github.com/libretro/libretro-database; " +
+                            "creativecommons.org/licenses/by-sa/4.0/",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    )
                 }
             }
         }

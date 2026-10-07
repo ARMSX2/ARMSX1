@@ -746,6 +746,7 @@ private fun BackupRestoreRows() {
             coverStatus = ""
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
+                    com.armsx2.CoverCatalogue.load(context)
                     // The library rows, not a raw re-walk: their serials come from the disc for
                     // POSIX and SAF alike (descriptor-lease probe), and coverSerial adds the same
                     // filename fallbacks the grid itself renders with — so this fetches exactly
@@ -756,7 +757,7 @@ private fun BackupRestoreRows() {
                             .getOrDefault(emptyList())
                     }
                     val serials = games.mapNotNull { it.coverSerial }
-                    if (serials.isEmpty()) return@withContext -1
+                    if (serials.isEmpty()) return@withContext null
                     com.armsx2.core.Ps1Covers.downloadMissing(serials) { done, total ->
                         coverStatus = "$done / $total"
                     }
@@ -764,9 +765,11 @@ private fun BackupRestoreRows() {
                 coverStatus = when {
                     // No serial anywhere usually means the library itself is empty — which on
                     // Android 11+ is the all-files-access case, not a cover problem.
-                    result < 0 -> I18n.get("app.covers.none")
-                    result == 0 -> I18n.get("app.covers.upToDate")
-                    else -> I18n.get("app.covers.done").replace("%d", result.toString())
+                    result == null -> I18n.get("app.covers.none")
+                    result.failed > 0 -> I18n.get("app.covers.incomplete")
+                        .replace("%d", result.downloaded.toString()).replace("%s", result.failed.toString())
+                    result.downloaded == 0 -> I18n.get("app.covers.upToDate")
+                    else -> I18n.get("app.covers.done").replace("%d", result.downloaded.toString())
                 }
                 busy = false
                 com.armsx2.core.Ps1Library.rescan.intValue++

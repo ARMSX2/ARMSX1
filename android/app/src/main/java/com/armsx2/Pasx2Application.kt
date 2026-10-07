@@ -57,6 +57,7 @@ class Pasx2Application : Application(), ImageLoaderFactory {
 	 */
 	private fun warmUpOffMainThread() {
 		kotlin.concurrent.thread(isDaemon = true, name = "armsx-warmup") {
+			CoverCatalogue.load(this)
 			// 1. SharedPreferences. getSharedPreferences() only SCHEDULES the XML parse; the first
 			//    getX() BLOCKS on it. BootSplashActivity's very first act is prefs.getBoolean(
 			//    "ui.bootLogo") — on the UI thread, against a file that also carries config.global,
