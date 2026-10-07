@@ -1,5 +1,6 @@
 #include "runahead_prediction.h"
 #include "mali_frame_pacing.h"
+#include "honor_software_profile.h"
 #include "runahead_sequence.h"
 #include <SDL.h>
 #include <SDL_gamecontroller.h>
@@ -59,6 +60,7 @@
 #if defined(__ANDROID__)
 #include <jni.h>
 #include <android/log.h>
+#include <sys/system_properties.h>
 // Boot-path tracing. The core's own diagnostics are file-backed and off by default
 // (quiet=true / logging_enabled=false in settings.toml), so a silent early return in
 // ArmsxApp::run() left no trace anywhere. These go straight to logcat under the same tag
@@ -68,6 +70,21 @@
 #else
 #define ARMSX_BOOTLOG(...) ((void)0)
 #define ARMSX_BOOTERR(...) ((void)0)
+#endif
+
+#if defined(__ANDROID__)
+static bool HonorDeferredShadingDevice() {
+    static const bool matched = [] {
+        char manufacturer[PROP_VALUE_MAX] = {};
+        char model[PROP_VALUE_MAX] = {};
+        char device[PROP_VALUE_MAX] = {};
+        __system_property_get("ro.product.manufacturer", manufacturer);
+        __system_property_get("ro.product.model", model);
+        __system_property_get("ro.product.device", device);
+        return armsx_honor_deferred_shading_device(manufacturer, model, device) != 0;
+    }();
+    return matched;
+}
 #endif
 
 extern "C" {
@@ -2573,7 +2590,12 @@ class ArmsxSession {
 
         psx_gpu_t* gpu = psx_get_gpu(psx_);
 #ifdef __ANDROID__
-        gpu->defer_software_shading = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+        gpu->defer_software_shading = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI
+            || HonorDeferredShadingDevice();
+        if (HonorDeferredShadingDevice()) {
+            psxe_diag_logf("gpu", "HONOR ELI-NX9 software profile: deferred shading enabled; CPU timing unchanged");
+            psxe_diag_pacingf("device_profile=honor-eli-nx9 deferred_software_shading=1 cpu_timing_unchanged=yes");
+        }
 #endif
 
         {
