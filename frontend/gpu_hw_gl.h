@@ -82,7 +82,10 @@ void armsx_hw_gl_destroy(psx_gpu_backend_t* backend);
 
     `opt_in` is the ARMSX_GL_MASK_BIT escape hatch. The framebuffer-fetch mask path remains
     opt-in because the mask-from-texel fixes were validated against the CPU rasterizer.
-    Returns 1 only when the GL path may attach.
+    Returns 1 only when the framebuffer-fetch mask shader may attach. At 2x+
+    the ordinary shader can also attach with an accurate software shadow and a
+    guard which retires it before a mask-checked draw. At 1x the old selection
+    is retained. The guard never enables the experimental mask shader.
 */
 int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_angle,
                                    int opt_in);

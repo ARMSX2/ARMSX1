@@ -24,8 +24,10 @@
 
     THE INVARIANT, IN ONE LINE
 
-    With accurate_mask_bit on and no explicit opt-in, the GLES backend must decline for
-    EVERY hardware combination — including one that reports flawless support.
+    With accurate_mask_bit on and no explicit opt-in, the framebuffer-fetch mask shader
+    must decline for EVERY hardware combination — including flawless advertised support.
+    An upscaled session may now use the ordinary shader with a software-shadow guard;
+    tests/gpu_gl_render.c exercises real rendering and its accurate CPU handoff on device.
 */
 
 #include <stdio.h>

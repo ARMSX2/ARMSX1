@@ -39,6 +39,9 @@ typedef struct armsx_render_config {
     armsx_render_backend_t backend;
     bool vsync;
     bool linear_filter;
+    /* Opt-in at renderer creation for a GPU-resident upscaled scanout. Native
+       and 2x sessions leave device extensions and their upload path unchanged. */
+    bool upscale_shared_image;
 } armsx_render_config_t;
 
 /* Per-frame presentation state. `aspect` is the target display aspect (width / height);
@@ -171,6 +174,17 @@ bool armsx_renderer_adopt_gl_texture(armsx_renderer_t* renderer,
                                      int width,
                                      int height,
                                      Uint32 sdl_format);
+
+/* Android RGBA8 AHardwareBuffer bridge. prepare returns false when import or
+   reuse is unavailable; callers then keep the ordinary CPU upload path.
+   The caller owns the buffer and must finish its GL writes before adopt. */
+bool armsx_renderer_prepare_hardware_buffer(armsx_renderer_t* renderer,
+                                           void* buffer, int width, int height);
+bool armsx_renderer_adopt_hardware_buffer(armsx_renderer_t* renderer,
+                                         void* buffer, int width, int height);
+/* The native-fence descriptor is consumed on success; the caller closes it on failure. */
+bool armsx_renderer_import_hardware_buffer_fence(armsx_renderer_t* renderer, int fd);
+
 
 /* ---- Android surface hand-off ------------------------------------------------------ */
 

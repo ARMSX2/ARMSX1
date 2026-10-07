@@ -32,8 +32,8 @@ int armsx_hw_gl_mask_bit_opt_in(void) {
 
     The opt-in is checked FIRST and on its own line because it is the whole point: without it
     this must return 0 for every hardware combination, including the one that reports perfect
-    support. That is what keeps a session with accurate_mask_bit on the CPU rasterizer, which
-    is the rasterizer against which mask-from-texel was validated.
+    support. The experimental fetch shader remains off; upscaled sessions can instead use
+    the guarded ordinary shader and retain accurate mask bits in their native shadow.
 */
 int armsx_hw_gl_mask_bit_supported(int have_fbfetch, int driver_trusted, int is_angle,
                                    int opt_in) {
@@ -65,6 +65,9 @@ int armsx_hw_gl_use_cpu_fallback(int rasterizer_mode, int internal_scale) {
 /* Types and constants only; every entry point is dlsym'd out of the same provider the
    present path bound, exactly as frontend/render_gl.cpp does. */
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <android/hardware_buffer.h>
+#include <unistd.h>
 
 #include "diagnostics.h"
 #include "gpu_profile.h"
@@ -249,6 +252,7 @@ typedef struct {
     void (*Enable)(GLenum);
     void (*EnableVertexAttribArray)(GLuint);
     void (*Finish)(void);
+    void (*Flush)(void);
     /* Trailing underscore only because the macro that loads it takes the field name and the
        symbol name separately, and this keeps them visually distinct. */
     void (*FramebufferTexture2D_)(GLenum, GLenum, GLenum, GLuint, GLint);
@@ -394,6 +398,19 @@ typedef struct {
     int    scratch_w, scratch_h;
     GLuint resolve_tex, resolve_fbo;   /* packed BGR555 scanout, read straight to the host */
     int    resolve_w, resolve_h;
+    AHardwareBuffer* shared_buffer;
+    EGLImageKHR shared_egl_image;
+    GLuint shared_tex, shared_fbo, shared_program;
+    int shared_w, shared_h, shared_disabled;
+    PFNEGLCREATESYNCKHRPROC shared_create_sync;
+    PFNEGLDESTROYSYNCKHRPROC shared_destroy_sync;
+    PFNEGLDUPNATIVEFENCEFDANDROIDPROC shared_dup_fence;
+
+    GLint shared_uniforms[6];
+    PFNEGLCREATEIMAGEKHRPROC shared_create_image;
+    PFNEGLDESTROYIMAGEKHRPROC shared_destroy_image;
+    PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC shared_native_buffer;
+    void (*shared_target_image)(GLenum, EGLImageKHR);
     GLuint xfer_tex, xfer_fbo;         /* packed BGR555 at NATIVE size, for GPU->host reads */
     int    xfer_w, xfer_h;
 
@@ -447,6 +464,10 @@ typedef struct {
         byte-identical.
     */
     int mask_mode;
+    /* Accurate native shadow retains bit 15 while ordinary upscaled draws use the
+       established non-fetch shader. Before a mask-checked draw, retire this backend
+       and let the frontend seed its accurate CPU fallback from that shadow. */
+    int mask_guard;
 
     gl_vertex_t* verts;
     int          vert_count, vert_cap;
@@ -2902,11 +2923,26 @@ static int gl_expand_thin_poly(poly_data_t* p, int nv, int mode) {
     return 0;
 }
 
+static int gl_require_mask_fallback(hw_gl_t* g, const psx_gpu_t* gpu) {
+    if (!g->mask_guard || !psx_gpu_mask_check(gpu))
+        return 0;
+
+    /* Hooks run BEFORE the software shadow draws. Do not flush/read back the
+       non-fetch target over authoritative native VRAM: its alpha is blending,
+       not bit 15. The shadow processes this and all remaining commands exactly;
+       checkRasterizerHealth() switches backends before presenting the frame. */
+    g->failed = 1;
+    gl_release(g);
+    gl_status("game uses mask checking; preserving accurate VRAM for CPU fallback");
+    psxe_diag_logf("hwgl", "%s", armsx_hw_gl_status());
+    return 1;
+}
+
 static void gl_draw_poly(psx_gpu_backend_t* be, psx_gpu_t* gpu, const poly_data_t* poly) {
     hw_gl_t* g = gl_self(be);
     poly_data_t adjusted;
 
-    if (g->failed)
+    if (g->failed || gl_require_mask_fallback(g, gpu))
         return;
 
     /* Keep the shader's blend rounding in step with psx_gpu_modulate_channel(). Re-read
@@ -2963,7 +2999,7 @@ static void gl_draw_rect(psx_gpu_backend_t* be, psx_gpu_t* gpu, const rect_data_
     uint16_t texp;
     int x0, y0, x1, y1;
 
-    if (g->failed)
+    if (g->failed || gl_require_mask_fallback(g, gpu))
         return;
 
     /* Keep the shader's blend rounding in step with psx_gpu_modulate_channel(). Re-read
@@ -3116,7 +3152,7 @@ static void gl_draw_line(psx_gpu_backend_t* be, psx_gpu_t* gpu,
                        (uint32_t)((((color_bgr555 >> 10) & 0x1f) << 3) << 16);
     int lo_x, lo_y, hi_x, hi_y;
 
-    if (g->failed)
+    if (g->failed || gl_require_mask_fallback(g, gpu))
         return;
 
     /* Lines are never textured, so gpu_line() never binds a replacement; this only makes
@@ -3904,7 +3940,8 @@ static void gl_downgrade(hw_gl_t* g, const char* reason) {
                    (int)(sizeof(g->c0_window) / sizeof(g->c0_window[0])),
                    (unsigned long long)g->c0_limit);
 
-    gl_seed_host_vram(g);
+    if (!g->mask_guard)
+        gl_seed_host_vram(g);
 
     /* gl_status() last, so the string frontend/main.cpp echoes through log_error() is this
        one and not a stale "GL rasterizer up". Reason-led rather than cause-led: the same
@@ -4517,6 +4554,163 @@ static const void* gl_display_buffer(psx_gpu_backend_t* be, uint32_t disp_x, uin
       * adopt_disabled — sticky after the first refusal from the present layer, so a Vulkan
         or SDL present path costs exactly one wasted resolve rather than one per frame.
 */
+static void gl_shared_destroy(hw_gl_t* g) {
+    if (g->shared_fbo) g->gl.DeleteFramebuffers(1, &g->shared_fbo);
+    if (g->shared_tex) g->gl.DeleteTextures(1, &g->shared_tex);
+    if (g->shared_egl_image && g->shared_destroy_image)
+        g->shared_destroy_image(g->egl_display, g->shared_egl_image);
+    if (g->shared_buffer) AHardwareBuffer_release(g->shared_buffer);
+    g->shared_fbo = g->shared_tex = 0;
+    g->shared_egl_image = EGL_NO_IMAGE_KHR;
+    g->shared_buffer = NULL;
+    g->shared_w = g->shared_h = 0;
+}
+
+static int gl_shared_target(hw_gl_t* g, int w, int h) {
+    if (g->shared_buffer && g->shared_w == w && g->shared_h == h) return 1;
+    gl_shared_destroy(g);
+    if (!g->shared_create_image) {
+        __eglMustCastToProperFunctionPointerType (*get_proc)(const char*);
+        *(void**)&get_proc = dlsym(g->egl_library, "eglGetProcAddress");
+        if (!get_proc) return 0;
+        const char* (*query_string)(EGLDisplay, EGLint);
+        *(void**)&query_string = dlsym(g->egl_library, "eglQueryString");
+        const char* extensions = query_string ? query_string(g->egl_display, EGL_EXTENSIONS) : NULL;
+        if (extensions && strstr(extensions, "EGL_ANDROID_native_fence_sync")) {
+            g->shared_create_sync = (PFNEGLCREATESYNCKHRPROC)get_proc("eglCreateSyncKHR");
+            g->shared_destroy_sync = (PFNEGLDESTROYSYNCKHRPROC)get_proc("eglDestroySyncKHR");
+            g->shared_dup_fence = (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)get_proc("eglDupNativeFenceFDANDROID");
+        }
+        g->shared_create_image = (PFNEGLCREATEIMAGEKHRPROC)get_proc("eglCreateImageKHR");
+        g->shared_destroy_image = (PFNEGLDESTROYIMAGEKHRPROC)get_proc("eglDestroyImageKHR");
+        g->shared_native_buffer = (PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)get_proc("eglGetNativeClientBufferANDROID");
+        g->shared_target_image = (void (*)(GLenum, EGLImageKHR))get_proc("glEGLImageTargetTexture2DOES");
+        if (!g->shared_create_image || !g->shared_destroy_image ||
+            !g->shared_native_buffer || !g->shared_target_image) return 0;
+    }
+    if (!g->shared_program) {
+        /* Retain the ordinary packed resolve shader unchanged. This separate
+           shader applies precisely the CPU upload's 5-to-8-bit expansion. */
+        const char* tail = strstr(kResolveFS, "    o_color = vec4(float(v & 255u)");
+        const char* expanded = "    uvec3 q = uvec3(r, g, b);\n"
+            "    q = (q << 3) | (q >> 2);\n"
+            "    o_color = vec4(vec3(q) / 255.0, 1.0);\n}\n";
+        char* shader;
+        size_t prefix;
+        const char* names[] = {"u_rt", "u_origin", "u_limit", "u_step", "u_box", "u_mask"};
+        int i;
+        if (!tail) return 0;
+        prefix = (size_t)(tail - kResolveFS);
+        shader = (char*)malloc(prefix + strlen(expanded) + 1);
+        if (!shader) return 0;
+        memcpy(shader, kResolveFS, prefix);
+        strcpy(shader + prefix, expanded);
+        g->shared_program = gl_link(g, kResolveVS, shader, NULL, 0, "shared RGBA resolve");
+        free(shader);
+        if (!g->shared_program) return 0;
+        for (i = 0; i < 6; ++i)
+            g->shared_uniforms[i] = g->gl.GetUniformLocation(g->shared_program, names[i]);
+    }
+    {
+        AHardwareBuffer_Desc desc;
+        EGLint attributes[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+        memset(&desc, 0, sizeof(desc));
+        desc.width = (uint32_t)w; desc.height = (uint32_t)h; desc.layers = 1;
+        desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+        desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+        if (AHardwareBuffer_allocate(&desc, &g->shared_buffer) != 0) return 0;
+        g->shared_egl_image = g->shared_create_image(g->egl_display, EGL_NO_CONTEXT,
+            EGL_NATIVE_BUFFER_ANDROID, g->shared_native_buffer(g->shared_buffer), attributes);
+        if (g->shared_egl_image == EGL_NO_IMAGE_KHR) { gl_shared_destroy(g); return 0; }
+    }
+    g->gl.GenTextures(1, &g->shared_tex);
+    g->gl.GenFramebuffers(1, &g->shared_fbo);
+    g->gl.ActiveTexture(GL_TEXTURE0);
+    g->gl.BindTexture(GL_TEXTURE_2D, g->shared_tex);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    g->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g->shared_target_image(GL_TEXTURE_2D, g->shared_egl_image);
+    g->gl.BindFramebuffer(GL_FRAMEBUFFER, g->shared_fbo);
+    g->rt_bound = 0;
+    g->gl.FramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g->shared_tex, 0);
+    if (!g->shared_tex || !g->shared_fbo ||
+        g->gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE ||
+        g->gl.GetError() != GL_NO_ERROR) { gl_shared_destroy(g); return 0; }
+    g->shared_w = w; g->shared_h = h;
+    return 1;
+}
+
+static int gl_present_shared(hw_gl_t* g, struct armsx_renderer* renderer) {
+    const armsx_gpu_profile_t* profile = armsx_gpu_profile_get();
+    int w, h;
+    /* Leave native, 2x, Mali, custom drivers, display-disabled/24-bit frames,
+       downsampling and developer parity captures on their established path. */
+    if (!g->owns_context || g->scale < 3 || g->shared_disabled ||
+        profile->vendor != ARMSX_GPU_VENDOR_ADRENO || profile->model != 740 ||
+        profile->driver != ARMSX_GPU_DRIVER_QUALCOMM_PROPRIETARY ||
+        armsx_renderer_backend(renderer) != ARMSX_RENDER_BACKEND_VULKAN ||
+        (g->gpu->gpustat & 0x800000) || (g->gpu->display_mode & 0x10) ||
+        g_opt_downsample >= 2 || g->dbg_upscale_parity || g->dbg_dump) return 0;
+    w = gl_display_width(g->gpu) * g->scale;
+    h = gl_display_height(g->gpu) * g->scale;
+    if (w <= 0 || h <= 0) return 0;
+    /* Flush primitives before setup can replace the bound render target. */
+    gl_flush(g);
+    if (!gl_shared_target(g, w, h)) {
+        g->shared_disabled = 1;
+        gl_release(g);
+        return 0;
+    }
+    if (!armsx_renderer_prepare_hardware_buffer(renderer, g->shared_buffer, w, h)) {
+        gl_release(g);
+        return 0;
+    }
+    g->gl.BindFramebuffer(GL_FRAMEBUFFER, g->shared_fbo);
+    g->rt_bound = 0;
+    g->gl.Viewport(0, 0, w, h);
+    g->gl.Disable(GL_SCISSOR_TEST);
+    g->gl.Disable(GL_BLEND);
+    g->gl.Disable(GL_DITHER);
+    g->gl.UseProgram(g->shared_program);
+    g->gl.Uniform1i(g->shared_uniforms[0], 0);
+    g->gl.Uniform2i(g->shared_uniforms[1], (GLint)g->gpu->disp_x * g->scale,
+                    (GLint)g->gpu->disp_y * g->scale);
+    g->gl.Uniform2i(g->shared_uniforms[2], g->rt_w - 1, g->rt_h - 1);
+    g->gl.Uniform1i(g->shared_uniforms[3], 1);
+    g->gl.Uniform1i(g->shared_uniforms[4], 1);
+    g->gl.Uniform1i(g->shared_uniforms[5], g->mask_mode);
+    g->gl.ActiveTexture(GL_TEXTURE0);
+    g->gl.BindTexture(GL_TEXTURE_2D, g->rt_tex);
+    g->gl.BindVertexArray(g->quad_vao);
+    g->gl.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    /* Let the Vulkan submission wait for the GL writes on the GPU. Unlike
+       glFinish, this does not park the emulation thread until rendering ends.
+       Unsupported or failed fence import retains the established CPU wait. */
+    int fenced = 0;
+    if (g->shared_create_sync && g->shared_destroy_sync && g->shared_dup_fence) {
+        EGLint attrs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE};
+        EGLSyncKHR sync = g->shared_create_sync(g->egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
+        if (sync != EGL_NO_SYNC_KHR) {
+            g->gl.Flush();
+            int fd = g->shared_dup_fence(g->egl_display, sync);
+            g->shared_destroy_sync(g->egl_display, sync);
+            if (fd >= 0) {
+                fenced = armsx_renderer_import_hardware_buffer_fence(renderer, fd);
+                if (!fenced) close(fd);
+            }
+        }
+    }
+    if (!fenced) g->gl.Finish();
+    gl_release(g);
+    if (g->gl.GetError() != GL_NO_ERROR) {
+        g->shared_disabled = 1;
+        return 0;
+    }
+    return armsx_renderer_adopt_hardware_buffer(renderer, g->shared_buffer, w, h);
+}
+
 int armsx_hw_gl_present_texture(psx_gpu_backend_t* be, struct armsx_renderer* renderer) {
     hw_gl_t* g;
     int w = 0, h = 0, sw, sh;
@@ -4526,7 +4720,11 @@ int armsx_hw_gl_present_texture(psx_gpu_backend_t* be, struct armsx_renderer* re
 
     g = gl_self(be);
 
-    if (g->failed || !g->have_context || g->owns_context || g->adopt_disabled)
+    if (g->failed || !g->have_context)
+        return 0;
+    if (g->owns_context)
+        return gl_present_shared(g, renderer);
+    if (g->adopt_disabled)
         return 0;
 
     if (g->gpu->gpustat & 0x800000)
@@ -4783,6 +4981,7 @@ static int gl_load_api(hw_gl_t* g, void* lib) {
     GL_LOAD(Enable, "glEnable");
     GL_LOAD(EnableVertexAttribArray, "glEnableVertexAttribArray");
     GL_LOAD(Finish, "glFinish");
+    GL_LOAD(Flush, "glFlush");
     GL_LOAD(FramebufferTexture2D_, "glFramebufferTexture2D");
     GL_LOAD(GenBuffers, "glGenBuffers");
     GL_LOAD(GenFramebuffers, "glGenFramebuffers");
@@ -5087,6 +5286,11 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
 
         if (armsx_hw_gl_mask_bit_supported(have_ext, trusted, is_angle, allow_gl_mask)) {
             g->mask_mode = 1;
+        } else if (scale > 1) {
+            /* An enabled accuracy option is not evidence the game uses mask
+               checking. Keep the accurate native shadow and established shader;
+               draw hooks hand off before any checked primitive reaches GL. */
+            g->mask_guard = 1;
         } else {
             gl_status("accurate mask bit needs GL_EXT_shader_framebuffer_fetch (present=%s, "
                       "driver trusted=%s, angle=%s, opt-in=%s); using the CPU rasterizer, "
@@ -5133,13 +5337,13 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
         still submitted to the same backend, and the only thing that stops happening is the
         software rasterizer.
     */
-    g->base.flags = gl_debug_marker("hwgl_no_shadow") ? 0u
+    g->base.flags = (!g->mask_guard && gl_debug_marker("hwgl_no_shadow")) ? 0u
                                                       : PSX_GPU_BACKEND_SOFTWARE_SHADOW;
     g->shadow = (g->base.flags & PSX_GPU_BACKEND_SOFTWARE_SHADOW) ? 1 : 0;
     /* Without the shadow the render target is the only copy of anything the rasterizer drew,
        so  row 1 is mandatory. `hwgl_gpu_resolve` turns it on while the shadow is still
        there, which is how it gets an oracle. */
-    g->gpu_own = !g->shadow || g->dbg_gpu_resolve;
+    g->gpu_own = !g->shadow || (!g->mask_guard && g->dbg_gpu_resolve);
     g->base.destroy = NULL;   /* owned by armsx_hw_gl_destroy(), not by the core */
     g->base.draw_poly = gl_draw_poly;
     g->base.draw_rect = gl_draw_rect;
@@ -5303,7 +5507,7 @@ psx_gpu_backend_t* armsx_hw_gl_create(psx_gpu_t* gpu, int scale) {
               g->owns_context ? "own EGL" : (present_is_gl ? "shared with present"
                                                            : "pre-existing"),
               g->scale, g->rt_w, g->rt_h,
-              g->mask_mode ? "on (fbfetch)" : "off",
+              g->mask_mode ? "on (fbfetch)" : (g->mask_guard ? "accurate shadow/guard" : "off"),
               g->adopt_disabled ? "off (hwgl_no_adopt)"
                                 : (g->owns_context ? "unavailable (own context)" : "armed"),
               g->shadow ? "on" : "off",
@@ -5334,6 +5538,10 @@ void armsx_hw_gl_destroy(psx_gpu_backend_t* backend) {
         goto release_libraries;
 
     g->gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    gl_shared_destroy(g);
+    if (g->shared_program && g->gl.DeleteProgram)
+        g->gl.DeleteProgram(g->shared_program);
 
     if (g->gl.DeleteTextures) {
         if (g->rt_tex)      g->gl.DeleteTextures(1, &g->rt_tex);

@@ -4148,13 +4148,16 @@ class ArmsxSession {
         // Deinterlacing also declines the seam: it is a CPU pass over the finished frame, so
         // the pixels have to come back to the host. It is opt-in and only fires in 480-line
         // modes, so the fast path is untouched in every other case.
-        const bool adopted_gl_texture =
+        const bool adopted_gpu_texture =
             !deinterlaceApplies(settings) &&
             !want_native_scanout && !debug_view_ && psx_ && psx_->gpu && hw_rt_backend_ &&
-            hw_rt_is_gl_ && (armsx_renderer_backend(render_) == ARMSX_RENDER_BACKEND_OPENGL) &&
+            hw_rt_is_gl_ &&
+            (armsx_renderer_backend(render_) == ARMSX_RENDER_BACKEND_OPENGL ||
+             (armsx_renderer_backend(render_) == ARMSX_RENDER_BACKEND_VULKAN &&
+              settings.internal_scale >= 3)) &&
             (armsx_hw_gl_present_texture(hw_rt_backend_, render_) != 0);
 
-        if (adopted_gl_texture) {
+        if (adopted_gpu_texture) {
             // The adopted texture is the render target at internal resolution, so the
             // presentation size is the same one the upload path would have produced — and
             // armsx_render_compute_dst() therefore letterboxes it identically.
@@ -4236,7 +4239,7 @@ class ArmsxSession {
         }
 
 #ifdef USE_HARDWARE
-        if (adopted_gl_texture) {
+        if (adopted_gpu_texture) {
             // There is no CPU frame this frame, so the snapshot the dirty-row scan compares
             // against describes a frame the present layer is no longer showing. Dropping it
             // costs nothing (the vector keeps its capacity) and makes whichever frame falls
@@ -6640,6 +6643,8 @@ class ArmsxApp {
         armsx_render_config_t config{};
         config.vsync = vsync_enabled;
         config.linear_filter = settings_.texture_scale_mode;
+        config.upscale_shared_image = settings_.internal_scale >= 3 &&
+            (settings_.rasterizer_mode == 1 || settings_.rasterizer_mode == 3);
 
         std::vector<armsx_render_backend_t> ladder;
 #ifdef USE_HARDWARE

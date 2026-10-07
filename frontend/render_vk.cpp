@@ -54,6 +54,8 @@
 
 #if defined(__ANDROID__)
 #include <android/native_window.h>
+#include <android/hardware_buffer.h>
+#include <android/log.h>
 #endif
 
 #if !defined(_WIN32)
@@ -223,6 +225,13 @@ struct VkApi {
        the renderer coming up. It is how we read VkPhysicalDeviceDriverProperties, i.e. the
        driver ID — the only signal precise enough to gate a workaround on (see gpu_profile.h). */
     PFN_vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceProperties2 = nullptr;
+#if defined(__ANDROID__)
+    PFN_vkEnumerateDeviceExtensionProperties vkEnumerateDeviceExtensionProperties = nullptr;
+    PFN_vkGetAndroidHardwareBufferPropertiesANDROID vkGetAndroidHardwareBufferPropertiesANDROID = nullptr;
+    PFN_vkGetFenceStatus vkGetFenceStatus = nullptr;
+    PFN_vkImportSemaphoreFdKHR vkImportSemaphoreFdKHR = nullptr;
+
+#endif
 };
 
 /* ---- backend state ---------------------------------------------------------------------- */
@@ -233,6 +242,21 @@ struct VkRenderer {
     /* The apiVersion the instance was actually created with. Gates every core-1.1 entry point:
        calling one on a 1.0 instance is undefined and Mesa/Turnip enforces it by dying. */
     uint32_t instance_api_version = VK_API_VERSION_1_0;
+#if defined(__ANDROID__)
+    bool shared_requested = false;
+    bool shared_enabled = false;
+    bool shared_active = false;
+    bool shared_fence_enabled = false;
+    bool shared_fence_pending = false;
+    bool shared_fence_logged = false;
+    VkSemaphore shared_gl_semaphore = VK_NULL_HANDLE;
+
+    bool shared_logged = false;
+    AHardwareBuffer* shared_buffer = nullptr;
+    VkImage shared_image = VK_NULL_HANDLE;
+    VkDeviceMemory shared_memory = VK_NULL_HANDLE;
+    int shared_width = 0, shared_height = 0;
+#endif
 
     void* library = nullptr;
     VkApi api{};
@@ -594,17 +618,71 @@ bool CreateDeviceAndQueue(VkRenderer* self) {
     queue_info.queueCount = 1;
     queue_info.pQueuePriorities = &priority;
 
-    const char* device_extensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    std::vector<const char*> device_extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+#if defined(__ANDROID__)
+    const auto* profile = armsx_gpu_profile_get();
+    if (self->shared_requested && !g_custom_loader_active &&
+        self->instance_api_version >= VK_API_VERSION_1_1 &&
+        profile->vendor == ARMSX_GPU_VENDOR_ADRENO && profile->model == 740 &&
+        profile->driver == ARMSX_GPU_DRIVER_QUALCOMM_PROPRIETARY) {
+        self->api.vkEnumerateDeviceExtensionProperties =
+            reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                self->api.vkGetInstanceProcAddr(self->instance, "vkEnumerateDeviceExtensionProperties"));
+        uint32_t count = 0;
+        if (self->api.vkEnumerateDeviceExtensionProperties &&
+            self->api.vkEnumerateDeviceExtensionProperties(self->physical_device, nullptr, &count, nullptr) == VK_SUCCESS) {
+            std::vector<VkExtensionProperties> available(count);
+            if (self->api.vkEnumerateDeviceExtensionProperties(self->physical_device, nullptr, &count, available.data()) == VK_SUCCESS) {
+                const auto have = [&](const char* name) {
+                    return std::any_of(available.begin(), available.begin() + count,
+                        [&](const auto& e) { return std::strcmp(e.extensionName, name) == 0; });
+                };
+                self->shared_enabled = have(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) &&
+                    have(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+                if (self->shared_enabled) {
+                    device_extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+                    device_extensions.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+                    if (have(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+                        auto get = reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(
+                            self->api.vkGetInstanceProcAddr(self->instance, "vkGetPhysicalDeviceExternalSemaphoreProperties"));
+                        if (get) {
+                            VkPhysicalDeviceExternalSemaphoreInfo query{};
+                            query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO;
+                            query.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+                            VkExternalSemaphoreProperties properties{};
+                            properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES;
+                            get(self->physical_device, &query, &properties);
+                            self->shared_fence_enabled =
+                                (properties.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) != 0;
+                            if (self->shared_fence_enabled)
+                                device_extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+                        }
+                    }
+
+                }
+            }
+        }
+    }
+#endif
 
     VkDeviceCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     info.queueCreateInfoCount = 1;
     info.pQueueCreateInfos = &queue_info;
-    info.enabledExtensionCount = 1;
-    info.ppEnabledExtensionNames = device_extensions;
+    info.enabledExtensionCount = static_cast<uint32_t>(device_extensions.size());
+    info.ppEnabledExtensionNames = device_extensions.data();
 
     if (!Check(self->api.vkCreateDevice(self->physical_device, &info, nullptr, &self->device), "vkCreateDevice")) {
-        return false;
+        if (device_extensions.size() == 1) return false;
+        /* Optional interop must never prevent the established Vulkan device
+           from starting. Retry without the new extensions. */
+        info.enabledExtensionCount = 1;
+        if (!Check(self->api.vkCreateDevice(self->physical_device, &info, nullptr, &self->device),
+                   "vkCreateDevice (without shared scanout)")) return false;
+#if defined(__ANDROID__)
+        self->shared_enabled = false;
+        self->shared_fence_enabled = false;
+#endif
     }
 
 #define ARMSX_VK_LOAD_DEVICE(name)                                                       \
@@ -615,6 +693,23 @@ bool CreateDeviceAndQueue(VkRenderer* self) {
     }
     ARMSX_VK_DEVICE_FUNCS(ARMSX_VK_LOAD_DEVICE)
 #undef ARMSX_VK_LOAD_DEVICE
+
+#if defined(__ANDROID__)
+    if (self->shared_enabled) {
+        self->api.vkGetAndroidHardwareBufferPropertiesANDROID =
+            reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
+                self->api.vkGetDeviceProcAddr(self->device, "vkGetAndroidHardwareBufferPropertiesANDROID"));
+        self->api.vkGetFenceStatus = reinterpret_cast<PFN_vkGetFenceStatus>(
+            self->api.vkGetDeviceProcAddr(self->device, "vkGetFenceStatus"));
+        self->shared_enabled = self->api.vkGetAndroidHardwareBufferPropertiesANDROID && self->api.vkGetFenceStatus;
+        if (self->shared_fence_enabled) {
+            self->api.vkImportSemaphoreFdKHR = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+                self->api.vkGetDeviceProcAddr(self->device, "vkImportSemaphoreFdKHR"));
+            self->shared_fence_enabled = self->api.vkImportSemaphoreFdKHR != nullptr;
+        }
+
+    }
+#endif
 
     self->api.vkGetDeviceQueue(self->device, self->queue_family, 0, &self->queue);
     return self->queue != VK_NULL_HANDLE;
@@ -1054,6 +1149,188 @@ void ImageBarrier(VkRenderer* self, VkCommandBuffer cmd, VkImage image, VkImageL
 
 /* ---- ops --------------------------------------------------------------------------------- */
 
+#if defined(__ANDROID__)
+/* Only needed for an adopted frame discarded before its normal submit, such as
+   a display transition. Consume its imported payload before reusing or freeing
+   the shared target. This never runs in the normal frame-transfer path. */
+bool DrainSharedFence(VkRenderer* self) {
+    if (!self->shared_fence_pending) return true;
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.waitSemaphoreCount = 1;
+    submit.pWaitSemaphores = &self->shared_gl_semaphore;
+    submit.pWaitDstStageMask = &stage;
+    ShaderQueueGuard guard;
+    if (self->api.vkQueueSubmit(self->queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS) return false;
+    self->shared_fence_pending = false;
+    return self->api.vkQueueWaitIdle(self->queue) == VK_SUCCESS;
+}
+
+void DestroySharedImage(VkRenderer* self) {
+    DrainSharedFence(self);
+    self->shared_active = false;
+    if (self->shared_image) self->api.vkDestroyImage(self->device, self->shared_image, nullptr);
+    if (self->shared_memory) self->api.vkFreeMemory(self->device, self->shared_memory, nullptr);
+    if (self->shared_buffer) AHardwareBuffer_release(self->shared_buffer);
+    self->shared_image = VK_NULL_HANDLE;
+    self->shared_memory = VK_NULL_HANDLE;
+    self->shared_buffer = nullptr;
+    self->shared_width = self->shared_height = 0;
+}
+
+void SharedOwnership(VkRenderer* self, VkCommandBuffer cmd, bool acquire, bool initial = false) {
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.image = self->shared_image;
+    barrier.oldLayout = initial ? VK_IMAGE_LAYOUT_UNDEFINED :
+        (acquire ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    barrier.newLayout = acquire ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcQueueFamilyIndex = acquire ? VK_QUEUE_FAMILY_FOREIGN_EXT : self->queue_family;
+    barrier.dstQueueFamilyIndex = acquire ? self->queue_family : VK_QUEUE_FAMILY_FOREIGN_EXT;
+    barrier.srcAccessMask = acquire || initial ? 0 : VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = acquire ? VK_ACCESS_TRANSFER_READ_BIT : 0;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    self->api.vkCmdPipelineBarrier(cmd,
+        acquire ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        acquire ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+bool OpPrepareHardwareBuffer(armsx_renderer_t* base, void* buffer, int width, int height) {
+    auto* self = Self(base);
+    if (!self->shared_enabled || !buffer || width <= 0 || height <= 0) return false;
+    if (!DrainSharedFence(self)) return false;
+    /* Never overwrite an image the preceding present is still reading. The
+       ordinary readback remains available instead of adding another queued frame. */
+    if (self->api.vkGetFenceStatus(self->device, self->frame_fence) != VK_SUCCESS) return false;
+    auto* hb = static_cast<AHardwareBuffer*>(buffer);
+    if (hb == self->shared_buffer && width == self->shared_width && height == self->shared_height)
+        return true;
+    DestroySharedImage(self);
+    const auto unavailable = [self]() {
+        DestroySharedImage(self);
+        self->shared_enabled = false;
+        return false;
+    };
+    VkAndroidHardwareBufferFormatPropertiesANDROID format{};
+    format.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+    VkAndroidHardwareBufferPropertiesANDROID properties{};
+    properties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+    properties.pNext = &format;
+    if (self->api.vkGetAndroidHardwareBufferPropertiesANDROID(self->device, hb, &properties) != VK_SUCCESS ||
+        format.format != VK_FORMAT_R8G8B8A8_UNORM || !(format.formatFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT))
+        return unavailable();
+    VkExternalMemoryImageCreateInfo external{};
+    external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+    VkImageCreateInfo image{};
+    image.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image.pNext = &external;
+    image.imageType = VK_IMAGE_TYPE_2D;
+    image.format = format.format;
+    image.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    image.mipLevels = image.arrayLayers = 1;
+    image.samples = VK_SAMPLE_COUNT_1_BIT;
+    image.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (self->api.vkCreateImage(self->device, &image, nullptr, &self->shared_image) != VK_SUCCESS)
+        return unavailable();
+    VkMemoryDedicatedAllocateInfo dedicated{};
+    dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicated.image = self->shared_image;
+    VkImportAndroidHardwareBufferInfoANDROID import{};
+    import.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+    import.pNext = &dedicated;
+    import.buffer = hb;
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.pNext = &import;
+    allocation.allocationSize = properties.allocationSize;
+    allocation.memoryTypeIndex = FindMemoryType(self, properties.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (allocation.memoryTypeIndex == UINT32_MAX ||
+        self->api.vkAllocateMemory(self->device, &allocation, nullptr, &self->shared_memory) != VK_SUCCESS ||
+        self->api.vkBindImageMemory(self->device, self->shared_image, self->shared_memory, 0) != VK_SUCCESS) {
+        return unavailable();
+    }
+    AHardwareBuffer_acquire(hb);
+    self->shared_buffer = hb;
+    self->shared_width = width;
+    self->shared_height = height;
+    /* Establish GENERAL/foreign ownership before the first GL write. This
+       one-time submit is not part of the steady-state frame transfer. */
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    const bool reset = self->api.vkResetCommandBuffer(self->command_buffer, 0) == VK_SUCCESS;
+    if (!reset || self->api.vkBeginCommandBuffer(self->command_buffer, &begin) != VK_SUCCESS) {
+        return unavailable();
+    }
+    SharedOwnership(self, self->command_buffer, false, true);
+    if (self->api.vkEndCommandBuffer(self->command_buffer) != VK_SUCCESS) {
+        return unavailable();
+    }
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &self->command_buffer;
+    bool ready;
+    {
+        ShaderQueueGuard guard;
+        ready = self->api.vkQueueSubmit(self->queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS &&
+            self->api.vkQueueWaitIdle(self->queue) == VK_SUCCESS;
+    }
+    if (!ready) return unavailable();
+    DestroyFrameImage(self);
+    return true;
+}
+
+bool OpImportHardwareBufferFence(armsx_renderer_t* base, int fd) {
+    auto* self = Self(base);
+    if (!self->shared_enabled || !self->shared_fence_enabled || !self->shared_image ||
+        self->shared_fence_pending || fd < 0) return false;
+    if (!self->shared_gl_semaphore) {
+        VkSemaphoreCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        if (self->api.vkCreateSemaphore(self->device, &info, nullptr, &self->shared_gl_semaphore) != VK_SUCCESS) {
+            self->shared_fence_enabled = false;
+            return false;
+        }
+    }
+    VkImportSemaphoreFdInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+    info.semaphore = self->shared_gl_semaphore;
+    info.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
+    info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+    info.fd = fd;
+    if (self->api.vkImportSemaphoreFdKHR(self->device, &info) != VK_SUCCESS) return false;
+    self->shared_fence_pending = true;
+    if (!self->shared_fence_logged) {
+        self->shared_fence_logged = true;
+        __android_log_print(ANDROID_LOG_INFO, "ARMSX-SHARED", "Vulkan shared scanout GPU fence active: no CPU finish wait");
+    }
+    return true;
+}
+
+bool OpAdoptHardwareBuffer(armsx_renderer_t* base, void* buffer, int width, int height) {
+    auto* self = Self(base);
+    if (!self->shared_enabled || buffer != self->shared_buffer || !self->shared_image ||
+        width != self->shared_width || height != self->shared_height) return false;
+    self->shared_active = true;
+    self->has_frame = true;
+    self->frame_width = width;
+    self->frame_height = height;
+    self->dirty_first = 0;
+    self->dirty_last = -1;
+    self->source_format = SDL_PIXELFORMAT_BGR555;
+    if (!self->shared_logged) {
+        self->shared_logged = true;
+        __android_log_print(ANDROID_LOG_INFO, "ARMSX-SHARED", "Vulkan shared scanout active %dx%d: no CPU readback or conversion", width, height);
+    }
+    return true;
+}
+#endif
+
 const char* OpDriverName(armsx_renderer_t* base) {
     return Self(base)->driver_name.c_str();
 }
@@ -1105,6 +1382,16 @@ bool OpUploadFrame(armsx_renderer_t* base,
         armsx_render_log("renderer", "Vulkan backend cannot upload %s", SDL_GetPixelFormatName(sdl_format));
         return false;
     }
+
+#if defined(__ANDROID__)
+    if (!DrainSharedFence(self)) return false;
+    if (self->shared_active) {
+        self->shared_active = false;
+        /* Its dimensions were published for presentation, rather than for
+           the normal allocation. Force EnsureFrameImage to check that image. */
+        self->frame_width = self->frame_height = 0;
+    }
+#endif
 
     if (!EnsureFrameImage(self, width, height)) {
         return false;
@@ -1235,10 +1522,18 @@ bool BeginFrame(VkRenderer* self, uint32_t* image_index) {
 
 void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params) {
     VkRenderer* self = Self(base);
-    if (!self->has_frame || self->frame_image == VK_NULL_HANDLE) {
+    bool shared = false;
+#if defined(__ANDROID__)
+    shared = self->shared_active;
+#endif
+    VkImage source = self->frame_image;
+#if defined(__ANDROID__)
+    if (shared) source = self->shared_image;
+#endif
+    if (!self->has_frame || source == VK_NULL_HANDLE) {
         return;
     }
-    if (!self->frame_image_initialized && self->dirty_last < self->dirty_first) {
+    if (!shared && !self->frame_image_initialized && self->dirty_last < self->dirty_first) {
         /* Nothing has ever been written into the frame image; blitting from an UNDEFINED
            layout would be undefined behaviour. */
         return;
@@ -1259,8 +1554,12 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
         return;
     }
 
+#if defined(__ANDROID__)
+    if (shared) SharedOwnership(self, cmd, true);
+#endif
+
     /* 1. Staging -> frame image (dirty rows only). */
-    const bool needs_copy = self->dirty_last >= self->dirty_first;
+    const bool needs_copy = !shared && self->dirty_last >= self->dirty_first;
     if (needs_copy) {
         ImageBarrier(self, cmd, self->frame_image,
                      self->frame_image_initialized ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
@@ -1334,7 +1633,7 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
            this block is correct either way. */
         armsx_shader_vk_frame_t chain_frame{};
         chain_frame.cmd = cmd;
-        chain_frame.source = self->frame_image;
+        chain_frame.source = source;
         chain_frame.source_format = VK_FORMAT_R8G8B8A8_UNORM;
         chain_frame.source_width = self->frame_width;
         chain_frame.source_height = self->frame_height;
@@ -1380,7 +1679,7 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
             blit.dstOffsets[0] = {dst.x, dst.y, 0};
             blit.dstOffsets[1] = {dst.x + dst.w, dst.y + dst.h, 1};
 
-            self->api.vkCmdBlitImage(cmd, self->frame_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
+            self->api.vkCmdBlitImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                                      (params && params->linear_filter) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
         }
@@ -1389,6 +1688,10 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
     ImageBarrier(self, cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                  VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+#if defined(__ANDROID__)
+    if (shared) SharedOwnership(self, cmd, false);
+#endif
 
     if (!Check(self->api.vkEndCommandBuffer(cmd), "vkEndCommandBuffer")) {
         return;
@@ -1400,6 +1703,17 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
     submit.waitSemaphoreCount = 1;
     submit.pWaitSemaphores = &self->acquire_semaphore;
     submit.pWaitDstStageMask = &wait_stage;
+#if defined(__ANDROID__)
+    VkSemaphore wait_semaphores[] = {self->acquire_semaphore, self->shared_gl_semaphore};
+    VkPipelineStageFlags wait_stages[] = {wait_stage, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
+    const bool wait_gl = shared && self->shared_fence_pending;
+    if (wait_gl) {
+        submit.waitSemaphoreCount = 2;
+        submit.pWaitSemaphores = wait_semaphores;
+        submit.pWaitDstStageMask = wait_stages;
+    }
+#endif
+
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
     submit.signalSemaphoreCount = 1;
@@ -1416,6 +1730,10 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
     if (!submitted) {
         return;
     }
+
+#if defined(__ANDROID__)
+    if (wait_gl) self->shared_fence_pending = false;
+#endif
 
     VkPresentInfoKHR present{};
     present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1449,6 +1767,9 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
 
 void OpPresentBlank(armsx_renderer_t* base) {
     VkRenderer* self = Self(base);
+#if defined(__ANDROID__)
+    if (!DrainSharedFence(self)) return;
+#endif
 
     uint32_t image_index = 0;
     if (!BeginFrame(self, &image_index) || image_index >= self->swapchain_images.size()) {
@@ -1536,6 +1857,12 @@ void OpShutdown(armsx_renderer_t* base) {
 
         DestroyStaging(self);
         DestroyFrameImage(self);
+#if defined(__ANDROID__)
+        DestroySharedImage(self);
+        if (self->shared_gl_semaphore)
+            self->api.vkDestroySemaphore(self->device, self->shared_gl_semaphore, nullptr);
+
+#endif
         DestroySwapchain(self);
 
         if (self->frame_fence != VK_NULL_HANDLE) {
@@ -1586,6 +1913,12 @@ const armsx_render_ops_t kVkOps = {
     OpPresent,
     OpPresentBlank,
     OpShutdown,
+    nullptr,
+#if defined(__ANDROID__)
+    OpPrepareHardwareBuffer,
+    OpAdoptHardwareBuffer,
+    OpImportHardwareBufferFence,
+#endif
 };
 
 } // namespace
@@ -1599,6 +1932,9 @@ armsx_renderer_t* armsx_render_create_vk(SDL_Window* window, const armsx_render_
     self->base.backend = ARMSX_RENDER_BACKEND_VULKAN;
     self->window = window;
     self->vsync = config ? config->vsync : true;
+#if defined(__ANDROID__)
+    self->shared_requested = config && config->upscale_shared_image;
+#endif
     self->driver_name = "Vulkan";
 
     self->library = OpenVulkanLibrary();

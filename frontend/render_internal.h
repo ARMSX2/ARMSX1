@@ -37,7 +37,7 @@ typedef struct armsx_render_ops {
        NULL on backends that cannot: the dispatcher then returns false and the caller keeps
        using upload_frame().
 
-       MUST STAY LAST. kGlOps / kVkOps / kSdlOps are positional aggregate initialisers, so
+       New optional operations must be appended. kGlOps / kVkOps / kSdlOps are positional aggregate initialisers, so
        inserting a slot anywhere above silently reassigns every function pointer after it.
        Appending lets the two backends that do not implement this omit it entirely and be
        value-initialised to nullptr. */
@@ -46,6 +46,11 @@ typedef struct armsx_render_ops {
                              int width,
                              int height,
                              Uint32 sdl_format);
+    bool (*prepare_hardware_buffer)(armsx_renderer_t* self,
+                                     void* buffer, int width, int height);
+    bool (*adopt_hardware_buffer)(armsx_renderer_t* self,
+                                   void* buffer, int width, int height);
+    bool (*import_hardware_buffer_fence)(armsx_renderer_t* self, int fd);
 } armsx_render_ops_t;
 
 /* Every backend's state object embeds this header as its first member and points `impl`

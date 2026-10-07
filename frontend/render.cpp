@@ -286,6 +286,24 @@ bool armsx_renderer_adopt_gl_texture(armsx_renderer_t* renderer, unsigned int te
     return renderer->ops->adopt_gl_texture(renderer, texture, width, height, sdl_format);
 }
 
+bool armsx_renderer_prepare_hardware_buffer(armsx_renderer_t* renderer,
+                                           void* buffer, int width, int height) {
+    return renderer && renderer->ops && renderer->ops->prepare_hardware_buffer &&
+        renderer->ops->prepare_hardware_buffer(renderer, buffer, width, height);
+}
+
+bool armsx_renderer_adopt_hardware_buffer(armsx_renderer_t* renderer,
+                                         void* buffer, int width, int height) {
+    return renderer && renderer->ops && renderer->ops->adopt_hardware_buffer &&
+        renderer->ops->adopt_hardware_buffer(renderer, buffer, width, height);
+}
+
+bool armsx_renderer_import_hardware_buffer_fence(armsx_renderer_t* renderer, int fd) {
+    return renderer && renderer->ops && renderer->ops->import_hardware_buffer_fence &&
+        renderer->ops->import_hardware_buffer_fence(renderer, fd);
+}
+
+
 void armsx_render_set_native_window(void* native_window, int width, int height) {
     std::lock_guard<std::mutex> lock(g_native_window_lock);
     /* Bump on EVERY publish, including the null of a surfaceDestroyed.
