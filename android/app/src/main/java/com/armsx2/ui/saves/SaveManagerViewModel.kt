@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.armsx2.i18n.I18n
 import com.armsx2.runtime.MainActivityRuntime
+import com.armsx2.core.SwanStateFiles
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -63,6 +64,7 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
 
     fun load(item: SaveStateItem) {
         val slot = item.slot ?: return
+        if (!item.canUseWithActiveGame) return
         viewModelScope.launch {
             val hasActiveVm = withContext(Dispatchers.IO) {
                 runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
@@ -91,7 +93,14 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
 
     fun delete(item: SaveStateItem) {
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { runCatching { item.file.delete() }.getOrDefault(false) }
+            val ok = withContext(Dispatchers.IO) { runCatching {
+                check(item.file.delete()) { "Unable to delete state" }
+                SwanStateFiles.companions(item.file.name).forEach { name ->
+                    val sidecar = File(item.file.parentFile, name)
+                    if (sidecar.exists()) check(sidecar.delete()) { "Unable to delete $name" }
+                }
+                true
+            }.getOrDefault(false) }
             state.value = if (ok) {
                 state.value.copy(message = I18n.get("action.delete"))
             } else {
@@ -113,6 +122,10 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
                 files.count { file ->
                     runCatching {
                         file.copyTo(File(destination, file.name), overwrite = true)
+                        SwanStateFiles.companions(file.name).forEach { name ->
+                            val sidecar = File(file.parentFile, name)
+                            if (sidecar.isFile) sidecar.copyTo(File(destination, name), overwrite = false)
+                        }
                         true
                     }.getOrDefault(false)
                 }
@@ -132,30 +145,27 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun readSaves(): ReadResult {
         val active = MainActivityRuntime.currentGame.value
-        val activeSerial = active?.serial.orEmpty()
-        val activePaths = (0 until SLOT_COUNT).mapNotNull { slot ->
-            runCatching { NativeApp.getGamePathSlot(slot) }
+        val activePaths = (-1 until SLOT_COUNT).mapNotNull { slot ->
+            runCatching { NativeApp.getSwanStatePath(slot) }
                 .getOrNull()
                 ?.takeIf(String::isNotBlank)
                 ?.let(::File)
                 ?.takeIf(File::exists)
         }
 
-        val roots = listOf("sstates", "savestates")
+        val roots = listOf("swanstation/states")
             .map { File(MainActivityRuntime.assetCopyRoot(getApplication()), it) }
         val discovered = roots.flatMap { root ->
             if (!root.isDirectory) emptyList()
-            else root.walkTopDown().filter { it.isFile && it.extension.equals("pss", true) }.toList()
+            else root.listFiles()?.filter { it.isFile && SwanStateFiles.slot(it.name) != null }.orEmpty()
         }
         val allFiles = (activePaths + discovered)
             .distinctBy { it.absolutePath.lowercase() }
-            .filter { file -> active == null || activeSerial.isBlank() || serialFrom(file).equals(activeSerial, true) }
+            .filter { file -> active == null || activePaths.any { it.absolutePath == file.absolutePath } }
 
         val saves = allFiles.map { file ->
             val serial = serialFrom(file)
-            val belongsToActiveGame = active != null && (
-                activeSerial.isBlank() || serial.equals(activeSerial, true) || activePaths.any { it.absolutePath == file.absolutePath }
-            )
+            val belongsToActiveGame = active != null && activePaths.any { it.absolutePath == file.absolutePath }
             SaveStateItem(
                 slot = slotFrom(file),
                 file = file,
@@ -184,23 +194,12 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
         })
     }
 
-    private fun slotFrom(file: File): Int? = SLOT_PATTERN.find(file.name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+    private fun slotFrom(file: File): Int? = SwanStateFiles.slot(file.name)
 
-    private fun serialFrom(file: File): String = file.name.substringBefore(" (").ifBlank {
-        // psx/state.c:1268 writes "<sanitised title>-<crc32>.slot<N>.pss". nameWithoutExtension
-        // strips ".pss", substringBeforeLast('.') strips ".slotN", and CRC_SUFFIX strips the
-        // content hash — leaving the title, which is what the card shows.
-        file.nameWithoutExtension.substringBeforeLast('.').replace(CRC_SUFFIX, "")
-    }
+    private fun serialFrom(file: File): String = SwanStateFiles.identity(file.name)
 
     private companion object {
         const val SLOT_COUNT = 10
 
-        /* This core writes PS1 states as "<title>-<crc32>.slotN.pss" (psx/state.c:1268). The
-           inherited PS2 pattern looked for a two-digit slot in a ".p2s" — wrong extension AND
-           wrong slot form, so the Save Manager listed nothing at all. Slot is 1+ digits and
-           carries the "slot" prefix. */
-        val SLOT_PATTERN = Regex("\\.slot([0-9]+)\\.pss$", RegexOption.IGNORE_CASE)
-        val CRC_SUFFIX = Regex("-[0-9a-f]{8}$", RegexOption.IGNORE_CASE)
     }
 }

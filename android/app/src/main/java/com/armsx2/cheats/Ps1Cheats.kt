@@ -1,6 +1,7 @@
 package com.armsx2.cheats
 
 import android.content.Context
+import android.util.AtomicFile
 import com.armsx2.config.Ps1Settings
 import com.armsx2.config.Ps1SettingsStore
 import com.armsx2.runtime.MainActivityRuntime
@@ -78,15 +79,23 @@ object Ps1Cheats {
 
     /** The catalogue's raw text, or "" when the game has no file yet. Never null. */
     private fun readText(context: Context, gameKey: String): String =
-        runCatching { fileFor(context, gameKey).takeIf { it.isFile }?.readText() }
+        runCatching { AtomicFile(fileFor(context, gameKey)).openRead().bufferedReader().use { it.readText() } }
             .getOrNull() ?: ""
 
     /** Replace the catalogue's text, creating the folder if needed. Returns success. */
-    private fun writeText(context: Context, gameKey: String, text: String): Boolean = runCatching {
+    private fun writeText(context: Context, gameKey: String, text: String, sync: Boolean = true): Boolean = runCatching {
         val file = fileFor(context, gameKey)
         file.parentFile?.mkdirs()
-        file.writeText(if (text.endsWith("\n") || text.isEmpty()) text else text + "\n")
-        syncFilePath(context, gameKey)
+        val atomic = AtomicFile(file)
+        val output = atomic.startWrite()
+        try {
+            output.write((if (text.endsWith("\n") || text.isEmpty()) text else text + "\n").toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(output)
+        } catch (failure: Throwable) {
+            atomic.failWrite(output)
+            throw failure
+        }
+        if (sync) syncFilePath(context, gameKey)
         true
     }.getOrDefault(false)
 
@@ -110,7 +119,7 @@ object Ps1Cheats {
     }
 
     /** Append [text] to the catalogue — what the "paste codes" path does. */
-    fun appendText(context: Context, gameKey: String, text: String): Boolean {
+    @Synchronized fun appendText(context: Context, gameKey: String, text: String): Boolean {
         val existing = readText(context, gameKey)
         val joined = when {
             existing.isEmpty() -> text
@@ -118,6 +127,20 @@ object Ps1Cheats {
             else -> existing + "\n" + text
         }
         return writeText(context, gameKey, joined)
+    }
+
+    /** Add database groups without replacing custom groups or changing enabled selections. */
+    @Synchronized fun addDatabaseCatalogue(context: Context, gameKey: String, text: String): Int {
+        val merged = Ps1CheatCatalogue.merge(readText(context, gameKey), text)
+        if (merged.added == 0) return 0
+        // Do not let a stale/orphan enabled name accidentally arm a newly imported group.
+        // Save without reloading the engine until those names have been disarmed.
+        check(writeText(context, gameKey, merged.text, sync = false)) { "Unable to save the cheat catalogue" }
+        Ps1SettingsStore.update(context.applicationContext, gameKey) { current ->
+            current.copy(cheatsEnabledCodes = merged.selectionAfterImport(current.cheatsEnabledCodes))
+        }
+        syncFilePath(context, gameKey)
+        return merged.added
     }
 
     // ---- reading ---------------------------------------------------------------------------
@@ -195,7 +218,7 @@ object Ps1Cheats {
     }
 
     /** The entries in [gameKey]'s catalogue. Empty when it has no file. */
-    fun entriesFor(context: Context, gameKey: String): List<Ps1CheatEntry> =
+    @Synchronized fun entriesFor(context: Context, gameKey: String): List<Ps1CheatEntry> =
         parse(readText(context, gameKey))
 
     // ---- selection (the per-game settings layer) --------------------------------------------
@@ -214,7 +237,7 @@ object Ps1Cheats {
      * core never has to know how the app names things and a hand-edited settings.toml pointing
      * somewhere else keeps working.
      */
-    fun setEnabled(context: Context, gameKey: String, master: Boolean, enabled: List<String>) {
+    @Synchronized fun setEnabled(context: Context, gameKey: String, master: Boolean, enabled: List<String>) {
         val app = context.applicationContext
         val file = fileFor(app, gameKey)
         Ps1SettingsStore.update(app, gameKey) { current ->

@@ -7,3 +7,9 @@
 [submodule "third_party/libchdr"]
 	path = third_party/libchdr
 	url = https://github.com/rtissera/libchdr.git
+[submodule "core/swanstation"]
+	path = core/swanstation
+	url = https://github.com/libretro/swanstation.git
+[submodule "third_party/angle-prebuilt"]
+	path = third_party/angle-prebuilt
+	url = https://android.googlesource.com/platform/packages/modules/ANGLE

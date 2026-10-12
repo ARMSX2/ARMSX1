@@ -2,9 +2,9 @@ package com.armsx2.core
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.core.net.toUri
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.documentfile.provider.DocumentFile
 import com.armsx2.runtime.MainActivityRuntime
 import java.io.File
 import java.util.Locale
@@ -63,6 +63,7 @@ object Ps1Library {
             if (!root.isDirectory) continue
             root.walkTopDown()
                 .maxDepth(6)
+                .onEnter { it.name.lowercase(Locale.US) !in BLOCKED_DIRS }
                 .filter { Ps1Native.isBootable(it) && looksLikeGame(it) }
                 .forEach { f ->
                     if (seen.add(f.absolutePath)) {
@@ -72,6 +73,7 @@ object Ps1Library {
         }
         directories.asSequence()
             .filter { it.startsWith("content:") }
+            .distinct()
             .forEach { tree ->
                 scanSafTree(context, tree).forEach { game ->
                     if (seen.add(game.path)) out += game
@@ -121,33 +123,51 @@ object Ps1Library {
      *  11+ path and works for primary storage, SD cards, and USB drives without MANAGE_EXTERNAL_STORAGE. */
     private fun scanSafTree(context: Context, rawTreeUri: String): List<Ps1Game> {
         val treeUri = runCatching { Uri.parse(rawTreeUri) }.getOrNull() ?: return emptyList()
-        val root = runCatching { DocumentFile.fromTreeUri(context, treeUri) }.getOrNull() ?: return emptyList()
-        if (!root.isDirectory) return emptyList()
+        val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+            ?: return emptyList()
 
-        data class Pending(val directory: DocumentFile, val depth: Int)
+        data class Pending(val documentId: String, val depth: Int)
         val pending = ArrayDeque<Pending>()
+        val visited = HashSet<String>()
         val candidates = ArrayList<SafCandidate>()
-        pending += Pending(root, 0)
+        pending += Pending(rootId, 0)
 
         while (pending.isNotEmpty()) {
-            val (directory, depth) = pending.removeFirst()
-            val children = runCatching { directory.listFiles() }.getOrDefault(emptyArray())
-            for (child in children) {
-                val name = child.name?.takeIf(String::isNotBlank) ?: continue
-                if (child.isDirectory) {
-                    if (depth < 6 && name.lowercase(Locale.US) !in BLOCKED_DIRS) {
-                        pending += Pending(child, depth + 1)
+            val (directoryId, depth) = pending.removeFirst()
+            if (!visited.add(directoryId)) continue
+            val parent = DocumentsContract.buildDocumentUriUsingTree(treeUri, directoryId).toString()
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, directoryId)
+            // DocumentFile.listFiles() only fetches IDs: name/type/size each trigger another
+            // provider call per file. Fetch the complete row once per folder instead.
+            runCatching {
+                context.contentResolver.query(children, arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                ), null, null, null)?.use { cursor ->
+                    val idColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val typeColumn = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    val sizeColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getString(idColumn) ?: continue
+                        val name = cursor.getString(nameColumn)?.takeIf(String::isNotBlank) ?: continue
+                        val mime = cursor.getString(typeColumn)?.takeIf(String::isNotBlank) ?: continue
+                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                            if (depth < 6 && name.lowercase(Locale.US) !in BLOCKED_DIRS) {
+                                pending += Pending(id, depth + 1)
+                            }
+                            continue
+                        }
+                        if (!Ps1Native.isBootableName(name)) continue
+                        val size = if (sizeColumn < 0 || cursor.isNull(sizeColumn)) 0L else cursor.getLong(sizeColumn)
+                        if (!looksLikeGame(name, size)) continue
+                        val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
+                        candidates += SafCandidate(Ps1Game(name.substringBeforeLast('.'), uri.toString(), name),
+                            parent, uri)
                     }
-                    continue
                 }
-                if (!child.isFile || !Ps1Native.isBootableName(name)) continue
-                if (!looksLikeGame(name, runCatching { child.length() }.getOrDefault(0L))) continue
-                val path = child.uri.toString()
-                candidates += SafCandidate(
-                    game = Ps1Game(name.substringBeforeLast('.'), path, name),
-                    parent = directory.uri.toString(),
-                    uri = child.uri,
-                )
             }
         }
 

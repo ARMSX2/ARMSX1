@@ -67,7 +67,7 @@ object Ps1MemoryCards {
     fun cardFile(context: Context, slot: Int): File = Ps1Config.memoryCardFile(context, slot)
 
     /** The directory both cards live in (the native pref path). */
-    fun cardDirectory(context: Context): File = context.filesDir
+    fun cardDirectory(context: Context): File = cardFile(context, 1).parentFile!!
 
     /** True when [slot] currently has a card file on disk. */
     fun exists(context: Context, slot: Int): Boolean = cardFile(context, slot).isFile

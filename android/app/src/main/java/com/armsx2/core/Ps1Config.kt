@@ -59,7 +59,14 @@ object Ps1Config {
         }
     }
 
-    /** A PS1 memory-card file (slot1.mcd / slot2.mcd) under the native pref path. */
-    fun memoryCardFile(context: Context, slot: Int): File =
-        File(context.filesDir, "slot$slot.mcd")
+    /** Actual last-mounted SwanStation card. Old slot<N>.mcd files stay untouched. */
+    fun memoryCardFile(context: Context, slot: Int): File {
+        require(slot in 1..2)
+        val directory = File(com.armsx2.runtime.MainActivityRuntime.assetCopyRoot(context), "swanstation/cards")
+        val reported = runCatching { kr.co.iefriends.pcsx2.NativeApp.getSwanCardPath(slot) }.getOrNull()
+        val remembered = runCatching { File(directory, ".last-card-$slot").readLines().firstOrNull() }.getOrNull()
+        val target = (reported?.takeIf { it.isNotBlank() } ?: remembered)?.let(::File)
+        if (target != null && runCatching { target.canonicalFile.parentFile == directory.canonicalFile }.getOrDefault(false)) return target
+        return File(directory, "duckstation_shared_card_$slot.mcd")
+    }
 }

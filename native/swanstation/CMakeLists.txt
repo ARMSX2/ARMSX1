@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.25)
+project(emucorepsx_android LANGUAGES C CXX)
+if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a")
+  message(FATAL_ERROR "Initial Android adapter targets arm64-v8a")
+endif()
+set(CMAKE_CXX_STANDARD 17)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+add_link_options(-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
+add_subdirectory(../../third_party/libadrenotools adrenotools)
+set(RC_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../third_party/rcheevos)
+file(GLOB RC_SOURCES ${RC_ROOT}/src/rcheevos/*.c ${RC_ROOT}/src/rapi/*.c)
+add_library(swan_rcheevos STATIC ${RC_SOURCES} ${RC_ROOT}/src/rc_client.c ${RC_ROOT}/src/rc_compat.c ${RC_ROOT}/src/rc_util.c ${RC_ROOT}/src/rc_version.c ${RC_ROOT}/src/rhash/cdreader.c ${RC_ROOT}/src/rhash/hash.c ${RC_ROOT}/src/rhash/hash_disc.c ${RC_ROOT}/src/rhash/md5.c)
+target_include_directories(swan_rcheevos PUBLIC ${RC_ROOT}/include PRIVATE ${RC_ROOT}/src)
+target_compile_definitions(swan_rcheevos PUBLIC RC_NO_THREADS=1 RC_HASH_NO_ENCRYPTED RC_HASH_NO_ROM RC_HASH_NO_ZIP)
+add_library(emucorepsx SHARED runtime.cpp jni.cpp vulkan_host.cpp gl_api.cpp achievements.cpp shader_api.cpp shader_gl.cpp performance.cpp)
+target_include_directories(emucorepsx PRIVATE
+  ../../core/swanstation/dep/libretro-common/include
+  ../../core/swanstation/dep/vulkan-loader/include
+  ../../core/swanstation/dep/stb/include)
+target_link_libraries(emucorepsx PRIVATE android log EGL GLESv3 aaudio dl z adrenotools swan_rcheevos)
+target_link_options(emucorepsx PRIVATE -Wl,--no-undefined -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)

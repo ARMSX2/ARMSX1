@@ -161,6 +161,7 @@ void psx_cdrom_init(psx_cdrom_t* cdrom, psx_ic_t* ic) {
 }
 
 void psx_cdrom_reset(psx_cdrom_t* cdrom) {
+    cdrom->shell_open_latched = 0;
     cdrom->xa_prefetch_state = 0;
     cdrom->xa_start_phase = 0;
     cdrom->xa_start_age_cycles = 0;
@@ -725,7 +726,7 @@ uint8_t cdrom_get_stat(psx_cdrom_t* cdrom) {
     return ((cdrom->cdda_playing) ? CD_STAT_PLAY : 0) |
            ((cdrom->read_ongoing) ? CD_STAT_READ : 0) |
            ((cdrom->mode & 0x10) ? CD_STAT_IDERROR : 0) |
-           ((!cdrom->disc) ? CD_STAT_SHELLOPEN : 0) |
+           ((!cdrom->disc || cdrom->shell_open_latched) ? CD_STAT_SHELLOPEN : 0) |
            CD_STAT_SPINDLE;
 }
 
@@ -1516,6 +1517,7 @@ void psx_cdrom_save_state(psx_cdrom_t* cdrom, psx_state_writer_t* w) {
 }
 
 int psx_cdrom_load_state(psx_cdrom_t* cdrom, psx_state_reader_t* r) {
+    cdrom->shell_open_latched = 0;
     cdrom->xa_prefetch_state = 0;
     cdrom->xa_start_phase = 0;
     cdrom->xa_start_age_cycles = 0;

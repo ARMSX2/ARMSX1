@@ -25,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,6 +36,9 @@ import androidx.compose.ui.unit.sp
 import com.armsx2.GameInfo
 import com.armsx2.cheats.Ps1CheatEntry
 import com.armsx2.cheats.Ps1Cheats
+import com.armsx2.cheats.Ps1CheatDatabase
+import com.armsx2.cheats.Ps1CheatDatabaseIndex
+import com.armsx2.cheats.Ps1CheatDatabaseItem
 import com.armsx2.i18n.str
 import com.armsx2.runtime.MainActivityRuntime
 import com.armsx2.ui.common.ArmsBackdrop
@@ -50,6 +54,9 @@ import com.armsx2.ui.settings.Ps1InfoRow
 import com.armsx2.ui.settings.SettingsDivider
 import com.armsx2.ui.settings.ToggleRow
 import kr.co.iefriends.pcsx2.NativeApp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Cheats for one PS1 game.
@@ -112,6 +119,65 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
     }
     val hardcore = remember(revision) { runCatching { NativeApp.isHardcoreMode() }.getOrDefault(false) }
 
+    val coroutineScope = rememberCoroutineScope()
+    var database by remember(gameKey) { mutableStateOf<Ps1CheatDatabaseIndex?>(null) }
+    var databaseBusy by remember(gameKey) { mutableStateOf(true) }
+    var databaseFailed by remember(gameKey) { mutableStateOf(false) }
+    var matchedCatalogue by remember(gameKey) { mutableStateOf<Ps1CheatDatabaseItem?>(null) }
+    var verifiedSerial by remember(gameKey) { mutableStateOf<String?>(null) }
+    var browsingDatabase by remember(gameKey) { mutableStateOf(false) }
+    var pendingCatalogue by remember(gameKey) { mutableStateOf<Ps1CheatDatabaseItem?>(null) }
+    var databaseQuery by remember(gameKey) { mutableStateOf("") }
+    var cheatQuery by remember(gameKey) { mutableStateOf("") }
+    var resultLimit by remember(gameKey, databaseQuery) { mutableIntStateOf(30) }
+    var searching by remember(gameKey) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(gameKey) {
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val index = Ps1CheatDatabase.index(context)
+                // Never use the filename/cover-art guess as a running game's identity.
+                val serial = if (Ps1Cheats.isRunning(gameKey))
+                    Ps1CheatDatabaseIndex.normaliseSerial(runCatching { NativeApp.getGameSerial() }.getOrNull())
+                else Ps1CheatDatabaseIndex.normaliseSerial(gameKey)
+                val match = index.automatic(serial)
+                val installed = runCatching {
+                    if (match != null) Ps1Cheats.addDatabaseCatalogue(context, gameKey, Ps1CheatDatabase.catalogue(context, match))
+                }.isSuccess
+                Triple(index, serial, match to installed)
+            }
+        }
+        result.onSuccess { (index, serial, installation) ->
+            database = index
+            verifiedSerial = serial
+            matchedCatalogue = if (installation.second) installation.first else null
+            revision++
+        }
+        databaseFailed = result.isFailure || result.getOrNull()?.third?.second == false
+        databaseBusy = false
+    }
+
+    fun loadCatalogue(item: Ps1CheatDatabaseItem) {
+        if (databaseBusy) return
+        databaseBusy = true
+        databaseFailed = false
+        coroutineScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    Ps1Cheats.addDatabaseCatalogue(context, gameKey, Ps1CheatDatabase.catalogue(context, item))
+                }
+            }
+            if (result.isSuccess) {
+                matchedCatalogue = item
+                pendingCatalogue = null
+                browsingDatabase = false
+                revision++
+            }
+            databaseFailed = result.isFailure
+            databaseBusy = false
+        }
+    }
+
     val enabled = settings.cheatsEnabledCodes
     val master = settings.cheatsEnabled
 
@@ -130,7 +196,11 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
     val pastedGroupName = str("cheats.pastedGroup")
     val pastePlaceholder = str("cheats.action.paste.placeholder")
     LaunchedEffect(LibraryKeyboard.visible.value) {
-        if (pasting && !LibraryKeyboard.visible.value) {
+        if (searching != null && !LibraryKeyboard.visible.value) {
+            if (searching == "database") databaseQuery = LibraryKeyboard.text.value.trim()
+            else cheatQuery = LibraryKeyboard.text.value.trim()
+            searching = null
+        } else if (pasting && !LibraryKeyboard.visible.value) {
             pasting = false
             val text = LibraryKeyboard.text.value.trim()
             if (text.isNotEmpty()) {
@@ -168,6 +238,7 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
                 SectionTitle(gameTitle ?: gameKey, str("cheats.section.forGame"))
                 Spacer(Modifier.height(8.dp))
                 Ps1InfoRow(str("cheats.info.file"), file.absolutePath)
+                Ps1InfoRow(str("cheats.database.serial"), verifiedSerial ?: str("games.unknownSerial"))
                 Ps1InfoRow(
                     str("cheats.info.entries"),
                     if (entries.isEmpty()) str("cheats.info.noFile") else entries.size.toString(),
@@ -185,6 +256,69 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
         }
 
         Spacer(Modifier.height(10.dp))
+
+        Text(
+            when {
+                databaseBusy -> str("cheats.database.loading")
+                databaseFailed -> str("cheats.database.failed")
+                matchedCatalogue != null -> str("cheats.database.loaded").format(matchedCatalogue!!.title)
+                else -> str("cheats.database.unmatched")
+            },
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(vertical = 8.dp),
+        )
+        Ps1ActionRow(
+            label = str(if (browsingDatabase) "cheats.database.close" else "cheats.database.browse"),
+            controllerId = "ps1.cheats.database",
+            description = str("cheats.database.description").format(database?.items?.size ?: 0),
+        ) { browsingDatabase = !browsingDatabase }
+
+        if (browsingDatabase && database != null) {
+            val index = database!!
+            val suggested = remember(database, verifiedSerial, gameTitle) { index.suggestions(verifiedSerial, gameTitle) }
+            val results = remember(database, databaseQuery, suggested) {
+                if (databaseQuery.isBlank()) suggested.ifEmpty { index.items } else index.search(databaseQuery)
+            }
+            Ps1ActionRow(
+                label = str("cheats.database.search"),
+                controllerId = "ps1.cheats.database.search",
+                description = databaseQuery.ifBlank { gameTitle.orEmpty() },
+            ) {
+                searching = "database"
+                LibraryKeyboard.open(initial = databaseQuery, onChange = {}, placeholder = "Game, region or serial")
+            }
+            if (databaseQuery.isNotBlank()) Ps1ActionRow(
+                label = str("cheats.database.clearSearch"), controllerId = "ps1.cheats.database.clearSearch",
+            ) { databaseQuery = "" }
+            if (pendingCatalogue != null) {
+                val selected = pendingCatalogue!!
+                Notice(
+                    title = selected.title,
+                    body = str("cheats.database.confirm").format(verifiedSerial ?: gameKey),
+                    tint = MaterialTheme.colorScheme.tertiary,
+                )
+                Ps1ActionRow(
+                    label = str("cheats.database.load"), controllerId = "ps1.cheats.database.load",
+                ) { loadCatalogue(selected) }
+                Ps1ActionRow(
+                    label = str("action.cancel"), controllerId = "ps1.cheats.database.cancel",
+                ) { pendingCatalogue = null }
+            }
+            results.take(resultLimit).forEach { item ->
+                Ps1ActionRow(
+                    label = item.title,
+                    controllerId = "ps1.cheats.database.${item.id}",
+                    description = str("cheats.database.count").format(item.cheatCount, item.omittedCount),
+                ) { if (!databaseBusy) pendingCatalogue = item }
+            }
+            if (results.isEmpty()) Text(str("cheats.database.noResults"), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (results.size > resultLimit) Ps1ActionRow(
+                label = str("cheats.database.more"), controllerId = "ps1.cheats.database.more",
+            ) { resultLimit += 30 }
+            Ps1InfoRow(str("cheats.database.source"), "Libretro contributors · CC BY-SA 4.0",
+                "https://github.com/libretro/libretro-database · https://creativecommons.org/licenses/by-sa/4.0/")
+        }
 
         if (hardcore) {
             Notice(
@@ -204,6 +338,19 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
         }
         SettingsDivider()
 
+        if (entries.isNotEmpty()) {
+            Ps1ActionRow(
+                label = str("cheats.database.searchCheats"), controllerId = "ps1.cheats.search",
+                description = cheatQuery.takeIf(String::isNotBlank),
+            ) {
+                searching = "cheats"
+                LibraryKeyboard.open(initial = cheatQuery, onChange = {}, placeholder = "Cheat name")
+            }
+            if (cheatQuery.isNotBlank()) Ps1ActionRow(
+                label = str("cheats.database.clearSearch"), controllerId = "ps1.cheats.search.clear",
+            ) { cheatQuery = "" }
+        }
+
         if (entries.isEmpty()) {
             Text(
                 str("cheats.empty.body"),
@@ -213,11 +360,13 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
                 modifier = Modifier.padding(vertical = 10.dp),
             )
         } else {
-            entries.forEach { entry ->
+            val visibleEntries = entries.filter { it.name.contains(cheatQuery, ignoreCase = true) }
+            if (visibleEntries.isEmpty()) Text(str("cheats.database.noResults"), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            visibleEntries.forEach { entry ->
                 CheatRow(
                     entry = entry,
-                    checked = enabled.any { it.equals(entry.name, ignoreCase = true) },
-                    locked = hardcore || !master,
+                    checked = master && enabled.any { it.equals(entry.name, ignoreCase = true) },
+                    locked = hardcore,
                 ) { on ->
                     val next = enabled.filterNot { it.equals(entry.name, ignoreCase = true) }
                     // Turning a cheat on turns the master switch on with it. A row that ticks

@@ -30,12 +30,7 @@ public class NativeApp {
 	static {
 		String libraryName = selectNativeLibraryName();
 		try {
-			// libarmsx.so links against libSDL2.so; load it first so the in-process JNI
-			// surface below is available even when the SDL activity never ran.
-			try {
-				System.loadLibrary("SDL2");
-			} catch (UnsatisfiedLinkError ignored) {
-			}
+			// The SwanStation host owns EGL/AAudio; it must not load the old SDL core.
 			System.loadLibrary(libraryName);
 			hasNoNativeBinary = false;
 			System.out.println("PCSX2_LOAD " + libraryName + " pageSize=" + getRuntimePageSize());
@@ -57,9 +52,7 @@ public class NativeApp {
 	}
 
 	private static String selectNativeLibraryName() {
-		// PS1 port: the core is libarmsx.so (built by build.sh android, staged into
-		// jniLibs/<abi>). The PCSX2 emucore_4k/emucore_16k page-size split does not apply.
-		return "armsx";
+		return "emucorepsx";
 	}
 
 
@@ -124,7 +117,19 @@ public class NativeApp {
 		com.armsx2.RetroAchievementsHostOverrideReceiver.applyPending(context);
 	}
 
-	public static void initialize(String path, String biosFolder, int apiVer) {  }
+	public static void initialize(String path, String biosFolder, int apiVer) {
+		Context context = getContext();
+		if (context == null || !initializeSwanBackend(path, biosFolder,
+				new File(context.getFilesDir(), "settings.toml").getAbsolutePath()))
+			throw new IllegalStateException("Cannot initialize SwanStation backend");
+	}
+	private static native boolean initializeSwanBackend(String root, String bios, String config);
+	public static native long getAudioNonZeroSampleCount();
+	public static void backendNotice(String message) {
+		Context context = getContext();
+		if (context != null) new Handler(Looper.getMainLooper()).post(() ->
+			android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_LONG).show());
+	}
 
 	// PGO instrument build only: flush collected profile counters to disk.
 	// No-op in normal builds (the native impl is empty without -fprofile-generate).
@@ -275,7 +280,9 @@ public class NativeApp {
 			return title + "|" + serial + "|" + serial;
 		} catch (Throwable t) { return null; }
 	}
-	public static String getGameSerial() { return ""; }
+	public static native String getGameSerial();
+	/** Actual texture hook counters: dump enabled, replacement hook enabled, lookups, PNG writes, hits. */
+	public static native long[] getSwanTextureMetrics();
 	public static String getGameCRC() { return ""; }
 	/** Emulated frames per second, averaged over the core's last half-second window. 0 while no
 	 *  game is stepping (stopped or paused). Non-blocking — it reads an atomic the emulation loop
@@ -295,6 +302,13 @@ public class NativeApp {
 	 *  com.armsx2.ui.GameOsd.Stat / PSXE_HOST_STAT_* in frontend/host_stats.h. Pass a reused
 	 *  array — this deliberately does not allocate. */
 	public static native int getStatistics(double[] out);
+
+	/** Stable original URI/key, rather than a disposable SAF cache path. Call before boot. */
+	public static native void configureSwanSession(String identity, String originalPath);
+	public static native String getSwanStatePath(int slot);
+	public static native String getSwanCardPath(int slot);
+	public static native int getSwanGuestFrame();
+	public static native int getSwanMemoryByte(int address);
 
 	/** Build version string from BuildVersion::GitRev — formatted as
 	 *  "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT". Used by the
@@ -1220,40 +1234,16 @@ public class NativeApp {
 	}
 
 	public static BiosInfo getBiosInfoFromFd(int fd) {
-		android.os.ParcelFileDescriptor pfd = null;
-		try {
-			pfd = android.os.ParcelFileDescriptor.adoptFd(fd);
-			long size = pfd.getStatSize();
-			// A PlayStation 1 BIOS is exactly 512 KiB. The old bound here was "anything from
-			// 128 KiB to 8 MiB", which accepts a PS2 BIOS (~4 MiB) and calls it a PlayStation
-			// BIOS — so pointing the wizard at a PS2 BIOS folder "found" BIOSes that the core
-			// then refused at boot with only "No BIOS could be resolved" to show for it.
-			if (size != 512 * 1024) return null;
-			java.io.FileInputStream fis = new java.io.FileInputStream(pfd.getFileDescriptor());
-			byte[] buf = new byte[(int) size];
-			int read = 0, n;
-			while (read < buf.length && (n = fis.read(buf, read, buf.length - read)) > 0) read += n;
-			// Every retail PS1 BIOS carries this copyright string. Size alone is not enough:
-			// plenty of unrelated files are exactly 512 KiB.
-			if (indexOfAscii(buf, read, "Sony Computer Entertainment Inc.") < 0) return null;
-			// Region from the SCEI/SCEA/SCEE licence magic, unchanged — it was already correct.
-			int region = 10;
-			for (int i = 0; i + 4 <= read; i++) {
-				if (buf[i] == 'S' && buf[i+1] == 'C' && buf[i+2] == 'E') {
-					char c = (char) buf[i+3];
-					if (c == 'I') { region = 0; break; }
-					if (c == 'A') { region = 1; break; }
-					if (c == 'E') { region = 2; break; }
-				}
-			}
-			String zone = region == 0 ? "Japan" : region == 1 ? "USA" : region == 2 ? "Europe" : "Free";
-			return new BiosInfo(0x0200, region, "PlayStation BIOS", zone);
-		} catch (Throwable t) {
-			return null;
-		} finally {
-			if (pfd != null) { try { pfd.close(); } catch (Exception ignored) {} }
-		}
-	}
+        // Modified 2026-10-12: shared PS1-only validation for setup and BIOS settings.
+        try (ParcelFileDescriptor descriptor = ParcelFileDescriptor.adoptFd(fd);
+             java.io.InputStream stream = new ParcelFileDescriptor.AutoCloseInputStream(descriptor)) {
+            if (!com.armsx2.core.Ps1BiosProbe.isCandidateSize(descriptor.getStatSize())) return null;
+            com.armsx2.core.Ps1BiosProbe.Info info = com.armsx2.core.Ps1BiosProbe.probe(stream);
+            return info == null ? null : new BiosInfo(info.version, info.region, info.description, info.zone());
+        } catch (java.io.IOException | RuntimeException error) {
+            return null;
+        }
+    }
 
 	/**
 	 * Read enough of a PS2 disc image to extract its serial (e.g.

@@ -130,7 +130,7 @@ data class Ps1Settings(
     // it does nothing at 1x. NOT coerced against a local range here on purpose.
     val downsample: Int = 0,
     // Deinterlacing for 480-line modes. weave is the historical behaviour.
-    val deinterlace: String = DEINTERLACE_WEAVE,  // weave | bob | adaptive
+    val deinterlace: String = DEINTERLACE_WEAVE,  // legacy weave means core default; progressive disables interlacing
     val overscanCrop: String = OVERSCAN_NONE,     // none | small | full
     // Quarter turns are the core's internal form; settings.toml and this field hold DEGREES.
     val displayRotation: Int = 0,                 // 0 | 90 | 180 | 270
@@ -282,12 +282,11 @@ data class Ps1Settings(
             )
 
         const val DEINTERLACE_WEAVE = "weave"
-        val DEINTERLACES = listOf(DEINTERLACE_WEAVE, "bob", "adaptive")
+        val DEINTERLACES = listOf(DEINTERLACE_WEAVE, "progressive")
         val DEINTERLACE_LABELS: List<String>
             get() = listOf(
-                I18n.get("renderer.deinterlace.weave"),
-                I18n.get("renderer.deinterlace.bob"),
-                I18n.get("renderer.deinterlace.adaptive"),
+                I18n.get("common.auto"),
+                "Force progressive",
             )
 
         const val OVERSCAN_NONE = "none"

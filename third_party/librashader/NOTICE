@@ -27,6 +27,7 @@ tarballs every byte of `prebuilt/arm64-v8a/liblibrashader_capi.so` was built fro
     source/librashader-presets-0.12.0.crate
     source/librashader-reflect-0.12.0.crate
     source/librashader-runtime-0.12.0.crate
+    source/librashader-runtime-gl-0.12.0.crate
     source/librashader-runtime-vk-0.12.0.crate
 
 Those are the librashader crates — the MPL-covered part. They are the published
@@ -59,3 +60,14 @@ Note that `liblibrashader_capi.so` DOES need `libc++_shared.so` (glslang and
 SPIRV-Cross are C++ compiled through the `cc` crate). `build.sh android` already stages
 `libc++_shared.so` into jniLibs, so this costs nothing extra — but if that ever stops
 happening, librashader silently fails to dlopen.
+
+SwanStation dev integration, 2026-10-12
+-------------------------------------
+The new adapter does not use the historical prebuilt above. Build-SwanShaders.ps1
+builds the pinned capi crate with --locked and runtime-vulkan,runtime-opengl,
+then stages the shared library AND its NDK libc++ dependency into generated
+SwanStation jniLibs. The published runtime-gl source crate is included alongside
+the other 0.12.0 sources. No librashader upstream source is changed.
+libemucorepsx.so loads this library dynamically. Historical statements above do
+not grant distribution rights to the new combined app or its frontend/assets;
+the dev app's release gate remains closed pending that separate audit.

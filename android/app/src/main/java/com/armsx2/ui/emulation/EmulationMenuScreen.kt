@@ -165,6 +165,43 @@ fun EmulationMenuScreen(viewModel: EmulationMenuViewModel = viewModel()) {
     // anyone means by "go back" from a panel sitting on top of another panel.
     BackHandler(onBack = { if (friendsOpen) friendsOpen = false else closeMenu() })
 
+    if (MainActivityRuntime.discPickerOpen.value) {
+        val discs = MainActivityRuntime.playlistDiscs()
+        val busy = MainActivityRuntime.discSwapInProgress.value
+        val dismiss = { if (!busy) MainActivityRuntime.discPickerOpen.value = false }
+        AlertDialog(
+            onDismissRequest = dismiss,
+            title = { Text(if (busy) "Preparing disc…" else str("action.swapDisc")) },
+            text = {
+                Column(Modifier.height(300.dp).verticalScroll(rememberScrollState())) {
+                    discs.forEachIndexed { index, disc ->
+                        val selected = MainActivityRuntime.discPickerSelection.value == index
+                        val bringDiscIntoView = remember { BringIntoViewRequester() }
+                        LaunchedEffect(selected) { if (selected) bringDiscIntoView.bringIntoView() }
+                        TextButton(
+                            onClick = {
+                                MainActivityRuntime.discPickerSelection.value = index
+                                MainActivityRuntime.swapToPlaylistDisc(disc)
+                            },
+                            enabled = disc.exists && !busy,
+                            modifier = Modifier.fillMaxWidth().bringIntoViewRequester(bringDiscIntoView).background(
+                                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else Color.Transparent,
+                                RoundedCornerShape(8.dp)),
+                        ) {
+                            Column(Modifier.fillMaxWidth()) {
+                                Text(disc.label + if (disc.path == MainActivityRuntime.currentDiscPath.value) " (current)" else "")
+                                Text(if (disc.exists) disc.file.name else "Missing: ${disc.file.name}",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = dismiss, enabled = !busy) { Text(str("action.cancel")) } },
+        )
+    }
+
     state.pendingHardcore?.let { enabling ->
         androidx.compose.runtime.DisposableEffect(Unit) {
             com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.POPUP_OPEN)
@@ -685,16 +722,6 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
             // Changing only one leaves the bug alive on the other.
             MenuAction("reset", str("memcard.restart"), str("action.reset"), "↻", null, MainActivityRuntime::resetGame),
             MenuAction("swapDisc", str("action.swapDisc"), str("action.swapDisc.detail"), "⏏", null, MainActivityRuntime::promptSwapDisc),
-            // Multi-disc: the discs of the .m3u this session launched from. Empty for a single
-            // disc game, in which case Swap Disc still opens the file picker as before.
-            *MainActivityRuntime.playlistDiscs().map { disc ->
-                MenuAction("disc.${disc.file.absolutePath}",
-                    disc.label,
-                    if (disc.exists) disc.file.name else "missing",
-                    "💿",
-                    null,
-                ) { MainActivityRuntime.swapToPlaylistDisc(disc) }
-            }.toTypedArray(),
             MenuAction("swapGame", str("action.swapGame"), str("action.swapGame.detail"), "⇄", null, viewModel::swapGame),
             MenuAction("close", str("action.close"), MainActivityRuntime.currentGame.value?.title.orEmpty(), "■", Danger) {
                 MainActivityRuntime.closeGame()
@@ -1124,9 +1151,9 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     // working is as bad as one that silently does nothing.
     MenuOrderItem("Text.item.2") {
         Text(
-            "Runs the selected preset over the emulated image. The chain reads at the PlayStation's " +
-                "native resolution regardless of internal resolution, so scanlines and masks stay the " +
-                "right size instead of scaling with the upscale.",
+            "Runs the selected preset over the rendered image on Vulkan, OpenGL or ANGLE. " +
+                "Its source resolution follows the game's internal resolution setting. " +
+                "Unsupported presets fall back to the unfiltered image.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

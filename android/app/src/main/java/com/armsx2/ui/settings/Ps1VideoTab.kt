@@ -229,16 +229,12 @@ fun Ps1VideoTab() {
         )
         SettingsDivider()
 
-        SegmentedRow(
+        // Keep the old preference intact for compatibility, but never present a
+        // non-functional old-engine option as a usable SwanStation control.
+        Ps1InfoRow(
             label = str("renderer.lineDetect.label"),
-            options = Ps1Settings.LINE_DETECT_LABELS,
-            selectedIndex = Ps1Settings.indexOfOrZero(Ps1Settings.LINE_DETECTS, s.lineDetect),
+            value = str("renderer.lineDetect.unavailable"),
             description = str("renderer.lineDetect.description"),
-            onChange = { idx ->
-                val next = Ps1Settings.LINE_DETECTS[idx]
-                editor.update { it.copy(lineDetect = next) }
-                pushGlVideoOptions(s.textureFilter, s.downsample, next)
-            },
         )
         SettingsDivider()
 

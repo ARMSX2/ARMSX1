@@ -182,8 +182,13 @@ const armsx_gpu_profile_t* armsx_gpu_profile_get(void);
 /* Thor frame scheduling shared by software and GL presentation paths, including
    the software bridge's GPU probe which has no driver identity yet. */
 int armsx_gpu_profile_prefers_pre_present_pacing(void);
-/* Mali compatibility: restore pre-regression CPU base-cycle accounting. */
+/* Mali and Adreno 710/720 compatibility: restore legacy CPU base-cycle accounting. */
 unsigned armsx_gpu_profile_cpu_base_cycles(void);
+/* Temporary bounded diagnostic capture for the reported Adreno 720 slowdown. */
+int armsx_gpu_profile_needs_720_probe(void);
+/* Emulation-thread lifetime gate, also used by Vulkan's wait/submit probes. */
+int armsx_gpu_profile_720_probe_active(void);
+void armsx_gpu_profile_set_720_probe_active(int active);
 /* Thor Adreno 740 / Qualcomm driver: prefer supported Vulkan MAILBOX.
    Other GPU/driver combinations keep their existing presentation mode. */
 int armsx_gpu_profile_prefers_vulkan_mailbox(void);

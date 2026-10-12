@@ -106,7 +106,7 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Item 7: import every valid PS2 BIOS from a chosen folder in one shot (refresh parity — the
+     * Item 7: import every recognized PS1 BIOS from a chosen folder in one shot (refresh parity — the
      * old UI let you point at a BIOS folder and pick between them, not import one file at a time).
      * Non-BIOS files are silently skipped (importFile validates via getBiosInfoFromFd); the existing
      * list + "Use selected" UI then lets the user choose between the imported BIOSes.
@@ -118,26 +118,16 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
                 val context = getApplication<Application>()
                 var count = 0
                 val children = DocumentFile.fromTreeUri(context, treeUri)?.listFiles()?.filter { it.isFile }.orEmpty()
-                // Remember what each BIOS was called in the source folder AND what it ended up
-                // called here: sanitising and de-duplication can rename it, and the siblings below
-                // are matched by stem, so they have to follow the name the file actually got.
-                val importedStems = HashMap<String, String>()
-                children.forEach { child ->
-                    val result = importFile(child.uri)
-                    if (result.isSuccess) {
-                        count++
-                        val sourceStem = child.name?.substringBeforeLast('.')?.lowercase()
-                        val target = result.getOrNull()
-                        if (sourceStem != null && target != null) {
-                            importedStems[sourceStem] = target.name.substringBeforeLast('.')
-                        }
-                    }
+                // Modified 2026-10-12: PS1 only; no PS2 NVRAM/mechacon companions.
+                children.filter {
+                    com.armsx2.core.Ps1BiosProbe.isCandidateSize(it.length())
+                }.forEach { child ->
+                    if (importFile(child.uri).isSuccess) count++
                 }
-                copyBiosSiblings(context, children, importedStems)
                 count
             }
             if (imported == 0) {
-                state.value = state.value.copy(busy = false, error = "No valid PlayStation BIOS found in that folder.")
+                state.value = state.value.copy(busy = false, error = "No recognized PS1 BIOS files were found. Choose a folder containing a 512 KB PlayStation BIOS.")
             } else {
                 refresh()
             }
@@ -167,42 +157,11 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
         state.value = state.value.copy(error = null)
     }
 
-    /**
-     * Copy a BIOS's .mec / .nvm companions in alongside it.
-     *
-     * These are not BIOS images, so importFile rejects them — getBiosInfoFromFd fails and they were
-     * silently dropped, which is why importing a folder brought the .bin and left the console's
-     * NVRAM behind. The core looks for them beside the BIOS under the SAME stem, so they are
-     * renamed to follow whatever the imported BIOS ended up called. Requested by Rei Ayanami.
-     *
-     * Only reachable from a folder import: a single-document URI gives no access to its siblings.
-     */
-    private fun copyBiosSiblings(
-        context: android.content.Context,
-        children: List<DocumentFile>,
-        importedStems: Map<String, String>,
-    ) {
-        if (importedStems.isEmpty()) return
-        val directory = MainActivityRuntime.internalBiosDir(context)
-        children.forEach { child ->
-            val name = child.name ?: return@forEach
-            val ext = name.substringAfterLast('.', "").lowercase()
-            if (ext != "mec" && ext != "nvm") return@forEach
-            val stem = importedStems[name.substringBeforeLast('.').lowercase()] ?: return@forEach
-            runCatching {
-                val target = File(directory, "$stem.$ext")
-                context.contentResolver.openInputStream(child.uri)?.use { input ->
-                    target.outputStream().use(input::copyTo)
-                }
-            }
-        }
-    }
-
     private fun importFile(uri: Uri): Result<File> = runCatching {
         val context = getApplication<Application>()
         val name = DocumentFile.fromSingleUri(context, uri)?.name?.takeIf(String::isNotBlank) ?: "bios.bin"
         val descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: error("Unable to open the file.")
-        NativeApp.getBiosInfoFromFd(descriptor.detachFd()) ?: error("Not a valid PlayStation BIOS.")
+        NativeApp.getBiosInfoFromFd(descriptor.detachFd()) ?: error("Not a recognized 512 KB PS1 BIOS.")
         val directory = MainActivityRuntime.internalBiosDir(context).apply { mkdirs() }
         val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val target = uniqueFile(directory, safeName)

@@ -132,6 +132,8 @@ void cdrom_cmd_getstat(psx_cdrom_t* cdrom) {
     cdrom_set_int(cdrom, 3);
 
     queue_push(cdrom->response, cdrom_get_stat(cdrom));
+    // Getstat reports the tray-change latch once, then acknowledges the closed tray.
+    if (cdrom->disc) cdrom->shell_open_latched = 0;
 
     cdrom_restore_state(cdrom);
 }

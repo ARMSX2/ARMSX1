@@ -1,7 +1,24 @@
 # ARMSX
 ARMSX is a fork of `psxe`, rebuilt around a native FSUI donor shell and SDL2-hosted frontends for desktop, Android, iOS, UWP, web, and PSVita.
 
+## Local SwanStation dev integration
+
+The Android dev Compose build now uses SwanStation with the normal dev frontend.
+This is not a public release; see [SWANSTATION-DEV.md](SWANSTATION-DEV.md) for
+source boundaries, unfinished features, build commands and verification results.
+Existing old-engine source edits are preserved but are not Android build inputs.
+The old-engine feature description below is not a SwanStation feature checklist.
+
 ## What It Supports
+The Android Compose frontend includes an offline PS1 cheat catalogue under **Cheats**.
+Known serial/region matches load automatically; uncertain regions/revisions require confirmation
+in **Browse cheat database**. Select cheats by name, with optional search; no pasted codes are
+needed for covered games. Imported/custom groups and existing selections are preserved, and new
+database cheats start disabled. Back up your memory cards before using cheats. Some games and
+code types are not covered. Data is from [Libretro](https://github.com/libretro/libretro-database)
+under CC BY-SA 4.0; attribution/license files are bundled with the catalogue. Rebuild the assets
+with `tools/update_ps1_cheats.py` and the source commit recorded in `ps1-cheats-NOTICE.txt`.
+
 ARMSX currently has the following emulator pieces wired up:
 - CPU, DMA, GPU, SPU, MDEC, GTE, and timers
 - CD-ROM loading

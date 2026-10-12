@@ -238,6 +238,8 @@ typedef struct {
     int fake_getlocl_data;
     uint8_t ier;
     uint8_t ifr;
+    // Transient tray-change status, not serialized into save states.
+    uint8_t shell_open_latched;
     uint8_t vol_pending[4];
     uint8_t vol[4];
     uint8_t mode;

@@ -2581,9 +2581,15 @@ class ArmsxSession {
         const unsigned cpu_base_cycles = 1;
 #endif
         psx_cpu_set_base_instruction_cycles(psx_get_cpu(psx_), cpu_base_cycles);
-        psxe_diag_logf("cpu", "base_instruction_cycles=%u timing_path=%s gpu_vendor=%s",
-            cpu_base_cycles, cpu_base_cycles == 2 ? "mali-compat" : "standard",
-            armsx_gpu_profile_vendor_name(armsx_gpu_profile_get()->vendor));
+        const armsx_gpu_profile_t* cpu_gpu_profile = armsx_gpu_profile_get();
+        const char* cpu_timing_path = cpu_base_cycles == 2
+            ? (cpu_gpu_profile->vendor == ARMSX_GPU_VENDOR_MALI
+                ? "mali-compat" : (cpu_gpu_profile->model == 720
+                    ? "adreno-720-compat" : "adreno-710-compat"))
+            : "standard";
+        psxe_diag_logf("cpu", "base_instruction_cycles=%u timing_path=%s gpu_vendor=%s gpu_model=%d",
+            cpu_base_cycles, cpu_timing_path,
+            armsx_gpu_profile_vendor_name(cpu_gpu_profile->vendor), cpu_gpu_profile->model);
         psx_cpu_set_execution_mode(psx_get_cpu(psx_), settings.cpu_engine);
         psxe_diag_logf("cpu", "execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
         ARMSX_BOOTLOG("core: CPU execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
@@ -3073,6 +3079,13 @@ class ArmsxSession {
         runahead_reused_frames_ = 0;
         g_psx_work_diag_enabled = 0;
         work_frames_ = work_window_frames_ = work_elapsed_frames_ = 0;
+        probe720_start_ = probe720_snapshot_ = probe720_steps_ = 0;
+        probe720_cpu_unavailable_ = probe720_instruction_phase_ = 0;
+        probe720_finished_ = false;
+        armsx_gpu_profile_set_720_probe_active(0);
+        for (unsigned i = 0; i < 2; ++i) {
+            probe720_frames_[i] = 0; probe720_wall_[i] = probe720_cpu_[i] = 0;
+        }
         work_totals_ = {}; work_worst_ = {}; work_worst_core_ = 0;
         // A capture still open here would leak its FILE* and lose its tail; closing it also
         // clears g_psx_audio_diag_enabled so a fresh session starts unarmed.
@@ -3441,6 +3454,17 @@ class ArmsxSession {
        instruction count. */
     std::uint32_t stepOneFrame() {
         const uint64_t loop_begin = core_split_enabled_ ? SDL_GetPerformanceCounter() : 0;
+        // Select once per frame. Separate, non-inlined loops keep the optional
+        // Adreno 720 probe from changing register allocation/code layout in the
+        // ordinary instruction loop (including Thor and runahead frames).
+        const std::uint32_t steps = probe720Active() && g_psx_work_diag_enabled
+            ? stepOneFrameProfiled() : stepOneFrameNormal();
+
+        if (loop_begin) instruction_loop_ticks_ += SDL_GetPerformanceCounter() - loop_begin;
+        return steps;
+    }
+
+    __attribute__((noinline)) std::uint32_t stepOneFrameNormal() {
         const std::uint64_t start_vblank = vblank_counter_;
         std::uint32_t steps = 0;
 
@@ -3455,8 +3479,23 @@ class ArmsxSession {
             }
         }
 
-        if (loop_begin) instruction_loop_ticks_ += SDL_GetPerformanceCounter() - loop_begin;
+        return steps;
+    }
 
+    __attribute__((noinline)) std::uint32_t stepOneFrameProfiled() {
+        const std::uint64_t start_vblank = vblank_counter_;
+        std::uint32_t steps = 0;
+        unsigned countdown = 16381 - probe720_instruction_phase_;
+        while (vblank_counter_ == start_vblank) {
+            if (--countdown == 0) {
+                psx_update_profiled(psx_);
+                countdown = 16381;
+            } else {
+                psx_update(psx_);
+            }
+            if (++steps >= kMaxFrameSteps) break;
+        }
+        probe720_instruction_phase_ = 16381 - countdown;
         return steps;
     }
 
@@ -3499,10 +3538,114 @@ class ArmsxSession {
         return true;
     }
 
+    bool probe720Active() const {
+        return armsx_gpu_profile_needs_720_probe() &&
+            (!probe720_start_ || SDL_GetTicks64() - probe720_start_ < 120000);
+    }
+
+    // Called with the core's thread CPU time, separate from elapsed wall time.
+    // This does not reset the queue/mixer counters or enable the full PCM probe.
+    void record720Core(uint64_t wall_ticks, uint64_t cpu_ns, uint32_t steps, bool work_sampled) {
+        if (!probe720Active()) return;
+        const unsigned sampled = work_sampled ? 1 : 0;
+        ++probe720_frames_[sampled];
+        probe720_wall_[sampled] += wall_ticks;
+        probe720_cpu_[sampled] += cpu_ns;
+        probe720_steps_ += steps;
+        if (!cpu_ns) ++probe720_cpu_unavailable_;
+        const uint64_t now = SDL_GetTicks64();
+        if (!probe720_snapshot_) probe720_snapshot_ = now;
+        if (now - probe720_snapshot_ < 2000) return;
+        const uint64_t capture_begin = SDL_GetPerformanceCounter();
+        const auto average = [this](unsigned bucket) {
+            return probe720_frames_[bucket] ?
+                CounterTicksToMilliseconds(probe720_wall_[bucket]) / probe720_frames_[bucket] : 0.0;
+        };
+        const auto cpu_average = [this](unsigned bucket) {
+            return probe720_frames_[bucket] ?
+                double(probe720_cpu_[bucket]) / 1e6 / probe720_frames_[bucket] : 0.0;
+        };
+        const auto cache = psx_cpu_get_cache_stats(psx_->cpu);
+        const auto& p = g_psx_cpu_probe;
+        unsigned hot_op = 0;
+        for (unsigned i = 1; i < 64; ++i)
+            if (p.opcode_ticks[i] > p.opcode_ticks[hot_op]) hot_op = i;
+        psxe_diag_pacingf("probe720_core schema=1 elapsed_ms=%llu interval_ms=%llu "
+            "frames_plain=%u frames_sampled=%u core_wall_ms_plain=%.3f core_cpu_ms_plain=%.3f "
+            "core_wall_ms_sampled=%.3f core_cpu_ms_sampled=%.3f cpu_clock_unavailable_frames=%u "
+            "steps=%llu cache_hits=%llu cache_misses=%llu cache_invalidations=%llu "
+            "cpu_samples=%u sample_cycles=%u pc_ram_bios_scratch_mmio_other=%u/%u/%u/%u/%u "
+            "slowest_pc=%08x slowest_opcode=%08x slowest_cpu_us=%.3f hot_opcode=%02x hot_calls=%u hot_us=%.3f",
+            (unsigned long long)(now - probe720_start_), (unsigned long long)(now - probe720_snapshot_),
+            probe720_frames_[0], probe720_frames_[1], average(0), cpu_average(0), average(1), cpu_average(1),
+            probe720_cpu_unavailable_, (unsigned long long)probe720_steps_,
+            (unsigned long long)cache.hits, (unsigned long long)cache.misses, (unsigned long long)cache.invalidations,
+            p.samples, p.sampled_cycles, p.regions[0], p.regions[1], p.regions[2], p.regions[3], p.regions[4],
+            p.slowest_pc, p.slowest_opcode, CounterTicksToMilliseconds(p.slowest_ticks) * 1000.0,
+            hot_op, p.opcode_calls[hot_op], CounterTicksToMilliseconds(p.opcode_ticks[hot_op]) * 1000.0);
+        // All opcode buckets allow a later comparison without guessing a hotspot.
+        std::string histogram;
+        for (unsigned i = 0; i < 64; ++i) if (p.opcode_calls[i]) {
+            char entry[80];
+            std::snprintf(entry, sizeof(entry), "%02x:%u:%.3f,", i, p.opcode_calls[i],
+                CounterTicksToMilliseconds(p.opcode_ticks[i]) * 1000.0);
+            histogram += entry;
+        }
+        psxe_diag_pacingf("probe720_opcodes buckets=opcode:calls:total_us values=%s", histogram.c_str());
+        char host[4096];
+        armsx_host_diagnostic_snapshot(host, sizeof(host));
+        armsx_host_usage_t usage;
+        armsx_host_usage_sample(&usage);
+        psxe_diag_pacingf("probe720_host %s ram_mb=%.1f available_mb=%.1f gpu_busy_percent=%.1f "
+            "process_percent_of_device=%.1f unavailable=-1_or_unavailable cumulative_counters=yes",
+            host, usage.ram_mb, usage.ram_available_mb, usage.gpu_percent, usage.cpu_percent);
+        size_t queued = 0;
+        uint32_t underruns, rebuffers, trims;
+        uint64_t missing;
+        SDL_LockAudioDevice(audio_dev_);
+        queued = audio_queue_.size() - audio_queue_read_offset_;
+        underruns = audio_underruns_; missing = audio_underrun_bytes_;
+        rebuffers = audio_rebuffer_events_; trims = audio_overflow_trims_;
+        SDL_UnlockAudioDevice(audio_dev_);
+        psxe_diag_pacingf("probe720_audio driver=%s output_hz=%d callback_samples=%u queued_bytes=%zu "
+            "queued_ms=%.3f underruns=%u missing_bytes=%llu rebuffers=%u overflow_trims=%u "
+            "rate_ratio=%.6f playback_started=%d audio_device=%u spu_control=%04x "
+            "cd_mode=%02x cd_state=%u cd_reading=%u xa_playing=%u counters_since_audio_open=yes",
+            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "unavailable",
+            audio_desired_.freq, (unsigned)audio_desired_.samples, queued,
+            double(queued) * 1000.0 / (kAudioBytesPerSample * kAudioMixRate), underruns,
+            (unsigned long long)missing, rebuffers, trims, audio_rate_ratio_, audio_playback_started_ ? 1 : 0,
+            (unsigned)audio_dev_, psx_->spu->spucnt, psx_->cdrom->mode, psx_->cdrom->state,
+            psx_->cdrom->read_ongoing, psx_->cdrom->xa_playing);
+        probe720_snapshot_ = now;
+        probe720_steps_ = 0; probe720_cpu_unavailable_ = 0;
+        for (unsigned i = 0; i < 2; ++i) {
+            probe720_frames_[i] = 0; probe720_wall_[i] = 0; probe720_cpu_[i] = 0;
+        }
+        g_psx_cpu_probe = {};
+        psxe_diag_pacingf("probe720_capture snapshot_wall_ms=%.3f overhead_in_next_loop_interval=yes",
+            CounterTicksToMilliseconds(SDL_GetPerformanceCounter() - capture_begin));
+    }
+
     // Automatic bounded work breakdown. CPU samples include memory-mapped
     // device calls; audio queue may include SPU/disc work. Never sum categories.
     void beginMaliWorkProbe() {
         ++work_elapsed_frames_;
+        const bool gpu720 = armsx_gpu_profile_needs_720_probe();
+        if (gpu720 && !probe720_start_) {
+            probe720_start_ = SDL_GetTicks64();
+            g_psx_cpu_probe = {};
+            psxe_diag_pacingf("probe720_begin schema=1 test=adreno720-timing-diagnostics-v1 "
+                "title=%s gpu=%s model=%d duration_ms=120000 work_frame_stride=16 cpu_sample_stride=16381 "
+                "base_instruction_cycles=%u overclock_percent=%u instruction_time_inclusive=yes "
+                "sampling_is_statistical=yes no_display_timestamps=yes",
+                title_.c_str(), armsx_gpu_profile_get()->name, armsx_gpu_profile_get()->model,
+                armsx_gpu_profile_cpu_base_cycles(), psx_get_cpu_overclock());
+        }
+        if (gpu720 && !probe720Active() && !probe720_finished_) {
+            probe720_finished_ = true;
+            psxe_diag_pacingf("probe720_end reason=120-second-budget capture_disabled=yes");
+        }
         // Ordinary Mali builds sample two seconds per thirty seconds from the
         // start. Per-primitive clock reads should not run throughout gameplay.
         // Full diagnostic builds retain their larger sample budget.
@@ -3516,9 +3659,10 @@ class ArmsxSession {
             : work_elapsed_frames_ > initial_budget &&
                 ((work_elapsed_frames_ - initial_budget - 1) % 1800) < 120;
         const bool probe_gpu = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
-        const bool enabled = probe_gpu && (work_elapsed_frames_ <= initial_budget || periodic);
+        const bool enabled = (probe_gpu && (work_elapsed_frames_ <= initial_budget || periodic)) ||
+            (gpu720 && probe720Active() && ((work_elapsed_frames_ - 1) % 16 == 0));
         psx_work_diag_begin(enabled ? SDL_GetPerformanceCounter : nullptr);
-        if (enabled && work_frames_ == 0) {
+        if (enabled && work_frames_ == 0 && !gpu720) {
             psxe_diag_pacingf("work_begin schema=5 source=%s title=%s frame_limit=%u "
                 "periodic_sample_frames=120 periodic_interval_frames=1800 "
 #if defined(ARMSX_DIAGNOSTIC_BUILD)
@@ -3549,7 +3693,8 @@ class ArmsxSession {
             work_worst_ = frame;
             work_worst_frame_ = work_elapsed_frames_;
         }
-        if (work_window_frames_ < 120 && work_elapsed_frames_ != 10800) return;
+        if (work_window_frames_ < (armsx_gpu_profile_needs_720_probe() ? 8u : 120u)
+            && work_elapsed_frames_ != 10800) return;
         const auto avg = [this](unsigned i) {
             return CounterTicksToMilliseconds(work_totals_.ticks[i]) / work_window_frames_;
         };
@@ -3639,7 +3784,7 @@ class ArmsxSession {
     uint64_t instructionLoopTicks() const { return instruction_loop_ticks_; }
 
     std::uint32_t runFrame() {
-        core_split_enabled_ = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+        core_split_enabled_ = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || probe720Active();
         instruction_loop_ticks_ = 0;
         stall_audio_ticks_ = 0;
         if (!psx_ || paused_) {
@@ -3897,7 +4042,8 @@ class ArmsxSession {
         launch_kind_ = LaunchKind::Disc;
         title_ = StemToTitle(path);
         psxe_diag_breadcrumbf("Disc swapped path=%s", path.string().c_str());
-        psx_soft_reset(psx_);
+        // A disc-change prompt belongs to the running game, not a new boot.
+        // Preserve CPU/RAM/BIOS so the game can detect the replacement disc.
         return true;
     }
 
@@ -3951,6 +4097,11 @@ class ArmsxSession {
         if (gpu && ((psx_pgxp_enabled() && rasterizer_mode_ != 3) ||
                     armsx_hw_gl_use_cpu_fallback(rasterizer_mode_, internal_scale_))) {
             hw_rt_backend_ = armsx_hw_rt_create(gpu, internal_scale_);
+
+#ifdef __ANDROID__
+            armsx_hw_rt_set_span_clipping(hw_rt_backend_,
+                armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI);
+#endif
 
             if (hw_rt_backend_) {
                 psx_gpu_set_backend(gpu, hw_rt_backend_);
@@ -5919,6 +6070,10 @@ class ArmsxSession {
     ArmsxAudioTimeStretcher audio_time_stretcher_;
     unsigned work_frames_ = 0, work_window_frames_ = 0, work_worst_frame_ = 0;
     unsigned work_elapsed_frames_ = 0;
+    uint64_t probe720_start_ = 0, probe720_snapshot_ = 0, probe720_steps_ = 0;
+    uint64_t probe720_wall_[2]{}, probe720_cpu_[2]{};
+    unsigned probe720_frames_[2]{}, probe720_cpu_unavailable_ = 0, probe720_instruction_phase_ = 0;
+    bool probe720_finished_ = false;
     uint64_t work_worst_core_ = 0;
     psx_work_diag_t work_totals_{}, work_worst_{};
     std::filesystem::path disc_path_;
@@ -7619,10 +7774,17 @@ class ArmsxApp {
             psx_state_service_requests();
         }
 
+        const bool gpu720_probe = session_.valid() && !session_.paused() && session_.probe720Active();
+        // Presentation still runs while paused: gate it here as well, so the
+        // Vulkan probe cannot outlive the capture budget in an open pause menu.
+        if (gpu720_probe || armsx_gpu_profile_720_probe_active())
+            armsx_gpu_profile_set_720_probe_active(gpu720_probe);
         const bool lag_probe = session_.valid() && !session_.paused()
-            && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || stall_probe);
+            && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || gpu720_probe || stall_probe);
         const uint64_t lag_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
         uint64_t lag_wait = 0, lag_core_end = 0;
+        uint64_t probe720_core_cpu_ns = 0;
+        bool probe720_work_sampled = false;
         const bool pace_before_present = armsx_mali_frame_pacing_active(
             armsx_gpu_profile_get()->vendor, session_.valid() && !session_.paused())
             || (session_.valid() && !session_.paused() &&
@@ -7680,9 +7842,15 @@ class ArmsxApp {
 
         if (session_stepping) {
             session_.beginMaliWorkProbe();
+            probe720_work_sampled = gpu720_probe && g_psx_work_diag_enabled;
+            const uint64_t cpu_begin = gpu720_probe ? armsx_host_thread_cpu_ns() : 0;
             session_steps = session_.runFrame();
             if (lag_probe) lag_core_end = SDL_GetPerformanceCounter();
-            if (lag_probe && armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI) {
+            if (gpu720_probe) {
+                const uint64_t cpu_end = armsx_host_thread_cpu_ns();
+                probe720_core_cpu_ns = cpu_begin && cpu_end >= cpu_begin ? cpu_end - cpu_begin : 0;
+            }
+            if (lag_probe && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || gpu720_probe)) {
                 const uint64_t core = lag_core_end - lag_work_begin;
                 const uint64_t instructions = session_.instructionLoopTicks();
                 core_split_ticks_ += core;
@@ -7824,7 +7992,8 @@ class ArmsxApp {
             session_.recordStallTiming(stall_start, end, lag_core_end - lag_work_begin,
                                       phase_emu_end - lag_core_end, end - lag_draw_begin, lag_wait);
         }
-        if (lag_probe && armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI && session_stepping && lag_core_end) {
+        if (lag_probe && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || gpu720_probe)
+            && session_stepping && lag_core_end) {
             const uint64_t end = SDL_GetPerformanceCounter();
             const uint64_t interval = lag_prev_end_ ? end - lag_prev_end_ : 0;
             lag_prev_end_ = end;
@@ -7836,6 +8005,22 @@ class ArmsxApp {
                 lag_wait_begin - phase_emu_end, // Achievements and other host work.
                 interval
             };
+            if (gpu720_probe && frame_period_ticks_ && interval > frame_period_ticks_ * 11 / 10 &&
+                end - probe720_last_dip_ >= SDL_GetPerformanceFrequency()) {
+                probe720_last_dip_ = end;
+                psxe_diag_pacingf("probe720_dip dip_index=%u steps=%u "
+                    "core_ms=%.3f core_cpu_ms=%.3f upload_finish_ms=%.3f wait_ms=%.3f draw_swap_ms=%.3f "
+                    "other_ms=%.3f interval_ms=%.3f budget_ms=%.3f "
+                    "skip_present=%d suspended=%d sampled=%d wall_times_not_display_timestamps=yes",
+                    ++probe720_dip_count_, session_steps,
+                    CounterTicksToMilliseconds(values[0]),
+                    probe720_core_cpu_ns ? double(probe720_core_cpu_ns) / 1e6 : -1.0,
+                    CounterTicksToMilliseconds(values[1]),
+                    CounterTicksToMilliseconds(values[2]), CounterTicksToMilliseconds(values[3]),
+                    CounterTicksToMilliseconds(values[4]), CounterTicksToMilliseconds(values[5]),
+                    CounterTicksToMilliseconds(frame_period_ticks_), skip_present, presentation_suspended,
+                    probe720_work_sampled);
+            }
             for (unsigned i = 0; i < 6; ++i) {
                 lag_sum_[i] += values[i];
                 lag_max_[i] = std::max(lag_max_[i], values[i]);
@@ -7876,6 +8061,9 @@ class ArmsxApp {
             lag_samples_ = lag_intervals_ = lag_long_intervals_ = lag_not_presented_ = 0;
             lag_sum_.fill(0); lag_max_.fill(0);
         }
+        if (gpu720_probe && session_stepping && lag_core_end)
+            session_.record720Core(lag_core_end - lag_work_begin, probe720_core_cpu_ns,
+                session_steps, probe720_work_sampled);
         publishFrameSkipTrace(session_stepping);
         publishFrameStats(stats_enabled, session_stepping, phase_frame_begin, phase_emu_end);
 
@@ -8725,6 +8913,8 @@ class ArmsxApp {
     bool managed_renderer_vsync_ = DefaultVsyncEnabled();
     std::array<uint64_t, 6> lag_sum_{}, lag_max_{};
     uint64_t lag_window_start_ = 0, lag_prev_end_ = 0;
+    uint64_t probe720_last_dip_ = 0;
+    unsigned probe720_dip_count_ = 0;
     unsigned lag_samples_ = 0, lag_intervals_ = 0, lag_long_intervals_ = 0, lag_not_presented_ = 0;
     unsigned core_split_frames_ = 0;
     uint64_t core_split_ticks_ = 0, instruction_split_ticks_ = 0;

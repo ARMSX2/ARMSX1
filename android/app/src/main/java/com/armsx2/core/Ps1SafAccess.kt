@@ -28,6 +28,7 @@ object Ps1SafAccess {
     class Session internal constructor(
         val launchPath: String,
         private val directory: File? = null,
+        val discs: List<Ps1Playlist.Disc> = emptyList(),
     ) : Closeable {
         override fun close() {
             directory?.let { runCatching { it.deleteRecursively() } }
@@ -47,9 +48,16 @@ object Ps1SafAccess {
         }
 
         return try {
+            if (cancelled()) throw IOException("Game preparation cancelled")
             val name = displayName(context, uri)
+            val discs = if (Ps1SafText.extension(name) == "m3u") {
+                playlistDiscs(context.contentResolver, uri)
+            } else {
+                // A single-file grant need not permit sibling listing. Still allow that game.
+                runCatching { discsForImage(context.contentResolver, uri, name) }.getOrDefault(emptyList())
+            }
             val launch = materialize(context.contentResolver, uri, name, root, 0, cancelled)
-            Session(launch.absolutePath, root)
+            Session(launch.absolutePath, root, discs)
         } catch (failure: Throwable) {
             runCatching { root.deleteRecursively() }
             throw failure
@@ -116,6 +124,34 @@ object Ps1SafAccess {
             return materialize(resolver, sibling, requested, root, depth + 1, cancelled)
         }
         throw IOException("No accessible disc from the selected playlist was found")
+    }
+
+    private fun playlistDiscs(resolver: ContentResolver, playlistUri: Uri): List<Ps1Playlist.Disc> =
+        Ps1SafText.playlistEntries(readSmallText(resolver, playlistUri)).mapIndexed { index, reference ->
+            val name = Ps1SafText.baseName(reference)
+            val source = resolveReference(resolver, playlistUri, reference)
+            Ps1Playlist.Disc(index, Ps1Playlist.discLabel(name, index), File(name), source != null,
+                source?.toString().orEmpty())
+        }
+
+    private fun discsForImage(resolver: ContentResolver, image: Uri, name: String): List<Ps1Playlist.Disc> {
+        val siblings = siblingDocuments(resolver, image)
+        fun sameDocument(a: String, b: Uri): Boolean = runCatching {
+            DocumentsContract.getDocumentId(Uri.parse(a)) == DocumentsContract.getDocumentId(b)
+        }.getOrDefault(a == b.toString())
+        val parent = parentDocumentUri(resolver, image)
+        val parentSiblings = parent?.let { runCatching { siblingDocuments(resolver, it) }.getOrNull() }.orEmpty()
+        for (candidates in listOf(siblings, parentSiblings)) {
+            val playlists = candidates.filterKeys { Ps1SafText.extension(it) == "m3u" }.values
+                .mapNotNull { runCatching { playlistDiscs(resolver, it) }.getOrNull() }
+                .filter { discs -> discs.any { it.exists && sameDocument(it.path, image) } }
+            if (playlists.size == 1) return playlists.single()
+            if (playlists.size > 1) return emptyList()
+        }
+        return Ps1Playlist.siblingDiscNames(name, siblings.keys).mapIndexed { index, sibling ->
+            Ps1Playlist.Disc(index, Ps1Playlist.discLabel(sibling, index), File(sibling), true,
+                siblings.getValue(sibling).toString())
+        }.takeIf { it.size > 1 }.orEmpty()
     }
 
     private fun copyDocument(
@@ -243,11 +279,12 @@ object Ps1SafAccess {
         resolver: ContentResolver,
         documentUri: Uri,
         reference: String,
-        siblings: Map<String, Uri>,
+        siblings: Map<String, Uri> = emptyMap(),
     ): Uri? {
+        if (reference.startsWith("content://")) return Uri.parse(reference)
         val segments = Ps1SafText.relativeSegments(reference)
         var parent = parentDocumentUri(resolver, documentUri) ?: return null
-        var children = siblings
+        var children = if (siblings.isEmpty()) childDocuments(resolver, parent) else siblings
         segments.forEachIndexed { index, segment ->
             if (segment == "..") {
                 parent = parentDocumentUri(resolver, parent) ?: return null
@@ -277,22 +314,37 @@ object Ps1SafAccess {
         }.getOrNull()
 
     private fun parentDocumentUri(resolver: ContentResolver, uri: Uri): Uri? {
+        // A document picked separately can still use an existing ROM-folder tree grant.
+        val treeDocument = runCatching {
+            if (DocumentsContract.isTreeUri(uri)) uri else {
+                val id = DocumentsContract.getDocumentId(uri)
+                val grant = resolver.persistedUriPermissions.filter { permission ->
+                    permission.isReadPermission && permission.uri.authority == uri.authority &&
+                        DocumentsContract.isTreeUri(permission.uri)
+                }.sortedByDescending { DocumentsContract.getTreeDocumentId(it.uri).length }
+                    .firstOrNull { permission ->
+                        val root = DocumentsContract.getTreeDocumentId(permission.uri)
+                        id == root || id.startsWith("$root/") || (root.endsWith(':') && id.startsWith(root))
+                    }
+                grant?.let { DocumentsContract.buildDocumentUriUsingTree(it.uri, id) } ?: uri
+            }
+        }.getOrDefault(uri)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching {
-                val path = DocumentsContract.findDocumentPath(resolver, uri)?.path.orEmpty()
+                val path = DocumentsContract.findDocumentPath(resolver, treeDocument)?.path.orEmpty()
                 if (path.size >= 2) {
-                    return DocumentsContract.buildDocumentUriUsingTree(uri, path[path.lastIndex - 1])
+                    return DocumentsContract.buildDocumentUriUsingTree(treeDocument, path[path.lastIndex - 1])
                 }
             }
         }
         return runCatching {
-            val id = DocumentsContract.getDocumentId(uri)
-            val treeRoot = DocumentsContract.getTreeDocumentId(uri)
+            val id = DocumentsContract.getDocumentId(treeDocument)
+            val treeRoot = DocumentsContract.getTreeDocumentId(treeDocument)
             if (id == treeRoot) return null
             val parentId = if ('/' in id) id.substringBeforeLast('/')
                 else if (':' in id) id.substringBefore(':') + ":" else ""
             parentId.takeIf(String::isNotBlank)?.let {
-                DocumentsContract.buildDocumentUriUsingTree(uri, it)
+                DocumentsContract.buildDocumentUriUsingTree(treeDocument, it)
             }
         }.getOrNull()
     }

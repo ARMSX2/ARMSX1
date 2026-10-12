@@ -41,6 +41,7 @@ object Ps1Playlist {
         val label: String,
         val file: File,
         val exists: Boolean,
+        val path: String = file.absolutePath,
     )
 
     fun isPlaylist(path: String): Boolean =
@@ -59,13 +60,17 @@ object Ps1Playlist {
         val discs = mutableListOf<Disc>()
 
         for (raw in lines) {
-            val line = raw.trim()
+            val line = raw.trim().removePrefix("\uFEFF").trim().removeSurrounding("\"")
 
             // '#' is a comment in .m3u, and '#EXTM3U' / '#EXTINF' headers are common in playlists
             // written by media tools. Skipping every '#' line covers all of them.
             if (line.isEmpty() || line.startsWith("#")) continue
 
-            val entry = if (File(line).isAbsolute) File(line) else File(parent, line)
+            val normalized = line.replace('\\', '/')
+            val entry = runCatching {
+                if (normalized.startsWith("file:")) File(java.net.URI(normalized))
+                else if (File(normalized).isAbsolute) File(normalized) else File(parent, normalized)
+            }.getOrNull() ?: continue
 
             discs += Disc(
                 index = discs.size,
@@ -84,7 +89,7 @@ object Ps1Playlist {
      * to insert — falling straight to a positional "Disc 3" would mislabel a playlist whose
      * entries are out of order or which omits a disc.
      */
-    private fun discLabel(fileName: String, position: Int): String {
+    fun discLabel(fileName: String, position: Int): String {
         val match = Regex("""(?i)\b(?:disc|disk|cd)\s*[._-]?\s*(\d{1,2})\b""").find(fileName)
         val number = match?.groupValues?.get(1)?.toIntOrNull()
 
@@ -113,5 +118,38 @@ object Ps1Playlist {
         val file = File(path)
 
         return bootDisc(file)?.absolutePath ?: path
+    }
+
+    private val discMarker = Regex("""(?i)\b(?:disc|disk|cd)\s*[._-]?\s*(\d{1,2})\b""")
+
+    /** Match numbered images conservatively, never unrelated games or CUE track files. */
+    fun siblingDiscNames(selected: String, names: Collection<String>): List<String> {
+        fun family(name: String): String? {
+            val stem = name.substringBeforeLast('.')
+            if (!discMarker.containsMatchIn(stem)) return null
+            return discMarker.replace(stem, "").lowercase(Locale.ROOT)
+                .replace(Regex("[\\s()._\\[\\]-]+"), " ").trim()
+        }
+        val key = family(selected) ?: return emptyList()
+        return names.filter {
+            it.substringAfterLast('.').equals(selected.substringAfterLast('.'), true) && family(it) == key
+        }.sortedBy { discMarker.find(it)?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE }
+    }
+
+    /** Prefer an explicit playlist containing this image; do not guess between conflicting sets. */
+    fun discsForImage(image: File): List<Disc> {
+        val siblings = image.parentFile?.listFiles().orEmpty().filter { it.isFile }
+        for (directory in listOfNotNull(image.parentFile, image.parentFile?.parentFile)) {
+            val matches = directory.listFiles().orEmpty().filter { it.isFile && isPlaylist(it) }
+                .map(::parse).filter { discs ->
+                    discs.any { runCatching { it.file.canonicalFile == image.canonicalFile }.getOrDefault(false) }
+                }
+            if (matches.size == 1) return matches.single()
+            if (matches.size > 1) return emptyList()
+        }
+        return siblingDiscNames(image.name, siblings.map { it.name }).mapIndexed { index, name ->
+            val file = File(image.parentFile, name)
+            Disc(index, discLabel(name, index), file, file.isFile)
+        }.takeIf { it.size > 1 }.orEmpty()
     }
 }

@@ -185,7 +185,7 @@ private fun SaveStateCard(
                     )
                     Spacer(Modifier.height(3.dp))
                     val slotLabel = save.slot?.let {
-                        "${str("memcard.slot1").substringBefore(' ')} ${it + 1}"
+                        if (it == -1) "Autosave" else "${str("memcard.slot1").substringBefore(' ')} ${it + 1}"
                     } ?: save.serial
                     Text(
                         text = slotLabel,

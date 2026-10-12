@@ -17,3 +17,11 @@ files/logs/
 .DS_Store
 /armsx.app/
 /test/
+__pycache__/
+*.pyc
+build-core/
+build-shaders/
+*.log
+test-fixtures/
+android/local.properties
+discord_creds.env

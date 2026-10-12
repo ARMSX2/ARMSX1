@@ -146,19 +146,17 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
                 2 -> MainActivityRuntime.resetGame()
                 3 -> MainActivityRuntime.promptSwapDisc()
                 else -> {
-                    val discs = MainActivityRuntime.playlistDiscs()
                     when (val action = state.value.selectedAction - 4) {
-                        in discs.indices -> MainActivityRuntime.swapToPlaylistDisc(discs[action])
-                        discs.size -> swapGame()
-                        discs.size + 1 -> MainActivityRuntime.closeGame()
-                        discs.size + 2 -> {
+                        0 -> swapGame()
+                        1 -> MainActivityRuntime.closeGame()
+                        2 -> {
                             MainActivityRuntime.instance?.let { com.armsx2.Screenshots.capture(it.applicationContext) }
                             com.armsx2.ui.GameOsd.toast("Screenshot saved")
                             resume()
                         }
                         // Repeated presses scrub further back without resuming.
-                        discs.size + 3 -> openDiscord()
-                        discs.size + 4 -> if (state.value.rewindEnabled) rewindStepBack()
+                        3 -> openDiscord()
+                        4 -> if (state.value.rewindEnabled) rewindStepBack()
                     }
                 }
             }
@@ -393,7 +391,7 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
     private fun actionCount(tab: EmulationMenuTab): Int = when (tab) {
         // Resume, Fast-Forward, Restart, Swap Disc, playlist discs, Swap Game, Close,
         // Screenshot, Discord, then optional Rewind; keep indices aligned with SessionPane.
-        EmulationMenuTab.Session -> 8 + MainActivityRuntime.playlistDiscs().size +
+        EmulationMenuTab.Session -> 8 +
             if (state.value.rewindEnabled) 1 else 0
         // 0 for the three registry-driven panes: their rows are SettingsControllerNav items, not
         // indices into an action grid, so a non-zero count here would move a selection nothing
@@ -454,7 +452,7 @@ object EmulationMenuInputController {
         when (event.action) {
             android.view.KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && confirmPress.down(event.keyCode)) {
                 val viewModel = owner
-                val target = if (overlayDismiss == null && nav.activeLayer.value == null) {
+                val target = if (!MainActivityRuntime.discPickerOpen.value && overlayDismiss == null && nav.activeLayer.value == null) {
                     if (!inContent.value) viewModel?.state?.value?.tab?.let { MenuMoveTarget("tabs", it.name) }
                     else nav.menuMoveTarget()
                 } else null
@@ -525,6 +523,15 @@ object EmulationMenuInputController {
 
     fun move(dx: Int, dy: Int): Boolean {
         cancelConfirm()
+        if (MainActivityRuntime.discPickerOpen.value) {
+            if (!MainActivityRuntime.discSwapInProgress.value) {
+                val delta = if (dy != 0) dy else dx
+                MainActivityRuntime.discPickerSelection.value =
+                    (MainActivityRuntime.discPickerSelection.value + delta).coerceIn(0,
+                        (MainActivityRuntime.playlistDiscs().size - 1).coerceAtLeast(0))
+            }
+            return true
+        }
         if (QuickMenuOrder.moving != null) {
             QuickMenuOrder.step(if (dy != 0) dy else dx)
             return true
@@ -561,6 +568,7 @@ object EmulationMenuInputController {
 
     /** Right is reserved for returning to tabs; X keeps all horizontal choices/values reachable. */
     fun nextOption(): Boolean {
+        if (MainActivityRuntime.discPickerOpen.value) return true
         owner ?: return false
         cancelConfirm()
         if (overlayDismiss != null || QuickMenuOrder.moving != null) return true
@@ -570,6 +578,7 @@ object EmulationMenuInputController {
 
     /** L1 / R1 always cycle tabs, snapping back to the tab column. */
     fun tab(delta: Int): Boolean {
+        if (MainActivityRuntime.discPickerOpen.value) return true
         cancelConfirm()
         if (QuickMenuOrder.moving != null) { QuickMenuOrder.step(delta); return true }
         // Swallowed while a panel is up: the tabs are behind it, and silently switching the pane
@@ -582,6 +591,11 @@ object EmulationMenuInputController {
     }
 
     fun confirm(): Boolean {
+        if (MainActivityRuntime.discPickerOpen.value) {
+            MainActivityRuntime.playlistDiscs().getOrNull(MainActivityRuntime.discPickerSelection.value)
+                ?.let(MainActivityRuntime::swapToPlaylistDisc)
+            return true
+        }
         if (overlayDismiss != null) { nav.confirm(); return true }
         owner ?: return false
         if (!inContent.value) { enterContent(); return true }
@@ -591,6 +605,10 @@ object EmulationMenuInputController {
 
     fun back(): Boolean {
         cancelConfirm()
+        if (MainActivityRuntime.discPickerOpen.value) {
+            if (!MainActivityRuntime.discSwapInProgress.value) MainActivityRuntime.discPickerOpen.value = false
+            return true
+        }
         if (QuickMenuOrder.moving != null) { QuickMenuOrder.finish(false); return true }
         // Back closes the panel, not the menu behind it.
         overlayDismiss?.let { dismiss -> dismiss(); return true }

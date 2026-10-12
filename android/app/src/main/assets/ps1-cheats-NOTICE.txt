@@ -1,0 +1,16 @@
+PS1 cheat catalogue
+
+Attribution: Libretro database contributors, Redump contributors, and original code authors.
+Source: https://github.com/libretro/libretro-database
+Commit: 12c21cf79f1e20eff6ac68b80875816c717d0a7a
+Source directory: cht/Sony - PlayStation
+License: Creative Commons Attribution-ShareAlike 4.0 International
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Changes: converted supported, complete GameShark groups to ARMSX .cht format;
+omitted unsupported/placeholder groups; added conservative title/region/serial index.
+Serial metadata is derived from the bundled ps1-cover-titles.tsv; its source commit
+and attribution are recorded in ps1-cover-titles-NOTICE.txt. No inferred ROM identity
+is used: this index maps known serials to cheat lists, not filenames to serials.
+Data is supplied without warranty and remains CC BY-SA 4.0, separately from the app.
+Rebuild with tools/update_ps1_cheats.py and the pinned source checkout.

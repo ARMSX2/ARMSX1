@@ -414,6 +414,12 @@ open class MainActivityRuntime : ComponentActivity() {
          *  the Swap Disc picker so a multi-disc game offers its own discs instead of a raw file
          *  browser. */
         private var m_szPlaylist = ""
+        private val sessionDiscs = mutableStateOf<List<com.armsx2.core.Ps1Playlist.Disc>>(emptyList())
+        val currentDiscPath = mutableStateOf("")
+        val discSwapInProgress = mutableStateOf(false)
+        private val discSessionLock = Any()
+        private var discSessionToken: Any? = null
+        private val swapSessions = mutableListOf<com.armsx2.core.Ps1SafAccess.Session>()
 
         /**
          * A .m3u is a playlist, not an image — the core must never be handed one. Resolves it to
@@ -422,8 +428,10 @@ open class MainActivityRuntime : ComponentActivity() {
          */
         private fun resolveLaunchPath(pathOrUri: String): String {
             m_szPlaylist = ""
-
-            if (!com.armsx2.core.Ps1Playlist.isPlaylist(pathOrUri)) return pathOrUri
+            sessionDiscs.value = emptyList()
+            discSwapInProgress.value = false
+            currentDiscPath.value = pathOrUri
+            if (pathOrUri.startsWith("content://")) return pathOrUri
 
             // ★ The two call sites do NOT agree on form: one passes a filesystem path, the other a
             // percent-encoded file:// URI ("file:///storage/.../Crash%20Bandicoot.m3u"). Handing
@@ -441,26 +449,65 @@ open class MainActivityRuntime : ComponentActivity() {
                 pathOrUri
             }
 
-            val boot = com.armsx2.core.Ps1Playlist.bootDisc(java.io.File(fsPath)) ?: return pathOrUri
-
+            val file = java.io.File(fsPath)
+            currentDiscPath.value = file.absolutePath
+            val playlist = com.armsx2.core.Ps1Playlist.isPlaylist(file)
+            sessionDiscs.value = if (playlist) com.armsx2.core.Ps1Playlist.parse(file)
+                else com.armsx2.core.Ps1Playlist.discsForImage(file)
+            if (!playlist) return pathOrUri
+            val boot = sessionDiscs.value.firstOrNull { it.exists }?.file ?: return pathOrUri
             m_szPlaylist = fsPath
+            currentDiscPath.value = boot.absolutePath
 
             return if (isUri) android.net.Uri.fromFile(boot).toString() else boot.absolutePath
         }
 
         /** Discs of the playlist this session came from; empty for a single-disc game. */
         fun playlistDiscs(): List<com.armsx2.core.Ps1Playlist.Disc> =
-            if (m_szPlaylist.isEmpty()) {
-                emptyList()
-            } else {
-                com.armsx2.core.Ps1Playlist.parse(java.io.File(m_szPlaylist))
-            }
+            sessionDiscs.value
 
         /** Swap to a disc of the current playlist. Same native path the file picker uses. */
         fun swapToPlaylistDisc(disc: com.armsx2.core.Ps1Playlist.Disc) {
             if (!disc.exists) return
+            swapDiscPath(disc.path)
+        }
 
-            runCatching { kr.co.iefriends.pcsx2.NativeApp.changeDisc(disc.file.absolutePath) }
+        /** Keep SAF copies alive until the native session ends, not just until the swap is queued. */
+        private fun swapDiscPath(path: String) {
+            if (discSwapInProgress.value) return
+            val context = instance?.applicationContext ?: return
+            val token = synchronized(discSessionLock) { discSessionToken } ?: return
+            discSwapInProgress.value = true
+            kotlin.concurrent.thread(name = "armsx-disc-swap") {
+                var prepared: com.armsx2.core.Ps1SafAccess.Session? = null
+                val accepted = runCatching {
+                    prepared = com.armsx2.core.Ps1SafAccess.prepare(context, path) {
+                        vmStopInProgress || synchronized(discSessionLock) { discSessionToken !== token }
+                    }
+                    synchronized(discSessionLock) {
+                        if (discSessionToken !== token || vmStopInProgress || !NativeApp.hasActiveVM()) false
+                        else if (NativeApp.changeDisc(prepared!!.launchPath)) {
+                            swapSessions += prepared!!
+                            prepared = null // owned by the running session now
+                            true
+                        } else false
+                    }
+                }.getOrDefault(false)
+                prepared?.close()
+                instance?.runOnUiThread {
+                    if (synchronized(discSessionLock) { discSessionToken !== token }) return@runOnUiThread
+                    discSwapInProgress.value = false
+                    if (accepted) {
+                        currentDiscPath.value = path
+                        discPickerOpen.value = false
+                        WindowImpl.overlayVisible.value = false
+                        resume()
+                    } else {
+                        android.widget.Toast.makeText(context, "Unable to prepare this disc. The current session was kept.",
+                            android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
         }
         private val pendingExternalLaunch = mutableStateOf<String?>(null)
         // A library game tapped before native init finished — deferred and fired once
@@ -528,30 +575,56 @@ open class MainActivityRuntime : ComponentActivity() {
                     failure.message?.contains("Permission Denial") == true
             }.getOrNull() else null
             val launched = launchSession?.use { prepared ->
+                val discToken = Any()
+                synchronized(discSessionLock) { discSessionToken = discToken }
+                instance?.runOnUiThread {
+                    if (synchronized(discSessionLock) { discSessionToken !== discToken }) return@runOnUiThread
+                    if (prepared.discs.isNotEmpty()) {
+                        sessionDiscs.value = prepared.discs
+                        currentDiscPath.value = prepared.discs.firstOrNull { it.exists }?.path ?: path
+                    }
+                }
                 if (prepared.launchPath != path) {
                     println(
                         "@@ARMSX_SAF_LAUNCH@@ kind=$kind uri=${path.take(160)} " +
                             "bridge=${prepared.launchPath.take(160)}",
                     )
                 }
-                com.armsx2.core.Ps1MemoryCards.runSession({ vmStopInProgress }) {
-                    val token = synchronized(vmLifecycleLock) {
-                        if (vmStopInProgress) 0L else NativeApp.prepareVMRun().also { vmNativeRunToken = it }
-                    }
-                    if (token == 0L) false else try {
-                        // Every launch path reaches this gate, including the normal PS1
-                        // library/SAF path, restart and Swap Game. Apply the resolved host
-                        // scheduling policy before the native emulation thread begins.
-                        val scheduling = com.armsx2.config.ConfigStore.resolveForGame(
-                            if (kind == "BIOS") null else currentGame.value?.settingsKey,
-                        )
-                        NativeApp.setAffinityMode(scheduling.affinityMode)
-                        NativeApp.runVMThreadForSession(prepared.launchPath, token)
-                    } finally {
-                        NativeApp.releaseVMRun(token)
-                        synchronized(vmLifecycleLock) {
-                            if (vmNativeRunToken == token) vmNativeRunToken = 0L
+                try {
+                    com.armsx2.core.Ps1MemoryCards.runSession({ vmStopInProgress }) {
+                        val token = synchronized(vmLifecycleLock) {
+                            if (vmStopInProgress) 0L else NativeApp.prepareVMRun().also { vmNativeRunToken = it }
                         }
+                        if (token == 0L) false else try {
+                            // Every launch path reaches this gate, including the normal PS1
+                            // library/SAF path, restart and Swap Game. Apply the resolved host
+                            // scheduling policy before the native emulation thread begins.
+                            val scheduling = com.armsx2.config.ConfigStore.resolveForGame(
+                                if (kind == "BIOS") null else currentGame.value?.settingsKey,
+                            )
+                            NativeApp.setAffinityMode(scheduling.affinityMode)
+                            NativeApp.configureSwanSession(
+                                if (kind == "BIOS") "BIOS" else currentGame.value?.settingsKey.orEmpty(),
+                                path,
+                            )
+                            NativeApp.runVMThreadForSession(prepared.launchPath, token)
+                        } finally {
+                            NativeApp.releaseVMRun(token)
+                            synchronized(vmLifecycleLock) {
+                                if (vmNativeRunToken == token) vmNativeRunToken = 0L
+                            }
+                        }
+                    }
+                } finally {
+                    val retained = synchronized(discSessionLock) {
+                        if (discSessionToken === discToken) discSessionToken = null
+                        swapSessions.toList().also { swapSessions.clear() }
+                    }
+                    retained.forEach { it.close() }
+                    instance?.runOnUiThread {
+                        if (synchronized(discSessionLock) { discSessionToken != null }) return@runOnUiThread
+                        discSwapInProgress.value = false
+                        discPickerOpen.value = false
                     }
                 }
             } ?: false
@@ -1743,11 +1816,16 @@ open class MainActivityRuntime : ComponentActivity() {
          *  UI migration, so Swap Disc silently did nothing. */
         /** Set when Swap Disc is pressed on a playlist game; the menu shows its disc list. */
         val discPickerOpen = androidx.compose.runtime.mutableStateOf(false)
+        val discPickerSelection = androidx.compose.runtime.mutableStateOf(0)
 
         fun promptSwapDisc() {
+            if (vmStopInProgress || discSwapInProgress.value || !NativeApp.hasActiveVM()) return
+            if (!WindowImpl.overlayVisible.value) InGameOverlay.open()
             // A multi-disc game knows its own discs — sending the player to a file browser to
             // find disc 2 of the game they are already playing is the wrong question to ask.
             if (playlistDiscs().size > 1) {
+                discPickerSelection.value = playlistDiscs().indexOfFirst { it.path == currentDiscPath.value }
+                    .coerceAtLeast(0)
                 discPickerOpen.value = true
 
                 return
@@ -2394,23 +2472,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     // new disc, and emits the on-screen "Disc changed to …" OSD.
                     // Runs off-thread since it parks the CPU thread and blocks.
                     println("@@ANDROID_SWAP_DISC@@ uri=${uri.take(240)}")
-                    kotlin.concurrent.thread {
-                        val ok = runCatching { NativeApp.changeDisc(uri) }.getOrDefault(false)
-                        instance?.runOnUiThread {
-                            if (ok) {
-                                // changeDisc parks the VM to swap on the CPU
-                                // thread; unpause so the game runs and detects
-                                // the new disc (otherwise the screen sits frozen
-                                // on the paused frame).
-                                resume()
-                            } else {
-                                // Swap Disc is swap-only. If native rejected
-                                // the image it already restored the old disc,
-                                // so just resume the existing session.
-                                resume()
-                            }
-                        }
-                    }
+                    swapDiscPath(uri)
                 }
             } catch (_: Exception) { }
         }
@@ -3991,6 +4053,10 @@ open class MainActivityRuntime : ComponentActivity() {
                     if (down) InGameOverlay.toggle()
                     return true
                 }
+                ControllerMappings.SysHotkey.SWAP_DISC -> {
+                    if (down) promptSwapDisc()
+                    return true
+                }
                 ControllerMappings.SysHotkey.SCREENSHOT -> {
                     if (down) com.armsx2.Screenshots.capture(applicationContext)
                     return true
@@ -5425,6 +5491,7 @@ open class MainActivityRuntime : ComponentActivity() {
     private fun runStickHotkey(h: ControllerMappings.SysHotkey) {
         when (h) {
             ControllerMappings.SysHotkey.MENU -> InGameOverlay.toggle()
+            ControllerMappings.SysHotkey.SWAP_DISC -> promptSwapDisc()
             ControllerMappings.SysHotkey.SCREENSHOT -> com.armsx2.Screenshots.capture(applicationContext)
             ControllerMappings.SysHotkey.SAVE_STATE -> saveState()
             ControllerMappings.SysHotkey.LOAD_STATE -> loadState()

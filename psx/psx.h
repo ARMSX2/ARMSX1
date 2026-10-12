@@ -72,6 +72,8 @@ void psx_load_exe(psx_t*, const char*);
 void psx_set_cpu_overclock(unsigned percent);
 unsigned psx_get_cpu_overclock(void);
 void psx_update(psx_t*);
+/* Same machine update, timed only when the frontend selects a sparse sample. */
+void psx_update_profiled(psx_t*);
 void psx_run_frame(psx_t*);
 void* psx_get_display_buffer(psx_t*);
 void* psx_get_vram(psx_t*);

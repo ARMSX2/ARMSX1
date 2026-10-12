@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Process
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.system.Os
 import android.system.OsConstants
 import android.view.InputDevice
@@ -150,6 +151,13 @@ object DiagnosticsReport {
         w.appendLine("abis: ${Build.SUPPORTED_ABIS.joinToString()}")
         w.appendLine("page size: ${runCatching { Os.sysconf(OsConstants._SC_PAGESIZE) }.getOrDefault(-1L)}")
         w.appendLine("free app storage: ${context.filesDir.usableSpace}")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val thermal = runCatching {
+                context.getSystemService(PowerManager::class.java).currentThermalStatus
+            }.getOrDefault(-1)
+            w.appendLine("thermal status at export: $thermal (0=none, 1=light, 2=moderate, " +
+                "3=severe, 4=critical, 5=emergency, 6=shutdown, -1=unavailable)")
+        }
         val coreLogging = BuildConfig.DIAGNOSTIC_BUILD ||
             runCatching { Ps1SettingsStore.load(context).loggingEnabled }.getOrDefault(false)
         w.appendLine(
@@ -169,8 +177,8 @@ object DiagnosticsReport {
         section(w, "armsx.log — core/interpreter/renderer diagnostics", File(context.filesDir, "logs/armsx.log"))
         section(w, "previous audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt.previous"))
         section(w, "audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt"))
-        section(w, "previous automatic Mali pacing", File(context.filesDir, "logs/armsx.log.pacing.previous"))
-        section(w, "automatic Mali pacing and FPS dips (independent of core logging)", File(context.filesDir, "logs/armsx.log.pacing"))
+        section(w, "previous automatic GPU pacing", File(context.filesDir, "logs/armsx.log.pacing.previous"))
+        section(w, "automatic GPU pacing, FPS dips and bounded device probes (independent of core logging)", File(context.filesDir, "logs/armsx.log.pacing"))
         section(w, "previous device session", File(context.filesDir, "logs/device.previous.log"))
         section(w, "device lifecycle, controller and native logs", File(context.filesDir, "logs/device.log"))
         section(w, "session.log — frontend stdout/stderr", File(externalLogs, "session.log"))

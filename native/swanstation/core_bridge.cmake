@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Attach our small public C API without modifying the pinned upstream submodule.
+if(PROJECT_NAME STREQUAL "swanstation")
+  cmake_language(EVAL CODE "cmake_language(DEFER CALL target_sources swanstation_libretro PRIVATE \"${CMAKE_CURRENT_LIST_DIR}/core_bridge.cpp\")")
+  include("${CMAKE_CURRENT_LIST_DIR}/core_texture_hooks.cmake")
+  cmake_language(DEFER CALL swan_attach_texture_hooks)
+endif()

@@ -62,13 +62,19 @@ def isDiscordSdkAvailable = file("${project.projectDir}/libs/discord_partner_sdk
 //
 // Overridable from the command line so a release build can stamp the tag it is published under:
 //     ./gradlew :app:assembleGithubRelease -Parmsx.versionCode=9 -Parmsx.versionName=1.2.0
-// The defaults are the historical hardcoded values, so an ordinary build is unchanged.
+// Defaults identify the stable release; CI can still override them for nightlies.
+// The code uses the same Unix-time epoch as CI so stable updates also install
+// over earlier nightly builds.
 //
 // This matters to the in-app updater (src/github): it decides whether a GitHub release is newer by
 // comparing the release tag against BuildConfig.VERSION_NAME. A published APK still carrying the
 // placeholder 0.1.0 would go on offering the user the very release they just installed, forever.
-def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.1.0').toString()
-def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '1').toString() as Integer
+def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.1.5').toString()
+def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '91045828').toString() as Integer
+// Optional isolated builds keep the normal app and its private data untouched.
+def armsxApplicationId = (project.findProperty('armsx.applicationId') ?: 'com.nanodata.armsx').toString()
+def armsxAppLabel = (project.findProperty('armsx.appLabel') ?: '@string/app_name').toString()
+def isIsolatedBuild = armsxApplicationId != 'com.nanodata.armsx'
 
 // Keep locally built and CI APKs identifiable in exported diagnostics.
 def armsxSourceCommit = (project.findProperty('armsx.sourceCommit') ?: System.getenv('GITHUB_SHA') ?: '').toString()
@@ -83,31 +89,23 @@ if (!armsxSourceCommit) {
 if (!(armsxSourceCommit ==~ /[0-9a-fA-F]{40,64}/)) armsxSourceCommit = 'unknown'
 
 android {
-    if (windowsNativeBuild) {
-        ndkVersion rootProject.ext.ndkVersion
-        externalNativeBuild { cmake { path file('../CMakeLists.txt'); version '3.30.5' } }
-    }
+    // Dev Compose UI stays in place; only the Android engine changes.
+    ndkVersion '29.0.14206865'
+    externalNativeBuild { cmake { path file('../../native/swanstation/CMakeLists.txt'); version '3.30.5' } }
     namespace 'com.armsx2'
     compileSdk rootProject.ext.compileSdkVersion
 
     defaultConfig {
-        if (windowsNativeBuild) {
-            externalNativeBuild { cmake {
-                arguments '-DANDROID_STL=c++_shared', '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
-                arguments "-DARMSX_DIAGNOSTIC_BUILD=${diagnosticBuild ? 'ON' : 'OFF'}"
-                arguments "-DARMSX_FRAME_TIMING_BUILD=${frameTimingBuild ? 'ON' : 'OFF'}"
-            } }
-        }
-        // applicationId stays com.nanodata.armsx so SDL_GetPrefPath / libarmsx / the JNI binding
-        // (Java_com_nanodata_armsx_*) and the native settings/BIOS paths are all unchanged. Only
-        // the module NAMESPACE moves to com.armsx2 so the lifted UI's R/BuildConfig references
-        // (com.armsx2.R, com.armsx2.BuildConfig) resolve without touching 49k lines.
-        applicationId 'com.nanodata.armsx'
-        minSdk rootProject.ext.minSdkVersion
+        externalNativeBuild.cmake.arguments '-DANDROID_STL=c++_static'
+        // Keep the namespace and JNI class names unchanged, even for separate test packages.
+        applicationId armsxApplicationId
+        minSdk 28
         targetSdk rootProject.ext.targetSdkVersion
         versionCode armsxVersionCode
         versionName armsxVersionName
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         buildConfigField "boolean", "DIAGNOSTIC_BUILD", diagnosticBuild.toString()
+        buildConfigField "boolean", "SWANSTATION_CORE", "true"
         buildConfigField "String", "SOURCE_COMMIT", "\"${armsxSourceCommit}\""
         vectorDrawables.useSupportLibrary = true
         // STORAGE_ALL_FILES is declared per flavor below. Game libraries never need it: they use
@@ -125,6 +123,7 @@ android {
         // MapProperty, which accepts put() but not a bare Groovy map assignment. put() is correct
         // for the plain-Map form too, so it is the version-independent spelling.
         manifestPlaceholders.put("discordCallbackScheme", discordCallbackScheme)
+        manifestPlaceholders.put("appLabel", armsxAppLabel)
         buildConfigField "boolean", "DISCORD_INTEGRATION_ENABLED", isDiscordSdkAvailable ? "true" : "false"
 
         // arm64 only. libarmsx.so / libSDL2.so / ANGLE are all built for arm64-v8a alone, so this
@@ -156,7 +155,8 @@ android {
     productFlavors {
         github {
             dimension 'store'
-            buildConfigField "boolean", "IN_APP_UPDATER", "true"
+            // No upstream old-core update may replace this experimental integration.
+            buildConfigField "boolean", "IN_APP_UPDATER", "false"
             buildConfigField "boolean", "STORAGE_ALL_FILES", "true"
         }
         play {
@@ -232,6 +232,12 @@ android {
         compose true
     }
 
+    // AGP's asset merger does not honor SourceDirectorySet exclusions for all
+    // asset inputs. Enforce this at the merger; leave the user's local file alone.
+    androidResources {
+        ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:CVS:thumbs.db:picasa.ini:*~:discord_creds.env'
+    }
+
     sourceSets {
         main {
             // Pull in SDL2's org.libsdl.app Java (EmulatorActivity extends SDLActivity). SDL's own
@@ -240,9 +246,18 @@ android {
             // resource error, and our definitions are the ones we want.
             java.srcDirs += ['../../third_party/SDL/android-project/app/src/main/java']
             assets.srcDirs += ['src/main/assets']
-            jniLibs.srcDirs += ['src/main/jniLibs']
+            // Never package stale old-core/SDL/ANGLE binaries from src/main/jniLibs.
+            jniLibs.srcDirs = [layout.buildDirectory.dir('generated/swan-jni').get().asFile]
+            assets.exclude 'discord_creds.env'
         }
     }
+}
+
+// This local integration retains the normal dev frontend, whose current licence
+// differs from the historical LGPL test frontend. Do not publish a release until
+// source/asset provenance and feature migration are reviewed (SWANSTATION-DEV.md).
+if (gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }) {
+    throw new GradleException('SwanStation dev release blocked: feature and licence audits are incomplete. See SWANSTATION-DEV.md.')
 }
 
 dependencies {
@@ -279,6 +294,8 @@ dependencies {
     // synthetic PS1 disc images and reads them back: disc identification is pure java.io with no
     // Android API in it, which is exactly what makes it testable without a device.
     testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
 
     // Discord Social SDK. Resolved from app/libs via the flatDir repository in settings.gradle.
     //
@@ -362,10 +379,21 @@ tasks.register("prepareNativeBinaries", BuildNativeLibraries) {
     // Set ARMSX_SKIP_NATIVE_PREPARE=1 when you are driving ./build.sh android yourself. Two
     // concurrent native builds share bin/obj and clobber each other, so gradle must not start
     // one behind your back.
-    onlyIf { !skipNativePrepare && !windowsNativeBuild }
+    // Preserved for source history, but not reachable by the SwanStation app.
+    onlyIf { false }
 }
 
-preBuild.dependsOn(tasks.named("prepareNativeBinaries"))
+tasks.register('stageSwanStationCore', Exec) {
+    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        file('../../Build-SwanCore.ps1').absolutePath
+    outputs.upToDateWhen { false }
+}
+tasks.configureEach { t ->
+    if (t.name ==~ /merge(?:Github|Play)(?:Debug|Release)(?:JniLibFolders|NativeLibs)/)
+        t.dependsOn(tasks.named('stageSwanStationCore'))
+    if (t.name ==~ /(?:assemble|bundle|package)(?:Github|Play)?Release(?:AndroidTest)?/)
+        t.doFirst { throw new GradleException('SwanStation dev release blocked. See SWANSTATION-DEV.md.') }
+}
 
 // ---- Fail-closed guard: the in-app updater must never reach a play artifact ---------------------
 //

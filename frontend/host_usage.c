@@ -9,8 +9,94 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#endif
 
 #define ARMSX_HOST_USAGE_INTERVAL_NS 500000000LL /* 500 ms; the OSD polls at 2 Hz */
+
+uint64_t armsx_host_thread_cpu_ns(void) {
+#if defined(CLOCK_THREAD_CPUTIME_ID)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0)
+        return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+    return 0;
+}
+
+/* Slots are specific to a fixed pathname, so a denial never turns into a
+   repeated SELinux audit on every snapshot. */
+static int diagnostic_read(const char* path, char* out, size_t capacity, unsigned slot) {
+    static unsigned char unavailable[128];
+    if (slot >= sizeof(unavailable) || unavailable[slot]) return 0;
+    FILE* f = fopen(path, "r");
+    if (!f) { unavailable[slot] = 1; return 0; }
+    const size_t n = fread(out, 1, capacity - 1, f);
+    fclose(f);
+    out[n] = 0;
+    while (strlen(out) && (out[strlen(out)-1] == '\n' || out[strlen(out)-1] == '\r'))
+        out[strlen(out)-1] = 0;
+    for (size_t i = 0; i < n; ++i) if (out[i] == '\n' || out[i] == '\r') out[i] = '|';
+    return n != 0;
+}
+
+void armsx_host_diagnostic_snapshot(char* out, size_t capacity) {
+    if (!out || !capacity) return;
+    out[0] = 0;
+#if defined(__linux__)
+    char sched[128] = "unavailable", allowed[96] = "unavailable", status[4096];
+    char cpu_pressure[256] = "unavailable", io_pressure[256] = "unavailable";
+    char mem_pressure[256] = "unavailable";
+    diagnostic_read("/proc/thread-self/schedstat", sched, sizeof(sched), 0);
+    if (diagnostic_read("/proc/thread-self/status", status, sizeof(status), 1)) {
+        const char* p = strstr(status, "Cpus_allowed_list:");
+        if (p) {
+            p += strlen("Cpus_allowed_list:");
+            const size_t n = strcspn(p, "|");
+            snprintf(allowed, sizeof(allowed), "%.*s", (int)n, p);
+        }
+    }
+    diagnostic_read("/proc/pressure/cpu", cpu_pressure, sizeof(cpu_pressure), 2);
+    diagnostic_read("/proc/pressure/io", io_pressure, sizeof(io_pressure), 3);
+    diagnostic_read("/proc/pressure/memory", mem_pressure, sizeof(mem_pressure), 4);
+    char clocks[768] = {0}, thermals[768] = {0}, path[160], value[64], maximum[64];
+    const long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    for (unsigned cpu = 0; cpu < 16 && cpu < (unsigned)(cores > 0 ? cores : 0); ++cpu) {
+        strcpy(value, "unavailable"); strcpy(maximum, "unavailable");
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u/cpufreq/scaling_cur_freq", cpu);
+        diagnostic_read(path, value, sizeof(value), 8 + cpu * 2);
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u/cpufreq/scaling_max_freq", cpu);
+        diagnostic_read(path, maximum, sizeof(maximum), 9 + cpu * 2);
+        size_t n = strlen(clocks);
+        snprintf(clocks + n, sizeof(clocks) - n, "%u:%s/%s,", cpu, value, maximum);
+    }
+    for (unsigned zone = 0; zone < 32; ++zone) {
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%u/type", zone);
+        if (!diagnostic_read(path, value, sizeof(value), 40 + zone * 2)) continue;
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%u/temp", zone);
+        strcpy(maximum, "unavailable");
+        diagnostic_read(path, maximum, sizeof(maximum), 41 + zone * 2);
+        size_t n = strlen(thermals);
+        snprintf(thermals + n, sizeof(thermals) - n, "%s:%s,", value, maximum);
+    }
+    struct rusage usage;
+    const int have_usage = getrusage(RUSAGE_THREAD, &usage) == 0;
+    unsigned current_cpu = 0;
+    const int have_cpu = syscall(SYS_getcpu, &current_cpu, NULL, NULL) == 0;
+    snprintf(out, capacity,
+        "tid=%ld cpu=%d priority=%d allowed=%s schedstat_ns_runtime_wait_timeslices='%s' "
+        "voluntary_switches=%ld involuntary_switches=%ld minor_faults=%ld major_faults=%ld "
+        "cpu_khz_cur_max='%s' thermal_raw='%s' pressure_cpu='%s' pressure_io='%s' pressure_memory='%s'",
+        (long)syscall(SYS_gettid), have_cpu ? (int)current_cpu : -1,
+        getpriority(PRIO_PROCESS, 0), allowed, sched,
+        have_usage ? usage.ru_nvcsw : -1L, have_usage ? usage.ru_nivcsw : -1L,
+        have_usage ? usage.ru_minflt : -1L, have_usage ? usage.ru_majflt : -1L,
+        clocks, thermals[0] ? thermals : "unavailable", cpu_pressure, io_pressure, mem_pressure);
+#else
+    snprintf(out, capacity, "host_scheduler=unavailable thermal=unavailable clocks=unavailable");
+#endif
+}
 
 static long long now_ns(void)
 {

@@ -37,6 +37,7 @@
 #define VKDRV_MESA_TURNIP           16
 
 static armsx_gpu_profile_t g_profile;
+static int g_720_probe_active;
 static int g_profile_ready = 0;
 static int g_profile_locked_by_override = 0;
 /* 0 = follow the profile, 1 = force on, -1 = force off. */
@@ -104,6 +105,7 @@ static void ensure_ready(void)
 
 void armsx_gpu_profile_reset(void)
 {
+    g_720_probe_active = 0;
     memset(&g_profile, 0, sizeof(g_profile));
     g_profile.vendor = ARMSX_GPU_VENDOR_UNKNOWN;
     g_profile.driver = ARMSX_GPU_DRIVER_UNKNOWN;
@@ -487,7 +489,24 @@ int armsx_gpu_profile_prefers_pre_present_pacing(void) {
 
 unsigned armsx_gpu_profile_cpu_base_cycles(void)
 {
-    return armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI ? 2u : 1u;
+    const armsx_gpu_profile_t* p = armsx_gpu_profile_get();
+    /* Adreno 710 uses the legacy timing from its reported working build.
+       Adreno 720 tests the same accounting after traces showed the ordinary
+       instruction loop exceeding the frame budget. Keep both model-specific. */
+    return p->vendor == ARMSX_GPU_VENDOR_MALI ||
+        (p->vendor == ARMSX_GPU_VENDOR_ADRENO &&
+            (p->model == 710 || p->model == 720)) ? 2u : 1u;
+}
+
+int armsx_gpu_profile_720_probe_active(void) { return g_720_probe_active; }
+void armsx_gpu_profile_set_720_probe_active(int active) {
+    g_720_probe_active = active && armsx_gpu_profile_needs_720_probe();
+}
+
+int armsx_gpu_profile_needs_720_probe(void)
+{
+    const armsx_gpu_profile_t* p = armsx_gpu_profile_get();
+    return p->vendor == ARMSX_GPU_VENDOR_ADRENO && p->model == 720;
 }
 
 int armsx_gpu_profile_prefers_vulkan_mailbox(void)

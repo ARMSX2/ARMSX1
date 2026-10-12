@@ -94,6 +94,7 @@ class GameLibraryRepository(private val context: Context) {
     }
 
     suspend fun scan(directories: List<String>): List<GameInfo> = withContext(Dispatchers.IO) {
+        val started = System.nanoTime()
         val roots = posixRoots(directories)
         // Mirror only genuine POSIX roots into settings.toml. SAF tree identity must stay as a
         // content URI; the Compose scanner and per-session descriptor lease own those entries.
@@ -111,13 +112,16 @@ class GameLibraryRepository(private val context: Context) {
         println("@@ARMSX_LIBRARY_SCAN@@ saf_metadata_only=true")
         val collected = linkedMapOf<String, GameInfo>()
         val probeLog = ArrayList<String>()
-        Ps1Library.scan(context, directories).forEach { game ->
+        val discovered = Ps1Library.scan(context, directories)
+        val discoveryMs = (System.nanoTime() - started) / 1_000_000
+        discovered.forEach { game ->
             val uri = if (game.path.startsWith("content:")) Uri.parse(game.path)
                 else Uri.fromFile(File(game.path))
             if (collected.containsKey(uri.toString())) return@forEach
             collected[uri.toString()] = createGame(uri, game, probeLog)
         }
         writeProbeLog("full scan", probeLog, append = false)
+        android.util.Log.i("ARMSX-Library", "Found ${collected.size} games; discovery ${discoveryMs}ms, total ${(System.nanoTime() - started) / 1_000_000}ms")
         collected.values.sortedBy { it.title.lowercase() }.also { saveCache(directories, it) }
     }
 

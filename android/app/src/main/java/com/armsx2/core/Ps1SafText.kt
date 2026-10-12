@@ -27,7 +27,7 @@ internal object Ps1SafText {
     }
 
     fun playlistEntries(text: String): List<String> = text.removePrefix("\uFEFF").lineSequence()
-        .map(String::trim)
+        .map { it.trim().removeSurrounding("\"") }
         .filter { it.isNotEmpty() && !it.startsWith("#") }
         .toList()
 

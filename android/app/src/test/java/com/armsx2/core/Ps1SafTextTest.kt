@@ -7,6 +7,12 @@ import org.junit.Test
 
 class Ps1SafTextTest {
     @Test
+    fun quotedPlaylistEntriesAreResolvedWithoutQuoteCharacters() {
+        assertEquals(listOf("Disc 1/Game.cue", "Disc 2\\Game.chd"),
+            Ps1SafText.playlistEntries("\uFEFF#EXTM3U\n\"Disc 1/Game.cue\"\n\"Disc 2\\Game.chd\"\n"))
+    }
+
+    @Test
     fun launchIdentitySeparatesGamesWithTheSameNameAndDiscLayout() {
         val first = "content://provider/tree/roms/document/roms%2FA%2Fgame.chd"
         val second = "content://provider/tree/roms/document/roms%2FB%2Fgame.chd"

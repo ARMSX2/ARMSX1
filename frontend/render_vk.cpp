@@ -43,6 +43,7 @@
 
 #include "render_internal.h"
 #include "gpu_profile.h"
+#include "diagnostics.h"
 
 #if defined(ARMSX_ENABLE_VULKAN)
 
@@ -318,7 +319,46 @@ struct VkRenderer {
     bool has_frame = false;
 
     std::string driver_name;
+    uint64_t probe720_sum[4]{}, probe720_max[4]{}, probe720_since = 0;
+    unsigned probe720_calls[4]{}, probe720_errors[4]{};
+    VkPresentModeKHR probe720_present_mode = VK_PRESENT_MODE_FIFO_KHR;
 };
+
+uint64_t Probe720VkStart() {
+    return armsx_gpu_profile_720_probe_active() ? SDL_GetPerformanceCounter() : 0;
+}
+
+void Probe720VkEnd(VkRenderer* self, unsigned phase, uint64_t start, VkResult result) {
+    if (!start) return;
+    const uint64_t now = SDL_GetPerformanceCounter();
+    const uint64_t ticks = now - start;
+    self->probe720_sum[phase] += ticks;
+    self->probe720_max[phase] = std::max(self->probe720_max[phase], ticks);
+    ++self->probe720_calls[phase];
+    if (result != VK_SUCCESS) ++self->probe720_errors[phase];
+    if (!self->probe720_since) self->probe720_since = now;
+    if (phase != 3 || now - self->probe720_since < SDL_GetPerformanceFrequency() * 2) return;
+    const double ms = 1000.0 / double(SDL_GetPerformanceFrequency());
+    psxe_diag_pacingf("probe720_vulkan schema=1 present_mode=%d vsync=%d swapchain_images=%zu "
+        "surface_rebuilds=%ld phase_order=fence/acquire/submit/present "
+        "phase_avg_ms=%.3f/%.3f/%.3f/%.3f phase_max_ms=%.3f/%.3f/%.3f/%.3f "
+        "calls=%u/%u/%u/%u non_success_including_suboptimal=%u/%u/%u/%u "
+        "includes_shader_queue_lock=yes CPU_wall_not_GPU_execution=yes",
+        int(self->probe720_present_mode), self->vsync, self->swapchain_images.size(), self->surface_rebuilds,
+        self->probe720_sum[0] * ms / std::max(self->probe720_calls[0], 1u),
+        self->probe720_sum[1] * ms / std::max(self->probe720_calls[1], 1u),
+        self->probe720_sum[2] * ms / std::max(self->probe720_calls[2], 1u),
+        self->probe720_sum[3] * ms / std::max(self->probe720_calls[3], 1u),
+        self->probe720_max[0] * ms, self->probe720_max[1] * ms,
+        self->probe720_max[2] * ms, self->probe720_max[3] * ms,
+        self->probe720_calls[0], self->probe720_calls[1], self->probe720_calls[2], self->probe720_calls[3],
+        self->probe720_errors[0], self->probe720_errors[1], self->probe720_errors[2], self->probe720_errors[3]);
+    for (unsigned i = 0; i < 4; ++i) {
+        self->probe720_sum[i] = self->probe720_max[i] = 0;
+        self->probe720_calls[i] = self->probe720_errors[i] = 0;
+    }
+    self->probe720_since = now;
+}
 
 VkRenderer* Self(armsx_renderer_t* base) {
     return static_cast<VkRenderer*>(base->impl);
@@ -952,6 +992,7 @@ bool CreateSwapchain(VkRenderer* self) {
         info.preTransform = pre_transform;
         info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         info.presentMode = present_mode;
+        self->probe720_present_mode = present_mode;
         info.clipped = VK_TRUE;
         info.oldSwapchain = reusable;
         reusable = VK_NULL_HANDLE;
@@ -1497,17 +1538,23 @@ bool BeginFrame(VkRenderer* self, uint32_t* image_index) {
         return false;
     }
 
-    self->api.vkWaitForFences(self->device, 1, &self->frame_fence, VK_TRUE, UINT64_MAX);
+    uint64_t probe_start = Probe720VkStart();
+    const VkResult fence_result = self->api.vkWaitForFences(self->device, 1, &self->frame_fence, VK_TRUE, UINT64_MAX);
+    Probe720VkEnd(self, 0, probe_start, fence_result);
 
+    probe_start = Probe720VkStart();
     VkResult result = self->api.vkAcquireNextImageKHR(self->device, self->swapchain, UINT64_MAX,
                                                       self->acquire_semaphore, VK_NULL_HANDLE, image_index);
+    Probe720VkEnd(self, 1, probe_start, result);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         self->swapchain_valid = false;
         if (!CreateSwapchain(self)) {
             return false;
         }
+        probe_start = Probe720VkStart();
         result = self->api.vkAcquireNextImageKHR(self->device, self->swapchain, UINT64_MAX,
                                                  self->acquire_semaphore, VK_NULL_HANDLE, image_index);
+        Probe720VkEnd(self, 1, probe_start, result);
     }
 
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -1720,6 +1767,7 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
     submit.pSignalSemaphores = &self->release_semaphore;
 
     bool submitted;
+    const uint64_t submit_probe = Probe720VkStart();
     {
         /* The shader chain is built on a worker thread which uploads its LUTs through THIS
            queue. A VkQueue may not be used from two threads at once. Uncontended when nothing
@@ -1727,13 +1775,14 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
         ShaderQueueGuard guard;
         submitted = Check(self->api.vkQueueSubmit(self->queue, 1, &submit, self->frame_fence), "vkQueueSubmit");
     }
+    Probe720VkEnd(self, 2, submit_probe, submitted ? VK_SUCCESS : VK_ERROR_UNKNOWN);
     if (!submitted) {
         return;
     }
-
 #if defined(__ANDROID__)
     if (wait_gl) self->shared_fence_pending = false;
 #endif
+
 
     VkPresentInfoKHR present{};
     present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1749,10 +1798,12 @@ void OpPresent(armsx_renderer_t* base, const armsx_render_frame_params_t* params
        on it rebuilds every single frame and never converges (that thrash is itself a black
        screen). Only OUT_OF_DATE — a genuinely stale surface — forces a rebuild. */
     VkResult result;
+    const uint64_t present_probe = Probe720VkStart();
     {
         ShaderQueueGuard guard;
         result = self->api.vkQueuePresentKHR(self->queue, &present);
     }
+    Probe720VkEnd(self, 3, present_probe, result);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         self->swapchain_valid = false;
     } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
@@ -1815,6 +1866,7 @@ void OpPresentBlank(armsx_renderer_t* base) {
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &self->release_semaphore;
     bool submitted;
+    const uint64_t submit_probe = Probe720VkStart();
     {
         /* The shader chain is built on a worker thread which uploads its LUTs through THIS
            queue. A VkQueue may not be used from two threads at once. Uncontended when nothing
@@ -1822,6 +1874,7 @@ void OpPresentBlank(armsx_renderer_t* base) {
         ShaderQueueGuard guard;
         submitted = Check(self->api.vkQueueSubmit(self->queue, 1, &submit, self->frame_fence), "vkQueueSubmit");
     }
+    Probe720VkEnd(self, 2, submit_probe, submitted ? VK_SUCCESS : VK_ERROR_UNKNOWN);
     if (!submitted) {
         return;
     }
@@ -1834,10 +1887,12 @@ void OpPresentBlank(armsx_renderer_t* base) {
     present.pSwapchains = &self->swapchain;
     present.pImageIndices = &image_index;
     VkResult result;
+    const uint64_t present_probe = Probe720VkStart();
     {
         ShaderQueueGuard guard;
         result = self->api.vkQueuePresentKHR(self->queue, &present);
     }
+    Probe720VkEnd(self, 3, present_probe, result);
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         self->swapchain_valid = false;
     }

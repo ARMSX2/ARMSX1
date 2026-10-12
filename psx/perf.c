@@ -47,6 +47,7 @@ psx_disc_timing_t g_psx_disc_timing;
 
 int g_psx_work_diag_enabled;
 psx_work_diag_t g_psx_work_diag;
+psx_cpu_probe_t g_psx_cpu_probe;
 uint64_t (*g_psx_work_clock)(void);
 void psx_work_diag_begin(uint64_t (*clock_fn)(void)) {
     /* Preserve the prime-period sampling phase across frames, avoiding a

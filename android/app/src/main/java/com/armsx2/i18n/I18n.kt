@@ -932,7 +932,24 @@ val EN: Map<String, String> = mapOf(
     "cheats.master.label" to "Enable cheats",
     "cheats.master.labelHardcore" to "Cheats — disabled in Hardcore",
     "cheats.master.description" to "Master switch for this game. Off leaves your selection intact but applies nothing.",
-    "cheats.empty.body" to "No cheats in this game's file yet. Paste codes below, or import a .cht file — GameShark / Action Replay codes like \"800AB3C4 0063\" are the format.",
+    "cheats.empty.body" to "No cheats available for this game yet. Browse the built-in database below, or paste/import your own GameShark codes.",
+    "cheats.database.serial" to "Game / region ID",
+    "cheats.database.loading" to "Loading the offline cheat database…",
+    "cheats.database.failed" to "Unable to load or save the database cheats. Your existing cheats were kept. Try selecting a catalogue again.",
+    "cheats.database.loaded" to "Database catalogue: %s. Select the cheats you want below; new cheats start disabled.",
+    "cheats.database.unmatched" to "No unambiguous game/region match. Browse the database to confirm your game's catalogue; the app won't guess a different region or revision.",
+    "cheats.database.browse" to "Browse cheat database",
+    "cheats.database.close" to "Close database browser",
+    "cheats.database.description" to "%d offline PS1 game lists. Existing custom codes are preserved.",
+    "cheats.database.search" to "Search games / regions",
+    "cheats.database.clearSearch" to "Clear search",
+    "cheats.database.confirm" to "Current game ID: %s. Check this catalogue's game, region and revision before loading. Cheats can differ between releases; back up your memory cards. This adds codes but does not enable them.",
+    "cheats.database.load" to "Load this catalogue for this game",
+    "cheats.database.count" to "%d selectable cheats · %d unsupported/incomplete entries omitted",
+    "cheats.database.noResults" to "No matching entries.",
+    "cheats.database.more" to "Show more games",
+    "cheats.database.source" to "Database source / license",
+    "cheats.database.searchCheats" to "Search cheats",
     "cheats.row.lines" to "%d codes",
     "cheats.row.unsupported" to "contains a code type this build can't run",
     "cheats.hardcore.title" to "Cheats are off in Hardcore mode",
@@ -1408,19 +1425,16 @@ val EN: Map<String, String> = mapOf(
     "renderer.textureFilter.xbr" to "xBR-style",
     "renderer.textureReplacements.label" to "Texture replacements",
     "renderer.textureReplacements.description" to
-        "Swaps in your own artwork for the game's textures, from PNG files in the " +
-        "replacements folder below. Each file is matched by the hash in its name, so a pack " +
-        "works on any build and needs no per-game setup beyond being in the right folder. A " +
-        "replacement may be 2x, 4x or 8x the original size; it is drawn at that resolution " +
-        "and ignores Texture filtering, which exists to hide the size of the original texels. " +
-        "Off costs nothing at all.",
+        "Loads SwanStation VRAM-write replacements from the replacements folder below. " +
+        "PNG names must use vram-write- followed by the 32-character content hash. " +
+        "Old psxe texture packs use a different format and are not interchangeable. " +
+        "Hardware OpenGL, ANGLE and Vulkan support this; software rendering does not.",
     "renderer.textureDump.label" to "Dump textures",
     "renderer.textureDump.description" to
-        "Writes every texture the game samples to the dump folder below, as a PNG named by " +
-        "its hash — the starting point for making a pack. Rename or repaint a file, drop it " +
-        "in the replacements folder, and it is picked up. An untouched dump put back is " +
-        "pixel-for-pixel identical to no replacement at all. Costs storage and some speed " +
-        "while it is on, so leave it off unless you are authoring.",
+        "Writes eligible VRAM uploads as hashed PNGs in dump/. Repaint an image without " +
+        "changing its name and place it in replacements/. Capturing costs storage and " +
+        "speed; each session stops after 512 unique images or about 64 MiB. Existing " +
+        "dumps are not overwritten. Hardware renderers only.",
     "renderer.textureFolder.label" to "Texture folder",
     "renderer.textureFolder.description" to
         "Dumps are written to dump/ inside this folder and replacements are read from " +
@@ -1443,21 +1457,17 @@ val EN: Map<String, String> = mapOf(
         "Needs the hardware rasterizer with internal resolution above 1x — it does nothing as " +
         "things are set now.",
     "renderer.lineDetect.label" to "Line detection",
+    "renderer.lineDetect.unavailable" to "Not available in SwanStation",
     "renderer.lineDetect.description" to
-        "Games draw thin lines — wires, rails, laser sights, UI rules — as flat polygons, and one " +
-        "with no thickness at all draws nothing. This gives those a pixel of thickness so they " +
-        "show up. Quads only rescues the ones that vanish completely, which is the safe choice; " +
-        "Basic also thickens lines that are already one pixel, which can make them look heavier " +
-        "than intended. Hardware rasterizer only.",
+        "The old engine's Quads/Basic line-thickening filters have no equivalent in this " +
+        "SwanStation adapter. Your saved preference is retained but does not change output.",
     "renderer.lineDetect.quads" to "Quads",
     "renderer.lineDetect.basic" to "Basic",
     "renderer.deinterlace.label" to "Deinterlacing",
     "renderer.deinterlace.description" to
-        "Only affects games that switch to the 480-line mode — mostly menus, maps and a handful of " +
-        "RPGs. Weave shows both halves of the picture as the game left them, which is sharpest and " +
-        "can comb into stripes when things move. Bob shows one half and doubles it: no combing, " +
-        "half the vertical detail. Adaptive measures each frame and only bobs when combing is " +
-        "actually there.",
+        "Auto uses SwanStation's normal interlaced output. Force progressive disables interlacing " +
+        "in the core; some games force their original mode for compatibility. Legacy Bob/Adaptive " +
+        "settings use Auto because those old-engine filters are not available in this core.",
     "renderer.deinterlace.weave" to "Weave",
     "renderer.deinterlace.bob" to "Bob",
     "renderer.deinterlace.adaptive" to "Adaptive",
@@ -1472,8 +1482,8 @@ val EN: Map<String, String> = mapOf(
     "renderer.rotation.label" to "Display rotation",
     "renderer.rotation.description" to
         "Turns the picture clockwise. Useful for vertical shooters and for handhelds mounted " +
-        "sideways; the image is rotated, the controls are not. The OpenGL and software display " +
-        "backends do this; the experimental Vulkan one cannot and stays upright.",
+        "sideways; the image is rotated, the controls are not. Works on OpenGL, ANGLE, " +
+        "Vulkan and software presentation, including shader output.",
     "renderer.internalRes.label" to "Internal resolution",
     "renderer.internalRes.description" to
         "Renders at this multiple of the PlayStation's native resolution. Cost grows with the " +

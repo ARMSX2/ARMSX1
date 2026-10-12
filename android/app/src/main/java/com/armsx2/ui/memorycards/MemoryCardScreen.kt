@@ -186,9 +186,11 @@ private fun AboutCardsPanel(directory: String, game: GameInfo?, sessionActive: B
             Text("How memory cards work here", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(6.dp))
             Text(
-                "The emulator always plugs a card into Slot 1 and Slot 2. Each card is a single " +
-                    "128 KiB file and is shared by every game — there are no per-game cards, no card " +
-                    "sizes or folder cards. New cards are formatted and ready to save.",
+                "SwanStation uses a per-game card in Slot 1 and a shared card in Slot 2. " +
+                    "Each card is a raw 128 KiB file. This screen manages the actual cards from " +
+                    "your last boot; boot the desired game once before managing its Slot 1 card. " +
+                    "Old-core slot1.mcd/slot2.mcd files are not moved or replaced. You can import " +
+                    "a copy explicitly with Import after closing the game.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -160,19 +160,45 @@ object GameOsd {
      *  rather than polled. Empty when the core does not export it. */
     val renderer = mutableStateOf("")
 
-    data class Note(val id: Long, val text: String, val expiresAt: Long)
+    data class Note(val id: Long, val text: String, val expiresAt: Long, val position: Int = 2)
+    data class AchievementIndicator(val id: String, val text: String, val position: Int)
+    val achievementIndicators = mutableStateListOf<AchievementIndicator>()
+
+    fun achievementIndicator(id: String, text: String, position: Int) {
+        val update = Runnable {
+            achievementIndicators.removeAll { it.id == id }
+            if (text.isNotBlank()) {
+                achievementIndicators.add(AchievementIndicator(id, text, position.coerceIn(0, 8)))
+                while (achievementIndicators.size > 8) achievementIndicators.removeAt(0)
+            }
+        }
+        MainActivityRuntime.instance?.runOnUiThread(update) ?: update.run()
+    }
+
+    fun clearAchievementIndicators() {
+        val update = Runnable { achievementIndicators.clear() }
+        MainActivityRuntime.instance?.runOnUiThread(update) ?: update.run()
+    }
+
+    fun achievementNote(text: String, durationMs: Long, position: Int) {
+        addNote(text, durationMs, position.coerceIn(1, 9))
+    }
 
     val notes = mutableStateListOf<Note>()
     private var nextNoteId = 1L
 
     /** Show a transient note over the game. Safe to call from any thread. */
     fun toast(text: String, durationMs: Long = DEFAULT_NOTE_MS) {
+        addNote(text, durationMs, 2)
+    }
+
+    private fun addNote(text: String, durationMs: Long, position: Int) {
         if (text.isBlank()) return
         val activity = MainActivityRuntime.instance
         val push = Runnable {
             // One line per message: a rapid FF on/off/on replaces rather than stacks.
             notes.removeAll { it.text == text }
-            notes.add(Note(nextNoteId++, text, System.currentTimeMillis() + durationMs))
+            notes.add(Note(nextNoteId++, text, System.currentTimeMillis() + durationMs, position))
             while (notes.size > MAX_NOTES) notes.removeAt(0)
         }
         if (activity != null) activity.runOnUiThread(push) else push.run()
@@ -229,6 +255,7 @@ object GameOsd {
         // would instrument the next boot for a panel nobody asked for.
         runCatching { NativeApp.setStatisticsEnabled(false) }
         notes.clear()
+        achievementIndicators.clear()
     }
 }
 
@@ -411,6 +438,7 @@ fun GameOsdOverlay() {
         if (showCpu) {
             add(
                 if (!ready) "R3000A --"
+                else if (s[GameOsd.Stat.CPU_INSTRUCTIONS] < 0) "R3000A counters n/a (SwanStation)"
                 else {
                     val ins = s[GameOsd.Stat.CPU_INSTRUCTIONS]
                     val cyc = s[GameOsd.Stat.CPU_CYCLES]
@@ -424,6 +452,7 @@ fun GameOsdOverlay() {
         if (showGpu) {
             add(
                 if (!ready) "GPU --"
+                else if (s[GameOsd.Stat.GPU_TRIANGLES] < 0) "GPU work counters n/a (SwanStation)"
                 else "GPU ${compact(s[GameOsd.Stat.GPU_TRIANGLES])} tri  " +
                     "${compact(s[GameOsd.Stat.GPU_RECTS])} rect  " +
                     "${compact(s[GameOsd.Stat.GPU_LINES])} line  " +
@@ -466,6 +495,7 @@ fun GameOsdOverlay() {
         if (showDevices) {
             add(
                 if (!ready) "SPU --"
+                else if (s[GameOsd.Stat.SPU_VOICES] < 0) "SPU / MDEC / CD counters n/a (SwanStation)"
                 else String.format(Locale.US, "SPU %.1f voices", s[GameOsd.Stat.SPU_VOICES]) +
                     "  MDEC ${compact(s[GameOsd.Stat.MDEC_MACROBLOCKS])} mb / " +
                     "${compact(s[GameOsd.Stat.MDEC_BLOCKS])} blk" +
@@ -473,6 +503,7 @@ fun GameOsdOverlay() {
             )
             add(
                 if (!ready) "DMA --"
+                else if (s[GameOsd.Stat.DMA_WORDS] < 0) "DMA counters n/a (SwanStation)"
                 else "DMA ${compact(s[GameOsd.Stat.DMA_WORDS])} wd  " +
                     "(gpu ${compact(s[GameOsd.Stat.DMA_GPU_WORDS])}" +
                     "  spu ${compact(s[GameOsd.Stat.DMA_SPU_WORDS])}" +
@@ -554,15 +585,28 @@ fun GameOsdOverlay() {
             }
         }
 
-        if (showNotes && GameOsd.notes.isNotEmpty()) {
+        fun position(index: Int): Alignment = when (index.coerceIn(0,8)) {
+            0 -> Alignment.TopStart; 1 -> Alignment.TopCenter; 2 -> Alignment.TopEnd
+            3 -> Alignment.CenterStart; 4 -> Alignment.Center; 5 -> Alignment.CenterEnd
+            6 -> Alignment.BottomStart; 7 -> Alignment.BottomCenter; else -> Alignment.BottomEnd
+        }
+        GameOsd.achievementIndicators.groupBy { it.position }.forEach { (slot, items) ->
+            Column(Modifier.align(position(slot)).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                items.forEach { item -> key(item.id) {
+                    Text(item.text, style=textStyle, modifier=Modifier.clip(RoundedCornerShape(6.dp))
+                        .background(Color.Black.copy(alpha=0.65f)).padding(horizontal=10.dp,vertical=4.dp))
+                } }
+            }
+        }
+        if (showNotes && GameOsd.notes.isNotEmpty()) GameOsd.notes.groupBy { it.position }.forEach { (slot, items) ->
             Column(
                 Modifier
-                    .align(Alignment.TopCenter)
+                    .align(position(slot-1))
                     .padding(top = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                GameOsd.notes.forEach { note ->
+                items.forEach { note ->
                     key(note.id) {
                         Text(
                             note.text,

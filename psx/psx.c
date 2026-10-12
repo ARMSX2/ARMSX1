@@ -107,6 +107,53 @@ __attribute__((always_inline)) void psx_update(psx_t* psx) {
     psx_spu_tick(psx->spu, device_cycles);
 }
 
+void psx_update_profiled(psx_t* psx) {
+    /* Keep this separate from psx_update: ordinary GPUs do not gain an
+       instruction-frequency branch or clock read. Update order and the
+       overclock remainder must remain identical to the ordinary path. */
+    psx_state_service_requests();
+    uint64_t start = psx_work_diag_start();
+    psx_cpu_cycle(psx->cpu);
+    const uint64_t cpu_ticks = g_psx_work_diag_enabled ? g_psx_work_clock() - start : 0;
+    if (g_psx_work_diag_enabled) {
+        psx_work_diag_t* d = &g_psx_work_diag;
+        d->ticks[PSX_WORK_CPU_SAMPLE] += cpu_ticks;
+        ++d->calls[PSX_WORK_CPU_SAMPLE];
+        if (cpu_ticks > d->max_ticks[PSX_WORK_CPU_SAMPLE])
+            d->max_ticks[PSX_WORK_CPU_SAMPLE] = cpu_ticks;
+        psx_cpu_probe_t* p = &g_psx_cpu_probe;
+        const uint32_t pc = psx->cpu->saved_pc & 0x1fffffffu;
+        const unsigned op = psx->cpu->opcode >> 26;
+        const unsigned region = pc < 0x00800000u ? 0 :
+            (pc >= 0x1fc00000u && pc < 0x1fc80000u) ? 1 :
+            (pc >= 0x1f800000u && pc < 0x1f800400u) ? 2 :
+            (pc >= 0x1f801000u && pc < 0x1f803000u) ? 3 : 4;
+        ++p->samples;
+        ++p->regions[region];
+        ++p->opcode_calls[op];
+        p->opcode_ticks[op] += cpu_ticks;
+        p->sampled_cycles += psx->cpu->last_cycles;
+        if (cpu_ticks > p->slowest_ticks) {
+            p->slowest_ticks = cpu_ticks;
+            p->slowest_pc = psx->cpu->saved_pc;
+            p->slowest_opcode = psx->cpu->opcode;
+        }
+    }
+    const uint32_t cycles = psx_overclock_device_cycles(psx->cpu->last_cycles);
+#define PSX_PROBE_UPDATE(category, call) do { \
+    start = psx_work_diag_start(); \
+    call; \
+    psx_work_diag_end(category, start); \
+} while (0)
+    PSX_PROBE_UPDATE(PSX_WORK_CDROM_UPDATE, psx_cdrom_update(psx->cdrom, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_GPU_UPDATE, psx_gpu_update(psx->gpu, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_PAD_UPDATE, psx_pad_update(psx->pad, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_TIMER_UPDATE, psx_timer_update(psx->timer, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_DMA_UPDATE, psx_dma_update(psx->dma, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_SPU_TICK, psx_spu_tick(psx->spu, cycles));
+#undef PSX_PROBE_UPDATE
+}
+
 void psx_run_frame(psx_t* psx) {
     float framerate = psx_gpu_frame_rate(psx->gpu);
 
@@ -312,19 +359,41 @@ uint32_t* psx_take_screenshot(psx_t* psx) {
 }
 
 int psx_swap_disc(psx_t* psx, const char* path) {
+    if (!psx || !path || !*path) return 0;
+    // Validate before releasing the old drive; a failed swap must leave it mounted.
+    psx_cdrom_t* replacement = psx_cdrom_create();
+    if (!replacement) return 0;
+    psx_cdrom_init(replacement, psx->ic);
+    if (!psx_cdrom_open(replacement, path)) {
+        psx_cdrom_destroy(replacement);
+        return 0;
+    }
+    // Tray changes do not power-cycle the controller or clear its IRQ configuration.
+    if (psx->cdrom) {
+        replacement->ier = psx->cdrom->ier;
+        replacement->index = psx->cdrom->index;
+        replacement->mode = psx->cdrom->mode;
+        replacement->version = psx->cdrom->version;
+        replacement->region = psx->cdrom->region;
+        replacement->mute = psx->cdrom->mute;
+        replacement->xa_mute = psx->cdrom->xa_mute;
+        replacement->xa_file = psx->cdrom->xa_file;
+        replacement->xa_channel = psx->cdrom->xa_channel;
+        memcpy(replacement->vol, psx->cdrom->vol, sizeof(replacement->vol));
+        memcpy(replacement->vol_pending, psx->cdrom->vol_pending, sizeof(replacement->vol_pending));
+    }
+    replacement->shell_open_latched = 1;
     /* Same reasoning as the soft reset: a snapshot taken against the previous
        disc would be refused by the state loader's disc fingerprint anyway. */
     psx_rewind_reset();
 
     psx_cdrom_destroy(psx->cdrom);
 
-    psx->cdrom = psx_cdrom_create();
+    psx->cdrom = replacement;
 
     psx_bus_init_cdrom(psx->bus, psx->cdrom);
 
-    psx_cdrom_init(psx->cdrom, psx->ic);
-
-    return psx_cdrom_open(psx->cdrom, path);
+    return 1;
 }
 
 void psx_destroy(psx_t* psx) {

@@ -162,11 +162,72 @@ int main(void) {
     check("unknown CPU base unchanged", armsx_gpu_profile_cpu_base_cycles(), 1);
     armsx_gpu_profile_note_gl("Qualcomm", "Adreno (TM) 740", "OpenGL ES 3.2 V@0676");
     check("Thor CPU base unchanged", armsx_gpu_profile_cpu_base_cycles(), 1);
+    check("Thor diagnostic capture disabled", armsx_gpu_profile_needs_720_probe(), 0);
+    armsx_gpu_profile_set_720_probe_active(1);
+    check("Thor cannot arm 720 Vulkan probe", armsx_gpu_profile_720_probe_active(), 0);
     armsx_gpu_profile_reset();
     armsx_gpu_profile_note_vk(0x13B5u, 9, "Mali-G615 MC6", "ARM proprietary", "r44p1");
     check("RG477V CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    check("Mali diagnostic cadence unchanged", armsx_gpu_profile_needs_720_probe(), 0);
+    armsx_gpu_profile_set_720_probe_active(1);
+    check("Mali cannot arm 720 Vulkan probe", armsx_gpu_profile_720_probe_active(), 0);
     armsx_gpu_profile_note_gl("ARM", "Mali-G615 MC6", "OpenGL ES 3.2");
     check("Mali policy survives API detection", armsx_gpu_profile_cpu_base_cycles(), 2);
+
+    /* Moto G75 compatibility follows the physical Adreno 710, including the
+       software bridge and alternate drivers, without affecting nearby models. */
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_host_hint("Adreno (TM) 710");
+    check("710 host probe CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    check("710 additional diagnostics disabled", armsx_gpu_profile_needs_720_probe(), 0);
+    armsx_gpu_profile_note_gl("Qualcomm", "Adreno (TM) 710", "OpenGL ES 3.2 V@0800");
+    check("710 GL CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    armsx_gpu_profile_note_vk(0x5143u, 8, "Adreno (TM) 710", "Qualcomm proprietary", "");
+    check("710 Vulkan CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    check("710 Vulkan presentation unchanged", armsx_gpu_profile_prefers_vulkan_mailbox(), 0);
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_vk(0x5143u, 0, "Turnip Adreno (TM) 710", "", "");
+    check("710 Turnip CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+
+    /* HONOR Adreno 720's CPU-loop compatibility test must stay distinct from
+       Thor's presentation policy and from the neighbouring Adreno models. */
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_host_hint("Adreno (TM) 720");
+    check("720 host probe CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    check("720 host diagnostic capture enabled", armsx_gpu_profile_needs_720_probe(), 1);
+    armsx_gpu_profile_set_720_probe_active(1);
+    check("720 Vulkan probe lifetime armed", armsx_gpu_profile_720_probe_active(), 1);
+    armsx_gpu_profile_set_720_probe_active(0);
+    check("720 Vulkan probe lifetime stopped", armsx_gpu_profile_720_probe_active(), 0);
+    armsx_gpu_profile_set_720_probe_active(1);
+    armsx_gpu_profile_note_gl("Qualcomm", "Adreno (TM) 720", "OpenGL ES 3.2 V@0676.76.3");
+    check("720 GL CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    armsx_gpu_profile_note_vk(0x5143u, 8, "Adreno (TM) 720", "Qualcomm proprietary", "");
+    check("720 Vulkan CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    check("720 Vulkan presentation unchanged", armsx_gpu_profile_prefers_vulkan_mailbox(), 0);
+    check("720 host scheduling unchanged", armsx_gpu_profile_prefers_pre_present_pacing(), 0);
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_gl("Google Inc.", "ANGLE (Qualcomm, Adreno (TM) 720, Vulkan)", "OpenGL ES 3.2");
+    check("720 ANGLE CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    check("profile reset disarms previous capture", armsx_gpu_profile_720_probe_active(), 0);
+    check("720 ANGLE diagnostic capture enabled", armsx_gpu_profile_needs_720_probe(), 1);
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_vk(0x5143u, 0, "Turnip Adreno (TM) 720", "", "");
+    check("720 Turnip CPU compatibility", armsx_gpu_profile_cpu_base_cycles(), 2);
+    check("720 Turnip diagnostic capture enabled", armsx_gpu_profile_needs_720_probe(), 1);
+
+    const char* other_adreno[] = { "Adreno (TM) 619", "Adreno (TM) 650",
+        "Adreno (TM) 709", "Adreno (TM) 719", "Adreno (TM) 725", "Adreno (TM) 730",
+        "Adreno (TM) 740", "Adreno (TM) 750", "Adreno (TM)" };
+    for (unsigned i = 0; i < sizeof(other_adreno) / sizeof(other_adreno[0]); ++i) {
+        armsx_gpu_profile_reset();
+        armsx_gpu_profile_note_gl("Qualcomm", other_adreno[i], "OpenGL ES 3.2");
+        check(other_adreno[i], armsx_gpu_profile_cpu_base_cycles(), 1);
+        check("other Adreno capture disabled", armsx_gpu_profile_needs_720_probe(), 0);
+    }
+    armsx_gpu_profile_reset();
+    armsx_gpu_profile_note_gl("ARM", "Mali-G710", "OpenGL ES 3.2");
+    check("Mali 710 retains Mali policy", armsx_gpu_profile_cpu_base_cycles(), 2);
 
     printf(fails ? "\nGPU_PROFILE %d check(s) FAILED\n" : "\nGPU_PROFILE all checks passed\n", fails);
     return fails ? 1 : 0;

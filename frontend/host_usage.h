@@ -17,6 +17,8 @@
 
 #ifndef ARMSX_HOST_USAGE_H
 #define ARMSX_HOST_USAGE_H
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,6 +47,11 @@ typedef struct {
 
 /* Fills `out` with the latest sample. Cheap and safe to call per frame. */
 void armsx_host_usage_sample(armsx_host_usage_t* out);
+/* Current thread CPU time; zero means unsupported, never interpreted as idle. */
+uint64_t armsx_host_thread_cpu_ns(void);
+/* Explicit diagnostic call, at most once per two seconds by the frontend.
+   Denied sysfs nodes are not retried. Missing counters say unavailable. */
+void armsx_host_diagnostic_snapshot(char* out, size_t capacity);
 
 #ifdef __cplusplus
 }

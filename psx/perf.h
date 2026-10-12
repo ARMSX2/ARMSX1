@@ -358,4 +358,13 @@ void psx_work_diag_end(unsigned category, uint64_t start);
 /* Records total raster time and subtype using one clock read. */
 void psx_work_diag_raster_end(unsigned category, uint64_t start);
 
+/* Sparse instruction samples; host diagnostics, never part of a save state. */
+typedef struct {
+    uint64_t opcode_ticks[64];
+    uint32_t opcode_calls[64], regions[5]; /* RAM, BIOS, scratchpad, MMIO, other */
+    uint64_t slowest_ticks;
+    uint32_t slowest_pc, slowest_opcode, sampled_cycles, samples;
+} psx_cpu_probe_t;
+extern psx_cpu_probe_t g_psx_cpu_probe;
+
 #endif

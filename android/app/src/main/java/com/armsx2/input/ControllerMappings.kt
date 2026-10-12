@@ -963,6 +963,8 @@ object ControllerMappings {
         // Appended last for the same persisted-by-ordinal reason as the two above: hotkeys
         // are stored by enum index, so inserting one mid-enum re-points existing bindings.
         REWIND("pad.rewind.keycode", "Rewind (hold)"),
+        // Append rather than insert: custom stick bindings persist enum ordinals.
+        SWAP_DISC("pad.swapdisc.keycode", "Swap Disc"),
     }
 
     // ---- PS1 port: which hotkeys the ARMSX (PS1) core can actually serve ----
@@ -1004,6 +1006,7 @@ object ControllerMappings {
     // any entry, grep NativeApp.java and confirm the method is `native`, not a stub.
     val ps1Hotkeys: List<SysHotkey> = listOf(
         SysHotkey.MENU,
+        SysHotkey.SWAP_DISC,
         // Real on this port since psx/texrep.c landed: flips [video] texture_dump and
         // re-pushes it, which is the same path the Video tab's switch takes. A hotkey earns
         // its place here because dumping is used WHILE playing — you walk into a room, dump

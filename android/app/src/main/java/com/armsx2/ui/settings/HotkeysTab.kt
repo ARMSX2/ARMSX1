@@ -103,8 +103,8 @@ fun HotkeyBindings(showHeader: Boolean = true) {
             str("hotkeys.help"),
         )
         // PS1 port: only the hotkeys the ARMSX core can actually serve are listed. The
-        // SysHotkey enum itself is unchanged (MainActivityRuntime has exhaustive `when`
-        // blocks over it); ControllerMappings.ps1Hotkeys documents the kept/dropped split.
+        // ControllerMappings.ps1Hotkeys documents the supported actions; both runtime
+        // dispatch paths handle each action listed here.
         ControllerMappings.ps1Hotkeys.forEach { hk ->
             @Suppress("UNUSED_EXPRESSION") ControllerMappings.hotkeyBindTick.value
             val capturing = ControllerMappings.captureHotkey.value == hk
