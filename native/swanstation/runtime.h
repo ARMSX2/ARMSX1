@@ -45,6 +45,7 @@ void StatisticsEnabled(bool enabled);
 std::vector<double> Statistics();
 int GuestFrame();
 int MemoryByte(int address);
+std::vector<unsigned char> MemorySnapshot();
 bool Save(int slot);
 bool Load(int slot);
 int LoadChecked(int slot, bool ignoreCardDivergence);

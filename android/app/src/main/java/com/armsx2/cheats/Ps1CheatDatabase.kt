@@ -29,4 +29,23 @@ object Ps1CheatDatabase {
         }
         error("Bundled cheat catalogue is missing")
     }
+
+    /** Read all selected lists in one archive pass, then merge in stable index order. */
+    fun catalogues(context: Context, items: List<Ps1CheatDatabaseItem>): List<Pair<String, String>> {
+        if (items.isEmpty()) return emptyList()
+        require(items.all { it.id.matches(Regex("[a-f0-9]{20}")) })
+        val wanted = items.mapTo(hashSetOf()) { it.id + ".cht" }
+        val bodies = mutableMapOf<String, String>()
+        ZipInputStream(context.assets.open("ps1-cheats.zip")).use { archive ->
+            while (bodies.size < wanted.size) {
+                val entry = archive.nextEntry ?: break
+                if (entry.name in wanted) {
+                    require(entry.size in 1..2_000_000)
+                    bodies[entry.name] = archive.bufferedReader(Charsets.UTF_8).readText()
+                }
+            }
+        }
+        check(bodies.size == wanted.size) { "Bundled cheat catalogue is missing" }
+        return items.map { Ps1CheatDatabaseIndex.formatLabel(it.title) to bodies.getValue(it.id + ".cht") }
+    }
 }

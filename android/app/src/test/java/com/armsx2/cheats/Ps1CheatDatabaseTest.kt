@@ -4,6 +4,53 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class Ps1CheatDatabaseTest {
+    @Test fun allVerifiedFormatsAreReturnedNotJustPreferredGameShark() {
+        val rows = listOf("GameShark", "Game Buster", "Xploder", "Action Replay").mapIndexed { i, type ->
+            "${i.toString().padStart(20, '0')}\tExample (USA) ($type)\tSLUS-00123\tSLUS-00123\t1\t0"
+        }
+        val index = Ps1CheatDatabaseIndex(rows.joinToString("\n").reader())
+        assertEquals(4, index.automaticCatalogues("slus_001.23").size)
+        assertTrue(index.automaticCatalogues("SLES-00123").isEmpty())
+        assertTrue(index.automaticCatalogues(null).isEmpty())
+    }
+
+    @Test fun ambiguousVersionsStillNeedConfirmationButOtherFormatsCanLoad() {
+        val first = "00000000000000000000\tExample (USA) (GameShark)\tSLUS-00123\tSLUS-00123\t1\t0"
+        val second = first.replace("00000000000000000000", "11111111111111111111")
+        val buster = first.replace("00000000000000000000", "22222222222222222222").replace("GameShark", "Game Buster")
+        val index = Ps1CheatDatabaseIndex("$first\n$second\n$buster".reader())
+        assertEquals(listOf("Game Buster"), index.automaticCatalogues("SLUS-00123").map { Ps1CheatDatabaseIndex.formatLabel(it.title) })
+        assertEquals(3, index.suggestions("SLUS-00123", null).size)
+        assertTrue(Ps1CheatDatabaseIndex(first.replace("\tSLUS-00123\tSLUS-00123", "\t\tSLUS-00123").reader())
+            .automaticCatalogues("SLUS-00123").isEmpty())
+    }
+
+    @Test fun batchMergePreservesCustomSelectionsAndDistinctNamedVariants() {
+        val existing = "# Keep me\n[Health]\n80000000 0001\n"
+        val lists = listOf("GameShark" to "[Health]\n80000000 0002\n[Lives]\n30000002 0009\n",
+            "Game Buster" to "[Health]\n80000000 0003\n[Other lives name]\n30000002 0009\n")
+        val merged = Ps1CheatCatalogue.mergeCatalogues(existing, lists)
+        assertTrue(merged.text.startsWith(existing))
+        assertEquals(listOf("Health (GameShark)", "Lives", "Health (Game Buster)"), merged.addedNames)
+        assertEquals(listOf("Health"), merged.selectionAfterImport(listOf("Health", "Lives")))
+        assertEquals(Ps1CheatCatalogue.Merge(merged.text, 0), Ps1CheatCatalogue.mergeCatalogues(merged.text, lists))
+    }
+
+    @Test fun batchMergeDeduplicatesIdenticalCodesDespiteCaseAndComments() {
+        val result = Ps1CheatCatalogue.mergeCatalogues("[Existing]\n8000abcd 1 # my code\n",
+            listOf("GameShark" to "[Alternative name]\n8000ABCD 0001\n"))
+        assertEquals(0, result.added)
+    }
+
+    @Test fun sourceSuffixesAreUniqueBoundedAndLiteral() {
+        val name = "A".repeat(150)
+        val original = "[$name]\n80000000 0001\n"
+        val result = Ps1CheatCatalogue.mergeCatalogues(original, listOf("GameShark" to "[$name]\n80000000 0002\n"))
+        assertTrue(result.addedNames.single().toByteArray().size <= 150)
+        val money = Ps1CheatCatalogue.mergeCatalogues("[Money]\n80000000 0001\n",
+            listOf("Game Buster" to "[Money]\n80000000 0002\n[Cash $100]\n80000000 0003\n"))
+        assertTrue(money.text.contains("[Cash $100]"))
+    }
     private val usa = "0123456789abcdef0123\tExample (USA) (GameShark)\tSLUS-00123\tSLUS-00123\t2\t1"
     private val pal = "abcdef0123456789abcd\tExample (Europe) (GameShark)\tSLES-00123\tSLES-00123\t3\t0"
     private val world = "11111111111111111111\tOther Game (World) (GameShark)\t\tSLUS-00456\t1\t1"

@@ -309,6 +309,9 @@ public class NativeApp {
 	public static native String getSwanCardPath(int slot);
 	public static native int getSwanGuestFrame();
 	public static native int getSwanMemoryByte(int address);
+	/** Read-only, emulation-thread-consistent RAM copy for developer memory research.
+	 *  Returns empty with no running core; never exposes memory or provides a write API. */
+	public static native byte[] getSwanMemorySnapshot();
 
 	/** Build version string from BuildVersion::GitRev — formatted as
 	 *  "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT". Used by the

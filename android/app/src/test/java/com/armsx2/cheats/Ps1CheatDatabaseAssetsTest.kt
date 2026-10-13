@@ -7,6 +7,51 @@ import org.junit.Test
 
 /** Exercise the real packaged catalogue, not just synthetic index fixtures. */
 class Ps1CheatDatabaseAssetsTest {
+    @Test fun tonyHawkRetainsUpstreamCheatsWithoutRemovedSupplement() {
+        val root = assets()
+        val index = File(root, "ps1-cheats-index.tsv").reader().use { reader ->
+            File(root, "ps1-cover-titles.tsv").reader().use { Ps1CheatDatabaseIndex(reader, it) }
+        }
+        val usa = index.automaticCatalogues("SLUS-00860")
+        assertEquals(1, usa.size)
+        assertEquals(setOf("GameShark"), usa.map { Ps1CheatDatabaseIndex.formatLabel(it.title) }.toSet())
+        assertEquals(1, index.automaticCatalogues("SLPM-86429").size)
+        assertFalse(index.items.any { it.id == "d35596600326aec0596d" })
+        ZipFile(File(root, "ps1-cheats.zip")).use { zip ->
+            val bodies = usa.map { item -> Ps1CheatDatabaseIndex.formatLabel(item.title) to
+                zip.getInputStream(zip.getEntry(item.id + ".cht")).bufferedReader().use { it.readText() } }
+            val merged = Ps1CheatCatalogue.mergeCatalogues("", bodies)
+            assertEquals(setOf("Infinite Time", "No Sound FX"), merged.addedNames.toSet())
+            assertFalse(merged.text.contains("????"))
+            assertFalse(merged.text.contains("@desc Author: ViperByte"))
+            assertNull(zip.getEntry("d35596600326aec0596d.cht"))
+            assertEquals(0, Ps1CheatCatalogue.mergeCatalogues(merged.text, bodies).added)
+        }
+    }
+    @Test fun realMultipleFormatsCombineWithoutCrossRegionCodesOrRepeatedImports() {
+        val root = assets()
+        val index = File(root, "ps1-cheats-index.tsv").reader().use { reader ->
+            File(root, "ps1-cover-titles.tsv").reader().use { Ps1CheatDatabaseIndex(reader, it) }
+        }
+        val lists = index.automaticCatalogues("SCES-01420")
+        assertEquals(setOf("Game Buster", "GameShark"), lists.map { Ps1CheatDatabaseIndex.formatLabel(it.title) }.toSet())
+        assertEquals(1, index.automaticCatalogues("SCUS-94244").size)
+        ZipFile(File(root, "ps1-cheats.zip")).use { zip ->
+            val bodies = lists.map { item -> Ps1CheatDatabaseIndex.formatLabel(item.title) to
+                zip.getInputStream(zip.getEntry(item.id + ".cht")).bufferedReader().use { it.readText() } }
+            val merged = Ps1CheatCatalogue.mergeCatalogues("", bodies)
+            assertTrue(merged.added >= 8)
+            assertEquals(Ps1CheatCatalogue.Merge(merged.text, 0), Ps1CheatCatalogue.mergeCatalogues(merged.text, bodies))
+            for ((_, body) in bodies) for (line in body.lineSequence().filter { it.matches(Regex("[0-9A-F]{8} [0-9A-F]{4}")) }) {
+                assertTrue(line, merged.text.contains(line))
+            }
+        }
+        for (serial in index.items.flatMap { it.automaticSerials }.distinct()) {
+            val returned = index.automaticCatalogues(serial)
+            assertEquals(returned.size, returned.map { Ps1CheatDatabaseIndex.formatLabel(it.title).lowercase() }.distinct().size)
+            assertTrue(returned.all { serial in it.automaticSerials && !index.isIncompatible(it, serial) })
+        }
+    }
     private fun assets(): File = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
         .map { File(it, "android/app/src/main/assets") }.first { File(it, "ps1-cheats-index.tsv").isFile }
 

@@ -4,6 +4,16 @@ from pathlib import Path
 from update_ps1_cheats import catalogue_paths, convert, revision, title_key, ROOT, match_metadata, region_tags
 
 class ConversionTests(unittest.TestCase):
+    def test_tony_hawk_unlicensed_supplement_is_not_bundled(self):
+        file = ROOT / "tools/cheat-supplements/Tony Hawk's Pro Skater (USA) (Action Replay).cht"
+        self.assertFalse(file.exists())
+        self.assertNotIn(file, catalogue_paths(ROOT / 'build/libretro-cheat-source'))
+
+    def test_explicit_author_attribution_survives_conversion(self):
+        body, count, omitted = convert('cheat0_desc = "Example"\ncheat0_author = "Example author"\ncheat0_code = "80000100+0001"', 'Example (USA)')
+        self.assertEqual((count, omitted), (1, 0))
+        self.assertIn('@desc Author: Example author', body)
+        self.assertNotIn('@desc Libretro:', body)
     def test_complete_multi_line_group(self):
         body, count, omitted = convert('cheat0_desc = "Infinite Health"\ncheat0_code = "D0000000+0001+80000002+0064"', 'Example (USA)')
         self.assertEqual((count, omitted), (1, 0))

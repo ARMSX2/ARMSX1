@@ -132,6 +132,15 @@ object Ps1Cheats {
     /** Add database groups without replacing custom groups or changing enabled selections. */
     @Synchronized fun addDatabaseCatalogue(context: Context, gameKey: String, text: String): Int {
         val merged = Ps1CheatCatalogue.merge(readText(context, gameKey), text)
+        return saveDatabaseMerge(context, gameKey, merged)
+    }
+
+    @Synchronized fun addDatabaseCatalogues(context: Context, gameKey: String, catalogues: List<Pair<String, String>>): Int {
+        val merged = Ps1CheatCatalogue.mergeCatalogues(readText(context, gameKey), catalogues)
+        return saveDatabaseMerge(context, gameKey, merged)
+    }
+
+    private fun saveDatabaseMerge(context: Context, gameKey: String, merged: Ps1CheatCatalogue.Merge): Int {
         if (merged.added == 0) return 0
         // Do not let a stale/orphan enabled name accidentally arm a newly imported group.
         // Save without reloading the engine until those names have been disarmed.

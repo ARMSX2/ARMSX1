@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -23,6 +24,7 @@ import com.armsx2.cheats.Ps1CheatDatabaseItem
 import com.armsx2.i18n.str
 import com.armsx2.ui.common.GlassPanel
 import com.armsx2.ui.common.SectionTitle
+import com.armsx2.ui.common.StatusChip
 import com.armsx2.ui.home.LibraryKeyboard
 import com.armsx2.ui.settings.Ps1ActionRow
 import com.armsx2.ui.settings.Ps1InfoRow
@@ -38,6 +40,7 @@ internal fun Ps1CheatDatabaseBrowser() {
     var failed by remember { mutableStateOf(false) }
     var retry by remember { mutableIntStateOf(0) }
     var query by remember { mutableStateOf("") }
+    var showDetails by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<Ps1CheatDatabaseItem?>(null) }
     var preview by remember { mutableStateOf<List<String>?>(null) }
     var previewFailed by remember { mutableStateOf(false) }
@@ -64,14 +67,10 @@ internal fun Ps1CheatDatabaseBrowser() {
     Column(Modifier.fillMaxWidth()) {
         GlassPanel(Modifier.fillMaxWidth()) {
             Column {
-                SectionTitle(str("cheats.database.start.title"), str("cheats.database.start.description"))
-                Ps1InfoRow(str("cheats.database.browse"),
-                    if (database != null) str("cheats.database.description").format(database!!.items.size)
-                    else str("cheats.database.loading"))
-                database?.let { index ->
-                    Ps1InfoRow(str("cheats.database.coverage"),
-                        str("cheats.database.coverage.description").format(index.coveredGameSerialCount, index.knownGameSerialCount))
-                }
+                SectionTitle(str("cheats.database.start.title"), str("cheats.ui.browserHint"))
+                Spacer(Modifier.height(8.dp))
+                if (database != null) StatusChip(str("cheats.ui.catalogues").format(database!!.items.size))
+                else Text(str("cheats.database.loading"))
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -83,36 +82,41 @@ internal fun Ps1CheatDatabaseBrowser() {
         val item = selected
         if (item != null) {
             Ps1ActionRow(str("cheats.database.start.back"), controllerId = "ps1.cheats.start.back") { selected = null }
-            Ps1InfoRow(item.title, str("cheats.database.count").format(item.cheatCount, item.omittedCount))
+            SectionTitle(item.title, catalogueCount(item))
             Text(str("cheats.database.start.preview"), color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (preview == null && !previewFailed) Text(str("cheats.database.loading"))
             preview.orEmpty().take(limit).forEach { name ->
-                Ps1InfoRow(name, str("cheats.database.start.disabled"))
+                Text(name, color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
                 SettingsDivider()
             }
             if (preview.orEmpty().size > limit) {
                 Ps1ActionRow(str("cheats.database.start.moreCheats"), controllerId = "ps1.cheats.start.moreCheats") { limit += 30 }
             }
         } else {
-            Ps1ActionRow(str("cheats.database.search"), controllerId = "ps1.cheats.start.search",
-                description = query.ifBlank { searchHint }) {
+            CheatSearchBar(query, searchHint, "ps1.cheats.start.search", onClear = { query = "" }) {
                 LibraryKeyboard.open(initial = query, onChange = { query = it }, placeholder = searchHint)
-            }
-            if (query.isNotBlank()) {
-                Ps1ActionRow(str("cheats.database.clearSearch"), controllerId = "ps1.cheats.start.clear") { query = "" }
             }
             val results = remember(database, query) { database?.search(query).orEmpty() }
             if (database != null && results.isEmpty()) Text(str("cheats.database.noResults"))
             results.take(limit).forEach { entry ->
                 Ps1ActionRow(entry.title, controllerId = "ps1.cheats.start.${entry.id}",
-                    description = str("cheats.database.count").format(entry.cheatCount, entry.omittedCount)) { selected = entry }
-                SettingsDivider()
+                    description = catalogueCount(entry)) { selected = entry }
             }
             if (results.size > limit) {
                 Ps1ActionRow(str("cheats.database.more"), controllerId = "ps1.cheats.start.more") { limit += 30 }
             }
         }
-        Ps1InfoRow(str("cheats.database.source"), "Libretro contributors · CC BY-SA 4.0",
-            "https://github.com/libretro/libretro-database · https://creativecommons.org/licenses/by-sa/4.0/")
+        CheatDatabaseAttribution()
+        Ps1ActionRow(str(if (showDetails) "cheats.ui.details.close" else "cheats.ui.details"),
+            controllerId = "ps1.cheats.start.details") { showDetails = !showDetails }
+        if (showDetails) {
+            database?.let { index ->
+                Ps1InfoRow(str("cheats.database.coverage"),
+                    str("cheats.database.coverage.description").format(index.coveredGameSerialCount, index.knownGameSerialCount))
+            }
+            Ps1InfoRow(str("cheats.database.source"), "Libretro contributors · CC BY-SA 4.0",
+                "https://github.com/libretro/libretro-database · https://creativecommons.org/licenses/by-sa/4.0/")
+        }
     }
 }

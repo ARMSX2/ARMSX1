@@ -65,6 +65,14 @@ class Ps1CheatDatabaseIndex(reader: Reader, metadata: Reader? = null) {
         return (preferred.ifEmpty { matches }).singleOrNull()
     }
 
+    /** All verified formats, without guessing between competing versions of one format. */
+    fun automaticCatalogues(serial: String?): List<Ps1CheatDatabaseItem> {
+        val identity = normaliseSerial(serial) ?: return emptyList()
+        return automaticBySerial[identity].orEmpty().filter { !isIncompatible(it, identity) }
+            .groupBy { formatLabel(it.title).lowercase(Locale.ROOT) }
+            .values.mapNotNull { it.singleOrNull() }
+    }
+
     fun suggestions(serial: String?, title: String?): List<Ps1CheatDatabaseItem> {
         val identity = normaliseSerial(serial)
         val key = title?.let(::titleKey).orEmpty()
@@ -109,6 +117,9 @@ class Ps1CheatDatabaseIndex(reader: Reader, metadata: Reader? = null) {
     }
 
     companion object {
+        private val FORMAT = Regex("\\((GameShark|Game\\s*Buster|Xploder|Action\\s*Replay)\\)$", RegexOption.IGNORE_CASE)
+        fun formatLabel(title: String): String = FORMAT.find(title)?.groupValues?.get(1)
+            ?.replace(Regex("\\s+"), " ") ?: "Other"
         private val SERIAL = Regex("([A-Z]{4})[-_. ]?(\\d{3})[-_. ]?(\\d{2})(?:;1)?")
         private val SERIAL_IN_TEXT = Regex("([A-Za-z]{4})[-_. ]?(\\d{3})[-_.]?(\\d{2})")
         private val PARTIAL_SERIAL = Regex("^S[A-Z]{3}[-_. ]*\\d{0,5}[-_.]?\\d{0,2}$", RegexOption.IGNORE_CASE)
@@ -170,6 +181,52 @@ object Ps1CheatCatalogue {
         }
     }
     private val HEADER = Regex("^[\\t \\uFEFF]*\\[([^]\\r\\n]+)][^\\r\\n]*", RegexOption.MULTILINE)
+    private val CODE = Regex("^([0-9a-fA-F]{8})\\s*[:,]?\\s*([0-9a-fA-F]{1,8})(?:\\s*(?:#|;|//).*)?$")
+
+    /** Preserve distinct variants across formats and deduplicate identical code bodies. */
+    fun mergeCatalogues(existing: String, catalogues: List<Pair<String, String>>): Merge {
+        fun signature(body: String): String = body.lineSequence().mapNotNull { line ->
+            CODE.matchEntire(line.trim())?.let {
+                it.groupValues[1].uppercase(Locale.ROOT) + " " +
+                    it.groupValues[2].uppercase(Locale.ROOT).trimStart('0').padStart(4, '0')
+            }
+        }.joinToString("\n")
+        val names = mutableSetOf<String>()
+        val signatures = mutableSetOf<String>()
+        fun groups(text: String): List<Pair<String, String>> {
+            val headers = HEADER.findAll(text).toList()
+            return headers.mapIndexed { index, header ->
+                header.groupValues[1].trim() to text.substring(header.range.first,
+                    headers.getOrNull(index + 1)?.range?.first ?: text.length)
+            }
+        }
+        groups(existing).forEach { (name, body) ->
+            names += name.lowercase(Locale.ROOT)
+            signature(body).takeIf(String::isNotEmpty)?.let(signatures::add)
+        }
+        val addedNames = mutableListOf<String>()
+        val additions = mutableListOf<String>()
+        for ((source, text) in catalogues) for ((name, body) in groups(text)) {
+            val codes = signature(body)
+            if (codes.isNotEmpty() && !signatures.add(codes)) continue
+            val safeSource = source.replace(Regex("[\\[\\]\\r\\n]"), " ").trim().ifBlank { "Database" }
+            var unique = name
+            var variant = 1
+            while (unique.lowercase(Locale.ROOT) in names) {
+                val suffix = " ($safeSource" + (if (variant == 1) "" else " $variant") + ")"
+                var stem = name
+                while ((stem + suffix).toByteArray(Charsets.UTF_8).size > 150 && stem.isNotEmpty()) stem = stem.dropLast(1)
+                unique = stem + suffix
+                variant++
+            }
+            names += unique.lowercase(Locale.ROOT)
+            addedNames += unique
+            additions += body.replaceRange(requireNotNull(HEADER.find(body)).range, "[$unique]")
+        }
+        if (additions.isEmpty()) return Merge(existing, 0)
+        return Merge(existing + (if (existing.isEmpty() || existing.endsWith('\n')) "" else "\n") +
+            additions.joinToString("\n"), addedNames.size, addedNames)
+    }
 
     fun merge(existing: String, incoming: String): Merge {
         val names = HEADER.findAll(existing).map { it.groupValues[1].trim().lowercase(Locale.ROOT) }.toMutableSet()

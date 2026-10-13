@@ -9,6 +9,34 @@ import org.junit.runner.RunWith
 /** Reads packaged assets directly: no game, original app, imported data or core setup needed. */
 @RunWith(AndroidJUnit4::class)
 class Ps1BundledDatabaseTest {
+    @Test fun tonyHawkUsaPackagedListExcludesRemovedSupplement() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val index = Ps1CheatDatabase.index(context)
+        val matches = index.automaticCatalogues("SLUS-00860")
+        assertEquals(1, matches.size)
+        assertFalse(index.items.any { it.id == "d35596600326aec0596d" })
+        val bodies = Ps1CheatDatabase.catalogues(context, matches)
+        val merged = Ps1CheatCatalogue.mergeCatalogues("", bodies)
+        assertEquals(setOf("Infinite Time", "No Sound FX"), merged.addedNames.toSet())
+        assertEquals(emptyList<String>(), merged.selectionAfterImport(merged.addedNames))
+        assertEquals(1, index.automaticCatalogues("SLPM-86429").size)
+        assertEquals(0, Ps1CheatCatalogue.mergeCatalogues(merged.text, bodies).added)
+    }
+    @Test fun packagedFormatsAreReadTogetherAndMergeWithoutEnablingNewCodes() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val index = Ps1CheatDatabase.index(context)
+        val matches = index.automaticCatalogues("SCES-01420")
+        assertEquals(setOf("GameShark", "Game Buster"), matches.map { Ps1CheatDatabaseIndex.formatLabel(it.title) }.toSet())
+        val catalogues = Ps1CheatDatabase.catalogues(context, matches)
+        assertEquals(2, catalogues.size)
+        val custom = "[My custom cheat]\n80000100 0001\n"
+        val merged = Ps1CheatCatalogue.mergeCatalogues(custom, catalogues)
+        assertTrue(merged.text.startsWith(custom))
+        assertTrue(merged.added >= 8)
+        assertEquals(listOf("My custom cheat"), merged.selectionAfterImport(listOf("My custom cheat") + merged.addedNames))
+        assertEquals(0, Ps1CheatCatalogue.mergeCatalogues(merged.text, catalogues).added)
+        assertEquals(1, index.automaticCatalogues("SCUS-94244").size)
+    }
     @Test fun catalogueAvailableWithoutSelectingOrImportingAGame() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val index = Ps1CheatDatabase.index(context)

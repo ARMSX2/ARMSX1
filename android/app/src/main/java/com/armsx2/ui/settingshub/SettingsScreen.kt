@@ -659,9 +659,8 @@ private fun CategoryContent(
         SettingsCategory.OnScreen -> OverlayTab()
         SettingsCategory.Skins -> SkinsTab(viewModel.settings)
         SettingsCategory.Advanced -> ps1 { Ps1AdvancedTab() }
-        // Cheats. Wrapped in ps1 { } like the other emulator tabs so the scope switch, the
-        // per-game badges and the override panel all apply — the three [cheats] keys ARE
-        // per-game settings and are stored in exactly the same layer as every other one.
+        // Keep game context/settings storage, without generic override UI:
+        // cheats are always game-local and identify their target in their header.
         SettingsCategory.Patches -> ps1 { com.armsx2.ui.cheats.Ps1CheatsTab() }
         // Not reachable: the About chip is not listed in settingsSections().
         SettingsCategory.About -> Unit

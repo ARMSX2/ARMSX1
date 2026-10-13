@@ -1,7 +1,7 @@
 # Attributed regional supplements
 
-These data files are derivatives of the existing Libretro catalogue at commit
-`12c21cf79f1e20eff6ac68b80875816c717d0a7a` and remain CC BY-SA 4.0, separately
+The Warped supplement is a derivative of the existing Libretro catalogue at commit
+`12c21cf79f1e20eff6ac68b80875816c717d0a7a` and remains CC BY-SA 4.0, separately
 from the app. See `android/app/src/main/assets/ps1-cheats-LICENSE.txt` for the
 complete licence. Attribution: Libretro database contributors, Redump
 contributors, and the original cheat authors named below.
@@ -27,3 +27,10 @@ claim is made for untested pressings, betas or revisions that reuse an ID.
 `tools/update_ps1_cheats.py` merges these files with the pinned upstream data
 deterministically. Do not relabel another regional list without independent
 evidence, or silently replace an identically named upstream catalogue.
+
+The previously added Tony Hawk USA score/special-meter supplement was removed
+from bundled inputs on 2026-10-14 at the user's request, pending clarification
+of redistribution rights. This is a precaution, not a finding of infringement.
+The upstream Tony Hawk USA/Japan catalogue is unchanged. No replacement is
+claimed to be independently developed until memory research and effect tests
+have actually established it.

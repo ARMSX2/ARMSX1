@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Local memory research, 2026-10-14. User-supplied SLUS-00860 tested on Thor.
+# Read README.md for derivation, evidence and limitations. Not a bundled input.
+# Four observed Career/Single Session allocations; unknown allocations are untouched.
+# RAM data writes, not game-instruction patches. Built-in cheat flag is unchanged.
+# New codes are experimental and must remain disabled until explicitly selected.
+
+[Score 999,999 (experimental)]
+@desc Local memory research: Warehouse and School in Career/Single Session only. Other levels/skaters/revisions unverified. Disable before leaving gameplay.
+D00D17C8 2638
+D00D17CA 801F
+801F2F60 423F
+D00D17C8 2638
+D00D17CA 801F
+801F2F62 000F
+D00D17C8 E6CC
+D00D17CA 801E
+801EEFF4 423F
+D00D17C8 E6CC
+D00D17CA 801E
+801EEFF6 000F
+D00D17C8 2694
+D00D17CA 801F
+801F2FBC 423F
+D00D17C8 2694
+D00D17CA 801F
+801F2FBE 000F
+D00D17C8 E728
+D00D17CA 801E
+801EF050 423F
+D00D17C8 E728
+D00D17CA 801E
+801EF052 000F
+
+[Full special meter (experimental)]
+@desc Local memory research: Warehouse and School in Career/Single Session only. Other levels/skaters/revisions unverified. Timer drains after disabling; restore a clean state to clear immediately.
+D00D17C8 2638
+D00D17CA 801F
+801F2888 02EE
+D00D17C8 2638
+D00D17CA 801F
+801F288A 0000
+D00D17C8 2638
+D00D17CA 801F
+801F288C 02EE
+D00D17C8 2638
+D00D17CA 801F
+801F288E 0000
+D00D17C8 E6CC
+D00D17CA 801E
+801EE91C 02EE
+D00D17C8 E6CC
+D00D17CA 801E
+801EE91E 0000
+D00D17C8 E6CC
+D00D17CA 801E
+801EE920 02EE
+D00D17C8 E6CC
+D00D17CA 801E
+801EE922 0000
+D00D17C8 2694
+D00D17CA 801F
+801F28E4 02EE
+D00D17C8 2694
+D00D17CA 801F
+801F28E6 0000
+D00D17C8 2694
+D00D17CA 801F
+801F28E8 02EE
+D00D17C8 2694
+D00D17CA 801F
+801F28EA 0000
+D00D17C8 E728
+D00D17CA 801E
+801EE978 02EE
+D00D17C8 E728
+D00D17CA 801E
+801EE97A 0000
+D00D17C8 E728
+D00D17CA 801E
+801EE97C 02EE
+D00D17C8 E728
+D00D17CA 801E
+801EE97E 0000

@@ -106,8 +106,12 @@ internal fun Ps1Scoped(
     }
     CompositionLocalProvider(LocalPs1SettingsScope provides scope) {
         Column(Modifier.fillMaxWidth()) {
-            Ps1ScopeNote()
-            Ps1PerGamePanel(category)
+            // Cheats always target a game; their own header identifies it.
+            // Keep the scope provider, but not generic global/override notices.
+            if (category != SettingsCategory.Patches) {
+                Ps1ScopeNote()
+                Ps1PerGamePanel(category)
+            }
             content()
         }
     }
@@ -292,6 +296,7 @@ internal fun PerGameMarker(label: String) {
     I18n.current
     ensureLabelIndex()
     val keys = labelIndex[label]
+    if (keys != null && keys.all(Ps1OverrideNoticePolicy::isCheatSetting)) return
 
     if (keys == null) {
         if (scope.perGame && label in hostLabels) {
@@ -540,7 +545,7 @@ internal fun Ps1PerGamePanel(category: SettingsCategory) {
 fun Ps1PerGameNotice(context: android.content.Context) {
     val app = context.applicationContext
     val gameKey = Ps1SettingsStore.activeGameKey ?: return
-    val overrides = Ps1GameSettings.overridesFor(gameKey)
+    val overrides = Ps1OverrideNoticePolicy.visibleOverrides(Ps1GameSettings.overridesFor(gameKey))
     if (overrides.isEmpty()) return
     val names = overrides.keys.map { LABELKEY_BY_KEY[it]?.let { k -> str(k) } ?: it }.distinct()
     val accent = MaterialTheme.colorScheme.tertiary
@@ -571,7 +576,8 @@ fun Ps1PerGameNotice(context: android.content.Context) {
         )
         Spacer(Modifier.height(6.dp))
         MarkerChip(str("scope.notice.useGlobal"), accent) {
-            Ps1SettingsStore.clearAllOverrides(app, gameKey)
+            // Only reset settings named by this notice; preserve hidden cheats.
+            Ps1SettingsStore.clearOverrides(app, gameKey, overrides.keys)
         }
     }
 }

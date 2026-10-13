@@ -748,6 +748,18 @@ int SwanHost::GuestFrame(){auto value=std::make_shared<int>(-1);if(!Invoke([valu
 int SwanHost::MemoryByte(int address){auto value=std::make_shared<int>(-1);if(!Invoke([value,address]{
   const auto size=core_retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);auto* data=static_cast<unsigned char*>(core_retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM));
   if(address<0 || static_cast<size_t>(address)>=size || !data)return false;*value=data[address];return true;}))return -1;return *value;}
+std::vector<unsigned char> SwanHost::MemorySnapshot(){
+  auto result=std::make_shared<std::vector<unsigned char>>();
+  // Copy on the emulation thread: never expose the mutable core pointer to Java.
+  if(!Invoke([result]{
+    if(!core_retro_get_memory_size || !core_retro_get_memory_data)return false;
+    const auto size=core_retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
+    const auto* data=static_cast<const unsigned char*>(core_retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM));
+    if(!data || size==0 || size>8*1024*1024)return false;
+    result->assign(data,data+size);return true;
+  }))return {};
+  return std::move(*result);
+}
 std::string SwanHost::StatePath(int slot){std::lock_guard lock(state_mutex);if(slot< -1||slot>=10||state_identity.empty())return {};
   const auto suffix=slot== -1?std::string("autosave"):std::to_string(slot);
   return data_root+"/swanstation/states/"+state_identity+"-"+suffix+".swanstate";}

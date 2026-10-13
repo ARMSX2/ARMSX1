@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build an offline PS1 catalogue from a local, pinned Libretro checkout.
 
-Generated data remains CC BY-SA 4.0, separately from the application license.
+Upstream data remains CC BY-SA 4.0, separately from the application license.
+Additional numeric supplements have per-source provenance in cheat-supplements/NOTICE.md.
 Only complete, supported GameShark groups are included; never run partial cheats.
 Usage: python tools/update_ps1_cheats.py build/libretro-cheat-source
 Attributed regional supplements in tools/cheat-supplements are included too.
@@ -95,7 +96,7 @@ def revision(name):
 
 def convert(text, source_name):
     fields = {}
-    for match in re.finditer(r'^\s*cheat(\d+)_(desc|code|handler)\s*=\s*(.*?)\s*$', text, re.M):
+    for match in re.finditer(r'^\s*cheat(\d+)_(desc|code|handler|author)\s*=\s*(.*?)\s*$', text, re.M):
         value = match[3].strip()
         if value.startswith('"') and value.endswith('"'):
             value = value[1:-1].replace('\\"', '"')
@@ -130,7 +131,9 @@ def convert(text, source_name):
         if name.lower() in names:
             name += f' (code {number + 1})'
         names.add(name.lower())
-        groups.append(f'[{name}]\n@desc Libretro: {source_name}\n' + '\n'.join(codes) + '\n')
+        author = re.sub(r'[\r\n\t]', ' ', row.get('author', '')).strip()
+        attribution = f'Author: {author}' if author else f'Libretro: {source_name}'
+        groups.append(f'[{name}]\n@desc {attribution}\n' + '\n'.join(codes) + '\n')
     comments = '\n'.join(line for line in text.splitlines() if line.lstrip().startswith(('#', ';')))
     return comments + '\n\n' + '\n'.join(groups), len(groups), skipped
 
@@ -182,10 +185,11 @@ def main():
         'Serial metadata is derived from the bundled ps1-cover-titles.tsv; its source commit\n'
         'and attribution are recorded in ps1-cover-titles-NOTICE.txt. No inferred ROM identity\n'
         'is used: this index maps known serials to cheat lists, not filenames to serials.\n'
-        'Data is supplied without warranty and remains CC BY-SA 4.0, separately from the app.\n'
+        'Upstream data is supplied without warranty and remains CC BY-SA 4.0, separately from the app.\n'
+        'Additional numeric supplements have per-source provenance and annotation notices below.\n'
         'Rebuild with tools/update_ps1_cheats.py and the pinned source checkout.\n', encoding='utf-8')
     with (ASSETS / 'ps1-cheats-NOTICE.txt').open('a', encoding='utf-8') as notice:
-        notice.write('\nRegional supplements: tools/cheat-supplements, CC BY-SA 4.0.\n'
+        notice.write('\nRegional supplements: tools/cheat-supplements.\n'
             'Crash Bandicoot - Warped (USA), SCUS-94244: six groups derived from the licensed\n'
             'Libretro Warped GameShark file and independently checked against USA listings.\n'
             'Original authors: CodeBoy (lives, powers, gems, sapphires, crystals); SonicBlueTM (platinum relics).\n'
