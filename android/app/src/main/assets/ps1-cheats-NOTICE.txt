@@ -9,8 +9,17 @@ https://creativecommons.org/licenses/by-sa/4.0/
 
 Changes: converted supported, complete GameShark groups to ARMSX .cht format;
 omitted unsupported/placeholder groups; added conservative title/region/serial index.
+Discovery aliases are confirmation-only; demo/retail and explicit disc mismatches are excluded.
 Serial metadata is derived from the bundled ps1-cover-titles.tsv; its source commit
 and attribution are recorded in ps1-cover-titles-NOTICE.txt. No inferred ROM identity
 is used: this index maps known serials to cheat lists, not filenames to serials.
 Data is supplied without warranty and remains CC BY-SA 4.0, separately from the app.
 Rebuild with tools/update_ps1_cheats.py and the pinned source checkout.
+
+Regional supplements: tools/cheat-supplements, CC BY-SA 4.0.
+Crash Bandicoot - Warped (USA), SCUS-94244: six groups derived from the licensed
+Libretro Warped GameShark file and independently checked against USA listings.
+Original authors: CodeBoy (lives, powers, gems, sapphires, crystals); SonicBlueTM (platinum relics).
+USA verification: https://gamehacking.org/game/88639?hacker=CodeBoy
+USA verification: https://gamehacking.org/game/88639?hacker=SonicBlueTM
+European catalogues are retained separately. See tools/cheat-supplements/NOTICE.md.

@@ -72,6 +72,8 @@ internal class Ps1SettingsScope(
     val gameTitle: String?,
     val contextKey: String?,
     val contextTitle: String?,
+    val gameUri: String? = null,
+    val contextUri: String? = null,
 ) {
     val perGame: Boolean get() = gameKey != null
 }
@@ -92,12 +94,14 @@ internal fun Ps1Scoped(
     contextGame: GameInfo?,
     content: @Composable () -> Unit,
 ) {
-    val scope = remember(scopeGame?.settingsKey, contextGame?.settingsKey) {
+    val scope = remember(scopeGame?.settingsKey, contextGame?.settingsKey, scopeGame?.uri, contextGame?.uri) {
         Ps1SettingsScope(
             gameKey = scopeGame?.settingsKey,
             gameTitle = scopeGame?.title,
             contextKey = contextGame?.settingsKey,
             contextTitle = contextGame?.title,
+            gameUri = scopeGame?.uri?.toString(),
+            contextUri = contextGame?.uri?.toString(),
         )
     }
     CompositionLocalProvider(LocalPs1SettingsScope provides scope) {

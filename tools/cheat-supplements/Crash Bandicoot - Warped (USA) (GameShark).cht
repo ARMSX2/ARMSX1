@@ -1,0 +1,35 @@
+# USA retail: SCUS-94244. Codes remain disabled until explicitly selected.
+# Derived from Libretro database, CC BY-SA 4.0, commit 12c21cf79f1e20eff6ac68b80875816c717d0a7a.
+# Licensed byte source: Crash Bandicoot 3 - Warped (Europe) (GameShark).cht.
+# Only the following six groups were independently checked against USA listings.
+# Original authors: CodeBoy (first five groups), SonicBlueTM (platinum relics).
+# USA verification: https://gamehacking.org/game/88639?hacker=CodeBoy
+# USA verification: https://gamehacking.org/game/88639?hacker=SonicBlueTM
+# Changes: selected independently USA-listed groups; explicit USA title/serial mapping.
+# This does not establish compatibility for other regions, betas or revisions.
+
+cheats = 6
+
+cheat0_desc = "99 Lives"
+cheat0_code = "D005BEEC+F64C+800B5D4C+6300+D005BEEC+F64C+80068F58+6300"
+cheat0_enable = false
+
+cheat1_desc = "Enable All Powers"
+cheat1_code = "80069178+003F"
+cheat1_enable = false
+
+cheat2_desc = "Have All Gems"
+cheat2_code = "80068FB0+FFFF+80068FB2+FFFF+80068FB4+FFFF+80068FB6+FF00"
+cheat2_enable = false
+
+cheat3_desc = "Have All Sapphires"
+cheat3_code = "800691B4+FFFF+800691B6+FFFF+800691B8+FFFF"
+cheat3_enable = false
+
+cheat4_desc = "Have All Crystals"
+cheat4_code = "8006912C+FFFF+8006912E+FFFF+80069130+FFFF"
+cheat4_enable = false
+
+cheat5_desc = "Have All Platinum Relics"
+cheat5_code = "800691B4+FFFF+800691B6+FFFF+800691B8+FFFF+800691BA+FFFF+800691BC+FFFF+800691BE+FFFF+800691C0+FFFF+800691C2+FFFF+800691C4+FFFF"
+cheat5_enable = false

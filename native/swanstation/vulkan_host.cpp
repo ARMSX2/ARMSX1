@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <atomic>
 #include "shader_api.h"
+#include "vulkan_surface.h"
 namespace {
 void* loader=nullptr;
 PFN_vkGetInstanceProcAddr entry=nullptr;
@@ -176,7 +177,11 @@ bool SwanVulkan::Window(ANativeWindow* window) {
   if(capabilities.maxImageCount)chain.minImageCount=std::min(chain.minImageCount,capabilities.maxImageCount);
   chain.imageFormat=format.format;chain.imageColorSpace=format.colorSpace;chain.imageExtent=extent;chain.imageArrayLayers=1;chain.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   if(swap_color_attachment)chain.imageUsage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-  chain.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE;chain.preTransform=capabilities.currentTransform;
+  chain.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE;
+  chain.preTransform=SwanVulkanSurface::UprightTransform(capabilities.supportedTransforms);
+  if(!chain.preTransform){Error("Vulkan surface cannot present logical window coordinates without pre-rotation.");return false;}
+  __android_log_print(ANDROID_LOG_INFO,"SwanVulkan","Window %ux%u: panel transform %u, presentation transform %u",
+    extent.width,extent.height,capabilities.currentTransform,chain.preTransform);
   chain.compositeAlpha=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   if(!(capabilities.supportedCompositeAlpha&chain.compositeAlpha))chain.compositeAlpha=static_cast<VkCompositeAlphaFlagBitsKHR>(capabilities.supportedCompositeAlpha&-capabilities.supportedCompositeAlpha);
   chain.presentMode=VK_PRESENT_MODE_FIFO_KHR;chain.clipped=VK_TRUE;
@@ -243,8 +248,12 @@ bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspen
     const auto result=vkQueuePresentKHR(core.queue,&present);
     // One in-flight frame: safe reuse of the core image and binary presentation semaphore.
     if(vkQueueWaitIdle(core.queue)!=VK_SUCCESS)return false;
-    if(result==VK_ERROR_OUT_OF_DATE_KHR||result==VK_SUBOPTIMAL_KHR)return Window(retained_window);
-    return result==VK_SUCCESS;}
+    if(result==VK_ERROR_OUT_OF_DATE_KHR)return Window(retained_window);
+    // Android may report SUBOPTIMAL every frame when identity differs from the
+    // panel transform. This is intentional compositor rotation, not a stale
+    // swapchain. Real resize/recreation is handled by Window/OUT_OF_DATE; do not
+    // stall and recreate shader resources on every otherwise-successful frame.
+    return result==VK_SUCCESS||result==VK_SUBOPTIMAL_KHR;}
   return true;
 }
 void SwanVulkan::Blank(){has_image=false;if(core.device)Present(0,0,4.f/3,false);}

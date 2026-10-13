@@ -9,8 +9,11 @@ object Ps1CheatDatabase {
 
     @Synchronized fun index(context: Context): Ps1CheatDatabaseIndex {
         cachedIndex?.let { return it }
-        return context.assets.open("ps1-cheats-index.tsv").bufferedReader().use(::Ps1CheatDatabaseIndex)
-            .also { cachedIndex = it }
+        return context.assets.open("ps1-cheats-index.tsv").bufferedReader().use { index ->
+            context.assets.open("ps1-cover-titles.tsv").bufferedReader().use { metadata ->
+                Ps1CheatDatabaseIndex(index, metadata)
+            }
+        }.also { cachedIndex = it }
     }
 
     fun catalogue(context: Context, item: Ps1CheatDatabaseItem): String {

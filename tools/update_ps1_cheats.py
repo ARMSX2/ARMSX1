@@ -4,6 +4,7 @@
 Generated data remains CC BY-SA 4.0, separately from the application license.
 Only complete, supported GameShark groups are included; never run partial cheats.
 Usage: python tools/update_ps1_cheats.py build/libretro-cheat-source
+Attributed regional supplements in tools/cheat-supplements are included too.
 """
 import argparse
 import hashlib
@@ -19,15 +20,74 @@ TAGS = re.compile(r'\(([^)]*)\)|\[([^]]*)\]')
 SUPPORTED = {0x30, 0x80, 0x50, 0xD0, 0xD1, 0xD2, 0xD3, 0xE0, 0xE1, 0xE2, 0xE3}
 REGIONS = {'usa', 'europe', 'japan', 'germany', 'france', 'italy', 'spain',
            'australia', 'uk', 'korea', 'asia', 'canada', 'netherlands', 'sweden'}
+REGION_SUFFIX = re.compile(r'\s+(USA|Europe|Japan|NTSC-U|NTSC-J|PAL)$', re.I)
+# Discovery aliases only: these do NOT establish revision/code compatibility.
+DISCOVERY_ALIASES = {
+    'battlearenatoshinden4': 'Toshinden 4',
+    'boardgametopshop': 'Top Shop',
+    'chippokeralphnodaibouken': 'Adventure of Little Ralph, The',
+    'finalfantasyixblankandamarant': 'Final Fantasy IX',
+    'finalfantasyixcinnaandquina': 'Final Fantasy IX',
+    'finalfantasyoriginsfinalfantasymiscellaneous': 'Final Fantasy Origins - Final Fantasy',
+    'finalfantasyoriginsfinalfantasyiimiscellaneous': 'Final Fantasy Origins - Final Fantasy II',
+    'pacmanworld': 'Pac-Man World - 20th Anniversary',
+    'puzzlestarsweep': 'Star Sweep',
+    'tigerwoodspgatourgold': 'Tiger Woods PGA Tour Golf',
+}
+
+def catalogue_paths(source, supplements=ROOT / 'tools/cheat-supplements'):
+    files = list((source / 'cht/Sony - PlayStation').glob('*.cht')) + list(supplements.glob('*.cht'))
+    names = set()
+    for file in files:
+        if file.name in names:
+            raise ValueError(f'Duplicate upstream/supplement catalogue: {file.name}')
+        names.add(file.name)
+    return sorted(files, key=lambda file: file.name.casefold())
 
 def title_key(name):
     text = TAGS.sub(' ', name)
+    text = re.sub(r'\s+\(?Game\s*(?:Buster|Shark)\)?\s*$', '', text, flags=re.I)
+    text = REGION_SUFFIX.sub('', text.strip()).replace('&', ' and ').replace('_', ' and ')
     text = unicodedata.normalize('NFKD', text).lower()
     return re.sub('[^a-z0-9]', '', text)
 
 def region_tags(name):
-    return {part.strip().lower() for tag in TAGS.findall(name)
-            for part in (tag[0] or tag[1]).split(',') if part.strip().lower() in REGIONS}
+    regions = {part.strip().lower() for tag in TAGS.findall(name)
+               for part in (tag[0] or tag[1]).split(',') if part.strip().lower() in REGIONS}
+    suffix = REGION_SUFFIX.search(TAGS.sub(' ', name).strip())
+    if suffix:
+        region = suffix[1].lower()
+        regions.add({'ntsc-u': 'usa', 'ntsc-j': 'japan', 'pal': 'europe'}.get(region, region))
+    return regions
+
+def release_kind(name):
+    tags = ' '.join(tag[0] or tag[1] for tag in TAGS.findall(name)).lower()
+    return next((kind for kind in ('demo', 'prototype', 'beta', 'sample', 'trial', 'taikenban', 'otameshi', 'cancelled')
+                 if re.search(r'\b' + kind + r'\b', tags)), 'retail')
+
+def disc_number(name):
+    match = re.search(r'[\[(]Disc\s+(\d+)[\])]', name, re.I)
+    return match[1] if match else None
+
+def match_metadata(name, by_title, serial_revisions):
+    key = title_key(name)
+    direct = by_title.get(key, [])
+    alias = DISCOVERY_ALIASES.get(key)
+    rows = direct + (by_title.get(title_key(alias), []) if alias else [])
+    regions, safe, related = region_tags(name), set(), set()
+    for disc_name, region, serial in rows:
+        if regions and region not in regions:
+            continue
+        if release_kind(name) != release_kind(disc_name):
+            continue
+        if disc_number(name) and disc_number(name) != disc_number(disc_name):
+            continue
+        related.add(serial)
+        # Aliases aid discovery only. World/revision ambiguities still need confirmation.
+        if ((disc_name, region, serial) in direct and regions and
+                revision(name) == revision(disc_name) and len(serial_revisions[serial]) == 1):
+            safe.add(serial)
+    return safe, related
 
 def revision(name):
     return tuple(tag[0].lower() for tag in TAGS.findall(name)
@@ -92,21 +152,13 @@ def main():
     for name, _, serial in metadata:
         serial_revisions.setdefault(serial, set()).add(revision(name))
     index, entries = [], []
-    for file in sorted((source / 'cht/Sony - PlayStation').glob('*.cht')):
+    for file in catalogue_paths(source):
         name = file.stem
         body, count, skipped = convert(file.read_text(encoding='utf-8-sig'), name)
         if not count:
             continue
         identifier = hashlib.sha256(file.name.encode()).hexdigest()[:20]
-        regions = region_tags(name)
-        safe, related = set(), set()
-        for disc_name, region, serial in by_title.get(title_key(name), []):
-            if regions and region not in regions:
-                continue
-            related.add(serial)
-            # World/untagged codes are not proof of region compatibility. Require confirmation.
-            if regions and revision(name) == revision(disc_name) and len(serial_revisions[serial]) == 1:
-                safe.add(serial)
+        safe, related = match_metadata(name, by_title, serial_revisions)
         clean_name = name.replace('\t', ' ').replace('\n', ' ')
         index.append('\t'.join((identifier, clean_name, ','.join(sorted(safe)),
                                 ','.join(sorted(related)), str(count), str(skipped))))
@@ -126,11 +178,20 @@ def main():
         'https://creativecommons.org/licenses/by-sa/4.0/\n\n'
         'Changes: converted supported, complete GameShark groups to ARMSX .cht format;\n'
         'omitted unsupported/placeholder groups; added conservative title/region/serial index.\n'
+        'Discovery aliases are confirmation-only; demo/retail and explicit disc mismatches are excluded.\n'
         'Serial metadata is derived from the bundled ps1-cover-titles.tsv; its source commit\n'
         'and attribution are recorded in ps1-cover-titles-NOTICE.txt. No inferred ROM identity\n'
         'is used: this index maps known serials to cheat lists, not filenames to serials.\n'
         'Data is supplied without warranty and remains CC BY-SA 4.0, separately from the app.\n'
         'Rebuild with tools/update_ps1_cheats.py and the pinned source checkout.\n', encoding='utf-8')
+    with (ASSETS / 'ps1-cheats-NOTICE.txt').open('a', encoding='utf-8') as notice:
+        notice.write('\nRegional supplements: tools/cheat-supplements, CC BY-SA 4.0.\n'
+            'Crash Bandicoot - Warped (USA), SCUS-94244: six groups derived from the licensed\n'
+            'Libretro Warped GameShark file and independently checked against USA listings.\n'
+            'Original authors: CodeBoy (lives, powers, gems, sapphires, crystals); SonicBlueTM (platinum relics).\n'
+            'USA verification: https://gamehacking.org/game/88639?hacker=CodeBoy\n'
+            'USA verification: https://gamehacking.org/game/88639?hacker=SonicBlueTM\n'
+            'European catalogues are retained separately. See tools/cheat-supplements/NOTICE.md.\n')
     print(f'Bundled {len(entries)} catalogues; {sum(int(row.split(chr(9))[4]) for row in index)} complete cheats.')
 
 if __name__ == '__main__':

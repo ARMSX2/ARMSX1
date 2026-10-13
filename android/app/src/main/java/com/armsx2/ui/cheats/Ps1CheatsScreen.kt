@@ -39,11 +39,11 @@ import com.armsx2.cheats.Ps1Cheats
 import com.armsx2.cheats.Ps1CheatDatabase
 import com.armsx2.cheats.Ps1CheatDatabaseIndex
 import com.armsx2.cheats.Ps1CheatDatabaseItem
+import com.armsx2.cheats.Ps1CheatIdentity
 import com.armsx2.i18n.str
 import com.armsx2.runtime.MainActivityRuntime
 import com.armsx2.ui.common.ArmsBackdrop
 import com.armsx2.ui.common.ArmsTopBar
-import com.armsx2.ui.common.EmptyState
 import com.armsx2.ui.common.GlassPanel
 import com.armsx2.ui.common.RoundAction
 import com.armsx2.ui.common.SectionTitle
@@ -57,6 +57,9 @@ import kr.co.iefriends.pcsx2.NativeApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.ensureActive
 
 /**
  * Cheats for one PS1 game.
@@ -86,18 +89,15 @@ import kotlinx.coroutines.withContext
  * The whole feature, minus chrome. Used by both the settings-hub tab and the full screen so the
  * two can never drift.
  *
- * [gameKey] null means "no game to talk about" — the screen says so instead of showing a list
- * that belongs to nobody.
+ * Without a game, browse the bundled database read-only. Enabling or importing
+ * cheats still requires an explicit per-game target.
  */
 @Composable
-fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
+fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?, gameUri: String? = null) {
     val context = LocalContext.current.applicationContext
 
     if (gameKey.isNullOrBlank()) {
-        EmptyState(
-            title = str("cheats.noGame.title"),
-            message = str("cheats.noGame.body"),
-        )
+        Ps1CheatDatabaseBrowser()
         return
     }
 
@@ -126,20 +126,25 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
     var matchedCatalogue by remember(gameKey) { mutableStateOf<Ps1CheatDatabaseItem?>(null) }
     var verifiedSerial by remember(gameKey) { mutableStateOf<String?>(null) }
     var browsingDatabase by remember(gameKey) { mutableStateOf(false) }
+    var browseAllGames by remember(gameKey) { mutableStateOf(false) }
     var pendingCatalogue by remember(gameKey) { mutableStateOf<Ps1CheatDatabaseItem?>(null) }
     var databaseQuery by remember(gameKey) { mutableStateOf("") }
     var cheatQuery by remember(gameKey) { mutableStateOf("") }
     var resultLimit by remember(gameKey, databaseQuery) { mutableIntStateOf(30) }
     var searching by remember(gameKey) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(gameKey) {
+    LaunchedEffect(gameKey, gameUri) {
+        databaseBusy = true
         val result = withContext(Dispatchers.IO) {
+            val lookupContext = currentCoroutineContext()
             runCatching {
                 val index = Ps1CheatDatabase.index(context)
                 // Never use the filename/cover-art guess as a running game's identity.
                 val serial = if (Ps1Cheats.isRunning(gameKey))
                     Ps1CheatDatabaseIndex.normaliseSerial(runCatching { NativeApp.getGameSerial() }.getOrNull())
+                else if (gameUri != null) Ps1CheatIdentity.resolve(context, gameUri) { !lookupContext.isActive }
                 else Ps1CheatDatabaseIndex.normaliseSerial(gameKey)
+                lookupContext.ensureActive()
                 val match = index.automatic(serial)
                 val installed = runCatching {
                     if (match != null) Ps1Cheats.addDatabaseCatalogue(context, gameKey, Ps1CheatDatabase.catalogue(context, match))
@@ -151,6 +156,9 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
             database = index
             verifiedSerial = serial
             matchedCatalogue = if (installation.second) installation.first else null
+            // A candidate list must not look like an empty database just because
+            // its region/revision needs confirmation rather than blind auto-import.
+            browsingDatabase = matchedCatalogue == null && Ps1Cheats.entriesFor(context, gameKey).isEmpty()
             revision++
         }
         databaseFailed = result.isFailure || result.getOrNull()?.third?.second == false
@@ -159,6 +167,10 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
 
     fun loadCatalogue(item: Ps1CheatDatabaseItem) {
         if (databaseBusy) return
+        if (database?.isIncompatible(item, verifiedSerial) == true) {
+            pendingCatalogue = item
+            return
+        }
         databaseBusy = true
         databaseFailed = false
         coroutineScope.launch {
@@ -180,6 +192,13 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
 
     val enabled = settings.cheatsEnabledCodes
     val master = settings.cheatsEnabled
+    val suggestedCatalogues = remember(database, verifiedSerial, gameTitle) {
+        database?.suggestions(verifiedSerial, gameTitle).orEmpty()
+    }
+    val otherRegionCatalogues = remember(database, verifiedSerial, gameTitle) {
+        val index = database
+        index?.suggestions(null, gameTitle).orEmpty().filter { index?.isIncompatible(it, verifiedSerial) == true }
+    }
 
     fun commit(nextMaster: Boolean, nextEnabled: List<String>) {
         Ps1Cheats.setEnabled(context, gameKey, nextMaster, nextEnabled)
@@ -262,7 +281,9 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
                 databaseBusy -> str("cheats.database.loading")
                 databaseFailed -> str("cheats.database.failed")
                 matchedCatalogue != null -> str("cheats.database.loaded").format(matchedCatalogue!!.title)
-                else -> str("cheats.database.unmatched")
+                suggestedCatalogues.isNotEmpty() -> str("cheats.database.candidates").format(suggestedCatalogues.size)
+                otherRegionCatalogues.isNotEmpty() -> str("cheats.database.otherRegionOnly")
+                else -> str("cheats.database.missing").format(verifiedSerial ?: gameKey)
             },
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 13.sp,
@@ -276,29 +297,36 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
 
         if (browsingDatabase && database != null) {
             val index = database!!
-            val suggested = remember(database, verifiedSerial, gameTitle) { index.suggestions(verifiedSerial, gameTitle) }
-            val results = remember(database, databaseQuery, suggested) {
-                if (databaseQuery.isBlank()) suggested.ifEmpty { index.items } else index.search(databaseQuery)
+            val results = remember(database, databaseQuery, suggestedCatalogues, browseAllGames) {
+                if (databaseQuery.isBlank()) {
+                    if (browseAllGames) index.items else suggestedCatalogues
+                } else index.search(databaseQuery)
             }
+            Ps1ActionRow(
+                label = str(if (browseAllGames) "cheats.database.thisGame" else "cheats.database.allGames"),
+                controllerId = "ps1.cheats.database.scope",
+            ) { browseAllGames = !browseAllGames }
             Ps1ActionRow(
                 label = str("cheats.database.search"),
                 controllerId = "ps1.cheats.database.search",
                 description = databaseQuery.ifBlank { gameTitle.orEmpty() },
             ) {
                 searching = "database"
-                LibraryKeyboard.open(initial = databaseQuery, onChange = {}, placeholder = "Game, region or serial")
+                LibraryKeyboard.open(initial = databaseQuery, onChange = { databaseQuery = it }, placeholder = "Game, region or serial")
             }
             if (databaseQuery.isNotBlank()) Ps1ActionRow(
                 label = str("cheats.database.clearSearch"), controllerId = "ps1.cheats.database.clearSearch",
             ) { databaseQuery = "" }
             if (pendingCatalogue != null) {
                 val selected = pendingCatalogue!!
+                val incompatible = index.isIncompatible(selected, verifiedSerial)
                 Notice(
                     title = selected.title,
-                    body = str("cheats.database.confirm").format(verifiedSerial ?: gameKey),
-                    tint = MaterialTheme.colorScheme.tertiary,
+                    body = str(if (incompatible) "cheats.database.regionBlocked" else "cheats.database.confirm")
+                        .format(verifiedSerial ?: gameKey),
+                    tint = if (incompatible) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
                 )
-                Ps1ActionRow(
+                if (!incompatible) Ps1ActionRow(
                     label = str("cheats.database.load"), controllerId = "ps1.cheats.database.load",
                 ) { loadCatalogue(selected) }
                 Ps1ActionRow(
@@ -309,7 +337,8 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?) {
                 Ps1ActionRow(
                     label = item.title,
                     controllerId = "ps1.cheats.database.${item.id}",
-                    description = str("cheats.database.count").format(item.cheatCount, item.omittedCount),
+                    description = str("cheats.database.count").format(item.cheatCount, item.omittedCount) +
+                        if (index.isIncompatible(item, verifiedSerial)) " · " + str("cheats.database.wrongRegion") else "",
                 ) { if (!databaseBusy) pendingCatalogue = item }
             }
             if (results.isEmpty()) Text(str("cheats.database.noResults"), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -527,7 +556,7 @@ fun Ps1CheatsTab() {
     val runningGame = MainActivityRuntime.currentGame.value
     val key = scope?.gameKey ?: scope?.contextKey ?: runningGame?.settingsKey
     val title = scope?.gameTitle ?: scope?.contextTitle ?: runningGame?.title
-    Ps1CheatsPanel(key, title)
+    Ps1CheatsPanel(key, title, scope?.gameUri ?: scope?.contextUri ?: runningGame?.uri?.toString())
 }
 
 /**
@@ -543,11 +572,11 @@ fun Ps1CheatsScreen(onBack: () -> Unit, game: GameInfo? = null) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             ArmsTopBar(
                 title = str("cheats.title"),
-                subtitle = target?.title ?: str("cheats.noGame.title"),
+                subtitle = target?.title ?: str("cheats.database.browse"),
                 leading = { RoundAction("←", str("action.back"), onBack) },
             )
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                Ps1CheatsPanel(target?.settingsKey, target?.title)
+                Ps1CheatsPanel(target?.settingsKey, target?.title, target?.uri?.toString())
                 Spacer(Modifier.height(24.dp))
             }
         }

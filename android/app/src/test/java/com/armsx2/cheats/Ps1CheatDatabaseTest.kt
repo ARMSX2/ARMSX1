@@ -61,4 +61,48 @@ class Ps1CheatDatabaseTest {
         assertEquals(listOf("Custom", "Other orphan"),
             merged.selectionAfterImport(listOf("Custom", "new DATABASE cheat", "Other orphan")))
     }
+
+    @Test fun serialFormatsAndSearchAreNormalisedWithoutAcceptingGarbage() {
+        val index = Ps1CheatDatabaseIndex("$usa\n$pal".reader())
+        for (serial in listOf("slus_001.23", "SLUS-001-23", "SLUS.00123", "SLUS_001.23;1")) {
+            assertEquals("SLUS-00123", Ps1CheatDatabaseIndex.normaliseSerial(serial))
+        }
+        assertEquals(1, index.search("slus_001.23").size)
+        assertEquals(1, index.search("example SLUS_001.23").size)
+        assertEquals(1, index.search("slus_").size)
+        assertNull(Ps1CheatDatabaseIndex.normaliseSerial("BOOT=cdrom:SLUS_001.23"))
+        assertNull(Ps1CheatDatabaseIndex.normaliseSerial("SLUS-001234"))
+    }
+
+    @Test fun titleSuggestionsDoNotSubstituteAnotherRegion() {
+        val index = Ps1CheatDatabaseIndex("$usa\n$pal".reader())
+        assertEquals(listOf("Example (USA) (GameShark)"), index.suggestions("SLUS-00999", "Example").map { it.title })
+        assertNull(index.automatic("SLUS-00999"))
+        assertTrue(index.isRegionIncompatible(index.items[1], "SLUS-00999"))
+    }
+
+    @Test fun regionMetadataDistinguishesFrenchCodesFromOtherPalCountries() {
+        val french = usa.replace("Example (USA)", "Example (France)").replace("SLUS-00123", "SLES-00124")
+        val index = Ps1CheatDatabaseIndex(french.reader(), "Example (Europe)\tEurope\tSLES-00999".reader())
+        assertTrue(index.suggestions("SLES-00999", "Example").isEmpty())
+        assertTrue(index.isRegionIncompatible(index.items.single(), "SLES-00999"))
+    }
+
+    @Test fun romanNumeralsAreSuggestionsNotAutomaticIdentity() {
+        val row = usa.replace("Example", "Final Fantasy VIII")
+        val index = Ps1CheatDatabaseIndex(row.reader())
+        assertEquals(1, index.suggestions(null, "Final Fantasy 8").size)
+        assertNull(index.automatic("Final Fantasy 8"))
+    }
+
+    @Test fun demoAndDiscMismatchesAreBlockedWhenSerialMetadataIsKnown() {
+        val demo = usa.replace("Example (USA)", "Example (Demo) (USA)")
+        val demoIndex = Ps1CheatDatabaseIndex(demo.reader(), "Example (USA)\tUSA\tSLUS-00123".reader())
+        assertTrue(demoIndex.isIncompatible(demoIndex.items.single(), "SLUS-00123"))
+        assertNull(demoIndex.automatic("SLUS-00123"))
+        assertTrue(demoIndex.suggestions("SLUS-00123", "Example").isEmpty())
+        val disc = usa.replace("Example (USA)", "Example (USA) (Disc 1)")
+        val discIndex = Ps1CheatDatabaseIndex(disc.reader(), "Example (USA) (Disc 2)\tUSA\tSLUS-00123".reader())
+        assertTrue(discIndex.isIncompatible(discIndex.items.single(), "SLUS-00123"))
+    }
 }

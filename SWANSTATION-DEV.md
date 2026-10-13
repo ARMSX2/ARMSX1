@@ -59,6 +59,11 @@ The original installed app is not replaced by this dev build.
 - Catalogue cheats: core parser validation, selected-group execution, master
   disable and actual RAM-effect checks. Enabling cheats disables achievements
   for that session, rather than awarding cheated progress.
+- The 1,664-list offline cheat database is available from the main-menu Cheats
+  screen even before selecting or launching a game. Search and catalogue previews
+  require no import/download and never write cheat files or arm codes. Loading /
+  enabling cheats still happens in the explicit per-game screen, with custom
+  codes preserved and ambiguous region/revision matches requiring confirmation.
 - Numbered/autosave `.swanstate` files, previews, original-source companions,
   atomic writes, payload CRC, pinned-core/game identity and memory-card digest.
   Checked loads reject incompatible/corrupt states; explicit card-divergence
@@ -148,7 +153,7 @@ CHD identity/hash, rotation, surface recreation, actual new PNG dumps/replacemen
 loads, clean closing and stale session/surface callbacks. BIOS tests
 filter PS1/fake/oversize files. Transport tests reject unsafe hosts without
 sending credentials and check positioned indicator lifecycle/private sound paths.
-JVM regression suite contains 104 tests; consult the latest
+JVM regression suite contains 113 tests; consult the latest
 generated reports for final results.
 
 Pre-integration backups remain outside the repository in
@@ -161,7 +166,8 @@ configuration, keys, credentials and game fixtures are excluded.
 ## Verification — 2026-10-12
 
 - 104 JVM tests passed; zero failures/errors in 20 report suites.
-- Final installed APK: all six Thor instrumentation tests passed in 117.249
+- Last Thor-installed renderer APK (before the standalone database browser):
+  all six instrumentation tests passed in 117.249
   seconds, including eight renderer launches, shaders/plain rotation, surface
   rebinding, fresh texture PNG dumps and actual replacement loads, positioned
   indicator lifecycle and private sound-path checks. No live achievement is
@@ -186,3 +192,118 @@ The existing `.github/workflows/nightly-android.yml` still targets the old relea
 build flow; the release guard intentionally rejects its assembleGithubRelease
 task. Updating CI for this adapter and clearing distribution checks are separate
 work. No automatic release workaround or signing-secret change is included.
+
+## Standalone cheat database follow-up
+
+The no-game Cheats entry now opens the bundled catalogue instead of hiding it
+behind “No game selected.” It supports live search, paginated game lists and
+read-only cheat-name previews. It does not restore a separate app's private
+imported files or enable cheats globally. All 1,663 original bundled lists remain
+included. Existing per-game custom codes and selections are not changed by browsing.
+
+The debug and instrumentation APKs built successfully; 105 JVM tests passed,
+including preview-name checks against every actual bundled catalogue. The new
+packaged-asset instrumentation test compiled but has not run: no Android device
+was connected for this follow-up. The updated APK has not been installed on Thor,
+and these follow-up source changes have not been committed/pushed.
+
+On 2026-10-13 that standalone-browser APK was installed on Thor at the user's
+request. The following newer USA catalogue build is separate from that installation.
+
+## Warped USA catalogue — 2026-10-13
+
+Added a separate `Crash Bandicoot - Warped (USA) (GameShark)` supplement, matched
+to `SCUS-94244`, with six USA-listed groups: lives, powers, gems, sapphires,
+crystals and platinum relics. European `SCES-01420` catalogues remain separate.
+This supplement uses existing CC BY-SA Libretro code bytes checked against
+the original authors' USA listings; see `tools/cheat-supplements/NOTICE.md`.
+No assertion is made that every group in the European file works on USA copies.
+
+The generator reproducibly adds the supplement and includes its attribution in
+the packaged notice. All 1,663 previous catalogue payloads were checked byte for
+byte against the committed ZIP and remain unchanged. The total is now 1,664
+catalogues / 16,909 supported complete groups. New imports still start disabled
+and preserve existing custom groups.
+
+The APKs rebuilt successfully. All 106 JVM tests and eight Python conversion
+tests passed, including USA-versus-Europe matching and packaged-data consistency.
+The new Android asset tests compiled but have not run, and Warped's actual in-game
+cheat effects have not been tested on the user's ROM. This newer APK has not been
+installed, committed or pushed yet.
+
+## Catalogue-wide discovery — 2026-10-13
+
+This follow-up fixes discovery across the available data, not just Warped:
+
+- Exact serial lookup is indexed. Title/serial searches handle common separators,
+  diacritics, scraped underscore/ampersand names, metadata aliases and numeral
+  variants. Title aliases are suggestions, never proof of automatic compatibility.
+- Candidate lists open automatically when no unambiguous list can be imported.
+  World/revision ambiguities still require confirmation. Confirmed different
+  countries, demo/retail releases or explicit discs cannot be loaded for a known
+  game ID. Existing custom groups and enablement are preserved.
+- On opening Cheats for a selected library game, its actual disc ID is read on IO
+  if needed. SAF stages only that selected game through the existing preparation
+  helper, then cleans up. Positive IDs are cached separately; library settings
+  keys and whole-library fast scanning are unchanged. Cancellation stops the lookup.
+- The generator corrects discoverable aliases and excludes demo/retail and disc
+  mismatches. `tools/audit_ps1_cheats.py` reports coverage; missing code lists are
+  not presented as a failed import or silently filled from another region.
+
+The source still has 1,664 catalogues / 16,909 complete supported groups. There
+are linked lists for 2,734 of 10,187 known disc/region IDs; 7,453 have no linked
+catalogue. Those IDs include distinct regional editions and discs, not 10,187
+unique game titles. This is NOT full-library cheat coverage. More matching code
+data is required to fill the genuine gaps; the user's original imported database
+is no longer available. No complete collection was scraped from an unlicensed
+source or imported from current DuckStation.
+
+113 JVM tests and twelve Python conversion tests passed. Tests check discovery
+for every linked catalogue serial, regional separation, aliases, demo/disc safety
+and formatted search. Three packaged-data tests passed on Thor in 1.877 seconds
+for the preceding discovery/search build. The actual UI also displayed the
+candidate list for an unidentified library copy of 007 - The World Is Not Enough.
+
+The final on-demand-ID build passed compilation, JVM and APK checks. Thor initially
+disconnected before installation, then reconnected at the user's request. Both
+the final app APK and its instrumentation APK installed successfully on Thor.
+All four packaged-data tests passed in 1.867 seconds, with no skipped identity
+test: the selected-game lookup read `SCUS-94154` from the Crash2 CHD's contents,
+not its filename. USA Warped selection and catalogue-wide discovery also passed.
+The app cold-launched successfully after testing. APK SHA-256:
+`70D4306A88A91C1F822E2F1C6989AA22B49F8A20ABB2D56A121D3E6D952DD428`.
+Device results are recorded in `swan-all-cheats-identity-device.log`. These
+follow-ups accompany the Thor fix below on `android-compose`. Individual in-game cheat effects across all titles,
+revisions and regions have not been established by these lookup tests.
+
+## Thor sideways Vulkan picture — 2026-10-13
+
+Reproduced the user's report on the top screen: Compose controls were upright,
+but Crash Bandicoot 2's game picture was rotated sideways with display rotation
+set to zero. Thor exposes a portrait-native panel and a landscape logical window.
+The Vulkan host incorrectly used `currentTransform` for frames that were not
+pre-rotated. It now explicitly requests supported identity presentation so
+Android handles physical-panel rotation. This does not change the user's game
+rotation, display selection, internal resolution or orientation preferences.
+Unsupported identity presentation fails explicitly rather than drawing sideways.
+The Android transform contract is described in
+[AOSP swapchain implementation](https://android.googlesource.com/platform/frameworks/native/+/85b74b7e07/vulkan/libvulkan/swapchain.cpp).
+
+Android reports `SUBOPTIMAL` for this intentional transform difference. Successful
+suboptimal presents no longer rebuild the swapchain every frame; actual surface
+changes and `OUT_OF_DATE` still rebuild it. Final-device logs show one swapchain
+creation instead of repeated per-frame creations: 1280x720 surface, panel
+transform 2, presentation transform 1. Actual game startup is upright at 3x,
+approximately 59.8 FPS / 100% speed in the captured frame. The final screenshot
+is `build/thor-orientation-final.png`; this is a startup observation, not a
+long-duration performance claim. OpenGL, ANGLE and software paths are unchanged.
+
+Build and signature checks passed, with 113 JVM tests, six native surface-policy
+cases and thirteen shared presentation cases. The native cases ran on Thor.
+Four cheat-device checks passed after installing the first orientation build;
+the final follow-up only avoids the repeated suboptimal native swapchain rebuild.
+The final APK was installed with the user's permission in the existing isolated
+EmuCorePSX Dev package. SHA-256:
+`4045CA1CC3119DA188CC733BFFDC34221634E30FFCD93C008E6D6E7A5879D02C`.
+Source changes target the team repository's `android-compose` dev branch;
+no APK release is published by this source update.
