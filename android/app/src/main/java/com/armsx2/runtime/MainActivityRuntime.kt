@@ -1818,6 +1818,16 @@ open class MainActivityRuntime : ComponentActivity() {
         val discPickerOpen = androidx.compose.runtime.mutableStateOf(false)
         val discPickerSelection = androidx.compose.runtime.mutableStateOf(0)
 
+        /** Open the current game's list, without changing the master switch or selected codes. */
+        fun openCheatsForRunningGame() {
+            if (vmStopInProgress || currentGame.value == null ||
+                eState.value !in setOf(EmuState.RUNNING, EmuState.PAUSED) || !NativeApp.hasActiveVM()) return
+            // The menu normally pauses first. A direct shortcut must take the same pause edge
+            // before drawing its manager; Back already resumes through dismissInGameScreen().
+            pauseForOverlay()
+            WindowImpl.openInGameScreen(com.armsx2.ui.InGameScreen.Patches)
+        }
+
         fun promptSwapDisc() {
             if (vmStopInProgress || discSwapInProgress.value || !NativeApp.hasActiveVM()) return
             if (!WindowImpl.overlayVisible.value) InGameOverlay.open()
@@ -4053,6 +4063,10 @@ open class MainActivityRuntime : ComponentActivity() {
                     if (down) InGameOverlay.toggle()
                     return true
                 }
+                ControllerMappings.SysHotkey.OPEN_CHEATS -> {
+                    if (down) openCheatsForRunningGame()
+                    return true
+                }
                 ControllerMappings.SysHotkey.SWAP_DISC -> {
                     if (down) promptSwapDisc()
                     return true
@@ -5491,6 +5505,7 @@ open class MainActivityRuntime : ComponentActivity() {
     private fun runStickHotkey(h: ControllerMappings.SysHotkey) {
         when (h) {
             ControllerMappings.SysHotkey.MENU -> InGameOverlay.toggle()
+            ControllerMappings.SysHotkey.OPEN_CHEATS -> openCheatsForRunningGame()
             ControllerMappings.SysHotkey.SWAP_DISC -> promptSwapDisc()
             ControllerMappings.SysHotkey.SCREENSHOT -> com.armsx2.Screenshots.capture(applicationContext)
             ControllerMappings.SysHotkey.SAVE_STATE -> saveState()

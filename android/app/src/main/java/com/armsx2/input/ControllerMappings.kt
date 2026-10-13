@@ -965,6 +965,8 @@ object ControllerMappings {
         REWIND("pad.rewind.keycode", "Rewind (hold)"),
         // Append rather than insert: custom stick bindings persist enum ordinals.
         SWAP_DISC("pad.swapdisc.keycode", "Swap Disc"),
+        // Keep old stick-binding ordinals intact. Unbound until the user chooses a key/chord.
+        OPEN_CHEATS("pad.opencheats.keycode", "Open Cheats"),
     }
 
     // ---- PS1 port: which hotkeys the ARMSX (PS1) core can actually serve ----
@@ -1006,6 +1008,7 @@ object ControllerMappings {
     // any entry, grep NativeApp.java and confirm the method is `native`, not a stub.
     val ps1Hotkeys: List<SysHotkey> = listOf(
         SysHotkey.MENU,
+        SysHotkey.OPEN_CHEATS,
         SysHotkey.SWAP_DISC,
         // Real on this port since psx/texrep.c landed: flips [video] texture_dump and
         // re-pushes it, which is the same path the Video tab's switch takes. A hotkey earns
