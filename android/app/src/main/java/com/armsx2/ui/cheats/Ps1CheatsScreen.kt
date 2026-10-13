@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -132,12 +133,13 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?, gameUri: String? = null
     var browseAllGames by remember(gameKey) { mutableStateOf(false) }
     var pendingCatalogue by remember(gameKey) { mutableStateOf<Ps1CheatDatabaseItem?>(null) }
     var databaseQuery by remember(gameKey) { mutableStateOf("") }
+    var databaseRevision by remember(gameKey) { mutableIntStateOf(0) }
     var cheatQuery by remember(gameKey) { mutableStateOf("") }
     var showTools by remember(gameKey) { mutableStateOf(false) }
     var resultLimit by remember(gameKey, databaseQuery) { mutableIntStateOf(30) }
     var searching by remember(gameKey) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(gameKey, gameUri) {
+    LaunchedEffect(gameKey, gameUri, databaseRevision) {
         databaseBusy = true
         val result = withContext(Dispatchers.IO) {
             val lookupContext = currentCoroutineContext()
@@ -389,6 +391,13 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?, gameUri: String? = null
             label = str(if (browsingDatabase) "cheats.database.close" else "cheats.database.browse"),
             controllerId = "ps1.cheats.database",
         ) { browsingDatabase = !browsingDatabase }
+
+        key(gameKey) {
+            CheatDownloadButton(blocked = databaseBusy, onBusyChanged = { databaseBusy = it }) {
+                pendingCatalogue = null
+                databaseRevision++
+            }
+        }
 
         if (browsingDatabase && database != null) {
             val index = database!!

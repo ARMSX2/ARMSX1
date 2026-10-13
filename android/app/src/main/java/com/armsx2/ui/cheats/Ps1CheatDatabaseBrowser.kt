@@ -32,7 +32,7 @@ import com.armsx2.ui.settings.SettingsDivider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Always-available offline browser. Never writes files, preferences or core cheats. */
+/** Offline browser. Explicit downloads update database data only, not user files or selections. */
 @Composable
 internal fun Ps1CheatDatabaseBrowser() {
     val context = LocalContext.current.applicationContext
@@ -74,6 +74,12 @@ internal fun Ps1CheatDatabaseBrowser() {
             }
         }
         Spacer(Modifier.height(10.dp))
+
+        CheatDownloadButton {
+            selected = null
+            preview = null
+            retry++
+        }
 
         if (failed || previewFailed) {
             Text(str("cheats.database.start.failed"), color = MaterialTheme.colorScheme.error)

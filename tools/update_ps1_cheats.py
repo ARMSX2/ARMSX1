@@ -197,6 +197,8 @@ def main():
             'USA verification: https://gamehacking.org/game/88639?hacker=SonicBlueTM\n'
             'European catalogues are retained separately. See tools/cheat-supplements/NOTICE.md.\n')
     print(f'Bundled {len(entries)} catalogues; {sum(int(row.split(chr(9))[4]) for row in index)} complete cheats.')
+    from build_cheat_update import build
+    print(f'GitHub download package SHA-256: {build()}')
 
 if __name__ == '__main__':
     main()

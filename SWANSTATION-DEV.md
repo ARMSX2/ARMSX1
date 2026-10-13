@@ -503,3 +503,28 @@ test task (127 existing validated tests), and 93 JNI/pinned-core contracts.
 Experimental codes remain outside the bundled database. No test ROM, BIOS,
 RAM dump, screenshot, installed cheat-file backup, keystore or APK is included
 in this source commit. This is not an APK release or public-release audit clearance.
+
+## Downloadable cheat catalogue — 2026-10-14
+
+Added an explicit Download cheats action beside the database browser in both
+the per-game and global Cheats UI. It fetches one data-only versioned package
+from this repository's android-compose branch; users need the feature APK once,
+not a new APK for later catalogue publications. It preserves per-game custom
+files/selections, merges newly verified matches disabled, retains conservative
+region/revision confirmation and persists the validated database for offline use.
+
+Size limits, strict UTF-8/index/count validation, fixed archive names, unique
+entries and component SHA-256 checks precede atomic installation. Failures keep
+the prior database; corrupt caches fall back to the bundled catalogue. The UI
+shows the downloaded revision and expandable current attribution notices. No
+automatic downloads, APK/core replacements or arbitrary ZIP extraction occur.
+
+`tools/build_cheat_update.py` generates the reproducible publication from seven
+database/metadata/license assets, excluding experimental research and private
+artifacts. The normal converter now regenerates it automatically. Publication
+instructions and version-1 trust/merge limitations are in `cheats/README.md`.
+
+Local validation: 134 JVM tests and 25 Python tests passed; main/test APKs built,
+and 93 native JNI/pinned-core contracts passed. Isolated Android storage tests
+cover offline restart, invalid replacement and corrupt-cache fallback; their
+GitHub network test is explicit opt-in via `-e cheatDownloadNetwork true`.
