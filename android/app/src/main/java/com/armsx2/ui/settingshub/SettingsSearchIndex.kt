@@ -75,6 +75,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
 
     // --- PS1 core settings ---
     // Video tab — settings.toml [video] + [runtime].display_scale
+    SettingsSearchEntry("renderer.hdPreset.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.gpuBackend.label", true, SettingsCategory.Graphics),
     // The real upscale, and the two rows a user searching for "resolution" or "upscale" is
     // actually looking for. Both existed on the Video tab from the start and neither was indexed.
@@ -84,6 +85,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("renderer.widescreenHack.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.textureFilter.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.textureReplacements.label", true, SettingsCategory.Graphics),
+    SettingsSearchEntry("textures.browser", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.textureDump.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.textureDir.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.downsample.label", true, SettingsCategory.Graphics),

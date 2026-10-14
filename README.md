@@ -9,6 +9,39 @@ source boundaries, unfinished features, build commands and verification results.
 Existing old-engine source edits are preserved but are not Android build inputs.
 The old-engine feature description below is not a SwanStation feature checklist.
 
+### Android Compose additions
+
+Video settings include Native/2x/3x/4x HD presets, globally or for an individual
+game. These set internal 3D resolution rather than replacing textures or videos;
+they preserve the renderer and disable downsampling. Restart the game to apply.
+
+The [texture-pack browser](texture-packs/README.md) downloads and installs a
+selected compatible pack automatically, with offline reuse. The catalogue is
+initially empty; only verified, redistribution-approved packs should be added.
+Selection uses the disc ID/region and never applies a pack globally.
+
+CTR USA (`SCUS-94426`) has an experimental secondary-display companion. Launch
+the game on the top display of a dual-screen handheld such as Thor. The bottom
+shows a larger race map, eight vertical live racer positions with original
+portraits, and the timer/laps/Wumpa/items/boost display. Boot/menu/loading/results
+screens have an information panel. Adventure hubs have a read-only map/player
+marker; hub alignment and transitions still need broader live validation.
+Other games do not use this companion, and other CTR regions do not guess the
+USA memory layout.
+
+Original pictures/fonts/maps come from the running user-supplied game; no game
+artwork is bundled or downloaded. With a populated bottom race panel, guarded
+temporary RAM drawing edits hide the original top race HUD. They do not change
+the ROM file, fruit collection or race mechanics, and are restored on pause,
+reset, shutdown, state save/load and rewind. Missing required artwork leaves
+the original HUD visible. Achievements are disabled for any session in which
+the drawing patch activates. Hub/menu displays do not activate it.
+
+Main-library controller navigation now keeps highlighted covers visible without
+restartable scrolling animations, including partially clipped covers and
+recents/collection rows. Grid row steps account for cover size and safe-area
+padding. This does not change touch scrolling or emulation controls.
+
 ## What It Supports
 The Android Compose frontend includes an offline PS1 cheat catalogue under **Cheats**.
 Known serial/region matches load automatically; uncertain regions/revisions require confirmation

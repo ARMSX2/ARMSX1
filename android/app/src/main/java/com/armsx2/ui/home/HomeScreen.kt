@@ -46,6 +46,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
@@ -53,6 +54,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -129,6 +131,36 @@ import com.armsx2.ui.common.StatusChip
 import kotlin.math.abs
 
 private val LocalCustomCoverMap = staticCompositionLocalOf<Map<String, java.io.File>> { emptyMap() }
+
+/** Reveal only the hidden part; no long animation to restart during held input. */
+private suspend fun LazyListState.revealControllerItem(index: Int) {
+    withFrameNanos { }
+    val info = layoutInfo
+    if(index !in 0 until info.totalItemsCount)return
+    val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+    if(item == null) scrollToItem(index)
+    else {
+        val delta = HomeScrollPolicy.revealDelta(item.offset,item.size,
+            info.viewportStartOffset + info.beforeContentPadding,
+            info.viewportEndOffset - info.afterContentPadding)
+        if(delta != 0)scrollBy(delta.toFloat())
+    }
+}
+
+private suspend fun LazyGridState.revealControllerItem(index: Int) {
+    withFrameNanos { }
+    val info = layoutInfo
+    if(index !in 0 until info.totalItemsCount)return
+    val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+    if(item == null) scrollToItem(index)
+    else {
+        val delta = HomeScrollPolicy.revealDelta(item.offset.y,item.size.height,
+            info.viewportStartOffset + info.beforeContentPadding,
+            info.viewportEndOffset - info.afterContentPadding)
+        if(delta != 0)scrollBy(delta.toFloat())
+    }
+}
+
 private data class HomeFolderEntry(val key: String, val label: String,
     val game: GameInfo? = null, val expanded: Boolean? = null, val glyph: String = "▤",
     val edit: (() -> Unit)? = null, val action: () -> Unit)
@@ -352,11 +384,14 @@ fun HomeScreen(
             // covers out in rows of `perShelf`, so it must report that count (not 1) —
             // otherwise Up/Down move one cover at a time (feeling like Left/Right) and
             // only the very first cover can step up into the Recents row.
+            val cutout = WindowInsets.displayCutout.asPaddingValues()
+            val ld = LocalLayoutDirection.current
+            val gridSidePadding = 16f + cutout.calculateStartPadding(ld).value + cutout.calculateEndPadding(ld).value
             val estimatedColumns = when (state.layout) {
                 // MUST track gridCellDp — this feeds HomeInputController's Up/Down step, so if the
                 // estimate and the real column count diverge, controller navigation skips rows.
                 LibraryLayout.Grid ->
-                    (maxWidth.value / ((if (compact) 112f else 128f) * coverScale)).toInt().coerceAtLeast(1)
+                    HomeScrollPolicy.adaptiveColumns(maxWidth.value, gridCellDp, 9f, gridSidePadding)
                 LibraryLayout.Shelf ->
                     (maxWidth.value / (((if (compact) 84f else 100f) * coverScale) + 20f)).toInt().coerceIn(3, 8)
                 LibraryLayout.List -> 1
@@ -400,14 +435,14 @@ fun HomeScreen(
             // selected cover on screen. The grid has leading full-span items (toolbar,
             // search, recents section, All-Games header) before the game cells, so the
             // selected game's lazy-grid index = leading + its row (shelf) / flat index
-            // (grid, list). Only scroll when it's actually off-screen so paging through a
+            // (grid, list). Only scroll when it is clipped/off-screen so paging through a
             // visible screenful doesn't jitter. (Previously this only ran while searching,
             // so normal browsing never followed the selector.)
             val allGamesHeaderShown = shownRecents.isNotEmpty() &&
                 state.initialized && state.visibleGames.isNotEmpty()
             val toolbarBottom = ToolbarPositionPreferences.atBottom.value
             LaunchedEffect(state.selectedIndex, state.visibleGames.size, state.layout, HomeInputController.zone.value,
-                state.initialized, showSearch, shownRecents.size, toolbarBottom) {
+                state.initialized, showSearch, shownRecents.size, toolbarBottom, estimatedColumns) {
                 if (HomeInputController.zone.value != HomeZone.Grid) return@LaunchedEffect
                 // Don't follow (and thus don't scroll away from the top) until the user
                 // has actually navigated — otherwise a cold open snaps the grid to the
@@ -421,26 +456,30 @@ fun HomeScreen(
                     (if (shownRecents.isNotEmpty()) 1 else 0) + // recents section
                     (if (allGamesHeaderShown) 1 else 0) // All Games header
                 val cols = estimatedColumns.coerceAtLeast(1)
-                val target = leading + if (state.layout == LibraryLayout.Shelf) sel / cols else sel
-                val vis = gridState.layoutInfo.visibleItemsInfo
-                val first = vis.firstOrNull()?.index
-                val last = vis.lastOrNull()?.index
-                if (first == null || last == null || target < first || target > last) {
-                    gridState.animateScrollToItem(target.coerceAtLeast(0))
-                }
+                val target = HomeScrollPolicy.targetIndex(sel, leading, if(state.layout == LibraryLayout.Shelf) cols else 1)
+                gridState.revealControllerItem(target)
             }
-            // Entering a chrome zone (Toolbar / Search / Recents) scrolls the grid to the
-            // very top so those rows are on-screen when focused.
-            LaunchedEffect(HomeInputController.zone.value) {
-                if (HomeInputController.zone.value != HomeZone.Grid) gridState.animateScrollToItem(0)
+            // Reveal the actual chrome row, not always item zero (recents/collections
+            // can sit below the viewport). The pinned bottom toolbar needs no scroll.
+            LaunchedEffect(HomeInputController.zone.value,state.initialized,showSearch,shownRecents.size,toolbarBottom) {
+                val zone = HomeInputController.zone.value
+                val toolbarRows=if(toolbarBottom)0 else 1
+                val searchRows=if(state.initialized && showSearch)1 else 0
+                val collectionRows=if(state.initialized)1 else 0
+                val target=when(zone) {
+                    HomeZone.Toolbar -> if(toolbarBottom)null else 0
+                    HomeZone.Search -> toolbarRows
+                    HomeZone.Collections -> toolbarRows+searchRows
+                    HomeZone.RecentsHeader,HomeZone.Recents -> toolbarRows+searchRows+collectionRows
+                    HomeZone.Grid -> null
+                }
+                if(target!=null && HomeInputController.userNavigated)gridState.revealControllerItem(target)
             }
 
             // Keep covers/text out of the display's unsafe edge (cutout / rounded
             // corner) — add the cutout inset to the side padding. The full-bleed
             // shelf/recent rows only negate the base 8dp, so they stop at the safe
             // edge rather than bleeding under the cutout.
-            val cutout = WindowInsets.displayCutout.asPaddingValues()
-            val ld = LocalLayoutDirection.current
 
             // Toolbar position is an App setting. At the top it's the first grid item;
             // at the bottom it's a pinned bar (identical rounded-pill shape). The grid
@@ -623,7 +662,7 @@ fun HomeScreen(
                             val rowState = rememberLazyListState()
                             val index = HomeInputController.collectionIndex.intValue
                             LaunchedEffect(index, focused, folderEntries.size) {
-                                if (focused) rowState.animateScrollToItem(index.coerceIn(0, folderEntries.lastIndex))
+                                if (focused && folderEntries.isNotEmpty()) rowState.revealControllerItem(index.coerceIn(0, folderEntries.lastIndex))
                             }
                             LazyRow(state = rowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 itemsIndexed(folderEntries, key = { _, item -> item.key }) { i, item ->
@@ -705,7 +744,7 @@ fun HomeScreen(
                             } else {
                                 val recentsRowState = rememberLazyListState()
                                 LaunchedEffect(recentSel) {
-                                    if (recentSel >= 0) recentsRowState.animateScrollToItem(recentSel)
+                                    if (recentSel >= 0) recentsRowState.revealControllerItem(recentSel)
                                 }
                                 LazyRow(
                                     state = recentsRowState,
@@ -1905,7 +1944,7 @@ private fun GameShelf(
             val rowState = rememberLazyListState()
             LaunchedEffect(selectedIndex) {
                 val local = selectedIndex - startIndex
-                if (local in games.indices) rowState.animateScrollToItem(local)
+                if (local in games.indices) rowState.revealControllerItem(local)
             }
             LazyRow(
                 state = rowState,

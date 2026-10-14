@@ -8,6 +8,13 @@
 #include "core/cheats.h"
 #include "core/settings.h"
 #include "core/texture_replacements.h"
+#include "core/gpu.h"
+#include "core/save_state_version.h"
+#include "common/byte_stream.h"
+#include "common/state_wrapper.h"
+#include "core/cpu_core.h"
+#include "core/cpu_code_cache.h"
+#include "ctr_hud.h"
 #include "common/vulkan/context.h"
 #include "xxhash.h"
 #include "png.h"
@@ -21,6 +28,35 @@ namespace { bool texture_dump=false,texture_replace=false;std::string texture_di
 uint64_t texture_lookups=0,texture_writes=0,texture_hits=0;
 }
 void swan_replacement_loaded(){texture_hits++;}
+namespace { SwanCtrHud::Controller ctr_hud;
+bool ctr_read(uint32_t address,uint32_t& value){return CPU::SafeReadMemoryWord(address,&value);}
+bool ctr_write(uint32_t address,uint32_t value){
+  if(!CPU::SafeWriteMemoryWord(address,value))return false;
+  CPU::CodeCache::InvalidateCodePages(address&0x1fffffffu,1);
+  CPU::ClearICache();return true;
+}}
+extern "C" RETRO_API bool swan_ctr_hud(bool enabled){return ctr_hud.Tick(enabled,ctr_read,ctr_write);}
+extern "C" RETRO_API const char* swan_ctr_hud_status(){return ctr_hud.status.c_str();}
+// Use the pinned core's public write-only GPU serializer for a bounded in-memory
+// readback. Never load state, write a file, expose a live VRAM pointer or patch GPU internals.
+extern "C" RETRO_API bool swan_companion_vram(void* output, size_t capacity) {
+  constexpr size_t bytes = 1024 * 512 * sizeof(uint16_t);
+  if (!g_gpu || !output || capacity != bytes) return false;
+  std::vector<uint8_t> storage(2 * 1024 * 1024);
+  auto stream = ByteStream_CreateMemoryStream(storage.data(), static_cast<uint32_t>(storage.size()));
+  StateWrapper writer(stream.get(), StateWrapper::Mode::Write, SAVE_STATE_VERSION);
+  const bool ok = g_gpu->DoState(writer, nullptr, false);
+  g_gpu->RestoreGraphicsAPIState();
+  const auto end = stream->GetPosition();
+  if (!ok || writer.HasError() || end < bytes + 12 || end > storage.size()) return false;
+  const size_t start = static_cast<size_t>(end) - bytes;
+  // Pinned GPU serializer ends with the length-prefixed GPU-VRAM marker + raw pixels.
+  uint32_t marker_length = 0;
+  std::memcpy(&marker_length, storage.data() + start - 12, sizeof(marker_length));
+  if (marker_length != 8 || std::memcmp(storage.data() + start - 8, "GPU-VRAM", 8) != 0) return false;
+  std::memcpy(output, storage.data() + start, bytes);
+  return true;
+}
 extern "C" RETRO_API uint64_t swan_texture_metric(unsigned index){return index==0?texture_dump:index==1?g_settings.texture_replacements.enable_vram_write_replacements:index==2?texture_lookups:index==3?texture_writes:index==4?texture_hits:0;}
 std::string swan_texture_directory(const std::string& game) {
   if(texture_directory.empty())return {};

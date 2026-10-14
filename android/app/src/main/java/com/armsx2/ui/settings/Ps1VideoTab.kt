@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import com.armsx2.config.Ps1Settings
+import com.armsx2.config.Ps1HdPreset
 import com.armsx2.core.Ps1Textures
 import com.armsx2.i18n.str
 
@@ -49,6 +50,27 @@ fun Ps1VideoTab() {
             fontSize = 14.sp,
             modifier = Modifier.padding(bottom = 8.dp),
         )
+
+        val hdPreset = Ps1HdPreset.selected(s)
+        SegmentedRow(
+            label = str("renderer.hdPreset.label"),
+            options = listOf(
+                str("renderer.hdPreset.native"),
+                str("renderer.hdPreset.2x"),
+                str("renderer.hdPreset.3x"),
+                str("renderer.hdPreset.4x"),
+            ),
+            selectedIndex = hdPreset?.ordinal ?: -1,
+            description = (if (hdPreset == null) str("renderer.hdPreset.custom") + " " else "") +
+                str("renderer.hdPreset.description") + " " +
+                str(if (LocalPs1SettingsScope.current?.gameKey == null)
+                    "renderer.hdPreset.global" else "renderer.hdPreset.game"),
+            onChange = { index ->
+                val preset = Ps1HdPreset.entries[index]
+                editor.update { preset.applyTo(it) }
+            },
+        )
+        SettingsDivider()
 
         SegmentedRow(
             label = str("renderer.gpuBackend.label"),
@@ -151,6 +173,8 @@ fun Ps1VideoTab() {
         SettingsDivider()
 
         // ---- Texture replacement / dumping (psx/texrep.h) -------------------------------
+        com.armsx2.ui.textures.TexturePacksSection(editor)
+        SettingsDivider()
         // Deliberately next to Texture filtering, and deliberately on this MAIN tab rather
         // than behind a manager screen: the PS2 build put its (unrelated) texture feature in
         // a drawer entry, where nobody found it.

@@ -143,6 +143,8 @@ private val ROWS: List<RowKeys> = listOf(
     RowKeys(Ps1Tab.Video, "renderer.hwRasterizer.label", listOf("video.renderer")),
     RowKeys(Ps1Tab.Video, "renderer.pgxp.label", listOf("video.pgxp")),
     RowKeys(Ps1Tab.Video, "renderer.internalRes.label", listOf("video.internal_scale")),
+    RowKeys(Ps1Tab.Video, "renderer.hdPreset.label",
+        listOf("video.renderer", "video.internal_scale", "video.downsample")),
     RowKeys(Ps1Tab.Video, "renderer.verticalSync.label", listOf("video.vsync")),
     RowKeys(Ps1Tab.Video, "renderer.bilinear.label", listOf("video.texture_scale_mode")),
     RowKeys(Ps1Tab.Video, "renderer.integerScaling.label", listOf("video.integer_scaling")),

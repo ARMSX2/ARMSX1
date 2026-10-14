@@ -114,6 +114,9 @@ API(bool,bridge_validate_cheat,(const char*));
 API(uint32_t,bridge_guest_frame,());
 API(void,bridge_texture_options,(bool,bool,const char*));
 API(uint64_t,bridge_texture_metric,(unsigned));
+API(bool,bridge_companion_vram,(void*,size_t));
+API(bool,bridge_ctr_hud,(bool)); API(const char*,bridge_ctr_hud_status,());
+std::atomic<int64_t> ctr_hud_lease{0};
 API(void*,core_retro_get_memory_data,(unsigned)); API(size_t,core_retro_get_memory_size,(unsigned));
 #undef API
 void Log(int priority,const char* message) {__android_log_write(priority,"EmuCorePSX",message);}
@@ -483,6 +486,7 @@ bool StepRewind() {
   if(!rewind_enabled || rewind_states.empty())return false;
   if(bridge_card_digest()!=rewind_card_epoch){ClearRewind();return false;}
   auto bytes=std::move(rewind_states.back());rewind_states.pop_back();rewind_bytes-=bytes.size();
+  bridge_ctr_hud(false);
   state_context=RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE;
   const bool ok=core_retro_unserialize(bytes.data(),bytes.size());
   state_context=RETRO_SAVESTATE_CONTEXT_NORMAL;
@@ -493,6 +497,7 @@ void CaptureRewind() {
   if(!rewind_enabled)return;
   const auto interval=std::max(1,static_cast<int>(nominal.load()/rewind_frequency));
   if(++rewind_tick<interval)return;rewind_tick=0;
+  bridge_ctr_hud(false); // Rewind/state files must never contain our temporary drawing patch.
   const auto size=core_retro_serialize_size();if(!size || size>64*1024*1024)return;
   const auto epoch=bridge_card_digest();
   if(epoch!=rewind_card_epoch){ClearRewind();rewind_card_epoch=epoch;}
@@ -553,6 +558,8 @@ bool SwanHost::Initialize(JNIEnv* env,jclass cls,std::string root,std::string bi
   BRIDGE(bridge_guest_frame,"swan_guest_frame");
   BRIDGE(bridge_texture_options,"swan_texture_options");
   BRIDGE(bridge_texture_metric,"swan_texture_metric");
+  BRIDGE(bridge_companion_vram,"swan_companion_vram");
+  BRIDGE(bridge_ctr_hud,"swan_ctr_hud");BRIDGE(bridge_ctr_hud_status,"swan_ctr_hud_status");
 #undef BRIDGE
   SwanAchievements::Initialize(env,[](uint32_t address,uint8_t* buffer,uint32_t count)->uint32_t {
     if(std::this_thread::get_id()!=emulation_thread||!active||!core_retro_get_memory_data||!buffer)return 0;
@@ -634,12 +641,17 @@ bool SwanHost::Run(std::string path,uint64_t token) {
     if(cheats_armed==0)SwanAchievements::Game(game_path);else SwanAchievements::Unload();
     OpenAudio();NotifyPause(false);
     int measured_frames=0;auto measured_at=Clock::now(),deadline=Clock::now();
+    bool ctr_hud_used=false;
+    ctr_hud_lease=0;
     double sum_frame=0,sum_emu=0,sum_present=0,sum_idle=0,worst=0;int stat_frames=0;
     while(!stop) {
       Drain();UpdateWindow(revision);AllocateTarget();
+      const int64_t hud_now=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+      const bool move_hud=!paused && !rewind_active && current_serial=="SCUS-94426" && hud_now<ctr_hud_lease.load();
+      if(bridge_ctr_hud(move_hud) && !ctr_hud_used){ctr_hud_used=true;SwanAchievements::Unload();}
       if(paused){fps=0;std::unique_lock lock(state_mutex);wake.wait_for(lock,std::chrono::milliseconds(10));deadline=Clock::now();continue;}
       const auto frame_start=Clock::now();present_ms=0;
-      if(rewind_active){StepRewind();SwanAchievements::Reset();}else {core_retro_run();if(cheats_armed==0)SwanAchievements::Frame();CaptureRewind();}
+      if(rewind_active){StepRewind();SwanAchievements::Reset();}else {core_retro_run();if(cheats_armed==0 && !ctr_hud_used)SwanAchievements::Frame();CaptureRewind();}
       const auto emu_end=Clock::now();
       const double emu_ms=std::chrono::duration<double,std::milli>(emu_end-frame_start).count();
       SwanPerformance::Frame(std::chrono::duration_cast<std::chrono::nanoseconds>(emu_end-frame_start).count(),int64_t(1000000000.0/std::max(1.f,nominal.load())));
@@ -661,6 +673,7 @@ bool SwanHost::Run(std::string path,uint64_t token) {
     PresentBlank();
     // SwanStation's destroy callback switches its live display to software.
     // Calling it after unload dereferences an already released host display.
+    bridge_ctr_hud(false);ctr_hud_lease=0;
     if(hardware.context_destroy)hardware.context_destroy();
     core_retro_unload_game();
   } else JavaNotice("SwanStation could not boot this game. Check its image and BIOS.");
@@ -708,7 +721,7 @@ void SwanHost::Analog(int player,int stick,int x,int y){if(player<0||player>=4||
   axes[player][stick*2]=std::clamp((x-128)*256,-32768,32767);axes[player][stick*2+1]=std::clamp((y-128)*256,-32768,32767);}
 void SwanHost::ResetButtons(){for(auto& pad:buttons)for(auto& b:pad)b=0;for(auto& pad:axes)for(auto& a:pad)a=0;}
 void SwanHost::Option(std::string key,std::string value){Invoke([key=std::move(key),value=std::move(value)]{options[key]=value;options_changed=true;return true;});}
-void SwanHost::Reset(){Invoke([]{core_retro_reset();SwanAchievements::Reset();ClearRewind();return true;});}
+void SwanHost::Reset(){Invoke([]{bridge_ctr_hud(false);core_retro_reset();SwanAchievements::Reset();ClearRewind();return true;});}
 void SwanHost::AudioSuspend(bool value){audio_suspended=value;}
 void SwanHost::FastForward(bool value){fast=value;wake.notify_all();}
 void SwanHost::Speed(bool limit,int percent,float ff){limit_speed=limit;speed=std::clamp(percent,10,1000);fast_speed=std::clamp(ff,0.f,16.f);wake.notify_all();}
@@ -760,6 +773,30 @@ std::vector<unsigned char> SwanHost::MemorySnapshot(){
   }))return {};
   return std::move(*result);
 }
+void SwanHost::CtrHudMoved(bool enabled){
+  const auto now=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+  ctr_hud_lease=enabled?now+600:0;wake.notify_all();
+}
+std::string SwanHost::CtrHudStatus(){auto result=std::make_shared<std::string>();
+  if(!Invoke([result]{*result=bridge_ctr_hud_status();return true;}))return "HUD status unavailable";
+  return *result;}
+std::vector<unsigned char> SwanHost::CompanionSnapshot(){
+  auto result=std::make_shared<std::vector<unsigned char>>();
+  if(!Invoke([result]{
+    {std::lock_guard lock(state_mutex);if(current_serial!="SCUS-94426")return false;}
+    constexpr size_t ram_bytes=2*1024*1024, vram_bytes=1024*512*2;
+    if(!bridge_companion_vram || !core_retro_get_memory_data || !core_retro_get_memory_size ||
+       core_retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM)!=ram_bytes)return false;
+    const auto* ram=static_cast<const unsigned char*>(core_retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM));
+    if(!ram)return false;
+    result->resize(ram_bytes+vram_bytes);
+    if(!bridge_companion_vram(result->data()+ram_bytes,vram_bytes))return false;
+    // Copy both on this emulation-thread job, so texture descriptors and pixels agree.
+    std::memcpy(result->data(),ram,ram_bytes);
+    return true;
+  }))return {};
+  return std::move(*result);
+}
 std::string SwanHost::StatePath(int slot){std::lock_guard lock(state_mutex);if(slot< -1||slot>=10||state_identity.empty())return {};
   const auto suffix=slot== -1?std::string("autosave"):std::to_string(slot);
   return data_root+"/swanstation/states/"+state_identity+"-"+suffix+".swanstate";}
@@ -776,7 +813,7 @@ bool AtomicBytes(const std::string& path,const unsigned char* bytes,size_t size)
 }
 }
 bool SwanHost::Save(int slot){auto path=StatePath(slot);if(path.empty())return false;
-  return Invoke([path]{auto size=core_retro_serialize_size();if(!size || size>63*1024*1024)return false;std::vector<unsigned char> bytes(size+80,0);
+  return Invoke([path]{bridge_ctr_hud(false);auto size=core_retro_serialize_size();if(!size || size>63*1024*1024)return false;std::vector<unsigned char> bytes(size+80,0);
     std::memcpy(bytes.data(),"SWANST02",8);Write64(bytes.data()+8,bridge_card_digest());Write64(bytes.data()+16,size);
     Write64(bytes.data()+24,Hash(state_identity));std::memcpy(bytes.data()+32,StateCore,40);
     if(!core_retro_serialize(bytes.data()+80,size))return false;
@@ -794,6 +831,7 @@ int SwanHost::LoadChecked(int slot,bool ignore){auto path=StatePath(slot);if(pat
        Read64(bytes.data()+72)!=crc32(0,bytes.data()+80,bytes.size()-80))return true;
     if(!ignore && Read64(bytes.data()+8)!=bridge_card_digest()){*result=-16;return true;}
     state_context=RETRO_SAVESTATE_CONTEXT_NORMAL;
+    bridge_ctr_hud(false);
     if(!core_retro_unserialize(bytes.data()+80,bytes.size()-80))return true;
     SwanAchievements::Reset();
     ClearRewind();{std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;}*result=0;return true;
@@ -813,6 +851,7 @@ void SwanHost::Screenshot(std::string path){Invoke([path]{
   return WritePng(path.c_str(),w,h,4,rgba.data(),w*4);});}
 bool SwanHost::Disc(std::string path){if(!std::filesystem::is_regular_file(path))return false;
   return Invoke([path]{if(!disk.set_eject_state||!disk.replace_image_index||!disk.get_image_index)return false;
+    bridge_ctr_hud(false);ctr_hud_lease=0;
     const auto index=disk.get_image_index();retro_game_info next{path.c_str(),nullptr,0,nullptr};
     if(!disk.set_eject_state(true))return false;const bool replaced=disk.replace_image_index(index,&next);
     const bool closed=disk.set_eject_state(false);if(replaced&&closed){SwanAchievements::Unload();if(cheats_armed==0)SwanAchievements::Game(path);

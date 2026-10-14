@@ -1463,6 +1463,35 @@ val EN: Map<String, String> = mapOf(
     "renderer.textureFilter.bilinear" to "Bilinear",
     "renderer.textureFilter.xbr" to "xBR-style",
     "renderer.textureReplacements.label" to "Texture replacements",
+    "textures.browser" to "Texture packs ▾",
+    "textures.browser.close" to "Texture packs ▴",
+    "textures.browser.description" to "Browse packs, then select one to download and install automatically. Installed packs work offline.",
+    "textures.refresh" to "Refresh texture catalogue from GitHub",
+    "textures.busy" to "Loading / installing textures…",
+    "textures.chooseGame" to "You can download packs here. To apply one, open Video settings for a game and select This game; global settings are never changed by pack selection.",
+    "textures.unknownGame" to "Could not verify this game's disc ID. Packs can be downloaded but cannot be applied until the exact game/region is identified.",
+    "textures.gameId" to "Verified disc ID: %s",
+    "textures.hardwareRequired" to "Texture replacements require a hardware renderer; Software rendering will not display them.",
+    "textures.loadFailed" to "Unable to read the texture catalogue. Existing packs and game settings were kept.",
+    "textures.refreshFailed" to "Unable to refresh the GitHub catalogue. The last saved catalogue and installed packs were kept.",
+    "textures.refreshed" to "Texture catalogue refreshed.",
+    "textures.progress" to "Downloading: %d%%",
+    "textures.empty" to "No texture packs have been published yet. The browser is ready for compatible, redistribution-approved packs.",
+    "textures.search" to "Search texture packs / game IDs",
+    "textures.matches" to "Show packs for this game",
+    "textures.allGames" to "Browse all texture packs",
+    "textures.noMatches" to "No packs match this game/region or search.",
+    "textures.selected" to "Selected for this game",
+    "textures.use" to "Use installed pack",
+    "textures.installed" to "Installed — open this game's Video settings to use it",
+    "textures.downloadUse" to "Download and use for this game",
+    "textures.download" to "Download and install",
+    "textures.size" to "Download %.1f MiB · installed %.1f MiB",
+    "textures.otherRegion" to "Not compatible with this game ID — cannot apply",
+    "textures.applied" to "Pack selected for this game. Existing user texture folders were not modified.",
+    "textures.downloaded" to "Pack installed and available offline. Open this game's Video settings to select it.",
+    "textures.installFailed" to "Unable to install or select this pack. Existing packs and texture folders were kept. Check your connection, free storage and pack compatibility.",
+    "textures.more" to "Show more packs",
     "renderer.textureReplacements.description" to
         "Loads SwanStation VRAM-write replacements from the replacements folder below. " +
         "PNG names must use vram-write- followed by the 32-character content hash. " +
@@ -1524,6 +1553,18 @@ val EN: Map<String, String> = mapOf(
         "sideways; the image is rotated, the controls are not. Works on OpenGL, ANGLE, " +
         "Vulkan and software presentation, including shader output.",
     "renderer.internalRes.label" to "Internal resolution",
+    "renderer.hdPreset.label" to "HD rendering preset",
+    "renderer.hdPreset.native" to "Native (1×)",
+    "renderer.hdPreset.2x" to "HD 2×",
+    "renderer.hdPreset.3x" to "HD 3×",
+    "renderer.hdPreset.4x" to "HD 4×",
+    "renderer.hdPreset.description" to
+        "Sharpens 3D rendering, not original textures or videos. Higher settings cost more GPU " +
+        "power; lower the preset if games slow down. Keeps your renderer and disables " +
+        "downsampling. Restart the game to apply.",
+    "renderer.hdPreset.global" to "Global applies to games without conflicting per-game overrides.",
+    "renderer.hdPreset.game" to "Applies only to this game.",
+    "renderer.hdPreset.custom" to "Custom: your manual resolution/downsampling differs from these presets.",
     "renderer.internalRes.description" to
         "Renders at this multiple of the PlayStation's native resolution. Cost grows with the " +
         "SQUARE of the multiplier, so 4x is roughly sixteen times the rasterising work of 1x — " +

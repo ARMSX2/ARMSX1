@@ -5800,6 +5800,7 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     override fun onPause() {
+        if (ctrCompanionDelegate.isInitialized()) ctrCompanion.pause()
         com.armsx2.ui.home.HomeInputController.finishTileMove()
         // Leaving the foreground: whatever was held gets no UP event (Android stops
         // delivering to us), so drop every pad bit or the game keeps running with a
@@ -5888,8 +5889,12 @@ open class MainActivityRuntime : ComponentActivity() {
         }
     }
 
+    private val ctrCompanionDelegate = lazy { com.armsx2.companion.CtrCompanion(this) }
+    private val ctrCompanion by ctrCompanionDelegate
+
     override fun onResume() {
         super.onResume()
+        ctrCompanion.resume()
         // Restart the platform audio stream FIRST, before anything below can ask the core for a
         // frame. Un-suspending is what actually undoes onPause/onStop — the VM's own resume still
         // belongs to the pause overlay's Resume button, which is where it has always been — and
@@ -5932,6 +5937,7 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (ctrCompanionDelegate.isInitialized()) ctrCompanion.close()
         getSystemService(android.hardware.input.InputManager::class.java)
             ?.unregisterInputDeviceListener(inputDeviceListener)
         // On a CONFIGURATION-driven recreate (e.g. Samsung DeX moving the activity to

@@ -42,6 +42,9 @@ extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwa
 extern "C" JNIEXPORT jint JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanGuestFrame(JNIEnv*,jclass) {return SwanHost::GuestFrame();}
 extern "C" JNIEXPORT jint JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanMemoryByte(JNIEnv*,jclass,jint address) {return SwanHost::MemoryByte(address);}
 extern "C" JNIEXPORT jbyteArray JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanMemorySnapshot(JNIEnv* env,jclass) {return Bytes(env,SwanHost::MemorySnapshot());}
+extern "C" JNIEXPORT jbyteArray JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanCompanionSnapshot(JNIEnv* env,jclass) {return Bytes(env,SwanHost::CompanionSnapshot());}
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setSwanCtrHudMoved(JNIEnv*,jclass,jboolean enabled){SwanHost::CtrHudMoved(enabled);}
+extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanCtrHudStatus(JNIEnv* env,jclass){return String(env,SwanHost::CtrHudStatus());}
 extern "C" JNIEXPORT jboolean JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_initializeSwanBackend(JNIEnv* env,jclass cls, jstring root, jstring bios, jstring config) {
     return SwanHost::Initialize(env,cls,Utf(env,root),Utf(env,bios),Utf(env,config));
 }
