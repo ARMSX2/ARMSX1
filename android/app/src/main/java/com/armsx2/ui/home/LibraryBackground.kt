@@ -17,7 +17,9 @@ import com.armsx2.runtime.MainActivityRuntime
 object LibraryBackground {
     private const val PREF = "library.background.uri"
     private const val PREF_ANIM = "library.background.animated2d"
+    private const val PREF_STYLE = "library.background.style"
     val uri = mutableStateOf<String?>(null)
+    val style = mutableStateOf(LibraryBackgroundStyle.Original)
 
     /**
      * Force the lightweight 2D animated background ([LibraryWaveBackground]) even on devices where
@@ -33,6 +35,10 @@ object LibraryBackground {
         if (loaded) return
         loaded = true
         uri.value = runCatching { MainActivityRuntime.prefs.getString(PREF, null) }.getOrNull()
+        style.value = LibraryBackgroundStyle.restored(
+            runCatching { MainActivityRuntime.prefs.getString(PREF_STYLE, null) }.getOrNull(),
+            !uri.value.isNullOrBlank(),
+        )
         animated2D.value = runCatching { MainActivityRuntime.prefs.getBoolean(PREF_ANIM, false) }.getOrDefault(false)
     }
 
@@ -41,16 +47,28 @@ object LibraryBackground {
         runCatching { MainActivityRuntime.prefs.edit().putBoolean(PREF_ANIM, on).apply() }
     }
 
+    fun setStyle(value: LibraryBackgroundStyle) {
+        ensureLoaded()
+        val selected = LibraryBackgroundStyle.restored(value.name, !uri.value.isNullOrBlank())
+        style.value = selected
+        // Keep the image URI and wave preferences so switching back restores them.
+        runCatching { MainActivityRuntime.prefs.edit().putString(PREF_STYLE, selected.name).apply() }
+    }
+
     fun set(context: Context, value: Uri) {
+        ensureLoaded()
         runCatching {
             context.contentResolver.takePersistableUriPermission(value, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         uri.value = value.toString()
+        setStyle(LibraryBackgroundStyle.CustomImage)
         runCatching { MainActivityRuntime.prefs.edit().putString(PREF, value.toString()).apply() }
     }
 
     fun clear() {
+        ensureLoaded()
         uri.value = null
+        setStyle(LibraryBackgroundStyle.Original)
         runCatching { MainActivityRuntime.prefs.edit().remove(PREF).apply() }
     }
 }

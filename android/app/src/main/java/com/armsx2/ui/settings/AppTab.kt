@@ -203,6 +203,9 @@ fun AppTab() {
             }
         }
 
+        LibraryBackgroundStyleSection()
+
+        if (com.armsx2.ui.home.LibraryBackground.style.value == com.armsx2.ui.home.LibraryBackgroundStyle.Original) {
         // Library background (wave) color. Separate from the theme accent above — that only tints
         // the UI chrome; this recolors the animated backdrop itself, with the white waves riding
         // over it. Unset = the built-in blue. Live: XmbGlView's GL thread reads the new color on
@@ -332,6 +335,8 @@ fun AppTab() {
                 ) { Text(str("action.reset")) }
             }
             }
+        }
+
         }
 
         ToggleRow(

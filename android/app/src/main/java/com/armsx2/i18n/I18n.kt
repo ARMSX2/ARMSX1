@@ -402,6 +402,11 @@ val EN: Map<String, String> = mapOf(
     "app.bgColor.rgb" to "RGB Cycle",
     "app.bgColor.rgb.desc" to "Continuously drift the background through the colour spectrum, like RGB peripherals. Overrides the fixed colour below. Same limitation as above: no effect where the fallback background is in use.",
     "app.theme.light" to "Light",
+    "app.bg.style" to "Background style",
+    "app.bg.original" to "Original ARMSX1",
+    "app.bg.psone" to "PS one",
+    "app.bg.custom" to "Custom image",
+    "app.bg.style.desc" to "Original keeps the current animated wave. PS one adds a static console-inspired background to the library and menus. Menu colours, controls and your saved wallpaper stay unchanged.",
     // "Dark" renamed to "Blue" — it was always the blue-tinted dark theme, which only became
     // confusing once the other hues existed. Keys are the lowercased ThemeMode names.
     "app.theme.blue" to "Blue",

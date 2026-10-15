@@ -781,8 +781,9 @@ object TouchControls {
      *  profile. */
     fun saveAsNewProfile(name: String) {
         val trimmed = name.trim().ifEmpty { return }
-        val newProf = TouchProfile(trimmed, activeLayout.value.copy())
         val existing = profiles.indexOfFirst { it.name == trimmed }
+        val newProf = (profiles.getOrNull(existing) ?: TouchProfile(trimmed, TouchLayout.default()))
+            .withLayoutFor(portrait.value, activeLayout.value.copy())
         if (existing >= 0) profiles[existing] = newProf
         else profiles.add(newProf)
         activeProfileName.value = trimmed
@@ -800,7 +801,7 @@ object TouchControls {
     fun switchProfile(name: String) {
         val match = profiles.firstOrNull { it.name == name } ?: return
         activeProfileName.value = name
-        activeLayout.value = match.layout.copy()
+        activeLayout.value = match.layoutFor(portrait.value).copy()
         // When a game is running, remember this profile FOR that game so it
         // auto-applies on the next boot (per-game tier). With no game (library),
         // it's just the global default, persisted via KEY_ACTIVE in persist().
@@ -820,7 +821,7 @@ object TouchControls {
         if (activeProfileName.value == name) {
             val fallback = profiles.first()
             activeProfileName.value = fallback.name
-            activeLayout.value = fallback.layout.copy()
+            activeLayout.value = fallback.layoutFor(portrait.value).copy()
         }
         // Drop any per-game overrides that pointed at the deleted profile.
         clearGameOverridesFor(name)
@@ -851,12 +852,16 @@ object TouchControls {
      *   2. the AUTHORITATIVE core disc serial (VMManager::GetDiscSerial via JNI),
      *      which knows the serial even when the filename had no serial token and
      *      the overlay never populated InGameOverlay.currentSerial;
-     *   3. InGameOverlay.currentSerial as a last resort (may be a formatted
-     *      "SERIAL (CRC)" string — only use if the cleaner sources are empty). */
-    private fun runningSerial(): String? =
-        MainActivityRuntime.currentGame.value?.serial?.takeIf { it.isNotEmpty() }
-            ?: coreSerial()
-            ?: InGameOverlay.currentSerial.value?.takeIf { it.isNotEmpty() }
+     *   3. The library's settings key (filename fallback for serial-less games);
+     *   4. The overlay key, then a legacy caller hint. Only legacy CRC suffixes
+     *      are stripped; filename qualifiers remain part of the identity. */
+    private fun runningSerial(hint: String? = null): String? = TouchLayoutIdentity.resolve(
+        MainActivityRuntime.currentGame.value?.serial,
+        coreSerial(),
+        MainActivityRuntime.currentGame.value?.settingsKey,
+        InGameOverlay.currentSerial.value,
+        hint,
+    )
 
     // ---- Per-game tier + portable inputprofiles/ folder ----
 
@@ -870,10 +875,9 @@ object TouchControls {
      *      active (otherwise a "GT4" profile bleeds into every other game).
      *  Does NOT persist (auto-apply must not overwrite the global selection). */
     fun applyForSerial(serial: String?) {
-        // Fall back to the authoritative core serial when the caller's serial is
-        // null/empty (filename had no serial token) so a per-serial layout still
-        // re-applies regardless of launch path.
-        val effSerial = serial?.takeIf { it.isNotEmpty() } ?: coreSerial()
+        // Use EXACTLY the save path's resolution. The menu may supply a filename for a
+        // CHD whose serial was unknown at scan time, while Save already used the core ID.
+        val effSerial = runningSerial(serial)
         if (effSerial == null) {
             // No serial — try the per-disc CRC layout key used by the in-game save
             // safety net before giving up.
@@ -906,7 +910,7 @@ object TouchControls {
             val match = profiles.firstOrNull { it.name == name }
             if (match != null) {
                 activeProfileName.value = name
-                activeLayout.value = match.layout.copy()
+                activeLayout.value = match.layoutFor(portrait.value).copy()
                 return
             }
         }
@@ -916,10 +920,10 @@ object TouchControls {
         val def = profiles.firstOrNull { it.name == "Default" } ?: profiles.firstOrNull()
         if (def != null) {
             activeProfileName.value = def.name
-            activeLayout.value = def.layout.copy()
+            activeLayout.value = def.layoutFor(portrait.value).copy()
         } else {
             activeProfileName.value = "Default"
-            activeLayout.value = TouchLayout.default()
+            activeLayout.value = TouchLayout.defaultFor(portrait.value)
         }
     }
 
@@ -994,7 +998,8 @@ object TouchControls {
      *  any unsaved edits. */
     fun discardEdits() {
         val match = profiles.firstOrNull { it.name == activeProfileName.value }
-        if (match != null) activeLayout.value = match.layout.copy()
+        if (gameIsRunning()) applyForSerial(runningSerial())
+        else if (match != null) activeLayout.value = match.layoutFor(portrait.value).copy()
         selectedButton.value = null
     }
 

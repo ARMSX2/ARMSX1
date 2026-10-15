@@ -77,6 +77,7 @@ fun ArmsBackdrop(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    androidx.compose.runtime.LaunchedEffect(Unit) { com.armsx2.ui.home.LibraryBackground.ensureLoaded() }
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     val safeSides = if (isLandscape) {
         WindowInsetsSides.Bottom
@@ -98,6 +99,8 @@ fun ArmsBackdrop(
             // exposed strip reads as a bar (most visibly in landscape).
             if (backgroundLayer != null) {
                 Box(modifier = Modifier.fillMaxSize(), content = backgroundLayer)
+            } else if (com.armsx2.ui.home.LibraryBackground.style.value == com.armsx2.ui.home.LibraryBackgroundStyle.PsOne) {
+                PsOneBackdrop()
             }
             Box(
                 modifier = Modifier

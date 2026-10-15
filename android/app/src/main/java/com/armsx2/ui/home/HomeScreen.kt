@@ -301,8 +301,15 @@ fun HomeScreen(
         // (behind the gesture bar) so it never leaves an exposed strip at the bottom —
         // that strip was the "blue bar" in landscape.
         backgroundLayer = {
-            val libraryBg = LibraryBackground.uri.value
-            if (libraryBg == null) {
+            val libraryBg = LibraryBackground.uri.value.takeIf {
+                LibraryBackground.style.value == LibraryBackgroundStyle.CustomImage
+            }
+            val psOne = LibraryBackground.style.value == LibraryBackgroundStyle.PsOne
+            if (psOne) {
+                // Background-only choice; switching back restores the user's saved wallpaper
+                // and wave settings. Do not instantiate a hidden GLES/animated background.
+                com.armsx2.ui.common.PsOneBackdrop()
+            } else if (libraryBg == null) {
                 // Default: the live PS3-XMB wave (XmbGlView — a GLES3 port of linkev's
                 // grid-displacement mesh, matching iOS). When GL can't init — older Mali without
                 // float-texture filtering, or any EGL failure — we fall back to LibraryWaveBackground,
@@ -340,8 +347,8 @@ fun HomeScreen(
             // backdrop (dark at the top where the content sits) and a heavy scrim just muddied
             // its blue into navy — so it gets only a whisper of dimming, letting the vivid blue
             // read through.
-            val scrimTop = if (libraryBg == null) 0.06f else 0.55f
-            val scrimBottom = if (libraryBg == null) 0.20f else 0.80f
+            val scrimTop = if (psOne) 0f else if (libraryBg == null) 0.06f else 0.55f
+            val scrimBottom = if (psOne) 0f else if (libraryBg == null) 0.20f else 0.80f
             Box(
                 Modifier.fillMaxSize().background(
                     Brush.verticalGradient(
