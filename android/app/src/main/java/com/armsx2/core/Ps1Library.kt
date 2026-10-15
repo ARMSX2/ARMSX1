@@ -26,7 +26,7 @@ data class Ps1Game(
  * deliberately NOTHING else. PS2 container formats (.mdf/.nrg/.cso/.zso/.gz/.dump/.elf/.irx) are
  * not listed anywhere in this app: a PS2 rip must not be able to appear in the library at all.
  * [looksLikeGame] then throws out the files that merely share an extension with a game — a BIOS
- * dump is a `.bin` too — and [dropCueTracks] collapses a cue+bin(+audio) rip to its single cue.
+ * dump is a `.bin` too — and [Ps1PlaylistVisibility] collapses CUE tracks and M3U disc entries.
  *
  * This is the source the library repository ([com.armsx2.data.library.GameLibraryRepository])
  * builds its `GameInfo` rows from.
@@ -59,6 +59,7 @@ object Ps1Library {
     ): List<Ps1Game> {
         val seen = HashSet<String>()
         val out = ArrayList<Ps1Game>()
+        val hiddenSafDocuments = HashSet<String>()
         for (root in scanRoots(context, directories)) {
             if (!root.isDirectory) continue
             root.walkTopDown()
@@ -71,15 +72,29 @@ object Ps1Library {
                     }
                 }
         }
+        // Resolve CUE and M3U membership together before hiding any metadata
+        // entries, so hidden CUEs cannot leave orphan BIN/audio rows.
+        val localEntries = out.map { Ps1PlaylistVisibility.Entry(it.path, it.path, it.name) }
+        val hiddenLocalDiscs = Ps1PlaylistVisibility.hiddenIds(localEntries) { playlist ->
+            runCatching { Ps1PlaylistVisibility.readText(File(playlist.id).inputStream()) }.getOrNull()
+        }
+        val localGames = out.filterNot { it.path in hiddenLocalDiscs }
+        out.clear()
+        out.addAll(localGames)
         directories.asSequence()
             .filter { it.startsWith("content:") }
             .distinct()
             .forEach { tree ->
-                scanSafTree(context, tree).forEach { game ->
+                scanSafTree(context, tree, hiddenSafDocuments).forEach { game ->
                     if (seen.add(game.path)) out += game
                 }
             }
-        return dropCueTracks(out).sortedBy { it.title.lowercase(Locale.US) }
+        // The same document can be reachable through overlapping tree grants.
+        // Keep the granted launch URI, but hide its aliases when another scanned
+        // tree established that this exact provider/document belongs to an M3U.
+        return out.filterNot { game ->
+            game.path.startsWith("content:") && safDocumentKey(Uri.parse(game.path)) in hiddenSafDocuments
+        }.sortedBy { it.title.lowercase(Locale.US) }
     }
 
     /** A disc image below this can't hold a PS1 data track. Filters the BIOS dumps, memory-card
@@ -115,27 +130,26 @@ object Ps1Library {
 
     private data class SafCandidate(
         val game: Ps1Game,
-        val parent: String,
         val uri: Uri,
+        val relativePath: String,
     )
 
     /** Walk a persisted tree directly through DocumentsProvider. This is the supported Android
      *  11+ path and works for primary storage, SD cards, and USB drives without MANAGE_EXTERNAL_STORAGE. */
-    private fun scanSafTree(context: Context, rawTreeUri: String): List<Ps1Game> {
+    private fun scanSafTree(context: Context, rawTreeUri: String, hiddenDocuments: MutableSet<String>): List<Ps1Game> {
         val treeUri = runCatching { Uri.parse(rawTreeUri) }.getOrNull() ?: return emptyList()
         val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
             ?: return emptyList()
 
-        data class Pending(val documentId: String, val depth: Int)
+        data class Pending(val documentId: String, val depth: Int, val relativePath: String)
         val pending = ArrayDeque<Pending>()
         val visited = HashSet<String>()
         val candidates = ArrayList<SafCandidate>()
-        pending += Pending(rootId, 0)
+        pending += Pending(rootId, 0, "")
 
         while (pending.isNotEmpty()) {
-            val (directoryId, depth) = pending.removeFirst()
+            val (directoryId, depth, relativePath) = pending.removeFirst()
             if (!visited.add(directoryId)) continue
-            val parent = DocumentsContract.buildDocumentUriUsingTree(treeUri, directoryId).toString()
             val children = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, directoryId)
             // DocumentFile.listFiles() only fetches IDs: name/type/size each trigger another
             // provider call per file. Fetch the complete row once per folder instead.
@@ -156,7 +170,7 @@ object Ps1Library {
                         val mime = cursor.getString(typeColumn)?.takeIf(String::isNotBlank) ?: continue
                         if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                             if (depth < 6 && name.lowercase(Locale.US) !in BLOCKED_DIRS) {
-                                pending += Pending(id, depth + 1)
+                                pending += Pending(id, depth + 1, if (relativePath.isEmpty()) name else "$relativePath/$name")
                             }
                             continue
                         }
@@ -165,37 +179,33 @@ object Ps1Library {
                         if (!looksLikeGame(name, size)) continue
                         val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, id)
                         candidates += SafCandidate(Ps1Game(name.substringBeforeLast('.'), uri.toString(), name),
-                            parent, uri)
+                            uri, if (relativePath.isEmpty()) name else "$relativePath/$name")
                     }
                 }
             }
         }
 
-        // A CUE plus its BIN/audio tracks is one game. Read only the tiny CUE sheets and remove
-        // exactly the siblings they name; unrelated BIN-only games in the same folder remain.
-        val referencedTracks = HashSet<String>()
-        candidates.filter { Ps1SafText.extension(it.game.name) == "cue" }.forEach { cue ->
-            val text = runCatching {
-                context.contentResolver.openInputStream(cue.uri)?.bufferedReader()?.use { reader ->
-                    val buffer = CharArray(256 * 1024 + 1)
-                    val count = reader.read(buffer)
-                    if (count < 0 || count > 256 * 1024) "" else String(buffer, 0, count)
-                }.orEmpty()
-            }.getOrDefault("")
-            Ps1SafText.cueReferences(text).forEach { reference ->
-                val base = Ps1SafText.baseName(reference).lowercase(Locale.US)
-                referencedTracks += "${cue.parent}\u0000$base"
+        val candidatesById = candidates.associateBy { it.game.path }
+        val hiddenPlaylistDiscs = Ps1PlaylistVisibility.hiddenIds(candidates.map {
+            Ps1PlaylistVisibility.Entry(it.game.path, it.relativePath, it.game.name, ignoreReferenceCase = true)
+        }) { playlist ->
+            candidatesById[playlist.id]?.let { candidate ->
+                runCatching { context.contentResolver.openInputStream(candidate.uri)?.let(Ps1PlaylistVisibility::readText) }
+                    .getOrNull()
             }
         }
-
+        candidates.filter { it.game.path in hiddenPlaylistDiscs }.forEach {
+            safDocumentKey(it.uri)?.let(hiddenDocuments::add)
+        }
         return candidates.asSequence()
-            .filter { candidate ->
-                Ps1SafText.extension(candidate.game.name) == "cue" ||
-                    "${candidate.parent}\u0000${candidate.game.name.lowercase(Locale.US)}" !in referencedTracks
-            }
+            .filterNot { it.game.path in hiddenPlaylistDiscs }
             .map(SafCandidate::game)
             .toList()
     }
+
+    private fun safDocumentKey(uri: Uri): String? = runCatching {
+        "${uri.authority}\u0000${DocumentsContract.getDocumentId(uri)}"
+    }.getOrNull()
 
     private fun looksLikeGame(name: String, length: Long): Boolean {
         val ext = Ps1SafText.extension(name)
@@ -204,22 +214,6 @@ object Ps1Library {
         // Some DocumentsProviders report SIZE_UNKNOWN as 0. Do not hide a real game merely
         // because metadata is absent; only reject a known, non-zero BIOS-sized impostor.
         return length <= 0L || length >= MIN_DISC_BYTES
-    }
-
-    /**
-     * A cue/bin rip is TWO bootable-looking files, and the audio tracks of a multi-track rip are
-     * several more — listing each one turns one game into five. Where a `.cue` exists it is the
-     * canonical entry, so drop every track file it references.
-     */
-    private fun dropCueTracks(games: List<Ps1Game>): List<Ps1Game> {
-        val cues = games.filter { it.path.substringAfterLast('.', "").equals("cue", true) }
-        if (cues.isEmpty()) return games
-        val cuePaths = cues.mapTo(HashSet()) { it.path }
-        val tracks = HashSet<String>()
-        for (cue in cues) tracks += cueReferencedPaths(cue.file)
-        tracks -= cuePaths // a cue never removes itself
-        if (tracks.isEmpty()) return games
-        return games.filter { it.path !in tracks }
     }
 
     /** Absolute paths of every `FILE "…"` line in [cue], resolved next to the cue itself.

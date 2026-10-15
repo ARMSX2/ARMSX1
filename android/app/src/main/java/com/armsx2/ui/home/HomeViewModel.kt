@@ -53,7 +53,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     MainActivityRuntime.prefs.getString(LayoutPreference, LibraryLayout.Grid.name) ?: LibraryLayout.Grid.name,
                 )
             }.getOrDefault(LibraryLayout.Grid)
-            pendingInitialScan = romDirectories.isNotEmpty() && cached.key != repository.cacheKey(romDirectories)
+            pendingInitialScan = (romDirectories.isNotEmpty() || cached.games.isNotEmpty()) &&
+                cached.key != repository.cacheKey(romDirectories)
             state.value = buildState(
                 base = state.value.copy(
                     allGames = cached.games,
