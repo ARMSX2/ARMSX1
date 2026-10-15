@@ -301,6 +301,12 @@ extern "C" JNIEXPORT jbyteArray JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_get
 extern "C" JNIEXPORT jboolean JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_changeDisc(JNIEnv* env,jclass cls, jstring path) {
     return SwanHost::Disc(Utf(env,path));
 }
+extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanEmbeddedDiscs(JNIEnv* env,jclass,jlong session){
+    return String(env,SwanHost::EmbeddedDiscs(uint64_t(session)));
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_changeSwanEmbeddedDisc(JNIEnv*,jclass,jint index,jlong session){
+    return SwanHost::EmbeddedDisc(index,uint64_t(session));
+}
 extern "C" JNIEXPORT jint JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getPresentedFrameCount(JNIEnv* env,jclass cls) {
     return SwanHost::Frames();
 }

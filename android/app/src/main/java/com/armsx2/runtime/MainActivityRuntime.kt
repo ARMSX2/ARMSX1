@@ -415,6 +415,8 @@ open class MainActivityRuntime : ComponentActivity() {
          *  browser. */
         private var m_szPlaylist = ""
         private val sessionDiscs = mutableStateOf<List<com.armsx2.core.Ps1Playlist.Disc>>(emptyList())
+        private val embeddedDiscs = mutableStateOf<List<com.armsx2.core.Ps1Playlist.Disc>>(emptyList())
+        private val embeddedCurrentIndex = mutableStateOf(-1)
         val currentDiscPath = mutableStateOf("")
         val discSwapInProgress = mutableStateOf(false)
         private val discSessionLock = Any()
@@ -429,6 +431,8 @@ open class MainActivityRuntime : ComponentActivity() {
         private fun resolveLaunchPath(pathOrUri: String): String {
             m_szPlaylist = ""
             sessionDiscs.value = emptyList()
+            embeddedDiscs.value = emptyList()
+            embeddedCurrentIndex.value = -1
             discSwapInProgress.value = false
             currentDiscPath.value = pathOrUri
             if (pathOrUri.startsWith("content://")) return pathOrUri
@@ -464,12 +468,48 @@ open class MainActivityRuntime : ComponentActivity() {
 
         /** Discs of the playlist this session came from; empty for a single-disc game. */
         fun playlistDiscs(): List<com.armsx2.core.Ps1Playlist.Disc> =
-            sessionDiscs.value
+            embeddedDiscs.value.ifEmpty { sessionDiscs.value }
+
+        fun isCurrentDisc(disc: com.armsx2.core.Ps1Playlist.Disc): Boolean =
+            if (disc.embeddedIndex != null) disc.embeddedIndex == embeddedCurrentIndex.value
+            else disc.path == currentDiscPath.value
 
         /** Swap to a disc of the current playlist. Same native path the file picker uses. */
         fun swapToPlaylistDisc(disc: com.armsx2.core.Ps1Playlist.Disc) {
             if (!disc.exists) return
+            if (disc.embeddedIndex != null) {
+                swapEmbeddedDisc(disc)
+                return
+            }
             swapDiscPath(disc.path)
+        }
+
+        private fun swapEmbeddedDisc(disc: com.armsx2.core.Ps1Playlist.Disc) {
+            if (discSwapInProgress.value || vmStopInProgress) return
+            val index = disc.embeddedIndex ?: return
+            val run = disc.embeddedSession ?: return
+            val activity = instance ?: return
+            val token = synchronized(discSessionLock) { discSessionToken } ?: return
+            discSwapInProgress.value = true
+            kotlin.concurrent.thread(name = "armsx-pbp-disc-swap") {
+                val accepted = runCatching {
+                    !vmStopInProgress && synchronized(discSessionLock) { discSessionToken === token } &&
+                        NativeApp.changeSwanEmbeddedDisc(index, run)
+                }.getOrDefault(false)
+                activity.runOnUiThread {
+                    if (synchronized(discSessionLock) { discSessionToken !== token }) return@runOnUiThread
+                    discSwapInProgress.value = false
+                    if (accepted) {
+                        embeddedCurrentIndex.value = index
+                        discPickerOpen.value = false
+                        WindowImpl.overlayVisible.value = false
+                        com.armsx2.ui.GameOsd.toast("Disc changed to Disc ${index + 1}")
+                        resume()
+                    } else android.widget.Toast.makeText(activity,
+                        "Unable to switch embedded disc. Check the game and try again.",
+                        android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
         }
 
         /** Keep SAF copies alive until the native session ends, not just until the swap is queued. */
@@ -625,6 +665,8 @@ open class MainActivityRuntime : ComponentActivity() {
                         if (synchronized(discSessionLock) { discSessionToken != null }) return@runOnUiThread
                         discSwapInProgress.value = false
                         discPickerOpen.value = false
+                        embeddedDiscs.value = emptyList()
+                        embeddedCurrentIndex.value = -1
                     }
                 }
             } ?: false
@@ -1830,18 +1872,50 @@ open class MainActivityRuntime : ComponentActivity() {
 
         fun promptSwapDisc() {
             if (vmStopInProgress || discSwapInProgress.value || !NativeApp.hasActiveVM()) return
+            val activity = instance ?: return
+            val token = synchronized(discSessionLock) { discSessionToken } ?: return
+            val run = synchronized(vmLifecycleLock) { vmNativeRunToken }
+            if (run == 0L) return
             if (!WindowImpl.overlayVisible.value) InGameOverlay.open()
+            val source = currentDiscPath.value
+            discSwapInProgress.value = true
+            discPickerOpen.value = true
+            kotlin.concurrent.thread(name = "armsx-disc-list") {
+                val metadata = runCatching {
+                    val wire = NativeApp.getSwanEmbeddedDiscs(run).orEmpty()
+                    check(wire != "!") { "Mounted disc query failed" }
+                    if (wire.isEmpty()) null else checkNotNull(
+                        com.armsx2.core.Ps1EmbeddedDiscs.parse(wire, source, run))
+                }
+                activity.runOnUiThread {
+                    if (synchronized(discSessionLock) { discSessionToken !== token } || vmStopInProgress) return@runOnUiThread
+                    discSwapInProgress.value = false
+                    if (metadata.isFailure) {
+                        discPickerOpen.value = false
+                        android.widget.Toast.makeText(activity, "Unable to read the mounted disc list. Try again.",
+                            android.widget.Toast.LENGTH_LONG).show()
+                        return@runOnUiThread
+                    }
+                    val mounted = metadata.getOrNull()
+                    embeddedDiscs.value = mounted?.discs.orEmpty()
+                    embeddedCurrentIndex.value = mounted?.currentIndex ?: -1
+                    showDiscChoicesOrBrowser(activity)
+                }
+            }
+        }
+
+        private fun showDiscChoicesOrBrowser(activity: MainActivityRuntime) {
             // A multi-disc game knows its own discs — sending the player to a file browser to
             // find disc 2 of the game they are already playing is the wrong question to ask.
             if (playlistDiscs().size > 1) {
-                discPickerSelection.value = playlistDiscs().indexOfFirst { it.path == currentDiscPath.value }
+                discPickerSelection.value = playlistDiscs().indexOfFirst(::isCurrentDisc)
                     .coerceAtLeast(0)
                 discPickerOpen.value = true
 
                 return
             }
 
-            val activity = instance ?: return
+            discPickerOpen.value = false
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "*/*"

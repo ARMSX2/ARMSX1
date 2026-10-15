@@ -32,6 +32,8 @@ rc_client_async_handle_t* loading=nullptr;
 uint32_t(*read_memory)(uint32_t,uint8_t*,uint32_t)=nullptr;
 std::string game_hash;
 bool game_running=false;
+thread_local unsigned hash_subimage=0;
+void*(*hash_open_subimage)(const char*,uint32_t,unsigned)=nullptr;
 std::map<std::string,bool> settings{{"notifications",true},{"leaderboardNotifications",true},{"overlays",true},{"lbOverlays",true},{"soundEffects",true},{"encoreMode",false},{"spectatorMode",false},{"unofficialTestMode",false}};
 std::map<std::string,int> number_settings{{"notificationsDuration",5},{"leaderboardsDuration",10},{"notificationPosition",1},{"overlayPosition",8}};
 std::set<uint32_t> primed;
@@ -112,13 +114,19 @@ void SwanAchievements::Initialize(JNIEnv* env,uint32_t(*reader)(uint32_t,uint8_t
   if(env->ExceptionCheck())env->ExceptionClear();
   if(!saved.first.empty()&&!saved.second.empty())rc_client_begin_login_with_token(client,saved.first.c_str(),saved.second.c_str(),Logged,nullptr);
 }
-std::string SwanAchievements::Hash(std::string path){
+std::string SwanAchievements::Hash(std::string path,unsigned subimage){
   static std::mutex probe_mutex;std::lock_guard lock(probe_mutex);
   static void* core=dlopen("libswanstation.so",RTLD_NOW|RTLD_LOCAL);if(!core||path.empty())return {};
+  // CD hash callbacks are synchronous; scope selection to this call/thread.
+  struct Selection {unsigned previous=hash_subimage;~Selection(){hash_subimage=previous;}} selection;
+  hash_subimage=subimage;
+  hash_open_subimage=reinterpret_cast<decltype(hash_open_subimage)>(dlsym(core,"swan_hash_open_subimage"));
   rc_hash_iterator_t iterator{};rc_hash_initialize_iterator(&iterator,path.c_str(),nullptr,0);
   iterator.callbacks.error_message=[](const char* message,const rc_hash_iterator_t*){__android_log_write(ANDROID_LOG_WARN,"SwanHash",message);};
   auto& cd=iterator.callbacks.cdreader;
-  cd.open_track=reinterpret_cast<decltype(cd.open_track)>(dlsym(core,"swan_hash_open"));
+  cd.open_track=hash_open_subimage?+[](const char* name,uint32_t track)->void*{
+    return hash_open_subimage(name,track,hash_subimage);
+  }:nullptr;
   cd.read_sector=reinterpret_cast<decltype(cd.read_sector)>(dlsym(core,"swan_hash_read"));
   cd.close_track=reinterpret_cast<decltype(cd.close_track)>(dlsym(core,"swan_hash_close"));
   cd.first_track_sector=reinterpret_cast<decltype(cd.first_track_sector)>(dlsym(core,"swan_hash_first"));cd.open_track_iterator=nullptr;
@@ -135,7 +143,7 @@ std::string SwanAchievements::Login(std::string user,std::string password){
   return future.get();
 }
 void SwanAchievements::Logout(){std::lock_guard lock(mutex);if(client){if(loading)rc_client_abort_async(client,loading);loading=nullptr;rc_client_logout(client);}Store("","");primed.clear();Overlay(3,0,"",false);}
-void SwanAchievements::Game(std::string path){auto hash=Hash(std::move(path));std::lock_guard lock(mutex);game_hash=std::move(hash);game_running=true;primed.clear();Load();}
+void SwanAchievements::Game(std::string path,unsigned subimage){auto hash=Hash(std::move(path),subimage);std::lock_guard lock(mutex);game_hash=std::move(hash);game_running=true;primed.clear();Load();}
 void SwanAchievements::Unload(){std::lock_guard lock(mutex);game_running=false;if(client){if(loading)rc_client_abort_async(client,loading);loading=nullptr;rc_client_unload_game(client);}primed.clear();Overlay(3,0,"",false);}
 void SwanAchievements::Frame(){std::lock_guard lock(mutex);if(client&&game_running)rc_client_do_frame(client);}
 void SwanAchievements::Reset(){std::lock_guard lock(mutex);if(client)rc_client_reset(client);primed.clear();Overlay(3,0,"",false);}

@@ -57,6 +57,8 @@ std::vector<unsigned char> Preview(std::string path);
 std::string StatePath(int slot);
 void Screenshot(std::string path);
 bool Disc(std::string path);
+std::string EmbeddedDiscs(uint64_t session);
+bool EmbeddedDisc(int index,uint64_t session);
 std::string Renderer();
 std::string DiagnosticsSnapshot();
 void GlDriver(std::string driver);

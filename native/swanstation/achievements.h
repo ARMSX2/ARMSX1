@@ -5,10 +5,10 @@
 #include <cstdint>
 namespace SwanAchievements {
 void Initialize(JNIEnv*,uint32_t(*reader)(uint32_t,uint8_t*,uint32_t));
-std::string Hash(std::string path);
+std::string Hash(std::string path,unsigned subimage=0);
 std::string Login(std::string user,std::string password);
 void Logout();
-void Game(std::string path);
+void Game(std::string path,unsigned subimage=0);
 void Unload();
 void Frame();
 void Reset();

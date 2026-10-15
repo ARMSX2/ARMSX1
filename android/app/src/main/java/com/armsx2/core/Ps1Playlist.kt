@@ -42,6 +42,8 @@ object Ps1Playlist {
         val file: File,
         val exists: Boolean,
         val path: String = file.absolutePath,
+        val embeddedIndex: Int? = null,
+        val embeddedSession: Long? = null,
     )
 
     fun isPlaylist(path: String): Boolean =

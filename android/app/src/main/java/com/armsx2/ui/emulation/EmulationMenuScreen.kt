@@ -189,8 +189,9 @@ fun EmulationMenuScreen(viewModel: EmulationMenuViewModel = viewModel()) {
                                 RoundedCornerShape(8.dp)),
                         ) {
                             Column(Modifier.fillMaxWidth()) {
-                                Text(disc.label + if (disc.path == MainActivityRuntime.currentDiscPath.value) " (current)" else "")
-                                Text(if (disc.exists) disc.file.name else "Missing: ${disc.file.name}",
+                                Text(disc.label + if (MainActivityRuntime.isCurrentDisc(disc)) " (current)" else "")
+                                Text(if (disc.embeddedIndex != null) "Inside the current PBP"
+                                    else if (disc.exists) disc.file.name else "Missing: ${disc.file.name}",
                                     style = MaterialTheme.typography.bodySmall)
                             }
                         }

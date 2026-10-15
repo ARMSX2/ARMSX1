@@ -1362,6 +1362,10 @@ public class NativeApp {
 	/** Swap the running game's disc. Accepted asynchronously: the swap is applied on the
 	 *  emulation thread at the next instruction boundary, so true means "queued", not "done". */
 	public static native boolean changeDisc(String path);
+	/** Mounted PBP subimages for this run token. Blocking: call off the UI thread. */
+	public static native String getSwanEmbeddedDiscs(long session);
+	/** Select an embedded PBP disc without replacing or re-copying its container. */
+	public static native boolean changeSwanEmbeddedDisc(int index, long session);
 
 	// Matches PSX_STATE_SLOT_AUTOSAVE in psx/state.h. Uses a per-game
 	// .autosave.pss file through the same emulation-thread queue as numbered

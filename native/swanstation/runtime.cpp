@@ -37,6 +37,7 @@
 #include "performance.h"
 #include "diagnostics.h"
 #include "statistics.h"
+#include "disc_switch.h"
 #ifndef ARMSX_SOURCE_COMMIT
 #define ARMSX_SOURCE_COMMIT "unknown"
 #endif
@@ -115,6 +116,8 @@ API(void,core_retro_set_controller_port_device,(unsigned,unsigned));
 API(size_t,core_retro_serialize_size,()); API(bool,core_retro_serialize,(void*,size_t)); API(bool,core_retro_unserialize,(const void*,size_t));
 API(void,core_retro_cheat_reset,()); API(void,core_retro_cheat_set,(unsigned,bool,const char*));
 API(bool,bridge_disc_serial,(const char*,char*,size_t));
+API(bool,bridge_disc_serial_at,(const char*,unsigned,char*,size_t));
+API(int,bridge_mounted_subimage,());
 API(uint64_t,bridge_card_digest,()); API(bool,bridge_card_path,(unsigned,char*,size_t));
 API(bool,bridge_validate_cheat,(const char*));
 API(uint32_t,bridge_guest_frame,());
@@ -473,6 +476,26 @@ bool Invoke(std::function<bool()> fn) {
   {std::lock_guard lock(state_mutex);if(!active || stop)return false;work.emplace_back([fn=std::move(fn),promise]{promise->set_value(fn());});}
   wake.notify_all();if(result.wait_for(std::chrono::seconds(10))!=std::future_status::ready)return false;return result.get();
 }
+// A disc operation must not apply later after reporting a timeout. Cancel jobs
+// which have not started; once mounting has started, await its real result on
+// the caller's worker thread rather than claiming the original disc was kept.
+bool InvokeDisc(std::function<bool()> fn){
+  bool same_thread;
+  {std::lock_guard lock(state_mutex);same_thread=std::this_thread::get_id()==emulation_thread&&active;}
+  if(same_thread)return fn();
+  struct Job {std::atomic<int> phase{0};std::promise<bool> done;};
+  auto job=std::make_shared<Job>();auto result=job->done.get_future();
+  {std::lock_guard lock(state_mutex);if(!active||stop)return false;
+    work.emplace_back([job,fn=std::move(fn)]{
+      int pending=0;if(!job->phase.compare_exchange_strong(pending,1)){job->done.set_value(false);return;}
+      try{job->done.set_value(fn());}catch(...){job->done.set_value(false);}
+    });}
+  wake.notify_all();
+  if(result.wait_for(std::chrono::seconds(10))!=std::future_status::ready){
+    int pending=0;if(job->phase.compare_exchange_strong(pending,2))return false;
+  }
+  return result.get();
+}
 void Drain() {std::deque<std::function<void()>> jobs;{std::lock_guard lock(state_mutex);jobs.swap(work);}for(auto& job:jobs)job();}
 std::vector<unsigned char> ReadBytes(const std::string& path) {
   std::ifstream stream(path,std::ios::binary|std::ios::ate);if(!stream)return {};auto size=stream.tellg();if(size<0 || size>64*1024*1024)return {};
@@ -568,6 +591,7 @@ bool SwanHost::Initialize(JNIEnv* env,jclass cls,std::string root,std::string bi
 #undef LINK
 #define BRIDGE(name,symbol) name=reinterpret_cast<decltype(name)>(dlsym(library,symbol));if(!name){JavaNotice("Missing SwanStation extension: " symbol);return false;}
   BRIDGE(bridge_disc_serial,"swan_disc_serial");BRIDGE(bridge_card_digest,"swan_card_digest");
+  BRIDGE(bridge_disc_serial_at,"swan_disc_serial_at");BRIDGE(bridge_mounted_subimage,"swan_mounted_subimage");
   BRIDGE(bridge_card_path,"swan_card_path");BRIDGE(bridge_validate_cheat,"swan_validate_cheat");
   BRIDGE(bridge_guest_frame,"swan_guest_frame");
   BRIDGE(bridge_texture_options,"swan_texture_options");
@@ -915,12 +939,55 @@ void SwanHost::Screenshot(std::string path){Invoke([path]{
   glReadPixels(0,0,w,h,GL_RGBA,GL_UNSIGNED_BYTE,rgba.data());
   for(unsigned y=0;y<h/2;y++)for(unsigned x=0;x<w*4;x++)std::swap(rgba[y*w*4+x],rgba[(h-y-1)*w*4+x]);
   return WritePng(path.c_str(),w,h,4,rgba.data(),w*4);});}
+std::string SwanHost::EmbeddedDiscs(uint64_t session){
+  auto result=std::make_shared<std::string>();
+  if(!Invoke([session,result]{
+    if(!session||session!=live_run_token||stop||!active||!disk.get_num_images)return false;
+    auto extension=std::filesystem::path(game_path).extension().string();
+    std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return std::tolower(c);});
+    if(extension!=".pbp")return true;
+    const unsigned count=disk.get_num_images();const int current=bridge_mounted_subimage();
+    if(count==1)return true;
+    if(count<2||count>5||current<0||unsigned(current)>=count)return false;
+    *result=std::to_string(session)+"\t"+std::to_string(current);
+    for(unsigned i=0;i<count;i++){
+      char buffer[512]{};std::string label;
+      if(disk.get_image_label&&disk.get_image_label(i,buffer,sizeof(buffer)))label=buffer;
+      for(char& c:label)if(static_cast<unsigned char>(c)<32)c=' ';
+      if(label.empty())label="Disc "+std::to_string(i+1);
+      *result+='\n'+label;
+    }
+    return true;
+  }))return "!";
+  return *result;
+}
+bool SwanHost::EmbeddedDisc(int index,uint64_t session){
+  return InvokeDisc([index,session]{
+    if(!session||session!=live_run_token||stop||!active)return false;
+    auto extension=std::filesystem::path(game_path).extension().string();
+    std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return std::tolower(c);});
+    if(extension!=".pbp")return false;
+    bridge_ctr_hud(false);ctr_hud_lease=0;
+    const auto outcome=SwanDisc::Switch({disk.set_eject_state,disk.get_eject_state,disk.set_image_index,
+      disk.get_num_images,bridge_mounted_subimage},index);
+    if(outcome==SwanDisc::Result::Unchanged)return true;
+    if(outcome!=SwanDisc::Result::Changed){
+      JavaNotice(outcome==SwanDisc::Result::FailedUnrestored?"Disc switch failed; the original disc could not be restored.":
+        "Could not switch embedded disc. The original disc remains selected.");return false;
+    }
+    ClearRewind();SwanAchievements::Unload();
+    if(cheats_armed==0)SwanAchievements::Game(game_path,unsigned(index));
+    char serial[32]{};bridge_disc_serial_at(game_path.c_str(),unsigned(index),serial,sizeof(serial));
+    {std::lock_guard lock(state_mutex);current_serial=serial;}
+    JavaNotice("Disc changed to Disc "+std::to_string(index+1));return true;
+  });
+}
 bool SwanHost::Disc(std::string path){if(!std::filesystem::is_regular_file(path))return false;
   return Invoke([path]{if(!disk.set_eject_state||!disk.replace_image_index||!disk.get_image_index)return false;
     bridge_ctr_hud(false);ctr_hud_lease=0;
     const auto index=disk.get_image_index();retro_game_info next{path.c_str(),nullptr,0,nullptr};
     if(!disk.set_eject_state(true))return false;const bool replaced=disk.replace_image_index(index,&next);
-    const bool closed=disk.set_eject_state(false);if(replaced&&closed){SwanAchievements::Unload();if(cheats_armed==0)SwanAchievements::Game(path);
+    const bool closed=disk.set_eject_state(false);if(replaced&&closed){ClearRewind();SwanAchievements::Unload();if(cheats_armed==0)SwanAchievements::Game(path);
       char serial[32]{};bridge_disc_serial(path.c_str(),serial,sizeof(serial));std::lock_guard lock(state_mutex);game_path=path;current_serial=serial;}return replaced&&closed;});}
 std::string SwanHost::DiagnosticsSnapshot(){return diagnostic_session.Snapshot();}
 std::string SwanHost::Renderer(){std::lock_guard lock(state_mutex);return active_renderer+(active&&(SwanShaders::ActiveGL()||SwanVulkan::ShaderActive())?" + shader chain":"");}

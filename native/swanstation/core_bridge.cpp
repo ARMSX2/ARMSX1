@@ -105,11 +105,16 @@ extern "C" RETRO_API void swan_texture_options(bool dump,bool replace,const char
 }
 extern "C" RETRO_API void swan_vulkan_abort() { if(g_vulkan_context)Vulkan::Context::Destroy();Vulkan::ResetVulkanLibraryFunctionPointers(); }
 
-extern "C" RETRO_API bool swan_disc_serial(const char* path, char* output, size_t capacity) {
+extern "C" RETRO_API int swan_mounted_subimage(){
+  return System::HasMediaSubImages()?int(System::GetMediaSubImageIndex()):-1;
+}
+extern "C" RETRO_API bool swan_disc_serial_at(const char* path,unsigned subimage,char* output,size_t capacity) {
   if (!path || !output || capacity < 11) return false;
   output[0] = 0;
   auto image = CDImage::Open(path, CDImage::OpenFlags::None, nullptr);
   if (!image) return false;
+  if(subimage>0&&(!image->HasSubImages()||subimage>=image->GetSubImageCount()||
+      !image->SwitchSubImage(subimage,nullptr)||image->GetCurrentSubImage()!=subimage))return false;
   const auto serial = System::GetGameCodeForImage(image.get(), false);
   // No filename guessing or hash masquerading as a region-specific retail serial.
   std::string compact;
@@ -120,6 +125,10 @@ extern "C" RETRO_API bool swan_disc_serial(const char* path, char* output, size_
   if (compact.size()+1 > capacity) return false;
   std::memcpy(output, compact.c_str(), compact.size()+1);
   return true;
+}
+
+extern "C" RETRO_API bool swan_disc_serial(const char* path,char* output,size_t capacity){
+  return swan_disc_serial_at(path,0,output,capacity);
 }
 
 extern "C" RETRO_API uint64_t swan_card_digest() {
@@ -148,8 +157,10 @@ extern "C" RETRO_API uint32_t swan_guest_frame() { return System::GetFrameNumber
 
 // Disc reader ABI for the official rcheevos PlayStation content hash (including CHD).
 struct SwanHashDisc { std::unique_ptr<CDImage> image; uint32_t start; };
-extern "C" RETRO_API void* swan_hash_open(const char* path,uint32_t track) {
+extern "C" RETRO_API void* swan_hash_open_subimage(const char* path,uint32_t track,unsigned subimage) {
   auto image=CDImage::Open(path,CDImage::OpenFlags::None,nullptr);if(!image)return nullptr;
+  if(subimage>0&&(!image->HasSubImages()||subimage>=image->GetSubImageCount()||
+      !image->SwitchSubImage(subimage,nullptr)||image->GetCurrentSubImage()!=subimage))return nullptr;
   const auto& tracks=image->GetTracks();if(tracks.empty())return nullptr;
   const CDImage::Track* chosen=nullptr;
   if(track==uint32_t(-1)){for(const auto& t:tracks)if(t.mode!=CDImage::TrackMode::Audio){chosen=&t;break;}}
@@ -161,6 +172,7 @@ extern "C" RETRO_API void* swan_hash_open(const char* path,uint32_t track) {
   const auto first=chosen->start_lba>=150?chosen->start_lba-150:0;
   return new SwanHashDisc{std::move(image),first};
 }
+extern "C" RETRO_API void* swan_hash_open(const char* path,uint32_t track){return swan_hash_open_subimage(path,track,0);}
 extern "C" RETRO_API uint32_t swan_hash_first(void* handle){return static_cast<SwanHashDisc*>(handle)->start;}
 extern "C" RETRO_API void swan_hash_close(void* handle){delete static_cast<SwanHashDisc*>(handle);}
 extern "C" RETRO_API size_t swan_hash_read(void* handle,uint32_t sector,void* output,size_t bytes) {
