@@ -99,7 +99,8 @@ fun ArmsBackdrop(
             // exposed strip reads as a bar (most visibly in landscape).
             if (backgroundLayer != null) {
                 Box(modifier = Modifier.fillMaxSize(), content = backgroundLayer)
-            } else if (com.armsx2.ui.home.LibraryBackground.style.value == com.armsx2.ui.home.LibraryBackgroundStyle.PsOne) {
+            } else if (com.armsx2.ui.theme.InterfacePreferences.psOne ||
+                com.armsx2.ui.home.LibraryBackground.style.value == com.armsx2.ui.home.LibraryBackgroundStyle.PsOne) {
                 PsOneBackdrop()
             }
             Box(
@@ -176,7 +177,8 @@ fun ArmsTopBar(
         shadowElevation = 5.dp,
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
+            modifier = Modifier.fillMaxWidth().psOneBevel(com.armsx2.ui.theme.InterfacePreferences.psOne)
+                .padding(horizontal = 10.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             leading?.invoke()
@@ -211,7 +213,8 @@ fun GlassPanel(
     contentPadding: Dp = 16.dp,
     content: @Composable () -> Unit,
 ) {
-    val panelShape = RoundedCornerShape(28.dp)
+    val psOne = com.armsx2.ui.theme.InterfacePreferences.psOne
+    val panelShape = RoundedCornerShape(if (psOne) 22.dp else 28.dp)
     val panelColor = MaterialTheme.colorScheme.surface
     Surface(
         modifier = modifier.clip(panelShape),
@@ -225,6 +228,7 @@ fun GlassPanel(
             Modifier
                 .fillMaxWidth()
                 .background(panelColor)
+                .psOneBevel(psOne)
                 .padding(contentPadding),
         ) { content() }
     }
@@ -242,6 +246,8 @@ fun RoundAction(
     subtleFrame: Boolean = false,
     glyphColor: Color? = null,
 ) {
+    val psOne = com.armsx2.ui.theme.InterfacePreferences.psOne
+    val shape = if (psOne) CircleShape else buttonShape
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val highlighted = selected || (focused &&
@@ -249,12 +255,13 @@ fun RoundAction(
         com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null &&
         !com.armsx2.ui.home.LibraryKeyboard.visible.value &&
         !com.armsx2.ui.settingshub.SettingsSearch.visible.value)
-    val actionBorder = if (framed) BorderStroke(
+    val actionBorder = if (framed || psOne) BorderStroke(
         1.dp,
         MaterialTheme.colorScheme.outline.copy(alpha = if (subtleFrame) 0.30f else 0.58f),
     ) else null
     val actionColor = when {
         selected -> MaterialTheme.colorScheme.primaryContainer
+        psOne -> MaterialTheme.colorScheme.surfaceVariant
         framed -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (subtleFrame) 0.58f else 1f)
         else -> Color.Transparent
     }
@@ -264,8 +271,8 @@ fun RoundAction(
         modifier = Modifier
             .size(buttonSize)
             .semantics { contentDescription = description }
-            .selectionOutline(highlighted, buttonShape),
-        shape = buttonShape,
+            .selectionOutline(highlighted, shape),
+        shape = shape,
         color = actionColor,
         border = actionBorder,
     ) {

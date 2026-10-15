@@ -29,6 +29,10 @@ fun LibraryBackgroundStyleSection() {
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(str("app.bg.style"), style = MaterialTheme.typography.titleMedium)
+        if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
+            Text(str("app.interface.background"), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Text(str("app.bg.style.desc"), style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp),

@@ -516,7 +516,8 @@ private const val RgbHueStep = 4f
 @Composable
 fun Armsx2Theme(content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val scheme = when (ThemePreferences.mode.value) {
+    val psOne = InterfacePreferences.psOne
+    val scheme = if (psOne) PsOneScheme else when (ThemePreferences.mode.value) {
         ThemeMode.System -> if (isSystemInDarkTheme()) NightScheme else DayScheme
         // Wallpaper-derived palette. Falls back rather than crashing if the preference somehow
         // arrives on a pre-Android-12 device (restored backup, sideloaded prefs) — the picker
@@ -563,6 +564,7 @@ fun Armsx2Theme(content: @Composable () -> Unit) {
         else
             scheme,
         typography = ArmsTypography,
+        shapes = if (psOne) PsOneShapes else androidx.compose.material3.Shapes(),
         content = content,
     )
 }

@@ -26,6 +26,19 @@ Android performance
   * Automatic Mali work reports sample briefly at intervals, reducing diagnostic
     overhead while retaining rasterizer details for investigating frame dips.
 
+0.2.6
+-----
+
+PS one interface and session fixes
+  * Settings > App > Interface style now offers Original ARMSX1 and PS one.
+    PS one adds light-grey console panels, circular controls, blue highlights
+    and memory-card-style game tiles in grid, list, shelf and recent views.
+  * Switching back restores the existing colour theme and background choices.
+    Existing installations keep Original ARMSX1 unless PS one is selected.
+  * BIOS/startup and resume audio prebuffers before playback to reduce dropouts.
+  * Close & Exit finishes after session shutdown instead of returning to the library.
+    External launches respect the return-to-launcher preference.
+
 0.1.3
 -----
 

@@ -111,11 +111,14 @@ fun AppTab() {
             }
         }
 
+        InterfaceStyleSection()
+        SettingsDivider()
+
         // Theme picker. NOT a SegmentedRow: that's a fixed-width Box, so eleven options would
         // squeeze into unreadable slivers — this wraps instead. Driven straight off the enum so
         // adding a colour needs no index bookkeeping; the old version mapped index<->mode by hand
         // in two separate places, which is precisely how such pairs drift out of sync.
-        Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        if (!com.armsx2.ui.theme.InterfacePreferences.psOne) Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
             Text(str("app.theme"), style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             FlowRow(

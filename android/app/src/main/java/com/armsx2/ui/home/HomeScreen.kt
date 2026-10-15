@@ -304,7 +304,8 @@ fun HomeScreen(
             val libraryBg = LibraryBackground.uri.value.takeIf {
                 LibraryBackground.style.value == LibraryBackgroundStyle.CustomImage
             }
-            val psOne = LibraryBackground.style.value == LibraryBackgroundStyle.PsOne
+            val psOne = com.armsx2.ui.theme.InterfacePreferences.psOne ||
+                LibraryBackground.style.value == LibraryBackgroundStyle.PsOne
             if (psOne) {
                 // Background-only choice; switching back restores the user's saved wallpaper
                 // and wave settings. Do not instantiate a hidden GLES/animated background.
@@ -1228,6 +1229,13 @@ private fun GameGridCard(
     onLaunch: () -> Unit,
     onDetails: () -> Unit,
 ) {
+    if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
+        PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), selected, GridLabels.show.value,
+            Modifier.fillMaxWidth(), onClick = { onSelect(); onLaunch() }, onDetails = onDetails) {
+            GameCover(game, it)
+        }
+        return
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1266,7 +1274,16 @@ private fun GameListCard(game: GameInfo, selected: Boolean, onClick: () -> Unit,
         ),
     ) {
         Row(Modifier.padding(7.dp), verticalAlignment = Alignment.CenterVertically) {
-            GameCover(game, Modifier.width(54.dp).aspectRatio(coverAspectRatio()))
+            if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
+                Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
+                    Column(Modifier.width(64.dp).padding(5.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        GameCover(game, Modifier.fillMaxWidth().aspectRatio(coverAspectRatio()))
+                        Spacer(Modifier.height(5.dp))
+                        com.armsx2.ui.common.PsOneContactStrip()
+                    }
+                }
+            } else GameCover(game, Modifier.width(54.dp).aspectRatio(coverAspectRatio()))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(game.displayTitle(EnglishTitles.enabled.value), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1281,6 +1298,11 @@ private fun GameListCard(game: GameInfo, selected: Boolean, onClick: () -> Unit,
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecentGameCard(game: GameInfo, selected: Boolean = false, onClick: () -> Unit, onDetails: () -> Unit) {
+    if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
+        PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), selected, true,
+            Modifier.width(120.dp), onClick = onClick, onDetails = onDetails) { GameCover(game, it) }
+        return
+    }
     Column(
         modifier = Modifier
             .width(102.dp)
@@ -1916,6 +1938,28 @@ private fun GameShelf(
     selectedIndex: Int = -1,
     startIndex: Int = 0,
 ) {
+    if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
+        if (scroll) {
+            LazyRow(modifier, horizontalArrangement = Arrangement.spacedBy(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp)) {
+                itemsIndexed(games, key = { _, game -> game.uri.toString() }) { i, game ->
+                    PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), startIndex + i == selectedIndex,
+                        GridLabels.show.value, Modifier.width(coverWidth),
+                        onClick = { onLaunch(game) }, onDetails = { onDetails(game) }) { GameCover(game, it) }
+                }
+            }
+        } else {
+            Row(modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                games.forEachIndexed { i, game ->
+                    PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), startIndex + i == selectedIndex,
+                        GridLabels.show.value, Modifier.width(coverWidth),
+                        onClick = { onLaunch(game) }, onDetails = { onDetails(game) }) { GameCover(game, it) }
+                }
+                repeat((slotsPerRow - games.size).coerceAtLeast(0)) { Spacer(Modifier.width(coverWidth)) }
+            }
+        }
+        return
+    }
     val coverHeight = coverWidth / 0.7f
     // Slimmer plank to match bagas's slimmer frosted-shelf PNG (2903×200).
     val plankHeight = 84.dp

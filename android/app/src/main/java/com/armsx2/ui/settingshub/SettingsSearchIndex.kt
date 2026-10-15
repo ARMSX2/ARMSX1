@@ -28,6 +28,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("app.backup.import", true, SettingsCategory.General),
     SettingsSearchEntry("app.blockHome", true, SettingsCategory.General),
     SettingsSearchEntry("app.theme", true, SettingsCategory.General),
+    SettingsSearchEntry("app.interface.style", true, SettingsCategory.General),
     SettingsSearchEntry("app.toolbarPosition", true, SettingsCategory.General),
     SettingsSearchEntry("app.launcherRotation", true, SettingsCategory.General),
     SettingsSearchEntry("app.bgColor", true, SettingsCategory.General),

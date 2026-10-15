@@ -3013,6 +3013,7 @@ open class MainActivityRuntime : ComponentActivity() {
         com.armsx2.LibraryView.load()
         com.armsx2.ui.UiScale.load()
         com.armsx2.ui.theme.ThemePreferences.load()
+        com.armsx2.ui.theme.InterfacePreferences.load()
         com.armsx2.ui.theme.BootLogoPreferences.load()
         com.armsx2.ui.ScreenPinning.load()
         com.armsx2.ui.theme.ToolbarPositionPreferences.load()
@@ -3098,6 +3099,7 @@ open class MainActivityRuntime : ComponentActivity() {
         // give it the wrong system-bar contrast.
         val startupTheme = com.armsx2.ui.theme.ThemePreferences.mode.value
         val initialLightSystemBars = when {
+            com.armsx2.ui.theme.InterfacePreferences.psOne -> true
             // System AND Material You both defer light/dark to the OS, so the bars follow it too.
             startupTheme.followsSystemDarkMode ->
                 resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
@@ -3190,6 +3192,7 @@ open class MainActivityRuntime : ComponentActivity() {
                 eState.value == EmuState.EMULATOR_UNSUPPORTED
             val themeMode = com.armsx2.ui.theme.ThemePreferences.mode.value
             val darkTheme = when {
+                com.armsx2.ui.theme.InterfacePreferences.psOne -> false
                 themeMode.followsSystemDarkMode -> androidx.compose.foundation.isSystemInDarkTheme()
                 themeMode == com.armsx2.ui.theme.ThemeMode.Light -> false
                 else -> true // every colour theme is a dark theme
