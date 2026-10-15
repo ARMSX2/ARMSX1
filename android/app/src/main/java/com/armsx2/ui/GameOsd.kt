@@ -294,29 +294,20 @@ fun GameOsdOverlay() {
     }
 
     val mode = InGameOverlay.osdMode.value
-    val showFps = when (mode) {
-        InGameOverlay.OsdMode.Full, InGameOverlay.OsdMode.Min -> true
-        InGameOverlay.OsdMode.Custom -> settings.osdShowFps
-        InGameOverlay.OsdMode.Off -> false
-    }
-    val showSpeed = when (mode) {
-        InGameOverlay.OsdMode.Full, InGameOverlay.OsdMode.Min -> true
-        InGameOverlay.OsdMode.Custom -> settings.osdShowSpeed
-        InGameOverlay.OsdMode.Off -> false
-    }
+    val showFps = OsdModePolicy.includes(mode, settings.osdShowFps, minimal = true)
+    val showSpeed = OsdModePolicy.includes(mode, settings.osdShowSpeed, minimal = true)
     val showNotes = settings.osdShowMessages
 
     // Statistics block. The inherited PS2 flags are re-pointed at what this machine actually has;
-    // Full/Min deliberately do NOT switch the heavy per-subsystem rows on, so the quick OSD cycle
-    // hotkey can never silently arm the core's counters — that stays an explicit opt-in.
-    val custom = mode == InGameOverlay.OsdMode.Custom
-    val showCpu = custom && settings.osdShowCpu
-    val showGpu = custom && settings.osdShowGpu
-    val showDevices = custom && settings.osdShowGsStats
-    val showFrameTimes = custom && settings.osdShowFrameTimes
-    val showResolution = custom && settings.osdShowResolution
-    val showRenderer = custom && settings.osdShowHardwareInfo
-    val showHostUsage = custom && settings.osdShowHostUsage
+    // Full explicitly enables every detailed row. Off/Minimal disarm expensive counters;
+    // Custom alone consults the saved individual choices without replacing them.
+    val showCpu = OsdModePolicy.includes(mode, settings.osdShowCpu)
+    val showGpu = OsdModePolicy.includes(mode, settings.osdShowGpu)
+    val showDevices = OsdModePolicy.includes(mode, settings.osdShowGsStats)
+    val showFrameTimes = OsdModePolicy.includes(mode, settings.osdShowFrameTimes)
+    val showResolution = OsdModePolicy.includes(mode, settings.osdShowResolution)
+    val showRenderer = OsdModePolicy.includes(mode, settings.osdShowHardwareInfo)
+    val showHostUsage = OsdModePolicy.includes(mode, settings.osdShowHostUsage)
 
     // Poll the core for the real rates. Cheap (2 Hz, two non-blocking atomic reads) and gated on
     // BOTH rows — the speed row is a percentage of the measured rate, so polling only for the FPS

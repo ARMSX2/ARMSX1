@@ -1,6 +1,7 @@
 package com.armsx2.ui
 
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import com.armsx2.EmuState
 import com.armsx2.runtime.MainActivityRuntime
 import com.armsx2.config.ConfigStore
@@ -20,41 +21,56 @@ object InGameOverlay {
      *  writes were empty PCSX2 stubs. */
     val frameLimitOn = mutableStateOf(true)
 
-    /** OSD hotkey mode. The hotkey now CYCLES rather than plain on/off (Cotcho): Full (every
-     *  stat) → Min (fps + CPU/EE/VU line) → Custom (the user's saved per-stat selection) → Off →
-     *  Full. Transient and in-game only; never mutates the saved Settings selection, so Custom
-     *  always reflects exactly what the user chose. Starts at Custom so a fresh boot shows their
-     *  stats and the first press advances to Off, matching the old "first press hides". */
-    enum class OsdMode { Full, Min, Custom, Off }
-    val osdMode = mutableStateOf(OsdMode.Custom)
-    private val osdCycle = listOf(OsdMode.Full, OsdMode.Min, OsdMode.Custom, OsdMode.Off)
-    private const val OsdModeKey = "ui.osdMode"
-    private var osdLoaded = false
+    /** Mode names are persisted (not ordinals). Custom's individual flags remain untouched. */
+    enum class OsdMode { Off, Min, Full, Custom }
+    val osdMode = mutableStateOf(OsdMode.Off)
+    private val osdPreferenceVersion = mutableIntStateOf(0)
+    private val osdPreferences = OsdModePreferences(
+        read = { key -> runCatching { MainActivityRuntime.prefs.getString(key, null) }.getOrNull() },
+        write = { key, value ->
+            MainActivityRuntime.prefs.edit().apply {
+                if (value == null) remove(key) else putString(key, value)
+            }.apply()
+        },
+    )
 
-    private fun ensureOsdLoaded() {
-        if (osdLoaded) return
-        osdLoaded = true
-        val name = runCatching { MainActivityRuntime.prefs.getString(OsdModeKey, null) }.getOrNull()
-        osdMode.value = OsdMode.entries.firstOrNull { it.name == name } ?: OsdMode.Custom
+    fun osdGameKey(): String? = MainActivityRuntime.currentGame.value?.settingsKey
+        ?: runCatching { NativeApp.getGameSerial().trim().takeIf(String::isNotEmpty) }.getOrNull()
+
+    fun configuredOsdMode(scope: SettingsScope, game: String? = osdGameKey()): OsdMode =
+        osdPreferenceVersion.intValue.let {
+            if (scope == SettingsScope.Game) osdPreferences.effective(game) else osdPreferences.global()
+        }
+
+    fun hasGameOsdOverride(game: String?): Boolean = osdPreferenceVersion.intValue.let {
+        osdPreferences.override(game) != null
+    }
+
+    fun clearGameOsdOverride(game: String) {
+        osdPreferences.clearGame(game)
+        osdPreferenceVersion.intValue++
+        applyStoredOsdMode()
     }
 
     /** Set the OSD mode (from the in-game menu selector or the hotkey), apply it live, and
      *  persist it so it survives a relaunch — matching the old per-stat toggles' persistence. */
-    fun setOsdMode(mode: OsdMode) {
-        ensureOsdLoaded()
-        applyOsdMode(mode)
-        runCatching { MainActivityRuntime.prefs.edit().putString(OsdModeKey, mode.name).apply() }
+    fun setOsdMode(mode: OsdMode, scope: SettingsScope = SettingsScope.Global) {
+        if (scope == SettingsScope.Game) {
+            val game = osdGameKey() ?: return
+            osdPreferences.setGame(game, mode)
+        } else osdPreferences.setGlobal(mode)
+        osdPreferenceVersion.intValue++
+        applyStoredOsdMode()
     }
 
     /** Re-assert the stored OSD mode after a game's settings apply on boot, so a non-Custom
      *  choice (Full / Min / Off) isn't reset to the per-stat selection every launch. */
     fun applyStoredOsdMode() {
-        ensureOsdLoaded()
+        osdMode.value = osdPreferences.effective(osdGameKey())
         // Custom = "the user's saved per-stat flags". At boot settingsState is NOT yet populated
         // with THIS game's resolved settings, so reading it here applied stale/empty flags — which
         // hid an enabled stat until a reset repopulated it (#385). Resolve the current game's
-        // settings ourselves. (A fresh install has every stat defaulting off, so this also cleanly
-        // shows nothing by default rather than whatever stale state was left in settingsState.)
+        // settings ourselves. Off is the default MODE, without clearing Custom's saved flags.
         if (osdMode.value == OsdMode.Custom) {
             applyOsdFlags(
                 com.armsx2.config.ConfigStore.resolveForGame(
@@ -167,12 +183,13 @@ object InGameOverlay {
         if (WindowImpl.overlayVisible.value) closeAndResume() else open()
     }
 
-    /** Advance the OSD cycle one step, apply it live, and return a short label for the
-     *  on-screen note. Applies live-only — the saved per-stat Settings are never mutated. */
+    /** Cycle the effective mode in its current scope. Per-stat Custom flags are never mutated. */
     fun cycleOsd(): String {
-        ensureOsdLoaded()
-        val next = osdCycle[(osdCycle.indexOf(osdMode.value) + 1) % osdCycle.size]
-        setOsdMode(next)
+        val game = osdGameKey()
+        val current = osdPreferences.effective(game)
+        val modes = OsdMode.entries
+        val next = modes[(modes.indexOf(current) + 1) % modes.size]
+        setOsdMode(next, if (hasGameOsdOverride(game)) SettingsScope.Game else SettingsScope.Global)
         return "OSD: " + osdModeLabel(next)
     }
 
@@ -187,8 +204,8 @@ object InGameOverlay {
                 NativeApp.osdShowGpuStats(true)
             }
             OsdMode.Min -> {
-                // fps + the CPU line (EE/VU/GS breakdown) — the at-a-glance set Cotcho described.
-                NativeApp.osdApplyFlags(true, false, false, true, false, false, false, false, false, false, false, false)
+                // Minimal = frame rate and speed only; detailed counters stay disarmed.
+                NativeApp.osdApplyFlags(true, false, true, false, false, false, false, false, false, false, false, false)
                 NativeApp.osdShowGpuStats(false)
             }
             OsdMode.Custom -> applyOsdFlags(settingsState.value)

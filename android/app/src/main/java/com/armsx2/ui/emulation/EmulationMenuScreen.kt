@@ -771,11 +771,21 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
                 }
             }
             Spacer(Modifier.height(6.dp))
-            // OSD mode selector — one control (Full / Minimal / Custom / Off) in place of the old
+            // OSD mode selector — one control (Off / Minimal / Full / Custom) in place of the old
             // master + simple toggles, cycled here and by the "Cycle Perf Stats (OSD)" hotkey. Custom
             // = the detailed per-stat selection from All Settings > On-Screen.
             val osdModes = com.armsx2.ui.InGameOverlay.OsdMode.entries
-            val osdModeIndex = osdModes.indexOf(com.armsx2.ui.InGameOverlay.osdMode.value).coerceAtLeast(0)
+            val osdGameKey = InGameOverlay.osdGameKey()
+            var osdForGame by remember(osdGameKey) { mutableStateOf(false) }
+            val osdScope = if (osdForGame && osdGameKey != null) com.armsx2.config.SettingsScope.Game
+                else com.armsx2.config.SettingsScope.Global
+            MenuOrderItem("MenuCycleRow.overlay.osdScope") {
+                MenuCycleRow(str("overlay.osd.scope"),
+                    str(if (osdScope == com.armsx2.config.SettingsScope.Game) "overlay.osd.thisGame" else "overlay.osd.allGames")) {
+                    if (osdGameKey != null) osdForGame = !osdForGame
+                }
+            }
+            val osdModeIndex = osdModes.indexOf(InGameOverlay.configuredOsdMode(osdScope, osdGameKey)).coerceAtLeast(0)
             MenuOrderItem("MenuCycleRow.overlay.master.label") {
                 MenuCycleRow(
                     title = str("overlay.master.label"),
@@ -783,8 +793,23 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
                 ) { step ->
                     val size = osdModes.size
                     val next = ((osdModeIndex + step) % size + size) % size
-                    com.armsx2.ui.InGameOverlay.setOsdMode(osdModes[next])
+                    com.armsx2.ui.InGameOverlay.setOsdMode(osdModes[next], osdScope)
                 }
+            }
+            if (osdScope == com.armsx2.config.SettingsScope.Game && osdGameKey != null) {
+                if (InGameOverlay.hasGameOsdOverride(osdGameKey)) {
+                    MenuOrderItem("Button.overlay.osd.inherit") {
+                        val inherit = { InGameOverlay.clearGameOsdOverride(osdGameKey) }
+                        TextButton(onClick = inherit,
+                            modifier = Modifier.controllerFocusable("overlay.osd.inherit", onConfirm = inherit)) {
+                            Text(str("overlay.osd.inherit"))
+                        }
+                    }
+                } else Text(str("overlay.osd.inheriting"), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else if (InGameOverlay.hasGameOsdOverride(osdGameKey)) {
+                Text(str("overlay.osd.overridden"), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Spacer(Modifier.height(6.dp))
             // Frame limit and the fast-forward speed, both straight through to the PS1 core's frame
