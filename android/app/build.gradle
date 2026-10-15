@@ -96,7 +96,7 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
 
     defaultConfig {
-        externalNativeBuild.cmake.arguments '-DANDROID_STL=c++_static'
+        externalNativeBuild.cmake.arguments '-DANDROID_STL=c++_static', "-DARMSX_SOURCE_COMMIT=${armsxSourceCommit}"
         // Keep the namespace and JNI class names unchanged, even for separate test packages.
         applicationId armsxApplicationId
         minSdk 28

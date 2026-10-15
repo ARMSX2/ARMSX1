@@ -58,6 +58,7 @@ std::string StatePath(int slot);
 void Screenshot(std::string path);
 bool Disc(std::string path);
 std::string Renderer();
+std::string DiagnosticsSnapshot();
 void GlDriver(std::string driver);
 std::string GlDriver();
 bool CustomDriver(std::string directory,std::string name,std::string redirect,std::string hooks);

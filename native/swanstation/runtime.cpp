@@ -35,10 +35,15 @@
 #include "achievements.h"
 #include "shader_api.h"
 #include "performance.h"
+#include "diagnostics.h"
+#ifndef ARMSX_SOURCE_COMMIT
+#define ARMSX_SOURCE_COMMIT "unknown"
+#endif
 #define SWAN_GL_ROUTE
 #include "gl_api.h"
 namespace {
 using Clock=std::chrono::steady_clock;
+SwanDiagnostics::Journal diagnostic_session;
 std::mutex state_mutex, session_mutex, audio_mutex;
 std::condition_variable wake;
 std::deque<std::function<void()>> work;
@@ -119,7 +124,10 @@ API(bool,bridge_ctr_hud,(bool)); API(const char*,bridge_ctr_hud_status,());
 std::atomic<int64_t> ctr_hud_lease{0};
 API(void*,core_retro_get_memory_data,(unsigned)); API(size_t,core_retro_get_memory_size,(unsigned));
 #undef API
-void Log(int priority,const char* message) {__android_log_write(priority,"EmuCorePSX",message);}
+void Log(int priority,const char* message) {
+  __android_log_write(priority,"EmuCorePSX",message);
+  if(priority>=ANDROID_LOG_WARN)diagnostic_session.Core(priority>=ANDROID_LOG_ERROR,message);
+}
 void CoreLog(retro_log_level level,const char* fmt,...) {
   char buffer[4096]; va_list args; va_start(args,fmt); vsnprintf(buffer,sizeof(buffer),fmt,args); va_end(args);
   Log(level==RETRO_LOG_ERROR?ANDROID_LOG_ERROR:level==RETRO_LOG_WARN?ANDROID_LOG_WARN:ANDROID_LOG_INFO,buffer);
@@ -595,13 +603,23 @@ bool SwanHost::Run(std::string path,uint64_t token) {
     if(!token || reserved_run_token!=token || cancelled_run_token==token)return false;
     live_run_token=token;stop=false;emulation_thread=std::this_thread::get_id();game_path=std::move(path);
   }
+  const auto epoch_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+    std::chrono::system_clock::now().time_since_epoch()).count();
+  std::string original_source;
+  {std::lock_guard lock(state_mutex);original_source=requested_source.empty()?game_path:requested_source;}
+  diagnostic_session.Begin(data_root+"/logs",std::to_string(getpid())+"-"+std::to_string(epoch_ms)+"-"+std::to_string(token),
+    ARMSX_SOURCE_COMMIT,original_source);
   // Reset session bookkeeping even when EGL or BIOS loading fails.
-  struct FinishRun { ~FinishRun(){std::lock_guard lock(state_mutex);active=false;live_run_token=0;game_path.clear();current_serial.clear();emulation_thread={};} } finish;
+  struct FinishRun { ~FinishRun(){diagnostic_session.State("ended");std::lock_guard lock(state_mutex);active=false;live_run_token=0;game_path.clear();current_serial.clear();emulation_thread={};} } finish;
   paused=false;audio_suspended=false;frames=0;fps=0;hardware={};disk={};av={};options.clear();
   video_width=video_height=0;software_pixels.clear();ResetButtons();audio_nonzero=0;
   ClearRewind();rewind_active=false;rewind_snapshot_bytes=0;cheat_groups.clear();cheats_armed=0;
   {std::lock_guard lock(statistics_mutex);statistics.clear();}
-  ReadConfig();if(!OpenGraphics()){JavaNotice("Cannot create an OpenGL ES 3 graphics context");CloseGraphics();return false;}
+  ReadConfig();
+  diagnostic_session.State("booting","requested_renderer="+SwanDiagnostics::Quote(OptionValue("swanstation_GPU_Renderer"))+
+    " requested_scale="+OptionValue("swanstation_GPU_ResolutionScale")+
+    " cpu_option="+SwanDiagnostics::Quote(OptionValue("swanstation_CPU_ExecutionMode")));
+  if(!OpenGraphics()){JavaNotice("Cannot create an OpenGL ES 3 graphics context");CloseGraphics();return false;}
   // Clear the retained Surface before loading the BIOS/disc, not only on frame one.
   unsigned revision=~0u;UpdateWindow(revision);
   core_retro_set_environment(Environment);core_retro_set_video_refresh(Video);core_retro_set_audio_sample(AudioSample);core_retro_set_audio_sample_batch(AudioBatch);
@@ -619,6 +637,12 @@ bool SwanHost::Run(std::string path,uint64_t token) {
     {std::lock_guard lock(state_mutex);active_renderer=SwanVulkan::Ready()?"SwanStation Vulkan (hardware)":hardware.context_reset?
       (SwanGL::IsAngle()?"SwanStation ANGLE OpenGL ES / Vulkan (hardware)":"SwanStation OpenGL ES (hardware)"):
       (SwanGL::IsAngle()?"SwanStation Software (ANGLE presenter)":"SwanStation Software (OpenGL ES presenter)");active=true;}
+    const auto* presenter_vendor=reinterpret_cast<const char*>(glGetString(GL_VENDOR));
+    const auto* presenter_renderer=reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+    diagnostic_session.State("running","renderer="+SwanDiagnostics::Quote(SwanHost::Renderer())+
+      " serial="+SwanDiagnostics::Quote(texture_serial)+" nominal_hz="+std::to_string(nominal.load())+
+      " presenter_gl_vendor="+SwanDiagnostics::Quote(presenter_vendor?presenter_vendor:"unavailable")+
+      " presenter_gl_renderer="+SwanDiagnostics::Quote(presenter_renderer?presenter_renderer:"unavailable"));
     core_retro_set_controller_port_device(0,RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG,0));
     for(unsigned player=1;player<4;player++)core_retro_set_controller_port_device(player,RETRO_DEVICE_JOYPAD);
     {
@@ -644,12 +668,17 @@ bool SwanHost::Run(std::string path,uint64_t token) {
     bool ctr_hud_used=false;
     ctr_hud_lease=0;
     double sum_frame=0,sum_emu=0,sum_present=0,sum_idle=0,worst=0;int stat_frames=0;
+    double diagnostic_window_ms=0;bool was_paused=false;
+    auto diagnostic_frame_end=Clock::now();
     while(!stop) {
+      const auto loop_start=Clock::now();
       Drain();UpdateWindow(revision);AllocateTarget();
       const int64_t hud_now=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
       const bool move_hud=!paused && !rewind_active && current_serial=="SCUS-94426" && hud_now<ctr_hud_lease.load();
       if(bridge_ctr_hud(move_hud) && !ctr_hud_used){ctr_hud_used=true;SwanAchievements::Unload();}
-      if(paused){fps=0;std::unique_lock lock(state_mutex);wake.wait_for(lock,std::chrono::milliseconds(10));deadline=Clock::now();continue;}
+      if(paused!=was_paused){was_paused=paused;diagnostic_window_ms=0;
+        diagnostic_session.State(was_paused?"paused":"running");measured_frames=0;measured_at=Clock::now();}
+      if(paused){fps=0;std::unique_lock lock(state_mutex);wake.wait_for(lock,std::chrono::milliseconds(10));deadline=Clock::now();diagnostic_frame_end=Clock::now();continue;}
       const auto frame_start=Clock::now();present_ms=0;
       if(rewind_active){StepRewind();SwanAchievements::Reset();}else {core_retro_run();if(cheats_armed==0 && !ctr_hud_used)SwanAchievements::Frame();CaptureRewind();}
       const auto emu_end=Clock::now();
@@ -660,6 +689,31 @@ bool SwanHost::Run(std::string path,uint64_t token) {
       const float multiplier=rewind_active?std::max(0.01f,float(rewind_frequency)/nominal.load()):(fast?fast_speed.load():speed.load()/100.f);
       if(limit_speed && multiplier>0 && nominal>0){deadline+=std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0/(nominal*multiplier)));
         if(deadline<now-std::chrono::milliseconds(100))deadline=now;std::unique_lock lock(state_mutex);wake.wait_until(lock,deadline);}
+      const auto frame_end=Clock::now();
+      const double loop_ms=std::chrono::duration<double,std::milli>(frame_end-diagnostic_frame_end).count();
+      diagnostic_frame_end=frame_end;
+      const double idle_ms=std::chrono::duration<double,std::milli>(frame_end-emu_end).count();
+      // Details are built only when a timing window is due, not once per frame.
+      diagnostic_window_ms+=loop_ms;
+      std::string diagnostic_details;
+      if(diagnostic_window_ms>=2000) {
+        const auto selected=SwanShaders::Selected();
+        diagnostic_details="renderer="+SwanDiagnostics::Quote(SwanHost::Renderer())+
+          " serial="+SwanDiagnostics::Quote(SwanHost::GameSerial())+" nominal_hz="+std::to_string(nominal.load())+
+          " speed_percent="+std::to_string(speed.load())+" limited="+std::to_string(limit_speed.load())+
+          " fast_forward="+std::to_string(fast.load())+" multiplier="+std::to_string(multiplier)+
+          " resolution_scale_option="+OptionValue("swanstation_GPU_ResolutionScale")+
+          " cpu_option="+SwanDiagnostics::Quote(OptionValue("swanstation_CPU_ExecutionMode"))+
+          " runahead="+OptionValue("swanstation_Main_RunaheadFrameCount")+
+          " rewind="+std::to_string(rewind_active.load())+
+          " shader_requested="+std::to_string(selected.enabled)+
+          " shader_active="+std::to_string(SwanShaders::ActiveGL()||SwanVulkan::ShaderActive())+
+          " video="+std::to_string(video_width)+"x"+std::to_string(video_height);
+        diagnostic_window_ms=0;
+      }
+      diagnostic_session.Frame(loop_ms,emu_ms,present_ms,idle_ms,
+        std::chrono::duration<double,std::milli>(frame_start-loop_start).count(),
+        1000.0/(std::max(1.f,nominal.load())*std::max(0.01f,multiplier)),diagnostic_details);
       if(statistics_enabled) {
         const double frame_ms=std::chrono::duration<double,std::milli>(Clock::now()-frame_start).count();
         sum_frame+=frame_ms;sum_emu+=emu_ms;sum_present+=present_ms;sum_idle+=std::max(0.0,frame_ms-emu_ms);worst=std::max(worst,frame_ms);stat_frames++;
@@ -856,6 +910,7 @@ bool SwanHost::Disc(std::string path){if(!std::filesystem::is_regular_file(path)
     if(!disk.set_eject_state(true))return false;const bool replaced=disk.replace_image_index(index,&next);
     const bool closed=disk.set_eject_state(false);if(replaced&&closed){SwanAchievements::Unload();if(cheats_armed==0)SwanAchievements::Game(path);
       char serial[32]{};bridge_disc_serial(path.c_str(),serial,sizeof(serial));std::lock_guard lock(state_mutex);game_path=path;current_serial=serial;}return replaced&&closed;});}
+std::string SwanHost::DiagnosticsSnapshot(){return diagnostic_session.Snapshot();}
 std::string SwanHost::Renderer(){std::lock_guard lock(state_mutex);return active_renderer+(active&&(SwanShaders::ActiveGL()||SwanVulkan::ShaderActive())?" + shader chain":"");}
 void SwanHost::GlDriver(std::string driver){std::lock_guard lock(state_mutex);if(!live_run_token)requested_gl_driver=driver=="angle"?"angle":"system";}
 bool SwanHost::CustomDriver(std::string directory,std::string name,std::string redirect,std::string hooks){std::lock_guard lock(state_mutex);

@@ -131,6 +131,9 @@ extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setGlDriv
 extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getGlDriver(JNIEnv* env,jclass cls) {
     return String(env,SwanHost::GlDriver());
 }
+extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanDiagnostics(JNIEnv* env,jclass) {
+    return String(env,SwanHost::DiagnosticsSnapshot());
+}
 extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getActiveRenderer(JNIEnv* env,jclass cls) {
     return String(env,SwanHost::Renderer());
 }

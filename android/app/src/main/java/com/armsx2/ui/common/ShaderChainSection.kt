@@ -168,24 +168,28 @@ fun ShaderChainSection(
     onPresetChange: (String) -> Unit,
     onParamsChange: (Map<String, Map<String, Float>>) -> Unit,
 ) {
-    ToggleRow(
-        str("renderer.shaderChain.label"),
-        enabled,
-        description = str("renderer.shaderChain.description"),
-    ) {
-        onEnabledChange(it)
-    }
-    // Gate: the picker only exists while the chain is on — the same shape as the
-    // Shadeboost sliders / CAS sharpness rows above, and it keeps a dead row out of the
-    // controller focus registry rather than parking focus on something inert.
-    if (enabled) {
-        SettingsDivider()
-        ShaderPresetPicker(preset, onPresetChange)
-        // Same gate one level down: with no preset there is nothing to enumerate, and the
-        // section would be a row that opens onto an empty list.
-        if (preset.isNotBlank()) {
+    // MenuOrderItem uses a Box so its drag overlay can cover the whole item.
+    // Keep every shader row under one Column; sibling roots would overlap in that Box.
+    Column(Modifier.fillMaxWidth()) {
+        ToggleRow(
+            str("renderer.shaderChain.label"),
+            enabled,
+            description = str("renderer.shaderChain.description"),
+        ) {
+            onEnabledChange(it)
+        }
+        // Gate: the picker only exists while the chain is on — the same shape as the
+        // Shadeboost sliders / CAS sharpness rows above, and it keeps a dead row out of the
+        // controller focus registry rather than parking focus on something inert.
+        if (enabled) {
             SettingsDivider()
-            ShaderParamPicker(preset, params, onParamsChange, onPresetChange)
+            ShaderPresetPicker(preset, onPresetChange)
+            // Same gate one level down: with no preset there is nothing to enumerate, and the
+            // section would be a row that opens onto an empty list.
+            if (preset.isNotBlank()) {
+                SettingsDivider()
+                ShaderParamPicker(preset, params, onParamsChange, onPresetChange)
+            }
         }
     }
 }

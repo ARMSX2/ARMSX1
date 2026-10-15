@@ -496,6 +496,9 @@ public class NativeApp {
 	 *    <li>{@code "Software"}
 	 *  </ul> */
 	public static native String getActiveRenderer();
+	/** Bounded, synchronized snapshot of the latest SwanStation session in this process.
+	 * Empty before a session; never combines prior games, builds or legacy PSXE logs. */
+	public static native String getSwanDiagnostics();
 
 	/** Live display aspect: 0 = classic 4:3, 1 = square 1:1, 2 = wide 16:9.
 	 *  Anything negative reverts to settings.toml's {@code [video] display_aspect}.

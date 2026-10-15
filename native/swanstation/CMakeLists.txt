@@ -19,3 +19,10 @@ target_include_directories(emucorepsx PRIVATE
   ../../core/swanstation/dep/stb/include)
 target_link_libraries(emucorepsx PRIVATE android log EGL GLESv3 aaudio dl z adrenotools swan_rcheevos)
 target_link_options(emucorepsx PRIVATE -Wl,--no-undefined -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
+
+# Match the native session's build identity to BuildConfig.SOURCE_COMMIT.
+set(ARMSX_SOURCE_COMMIT "unknown" CACHE STRING "ARMSX source revision")
+if(NOT ARMSX_SOURCE_COMMIT MATCHES "^[0-9a-fA-F]+$" AND NOT ARMSX_SOURCE_COMMIT STREQUAL "unknown")
+  message(FATAL_ERROR "Invalid ARMSX_SOURCE_COMMIT")
+endif()
+target_compile_definitions(emucorepsx PRIVATE ARMSX_SOURCE_COMMIT="${ARMSX_SOURCE_COMMIT}")

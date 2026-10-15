@@ -11,6 +11,8 @@ import android.system.Os
 import android.system.OsConstants
 import android.view.InputDevice
 import com.armsx2.config.Ps1SettingsStore
+import com.armsx2.runtime.MainActivityRuntime
+import kr.co.iefriends.pcsx2.NativeApp
 import java.io.BufferedWriter
 import java.io.File
 import java.io.RandomAccessFile
@@ -22,13 +24,10 @@ import java.util.concurrent.TimeUnit
 /**
  * "Generate log file": everything a bug report needs, in one file the USER chose the location of.
  *
- * Every piece already exists, but where users cannot reach it. The core's diagnostics file
- * (`armsx.log` — every emulator/interpreter/renderer line once `[console] logging_enabled` is
- * on) is written under the app-INTERNAL files dir, invisible to file managers; the Kotlin
- * session/crash logs live under the app's external files dir; native render errors only reach
- * logcat. Enabling the toggle asks for a destination through the system save dialog, switches
- * the core's own logging on. Startup refreshes a private report; explicit exports update the
- * chosen destination without making startup depend on its storage provider.
+ * Uses the active SwanStation host's bounded session journal and process-filtered logcat.
+ * Session metadata identifies the game, build, renderer and timing source. Older saved
+ * sessions are explicitly recovery/history data. No legacy emulator logs are imported.
+ * Startup refreshes a private report; explicit export writes the chosen destination.
  *
  * Prefs are read through the app's canonical "ARMSX2" SharedPreferences file directly (not
  * [com.armsx2.runtime.MainActivityRuntime.prefs]) because the startup refresh runs from
@@ -56,8 +55,8 @@ object DiagnosticsReport {
     /**
      * Persist the destination the user picked in the save dialog and switch capture on: the
      * grant is kept across restarts where the provider allows it, and the core's
-     * `[console] logging_enabled` goes on globally (paired with `quiet`, which the core derives
-     * from it — same contract Ps1AdvancedTab keeps) so the next session writes a full armsx.log.
+     * logging preference goes on globally, paired with `quiet`. The SwanStation session
+     * journal records bounded timing and warnings/errors independently of the OSD.
      */
     fun enable(context: Context, target: Uri) {
         runCatching {
@@ -160,30 +159,34 @@ object DiagnosticsReport {
         }
         val coreLogging = BuildConfig.DIAGNOSTIC_BUILD ||
             runCatching { Ps1SettingsStore.load(context).loggingEnabled }.getOrDefault(false)
-        w.appendLine(
-            "core logging: " +
-                if (coreLogging) "on" else "off — armsx.log below is stale; re-enable and play again",
-        )
+        w.appendLine("core: SwanStation")
+        w.appendLine("core logging preference: " + if (coreLogging) "on" else "off")
+        w.appendLine("process id at export: ${Process.myPid()}")
+        w.appendLine("Configuration files show requested settings, not proof of the active renderer.")
         w.appendLine()
 
-        w.appendLine("===== memory cards =====")
-        for (slot in 1..2) {
-            val card = File(context.filesDir, "slot$slot.mcd")
-            w.appendLine("slot=$slot exists=${card.exists()} bytes=${card.length()} readable=${card.canRead()} writable=${card.canWrite()}")
+        w.appendLine("===== latest SwanStation session in this process =====")
+        // The native snapshot is copied under its own mutex, without scheduling work on
+        // the VM thread. Safe while paused, booting, running or after a failed launch.
+        val current = if (MainActivityRuntime.nativeReady.value) {
+            runCatching { NativeApp.getSwanDiagnostics() }.getOrElse {
+                "Native session snapshot unavailable: ${it.javaClass.simpleName}"
+            }
+        } else ""
+        if (current.isNotBlank()) {
+            w.appendLine(current)
+            w.appendLine("Session state above identifies whether this is running, paused or ended.")
+        } else {
+            w.appendLine("No native session snapshot in this process. Historical files below are NOT current measurements.")
         }
         w.appendLine()
-        section(w, "settings.toml", File(context.filesDir, "settings.toml"))
-        section(w, "armsx.previous.log", File(context.filesDir, "logs/armsx.log.previous"))
-        section(w, "armsx.log — core/interpreter/renderer diagnostics", File(context.filesDir, "logs/armsx.log"))
-        section(w, "previous audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt.previous"))
-        section(w, "audio timing and SPU", File(context.filesDir, "logs/audio_diag.txt"))
-        section(w, "previous automatic GPU pacing", File(context.filesDir, "logs/armsx.log.pacing.previous"))
-        section(w, "automatic GPU pacing, FPS dips and bounded device probes (independent of core logging)", File(context.filesDir, "logs/armsx.log.pacing"))
-        section(w, "previous device session", File(context.filesDir, "logs/device.previous.log"))
-        section(w, "device lifecycle, controller and native logs", File(context.filesDir, "logs/device.log"))
-        section(w, "session.log — frontend stdout/stderr", File(externalLogs, "session.log"))
+        section(w, "saved settings.toml (requested configuration)", File(context.filesDir, "settings.toml"))
+        section(w, "SwanStation disk checkpoint — historical/recovery copy; use native session above for current data",
+            File(context.filesDir, "logs/swan-session.log"))
+        section(w, "previous SwanStation session — historical, may be a different build/game",
+            File(context.filesDir, "logs/swan-session.previous.log"))
         w.appendLine("===== input devices =====")
-        w.appendLine("Controller settings at export (session settings are in device.log):")
+        w.appendLine("Controller settings at export:")
         w.appendLine(runCatching { com.armsx2.input.ControllerMappings.diagnosticStickSettings() }
             .getOrElse { "unavailable: ${it.javaClass.simpleName}" })
         runCatching {
@@ -246,10 +249,6 @@ object DiagnosticsReport {
         // Belt and braces alongside the exit records: the renderer's last lines and the abort
         // message are also still in our own logcat buffer right after a bad session.
         w.appendLine("===== recent logcat (this process) =====")
-        if (BuildConfig.DIAGNOSTIC_BUILD) {
-            w.appendLine("Captured in device.log above.")
-            return
-        }
         runCatching {
             val snapshot = File.createTempFile("report-logcat-", ".txt", context.cacheDir)
             var process: java.lang.Process? = null
