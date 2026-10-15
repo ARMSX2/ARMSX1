@@ -14,6 +14,10 @@
 #include "common/state_wrapper.h"
 #include "core/cpu_core.h"
 #include "core/cpu_code_cache.h"
+#include "core/timing_event.h"
+#include "core/host_interface.h"
+#include "core/host_display.h"
+#include "statistics.h"
 #include "ctr_hud.h"
 #include "common/vulkan/context.h"
 #include "xxhash.h"
@@ -26,6 +30,21 @@
 
 namespace { bool texture_dump=false,texture_replace=false;std::string texture_directory;std::set<std::string> dumped;uint64_t dumped_bytes=0;
 uint64_t texture_lookups=0,texture_writes=0,texture_hits=0;
+}
+SwanTelemetry::Window SwanTelemetry::counters;
+extern "C" RETRO_API void swan_statistics_reset(){SwanTelemetry::counters.Reset();}
+extern "C" RETRO_API void swan_statistics_begin(bool enabled){
+  SwanTelemetry::counters.Begin(enabled,TimingEvents::GetGlobalTickCounter());
+}
+extern "C" RETRO_API void swan_statistics_end(){SwanTelemetry::counters.End(TimingEvents::GetGlobalTickCounter());}
+extern "C" RETRO_API void swan_statistics_read(double* output,size_t capacity){
+  if(!output||capacity<SwanTelemetry::Count)return;
+  auto values=SwanTelemetry::counters.Take();
+  if(g_host_interface)if(const auto* display=g_host_interface->GetDisplay()){
+    values[23]=display->GetDisplayWidth();values[24]=display->GetDisplayHeight();
+  }
+  values[30]=SwanTelemetry::counters.scale?double(SwanTelemetry::counters.scale):-1;
+  std::copy(values.begin(),values.end(),output);
 }
 void swan_replacement_loaded(){texture_hits++;}
 namespace { SwanCtrHud::Controller ctr_hud;

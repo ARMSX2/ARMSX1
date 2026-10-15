@@ -735,7 +735,7 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
                 com.armsx2.ui.GameOsd.toast("Screenshot saved")
                 viewModel.resume()
             },
-            MenuAction("discord", str("about.discord"), "Account, friends and game activity", "💬", null, viewModel::openDiscord),
+            MenuAction("discord", str("about.discord"), "Account, friends and game activity", "👥", SelectionBlue, viewModel::openDiscord),
             // Rewind, one snapshot per press. The hold-to-rewind hotkey (Settings › Hotkeys)
             // is the real way to use this, but a touch-only player has no button to hold, so
             // there has to be a reachable control — a feature whose only entry point is an
@@ -1833,7 +1833,12 @@ private fun ActionGrid(actions: List<MenuAction>, selected: Int, onSelect: (Int)
                     ),
                 ) {
                     Row(Modifier.padding(horizontal = 13.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(
+                        if (item.id == "discord") Box(Modifier.width(30.dp)) {
+                            com.armsx2.ui.friends.FriendsGlyphWithBadge(
+                                color = SelectionBlue,
+                                glyphSize = 19.sp,
+                            )
+                        } else Text(
                             item.glyph,
                             color = item.accent ?: MaterialTheme.colorScheme.primary,
                             fontSize = 19.sp,

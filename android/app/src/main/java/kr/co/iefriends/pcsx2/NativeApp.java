@@ -292,14 +292,15 @@ public class NativeApp {
 	public static native float getNominalFrameRate();
 
 	/** Arm the detailed performance overlay (per-subsystem work counters + host frame-phase
-	 *  timing). This is what switches the counters ON INSIDE THE EMULATOR — psx/perf.c — so it
+	 *  timing). This switches the SwanStation adapter's opt-in work counters on, so it
 	 *  MUST be cleared when the Statistics block is hidden, or every counter site in the core
 	 *  stays live feeding a panel nobody is reading. Off at boot. */
 	public static native void setStatisticsEnabled(boolean enabled);
 
 	/** Refill [out] with the latest snapshot and return how many entries were written; 0 until
 	 *  the core's first half-second window closes, or while statistics are disabled. Indices are
-	 *  com.armsx2.ui.GameOsd.Stat / PSXE_HOST_STAT_* in frontend/host_stats.h. Pass a reused
+	 *  com.armsx2.ui.GameOsd.Stat / native/swanstation/statistics.h. Negative means unavailable.
+	 *  Guest clock ticks are not CPU instructions; host phases are CPU wall durations. Pass a reused
 	 *  array — this deliberately does not allocate. */
 	public static native int getStatistics(double[] out);
 

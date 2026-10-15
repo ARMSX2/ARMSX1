@@ -247,12 +247,13 @@ internal fun MenuOrderItem(id: String, group: String? = null, modifier: Modifier
 
 @Composable
 internal fun MenuMoveControls() {
-    val moving = QuickMenuOrder.moving
+    // Normal browsing starts with the game header, not a permanent help banner.
+    // Keep guidance and Done/Cancel available only during an explicit move.
+    val moving = QuickMenuOrder.moving ?: return
     Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
-        Text(if (moving == null) "Left: options · Right: tabs · X: next/increase · Hold A or touch to move"
-            else "Move with directions · Release, then A to save · B to cancel",
+        Text("Move with directions · Release, then A to save · B to cancel",
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (moving != null) Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(modifier = Modifier.padFocusRing(), onClick = { QuickMenuOrder.step(-1) }) { Text("↑ / ←") }
             TextButton(modifier = Modifier.padFocusRing(), onClick = { QuickMenuOrder.step(1) }) { Text("↓ / →") }
             TextButton(modifier = Modifier.padFocusRing(), onClick = { QuickMenuOrder.finish(true) }) { Text("Done") }

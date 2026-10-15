@@ -36,6 +36,7 @@
 #include "shader_api.h"
 #include "performance.h"
 #include "diagnostics.h"
+#include "statistics.h"
 #ifndef ARMSX_SOURCE_COMMIT
 #define ARMSX_SOURCE_COMMIT "unknown"
 #endif
@@ -121,6 +122,8 @@ API(void,bridge_texture_options,(bool,bool,const char*));
 API(uint64_t,bridge_texture_metric,(unsigned));
 API(bool,bridge_companion_vram,(void*,size_t));
 API(bool,bridge_ctr_hud,(bool)); API(const char*,bridge_ctr_hud_status,());
+API(void,bridge_statistics_reset,());API(void,bridge_statistics_begin,(bool));
+API(void,bridge_statistics_end,());API(void,bridge_statistics_read,(double*,size_t));
 std::atomic<int64_t> ctr_hud_lease{0};
 API(void*,core_retro_get_memory_data,(unsigned)); API(size_t,core_retro_get_memory_size,(unsigned));
 #undef API
@@ -525,11 +528,14 @@ int ApplyCheats(bool master,const std::vector<std::string>& names) {
   cheats_armed=index;ClearRewind();return index;
 }
 void PublishStatistics(double frame,double emu,double present,double idle,double worst) {
-  std::vector<double> out(31,-1);out[0]=frame;out[1]=std::max(0.0,emu-present);out[2]=present;out[3]=idle;out[4]=worst;
-  int scale=1;try{if(hardware.context_reset)scale=std::max(1,std::stoi(OptionValue("swanstation_GPU_ResolutionScale")));}catch(...){}
-  out[23]=video_width/scale;out[24]=video_height/scale;out[30]=scale;
+  std::vector<double> out(SwanTelemetry::Count,-1);
+  bridge_statistics_read(out.data(),out.size());
+  out[0]=frame;out[1]=std::max(0.0,emu-present);out[2]=present;out[3]=idle;out[4]=worst;
+  out[31]=video_width;out[32]=video_height;
   out[26]=sysconf(_SC_NPROCESSORS_ONLN);
-  out[25]=SwanPerformance::CpuPercent();
+  const double cpu=SwanPerformance::CpuPercent();
+  // The process can use several cores. Match the OSD's whole-device 0..100 scale.
+  out[25]=cpu>=0&&out[26]>0?std::clamp(cpu/out[26],0.0,100.0):-1;
   std::ifstream usage("/proc/self/statm");unsigned long pages=0,resident=0;
   if(usage>>pages>>resident)out[27]=double(resident)*sysconf(_SC_PAGESIZE)/(1024.0*1024.0);
   struct sysinfo info{};if(sysinfo(&info)==0)out[28]=double(info.freeram)*info.mem_unit/(1024.0*1024.0);
@@ -568,6 +574,8 @@ bool SwanHost::Initialize(JNIEnv* env,jclass cls,std::string root,std::string bi
   BRIDGE(bridge_texture_metric,"swan_texture_metric");
   BRIDGE(bridge_companion_vram,"swan_companion_vram");
   BRIDGE(bridge_ctr_hud,"swan_ctr_hud");BRIDGE(bridge_ctr_hud_status,"swan_ctr_hud_status");
+  BRIDGE(bridge_statistics_reset,"swan_statistics_reset");BRIDGE(bridge_statistics_begin,"swan_statistics_begin");
+  BRIDGE(bridge_statistics_end,"swan_statistics_end");BRIDGE(bridge_statistics_read,"swan_statistics_read");
 #undef BRIDGE
   SwanAchievements::Initialize(env,[](uint32_t address,uint8_t* buffer,uint32_t count)->uint32_t {
     if(std::this_thread::get_id()!=emulation_thread||!active||!core_retro_get_memory_data||!buffer)return 0;
@@ -623,6 +631,7 @@ bool SwanHost::Run(std::string path,uint64_t token) {
   // Clear the retained Surface before loading the BIOS/disc, not only on frame one.
   unsigned revision=~0u;UpdateWindow(revision);
   core_retro_set_environment(Environment);core_retro_set_video_refresh(Video);core_retro_set_audio_sample(AudioSample);core_retro_set_audio_sample_batch(AudioBatch);
+  bridge_statistics_reset();
   core_retro_set_input_poll(InputPoll);core_retro_set_input_state(Input);core_retro_init();
   retro_game_info game{game_path.empty()?nullptr:game_path.c_str(),nullptr,0,nullptr};
   const bool loaded=core_retro_load_game(game_path.empty()?nullptr:&game);
@@ -677,10 +686,14 @@ bool SwanHost::Run(std::string path,uint64_t token) {
       const bool move_hud=!paused && !rewind_active && current_serial=="SCUS-94426" && hud_now<ctr_hud_lease.load();
       if(bridge_ctr_hud(move_hud) && !ctr_hud_used){ctr_hud_used=true;SwanAchievements::Unload();}
       if(paused!=was_paused){was_paused=paused;diagnostic_window_ms=0;
-        diagnostic_session.State(was_paused?"paused":"running");measured_frames=0;measured_at=Clock::now();}
+        diagnostic_session.State(was_paused?"paused":"running");measured_frames=0;measured_at=Clock::now();
+        sum_frame=sum_emu=sum_present=sum_idle=worst=0;stat_frames=0;
+        bridge_statistics_begin(false);}
       if(paused){fps=0;std::unique_lock lock(state_mutex);wake.wait_for(lock,std::chrono::milliseconds(10));deadline=Clock::now();diagnostic_frame_end=Clock::now();continue;}
       const auto frame_start=Clock::now();present_ms=0;
+      bridge_statistics_begin(statistics_enabled.load()&&!rewind_active);
       if(rewind_active){StepRewind();SwanAchievements::Reset();}else {core_retro_run();if(cheats_armed==0 && !ctr_hud_used)SwanAchievements::Frame();CaptureRewind();}
+      bridge_statistics_end();
       const auto emu_end=Clock::now();
       const double emu_ms=std::chrono::duration<double,std::milli>(emu_end-frame_start).count();
       SwanPerformance::Frame(std::chrono::duration_cast<std::chrono::nanoseconds>(emu_end-frame_start).count(),int64_t(1000000000.0/std::max(1.f,nominal.load())));
@@ -715,8 +728,7 @@ bool SwanHost::Run(std::string path,uint64_t token) {
         std::chrono::duration<double,std::milli>(frame_start-loop_start).count(),
         1000.0/(std::max(1.f,nominal.load())*std::max(0.01f,multiplier)),diagnostic_details);
       if(statistics_enabled) {
-        const double frame_ms=std::chrono::duration<double,std::milli>(Clock::now()-frame_start).count();
-        sum_frame+=frame_ms;sum_emu+=emu_ms;sum_present+=present_ms;sum_idle+=std::max(0.0,frame_ms-emu_ms);worst=std::max(worst,frame_ms);stat_frames++;
+        sum_frame+=loop_ms;sum_emu+=emu_ms;sum_present+=present_ms;sum_idle+=idle_ms;worst=std::max(worst,loop_ms);stat_frames++;
         if(sum_frame>=500) {PublishStatistics(sum_frame/stat_frames,sum_emu/stat_frames,sum_present/stat_frames,sum_idle/stat_frames,worst);
           sum_frame=sum_emu=sum_present=sum_idle=worst=0;stat_frames=0;}
       }else {sum_frame=sum_emu=sum_present=sum_idle=worst=0;stat_frames=0;}
@@ -735,7 +747,7 @@ bool SwanHost::Run(std::string path,uint64_t token) {
   PresentBlank();
   if(audio){AAudioStream_requestStop(audio);AAudioStream_close(audio);audio=nullptr;}
   {std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;}
-  core_retro_deinit();SwanVulkan::Close();CloseGraphics();fps=0;ClearRewind();cheat_groups.clear();cheats_armed=0;
+  core_retro_deinit();bridge_statistics_reset();SwanVulkan::Close();CloseGraphics();fps=0;ClearRewind();cheat_groups.clear();cheats_armed=0;
   // Keep hasActiveVM true until teardown really finishes, so the frontend does
   // not offer a second launch while the previous session still owns the core.
   {std::lock_guard lock(state_mutex);active=false;active_renderer="Stopped";game_path.clear();emulation_thread={};work.clear();}

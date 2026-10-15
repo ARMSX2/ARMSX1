@@ -98,13 +98,12 @@ object GameOsd {
         }
 
     /**
-     * Indices into [stats]. MUST stay in lockstep with `PSXE_HOST_STAT_*` in
-     * frontend/host_stats.h — the native side writes this array by ordinal, so an index
-     * inserted on one side and not the other silently relabels every row below it.
+     * Indices into [stats]. Keep in lockstep with native/swanstation/statistics.h
+     * and runtime.cpp. Slots 0..30 retain the original frontend ABI.
      *
-     * Every entry is a real measurement, per emulated frame, averaged over the core's last
-     * half-second window (WORST_FRAME_MS excepted — averaging a spike away is exactly what
-     * hides a stutter). Nothing here is modelled: see the note on measurement in psx/perf.h.
+     * Negative entries mean unavailable, never a zero measurement. Work counts
+     * are averaged per host emulation frame; SPU voices are sampled at audio
+     * execution, and CPU_CYCLES is elapsed guest clock ticks (not instructions).
      */
     object Stat {
         const val FRAME_MS = 0
@@ -142,13 +141,15 @@ object GameOsd {
         const val HOST_RAM_AVAILABLE_MB = 28
         const val HOST_GPU_PERCENT = 29
         const val INTERNAL_SCALE = 30
-        const val COUNT = 31
+        const val VIDEO_WIDTH = 31
+        const val VIDEO_HEIGHT = 32
+        const val COUNT = 33
     }
 
     /** The live snapshot. Reused rather than reallocated — `NativeApp.getStatistics` refills it
      *  in place, so polling costs no garbage. Read [statsVersion] to make a composable observe
      *  it: a plain array is not a Compose state and mutating it recomposes nothing. */
-    val stats = DoubleArray(Stat.COUNT)
+    val stats = DoubleArray(Stat.COUNT) { -1.0 }
     val statsVersion = mutableIntStateOf(0)
 
     /** True once the core has published at least one window. Until then the rows read "--"
@@ -220,25 +221,22 @@ object GameOsd {
     /** Refill [stats] from the core. Returns false while the core has nothing to report (the
      *  overlay was only just armed, or the game is paused). */
     fun pollStats(): Boolean {
+        stats.fill(-1.0)
         val written = runCatching { NativeApp.getStatistics(stats) }.getOrDefault(0)
-        if (written <= 0) return false
+        if (written <= 0) {
+            statsReady.value = false
+            statsVersion.intValue++
+            return false
+        }
         statsVersion.intValue++
         statsReady.value = true
         return true
     }
 
-    /**
-     * The active renderer, resolved through reflection.
-     *
-     * `NativeApp.getActiveRenderer()` is owned by the renderer work, not by this file, so it is
-     * called by name instead of linked against: a build where it has not landed yet degrades to
-     * an empty string (and therefore no row) rather than failing to compile or throwing. Resolved
-     * once per session and cached — the backend is fixed for the life of a VM.
-     */
+    /** Active native backend; ignore transient pre-boot placeholders. */
     fun refreshRenderer() {
         renderer.value = runCatching {
-            val method = NativeApp::class.java.getMethod("getActiveRenderer")
-            (method.invoke(null) as? String).orEmpty()
+            OsdReadings.renderer(NativeApp.getActiveRenderer().orEmpty())
         }.getOrDefault("")
     }
 
@@ -250,7 +248,7 @@ object GameOsd {
         nominalFps.floatValue = 0f
         renderer.value = ""
         statsReady.value = false
-        stats.fill(0.0)
+        stats.fill(-1.0)
         // Also disarms the counters inside the core; leaving them live across a closed game
         // would instrument the next boot for a panel nobody asked for.
         runCatching { NativeApp.setStatisticsEnabled(false) }
@@ -361,15 +359,13 @@ fun GameOsdOverlay() {
         }
     }
 
-    // The active backend is fixed for the life of a VM, but the Compose surface becomes visible
-    // slightly before the VM thread finishes EGL/SDL setup. Poll only through that startup race;
-    // caching the host-hint-only "Unknown" profile made screenshots lie for the whole session.
+    // The UI can appear before native boot finishes. Never cache "Stopped" for
+    // the entire session; also reflect live shader and renderer changes.
     LaunchedEffect(inGame, settingsKey, showRenderer) {
-        if (inGame && showRenderer && GameOsd.renderer.value.isEmpty()) {
-            repeat(50) {
+        if (inGame && showRenderer) {
+            while (true) {
                 GameOsd.refreshRenderer()
-                if (GameOsd.renderer.value.isNotEmpty()) return@LaunchedEffect
-                delay(100)
+                delay(500)
             }
         }
     }
@@ -425,7 +421,7 @@ fun GameOsdOverlay() {
                         if (GameOsd.fastForward.value) "$percent% FF" else "$percent%"
                     }
                     GameOsd.fastForward.value -> "FF ${GameOsd.fastForwardLabel}"
-                    else -> "1×"
+                    else -> "Speed --"
                 },
             )
         }
@@ -438,7 +434,12 @@ fun GameOsdOverlay() {
         if (showCpu) {
             add(
                 if (!ready) "R3000A --"
-                else if (s[GameOsd.Stat.CPU_INSTRUCTIONS] < 0) "R3000A counters n/a (SwanStation)"
+                else if (s[GameOsd.Stat.CPU_INSTRUCTIONS] < 0) buildString {
+                    append("R3000A ")
+                    if (s[GameOsd.Stat.CPU_CYCLES] >= 0) append("${compact(s[GameOsd.Stat.CPU_CYCLES])} clock ticks/frame")
+                    else append("clock n/a")
+                    if (s[GameOsd.Stat.EMU_MS] >= 0) append(String.format(Locale.US, " · host emu %.1fms", s[GameOsd.Stat.EMU_MS]))
+                }
                 else {
                     val ins = s[GameOsd.Stat.CPU_INSTRUCTIONS]
                     val cyc = s[GameOsd.Stat.CPU_CYCLES]
@@ -452,12 +453,10 @@ fun GameOsdOverlay() {
         if (showGpu) {
             add(
                 if (!ready) "GPU --"
-                else if (s[GameOsd.Stat.GPU_TRIANGLES] < 0) "GPU work counters n/a (SwanStation)"
+                else if (s[GameOsd.Stat.GPU_TRIANGLES] < 0) "GPU commands n/a"
                 else "GPU ${compact(s[GameOsd.Stat.GPU_TRIANGLES])} tri  " +
                     "${compact(s[GameOsd.Stat.GPU_RECTS])} rect  " +
-                    "${compact(s[GameOsd.Stat.GPU_LINES])} line  " +
-                    "${compact(s[GameOsd.Stat.GPU_PIXELS])} px  " +
-                    "${compact(s[GameOsd.Stat.GPU_VRAM_WORDS])} vram",
+                    "${compact(s[GameOsd.Stat.GPU_LINES])} line / frame",
             )
         }
         if (showHostUsage) {
@@ -495,7 +494,7 @@ fun GameOsdOverlay() {
         if (showDevices) {
             add(
                 if (!ready) "SPU --"
-                else if (s[GameOsd.Stat.SPU_VOICES] < 0) "SPU / MDEC / CD counters n/a (SwanStation)"
+                else if (s[GameOsd.Stat.SPU_VOICES] < 0) "SPU voices n/a"
                 else String.format(Locale.US, "SPU %.1f voices", s[GameOsd.Stat.SPU_VOICES]) +
                     "  MDEC ${compact(s[GameOsd.Stat.MDEC_MACROBLOCKS])} mb / " +
                     "${compact(s[GameOsd.Stat.MDEC_BLOCKS])} blk" +
@@ -503,7 +502,7 @@ fun GameOsdOverlay() {
             )
             add(
                 if (!ready) "DMA --"
-                else if (s[GameOsd.Stat.DMA_WORDS] < 0) "DMA counters n/a (SwanStation)"
+                else if (s[GameOsd.Stat.DMA_WORDS] < 0) "DMA counters n/a"
                 else "DMA ${compact(s[GameOsd.Stat.DMA_WORDS])} wd  " +
                     "(gpu ${compact(s[GameOsd.Stat.DMA_GPU_WORDS])}" +
                     "  spu ${compact(s[GameOsd.Stat.DMA_SPU_WORDS])}" +
@@ -532,16 +531,15 @@ fun GameOsdOverlay() {
         if (showResolution) {
             val w = s[GameOsd.Stat.WIDTH].toInt()
             val h = s[GameOsd.Stat.HEIGHT].toInt()
-            // WIDTH/HEIGHT are the EMULATED display size and never change when upscaling — the
-            // console still thinks it is drawing 512x240. Showing only those made the OSD report
-            // native resolution at every scale, so there was no way to confirm upscaling was on.
-            // The scale is read from the live rasterizer, so a fallback to native shows as 1x.
+            // Native scanout, resolved rasterizer scale and callback size are
+            // distinct facts. Never divide an aspect-padded video frame by a
+            // requested scale and claim it is the console's native resolution.
             val scale = s[GameOsd.Stat.INTERNAL_SCALE].toInt()
             add(
                 when {
                     !ready || w <= 0 || h <= 0 -> "RES --"
-                    scale > 1 -> "RES ${w}x$h -> ${w * scale}x${h * scale} (${scale}x)"
-                    else -> "RES ${w}x$h"
+                    else -> OsdReadings.resolution(w, h, scale,
+                        s[GameOsd.Stat.VIDEO_WIDTH].toInt(), s[GameOsd.Stat.VIDEO_HEIGHT].toInt())
                 },
             )
         }
