@@ -739,7 +739,7 @@ open class MainActivityRuntime : ComponentActivity() {
          *  work around it. One chokepoint means the two can't drift apart again. */
         @JvmStatic
         fun closeGame(saveAutosave: Boolean = false) {
-            if (launchedExternally && prefs.getBoolean("ui.exitToLauncherExternal", true))
+            if (SessionExitPolicy.closeExitsApp(launchedExternally, prefs.getBoolean("ui.exitToLauncherExternal", true)))
                 quitAfterStop = true
             stop(saveAutosave = saveAutosave)
         }
@@ -780,6 +780,7 @@ open class MainActivityRuntime : ComponentActivity() {
          *  stayed locked in the game's landscape until the process was killed. Idempotent. */
         private fun onReturnedToLibrary() {
             currentGame.value = null
+            launchedExternally = false
             emulationOwnsOrientation = false
             // Never leave the device pinned once the game is gone (#425).
             com.armsx2.ui.ScreenPinning.stop()
@@ -1271,6 +1272,9 @@ open class MainActivityRuntime : ComponentActivity() {
                     armRestartWatchdog()
                     return
                 }
+                // The PS1 path returns before the legacy launch code. Record the origin HERE,
+                // only for an accepted session, so Close can return external launches to their caller.
+                launchedExternally = external
                 // The PS1 path returns before the legacy launch code below.
                 // Arm the saved preference here, once an actual boot is accepted.
                 pendingAutoLoadOnBoot = pendingSlotLoadOnBoot == null &&
@@ -1321,7 +1325,8 @@ open class MainActivityRuntime : ComponentActivity() {
                                 if (pending) vmNextLaunch = null
                                 Pair(pending, parked)
                             }
-                            if (relaunch) {
+                            val destination = SessionExitPolicy.destination(quitAfterStop, relaunch)
+                            if (destination == SessionExitPolicy.Destination.Restart) {
                                 // Straight back into the same disc — or into the game the user
                                 // picked while this one was still dying, if a switch was parked.
                                 // Audio focus is kept rather than released and re-acquired —
@@ -1330,7 +1335,7 @@ open class MainActivityRuntime : ComponentActivity() {
                                 if (next != null) launchGame(next.uri, next.info, next.external)
                                 else launchGame(uri, info, external)
                             } else {
-                                currentGame.value = null
+                                onReturnedToLibrary()
                                 // Back to the library: settings.toml goes back to being the plain
                                 // global render, so the next thing to read it (or to save into it)
                                 // isn't looking at the last game's overrides.
@@ -1339,7 +1344,8 @@ open class MainActivityRuntime : ComponentActivity() {
                                     com.armsx2.core.Ps1Pacing.invalidate()
                                 }
                                 runCatching { com.armsx2.EmuAudioFocus.release(ctx) }
-                                runCatching { com.armsx2.LibraryMusic.start(ctx) }
+                                if (destination == SessionExitPolicy.Destination.ExitApp) finishToLauncherIfRequested()
+                                else runCatching { com.armsx2.LibraryMusic.start(ctx) }
                             }
                         }
                     }
@@ -1481,6 +1487,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     stop(restartAfterStop = true)
                     return
                 }
+                launchedExternally = false
                 eState.value = EmuState.RUNNING
                 scheduleVmRunningCallback()
                 Thread({
@@ -1507,14 +1514,17 @@ open class MainActivityRuntime : ComponentActivity() {
                                     Pair(false, null)
                                 }
                             }
-                            if (restartNow) {
+                            val destination = SessionExitPolicy.destination(quitAfterStop, restartNow)
+                            if (destination == SessionExitPolicy.Destination.Restart) {
                                 // A game launched while the BIOS session was dying wins over
                                 // rebooting the BIOS — dropping it stranded the user's tap.
                                 if (nextGame != null) launchGame(nextGame.uri, nextGame.info, nextGame.external)
                                 else startBios()
                             } else {
+                                onReturnedToLibrary()
                                 runCatching { com.armsx2.EmuAudioFocus.release(ctx) }
-                                runCatching { com.armsx2.LibraryMusic.start(ctx) }
+                                if (destination == SessionExitPolicy.Destination.ExitApp) finishToLauncherIfRequested()
+                                else runCatching { com.armsx2.LibraryMusic.start(ctx) }
                             }
                         }
                     }
@@ -1704,9 +1714,13 @@ open class MainActivityRuntime : ComponentActivity() {
                 }
             }
             if (!shouldStop) {
+                // A second Close can arrive after native shutdown starts but BEFORE the
+                // run loop's finally. Leave the quit request latched until that completion.
+                if (!SessionExitPolicy.fullyStopped(vmRunLoopActive, vmStopInProgress, nativeActive)) return
                 // Nothing left to stop (the VM self-terminated). Still reconcile the library
                 // state — this early return also used to leak a stale per-game rotation.
                 onReturnedToLibrary()
+                finishToLauncherIfRequested()
                 return
             }
 
@@ -4241,8 +4255,7 @@ open class MainActivityRuntime : ComponentActivity() {
                 ControllerMappings.SysHotkey.QUIT_APP -> {
                     // Stop the VM (flushes memcards/savestate), then finish the app once
                     // the VM has fully unwound — never finish inline (stop() is async).
-                    if (down) { quitAfterStop = true; stop()
-                    }
+                    if (down && event.repeatCount == 0) exitApp()
                     return true
                 }
                 ControllerMappings.SysHotkey.SAVE_AND_EXIT -> {
@@ -5597,8 +5610,7 @@ open class MainActivityRuntime : ComponentActivity() {
             ControllerMappings.SysHotkey.RES_DOWN -> stepResolution(-1)
             ControllerMappings.SysHotkey.ACHIEVEMENTS -> com.armsx2.ui.emulation.EmulationMenuInputController.open(com.armsx2.ui.emulation.EmulationMenuTab.Options)
             ControllerMappings.SysHotkey.CLOSE_GAME -> closeGame()
-            ControllerMappings.SysHotkey.QUIT_APP -> { quitAfterStop = true; stop()
-            }
+            ControllerMappings.SysHotkey.QUIT_APP -> exitApp()
             ControllerMappings.SysHotkey.SAVE_AND_EXIT -> closeGame(saveAutosave = true)
             ControllerMappings.SysHotkey.RESET_GAME -> restart()
             ControllerMappings.SysHotkey.SLOW_DOWN -> toggleSlowDown()

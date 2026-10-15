@@ -38,6 +38,7 @@
 #include "diagnostics.h"
 #include "statistics.h"
 #include "disc_switch.h"
+#include "audio_warmup.h"
 #ifndef ARMSX_SOURCE_COMMIT
 #define ARMSX_SOURCE_COMMIT "unknown"
 #endif
@@ -104,6 +105,7 @@ std::string active_renderer="Stopped";
 AAudioStream* audio=nullptr;
 std::array<int16_t,131072> samples{};
 size_t sample_head=0,sample_tail=0;
+SwanAudio::Warmup audio_warmup;
 void* library=nullptr;
 #define API(ret,name,args) ret (*name) args=nullptr
 API(void,core_retro_init,()); API(void,core_retro_deinit,()); API(void,core_retro_run,()); API(void,core_retro_reset,());
@@ -315,7 +317,16 @@ int16_t Input(unsigned port,unsigned device,unsigned index,unsigned id) {
   return 0;
 }
 aaudio_data_callback_result_t AudioOutput(AAudioStream*,void*,void* output,int32_t count) {
+  if(count<=0)return AAUDIO_CALLBACK_RESULT_CONTINUE;
   auto* out=static_cast<int16_t*>(output);std::lock_guard lock(audio_mutex);
+  const bool muted=audio_suspended||paused;
+  const size_t queued_frames=(sample_head+samples.size()-sample_tail)%samples.size()/2;
+  if(!audio_warmup.Ready(queued_frames,muted) && !muted) {
+    // Startup/resume silence is intentional: retain queued PCM until there is enough for
+    // the next bursts. Previously the callback drained partial frame batches immediately.
+    std::fill_n(out,size_t(count)*2,int16_t(0));
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+  }
   for(int i=0;i<count*2;i++) {
     const bool available=sample_head!=sample_tail;
     out[i]=available&&!audio_suspended&&!paused?samples[sample_tail]:0;
@@ -334,6 +345,7 @@ size_t AudioBatch(const int16_t* data,size_t count) {
   return count;
 }
 void AudioSample(int16_t left,int16_t right) {const int16_t s[]={left,right};AudioBatch(s,1);}
+int ConfigInt(const char* key,int fallback,int minimum,int maximum);
 void OpenAudio() {
   AAudioStreamBuilder* builder=nullptr;if(AAudio_createStreamBuilder(&builder)!=AAUDIO_OK)return;
   AAudioStreamBuilder_setDirection(builder,AAUDIO_DIRECTION_OUTPUT);
@@ -342,7 +354,10 @@ void OpenAudio() {
   AAudioStreamBuilder_setPerformanceMode(builder,AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
   AAudioStreamBuilder_setDataCallback(builder,AudioOutput,nullptr);
   if(AAudioStreamBuilder_openStream(builder,&audio)!=AAUDIO_OK)JavaNotice("Audio output could not be opened");
-  AAudioStreamBuilder_delete(builder);if(audio)AAudioStream_requestStart(audio);
+  AAudioStreamBuilder_delete(builder);
+  audio_warmup.Configure(static_cast<unsigned>(av.timing.sample_rate),ConfigInt("audio.buffer_ms",20,20,100),
+    av.timing.fps,audio?static_cast<unsigned>(std::max(0,AAudioStream_getFramesPerBurst(audio))):0);
+  if(audio)AAudioStream_requestStart(audio);
 }
 GLuint Compile(GLenum type,const char* text) {
   GLuint s=glCreateShader(type);glShaderSource(s,1,&text,nullptr);glCompileShader(s);
@@ -524,7 +539,7 @@ bool StepRewind() {
   state_context=RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE;
   const bool ok=core_retro_unserialize(bytes.data(),bytes.size());
   state_context=RETRO_SAVESTATE_CONTEXT_NORMAL;
-  {std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;}
+  {std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;audio_warmup.Reset();}
   return ok;
 }
 void CaptureRewind() {
@@ -770,7 +785,7 @@ bool SwanHost::Run(std::string path,uint64_t token) {
   // Also blank failed boots. The Surface outlives the EGL context and the VM.
   PresentBlank();
   if(audio){AAudioStream_requestStop(audio);AAudioStream_close(audio);audio=nullptr;}
-  {std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;}
+  {std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;audio_warmup.Reset();}
   core_retro_deinit();bridge_statistics_reset();SwanVulkan::Close();CloseGraphics();fps=0;ClearRewind();cheat_groups.clear();cheats_armed=0;
   // Keep hasActiveVM true until teardown really finishes, so the frontend does
   // not offer a second launch while the previous session still owns the core.
@@ -924,7 +939,7 @@ int SwanHost::LoadChecked(int slot,bool ignore){auto path=StatePath(slot);if(pat
     bridge_ctr_hud(false);
     if(!core_retro_unserialize(bytes.data()+80,bytes.size()-80))return true;
     SwanAchievements::Reset();
-    ClearRewind();{std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;}*result=0;return true;
+    ClearRewind();{std::lock_guard lock(audio_mutex);sample_head=sample_tail=0;audio_warmup.Reset();}*result=0;return true;
   }))return -1;return *result;}
 std::string SwanHost::StateGame(int slot){auto path=StatePath(slot);if(path.empty()||!std::filesystem::is_regular_file(path))return {};
   std::lock_guard lock(state_mutex);return state_source;}
