@@ -155,8 +155,9 @@ android {
     productFlavors {
         github {
             dimension 'store'
-            // No upstream old-core update may replace this experimental integration.
-            buildConfigField "boolean", "IN_APP_UPDATER", "false"
+            // Only the normal sideload package may install public ARMSX1 updates.
+            // Isolated/private integrations must never be replaced by the public package.
+            buildConfigField "boolean", "IN_APP_UPDATER", (!isIsolatedBuild).toString()
             buildConfigField "boolean", "STORAGE_ALL_FILES", "true"
         }
         play {

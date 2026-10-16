@@ -386,7 +386,7 @@ val EN: Map<String, String> = mapOf(
     "update.checkOnLaunch" to "Check on launch",
     "update.checkOnLaunch.desc" to "Automatically check GitHub for a new version each time ARMSX1 starts.",
     "update.includeNightly" to "Include nightly versions",
-    "update.includeNightly.desc" to "Also offer nightly (pre-release) builds, not just stable releases. Off by default. A nightly build can’t downgrade back to a stable release in-app — reinstall a stable APK manually if you want to switch back.",
+    "update.includeNightly.desc" to "Also check nightly builds. Off by default. A newer stable release can replace a nightly only when its Android version code is higher. Older APKs cannot update newer builds; uninstalling can erase your app data.",
     "update.later" to "Later",
     "app.theme.system" to "System",
     "app.theme.materialyou" to "Material You",

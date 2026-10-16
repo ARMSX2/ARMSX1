@@ -4,6 +4,15 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+Online updates
+  * Restore update checks for the normal GitHub app; private builds remain isolated
+    and Play builds still exclude the updater.
+  * Compare stable versions and dated nightly builds separately, and search a
+    paginated release history rather than trusting GitHub's first result.
+  * Verify downloaded APK size/checksum, package, signing certificate, version code
+    and SwanStation engine before handing an update to Android's installer.
+  * Show download/install preparation failures instead of silently dismissing them.
+
 Library and controller menus
   * Custom collections can appear as Home tiles and in the in-game Swap Game library.
     Collection folders expand horizontally on Home and can use custom images.

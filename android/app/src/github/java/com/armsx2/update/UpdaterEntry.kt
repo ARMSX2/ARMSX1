@@ -39,6 +39,9 @@ import com.armsx2.ui.common.GlassPanel
 import com.armsx2.ui.common.SettingSwitchRow
 import com.armsx2.ui.settings.controllerFocusable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -46,6 +49,10 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.Instant
+import java.security.MessageDigest
+import java.util.zip.ZipFile
+import android.content.pm.PackageManager
 
 /**
  * In-app updater — GitHub sideload flavor ONLY. Renders a "Check for updates" panel at the top of
@@ -60,26 +67,18 @@ import java.net.URL
  * ORG vs REPO: the GitHub org is ARMSX2 and this repo is ARMSX1 — `ARMSX2/ARMSX1`. Neither
  * `ARMSX1/ARMSX1` nor `ARMSX2/ARMSX2` (the PS2 sibling) is this app. Matches News.kt's endpoint.
  *
- * DELIBERATE DIVERGENCE FROM THE ARMSX2 UPDATER: ARMSX2 short-circuits on
- * `versionCode > 1_000_000` because its nightly CI sets versionCode = Unix seconds. ARMSX1 has no
- * nightly workflow (.github holds only FUNDING.yml) and its versionCode is a hand-set integer, so
- * that branch would be permanently dead here. The opt-in second channel is instead GitHub's own
- * `prerelease` flag, which is real for this repo.
+ * Stable releases use semantic tags; nightly CI uses dated tags and timestamp version codes.
+ * UpdatePolicy keeps these channels separate, and archive identity is checked before installation.
  */
 
-private const val RELEASES_URL = "https://api.github.com/repos/ARMSX2/ARMSX1/releases?per_page=20"
-
-/** This app is arm64-only (`abiFilters 'arm64-v8a'`); an APK for any of these can never run. */
-private val FOREIGN_ABI_TOKENS = listOf("armeabi", "armv7", "arm32", "x86", "mips")
-
-/** Asset-name markers for an explicitly arm64 build, preferred when a release ships several APKs. */
-private val ARM64_TOKENS = listOf("arm64", "aarch64")
+private const val RELEASES_URL = "https://api.github.com/repos/ARMSX2/ARMSX1/releases?per_page=100"
 
 private sealed interface UpdateState {
     data object Idle : UpdateState
     data object Checking : UpdateState
     data object UpToDate : UpdateState
-    data class Available(val version: String, val notes: String, val apkUrl: String) : UpdateState
+    data class Available(val version: String, val notes: String, val apkUrl: String,
+        val bytes: Long = 0, val digest: String = "") : UpdateState
     data class Downloading(val pct: Int) : UpdateState
     data class Error(val msg: String) : UpdateState
 }
@@ -193,9 +192,11 @@ fun UpdaterEntry() {
                 TextButton(onClick = {
                     scope.launch {
                         try {
+                            state = UpdateState.Downloading(0)
                             downloadAndInstall(context, avail) { pct -> state = UpdateState.Downloading(pct) }
                             state = UpdateState.Idle
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e
                             state = UpdateState.Error("$downloadFailedPrefix: ${e.message}")
                         }
                     }
@@ -220,6 +221,7 @@ fun AutoUpdateGate() {
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf<UpdateState>(UpdateState.Idle) }
     val checkFailedPrefix = str("update.checkFailed")
+    val downloadFailedPrefix = str("update.downloadFailed")
 
     LaunchedEffect(Unit) {
         if (MainActivityRuntime.prefs.getBoolean("update.checkOnLaunch", false)) {
@@ -268,9 +270,12 @@ fun AutoUpdateGate() {
                     TextButton(onClick = {
                         scope.launch {
                             try {
+                                state = UpdateState.Downloading(0)
                                 downloadAndInstall(context, avail) { pct -> state = UpdateState.Downloading(pct) }
-                            } finally {
                                 state = UpdateState.Idle
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                state = UpdateState.Error("$downloadFailedPrefix: ${e.message}")
                             }
                         }
                     }) { Text(str("update.install")) }
@@ -283,11 +288,15 @@ fun AutoUpdateGate() {
             },
         )
     }
+    (state as? UpdateState.Error)?.let { error ->
+        AlertDialog(onDismissRequest = { state = UpdateState.Idle },
+            title = { Text(str("update.downloadFailed")) }, text = { Text(error.msg) },
+            confirmButton = { TextButton(onClick = { state = UpdateState.Idle }) { Text(str("update.later")) } })
+    }
 }
 
 /**
- * Newest-first scan of the releases feed for the first release that is BOTH strictly newer than the
- * installed build AND ships an APK this device can actually run.
+ * Read the bounded, paginated release history, then select by channel/version, not feed order.
  *
  * Drafts are always skipped. Pre-releases are skipped unless [includePrerelease]. Only the
  * releases list endpoint is used (never /releases/latest): /latest hides pre-releases entirely and
@@ -299,24 +308,33 @@ private suspend fun checkForUpdate(
     checkFailedPrefix: String,
 ): UpdateState = withContext(Dispatchers.IO) {
     try {
-        val arr = JSONArray(httpGet(RELEASES_URL))
-        for (i in 0 until arr.length()) {
-            val rel = arr.optJSONObject(i) ?: continue
-            if (rel.optBoolean("draft", false)) continue
-            if (!includePrerelease && rel.optBoolean("prerelease", false)) continue
-            val tag = rel.optString("tag_name").trim()
-            if (!isNewer(tag, BuildConfig.VERSION_NAME)) continue
-            val apkUrl = pickApkAsset(rel) ?: continue
-            return@withContext UpdateState.Available(tag, rel.optString("body", ""), apkUrl)
+        val releases = ArrayList<UpdatePolicy.Release>()
+        for (page in 1..5) {
+            val arr = JSONArray(httpGet("$RELEASES_URL&page=$page"))
+            for (i in 0 until arr.length()) {
+                val rel = arr.optJSONObject(i) ?: continue
+                if (rel.optBoolean("draft", false)) continue
+                val asset = pickApkAsset(rel) ?: continue
+                val published = runCatching { Instant.parse(rel.optString("published_at")).epochSecond }.getOrDefault(0L)
+                releases += UpdatePolicy.Release(rel.optString("tag_name").trim(),
+                    rel.optBoolean("prerelease", false), published,
+                    asset.optString("browser_download_url"), rel.optString("body", ""),
+                    asset.optLong("size", 0L), asset.optString("digest", ""))
+            }
+            if (arr.length() < 100) break
+            if (page == 5) throw java.io.IOException("Release history is too large to check completely")
         }
-        UpdateState.UpToDate
+        val selected = UpdatePolicy.select(releases, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong(), includePrerelease)
+        if (selected == null) UpdateState.UpToDate else UpdateState.Available(
+            selected.tag, selected.notes, selected.url, selected.bytes, selected.digest)
     } catch (e: Exception) {
+        if (e is CancellationException) throw e
         UpdateState.Error("$checkFailedPrefix: ${e.message}")
     }
 }
 
 /**
- * The download URL of the APK asset this device can run, or null if the release has none.
+ * The APK asset this device can run, or null if the release has none.
  *
  * Only `.apk` names are considered, which drops `.idsig`, `.aab`, checksum files and source
  * archives. Anything naming a non-arm64 ABI is then discarded outright — handing the package
@@ -324,47 +342,18 @@ private suspend fun checkForUpdate(
  * survives, an explicitly arm64-named asset wins; otherwise the first remaining APK is taken, which
  * is the single universal/arm64-only artifact this app actually ships.
  */
-private fun pickApkAsset(release: JSONObject): String? {
+private fun pickApkAsset(release: JSONObject): JSONObject? {
     val assets = release.optJSONArray("assets") ?: return null
-    val candidates = ArrayList<Pair<String, String>>() // lowercased name to download url
+    val candidates = ArrayList<JSONObject>()
     for (i in 0 until assets.length()) {
         val a = assets.optJSONObject(i) ?: continue
-        val name = a.optString("name")
-        if (!name.endsWith(".apk", ignoreCase = true)) continue
-        val lower = name.lowercase()
-        if (FOREIGN_ABI_TOKENS.any { lower.contains(it) }) continue
-        val url = a.optString("browser_download_url")
-        if (url.isNotBlank()) candidates += lower to url
+        candidates += a
     }
     if (candidates.isEmpty()) return null
-    return (candidates.firstOrNull { (n, _) -> ARM64_TOKENS.any { n.contains(it) } } ?: candidates[0]).second
-}
-
-/**
- * Is release tag [remoteTag] strictly newer than the installed [installed] versionName?
- *
- * Both sides are parsed to a tuple of dotted integers: a leading "v" is dropped, the string is split
- * on '.' and '-', each segment is truncated at its first non-digit, and non-numeric segments are
- * discarded. So "v1.2.3" and "1.2.3.r" both parse to [1,2,3]. Missing trailing components compare as
- * 0, which makes "1.2" and "1.2.0" equal rather than a spurious update.
- *
- * Strictly greater is required, so the version already installed is never re-offered, and a tag
- * older than the installed build is never offered as a downgrade. A tag with no numeric component at
- * all (e.g. "refresh-preview") parses to an empty tuple, compares as all-zero and is therefore never
- * offered — failing toward "no update" rather than toward a bogus one.
- */
-private fun isNewer(remoteTag: String, installed: String): Boolean {
-    fun parts(v: String) = v.trim().removePrefix("v").removePrefix("V").split('.', '-')
-        .map { it.takeWhile(Char::isDigit) }
-        .mapNotNull { it.toIntOrNull() }
-    val r = parts(remoteTag)
-    val i = parts(installed)
-    for (k in 0 until maxOf(r.size, i.size)) {
-        val a = r.getOrElse(k) { 0 }
-        val b = i.getOrElse(k) { 0 }
-        if (a != b) return a > b
-    }
-    return false
+    val selected = UpdatePolicy.pickAsset(candidates.map {
+        UpdatePolicy.Asset(it.optString("name"), it.optString("browser_download_url"))
+    }) ?: return null
+    return candidates.first { it.optString("browser_download_url") == selected.url }
 }
 
 /**
@@ -379,6 +368,8 @@ private fun httpGet(url: String): String {
         conn.connectTimeout = 15_000
         conn.readTimeout = 20_000
         conn.instanceFollowRedirects = true
+        conn.useCaches = false
+        conn.setRequestProperty("Cache-Control", "no-cache")
         conn.setRequestProperty("Accept", "application/vnd.github+json")
         conn.setRequestProperty("User-Agent", USER_AGENT)
         val code = conn.responseCode
@@ -397,9 +388,11 @@ private suspend fun downloadAndInstall(
     onProgress: (Int) -> Unit,
 ) {
     val apk = withContext(Dispatchers.IO) {
-        val dir = File(context.externalCacheDir, "updates").apply { mkdirs() }
-        dir.listFiles()?.forEach { it.delete() } // keep only the current download
+        val dir = File(context.externalCacheDir ?: context.cacheDir, "updates").apply {
+            if (!mkdirs() && !isDirectory) throw java.io.IOException("Unable to create update cache")
+        }
         val out = File(dir, "armsx1-update.apk")
+        val partial = File(dir, "armsx1-update.part.apk")
         val conn = URL(info.apkUrl).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 15_000
@@ -412,13 +405,15 @@ private suspend fun downloadAndInstall(
             var read = 0L
             var lastPct = -1
             conn.inputStream.use { input ->
-                out.outputStream().use { sink ->
+                partial.outputStream().use { sink ->
                     val buf = ByteArray(64 * 1024)
                     while (true) {
+                        currentCoroutineContext().ensureActive()
                         val n = input.read(buf)
                         if (n < 0) break
                         sink.write(buf, 0, n)
                         read += n
+                        if (read > 512L * 1024 * 1024) throw java.io.IOException("Update APK exceeds the size limit")
                         if (total > 0) {
                             val pct = ((read * 100) / total).toInt()
                             if (pct != lastPct) {
@@ -429,8 +424,23 @@ private suspend fun downloadAndInstall(
                     }
                 }
             }
+            if (read == 0L || (info.bytes > 0 && read != info.bytes) || (total > 0 && read != total))
+                throw java.io.IOException("Update download is incomplete; please retry")
+            if (info.digest.startsWith("sha256:")) {
+                val digest = MessageDigest.getInstance("SHA-256")
+                partial.inputStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
+                }
+                val actual = digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+                if (!actual.equals(info.digest.removePrefix("sha256:"), true)) throw java.io.IOException("Update checksum does not match GitHub")
+            }
+            validateUpdateArchive(context, partial)
+            if (out.exists() && !out.delete()) throw java.io.IOException("Unable to replace cached update")
+            if (!partial.renameTo(out)) throw java.io.IOException("Unable to finish update download")
         } finally {
             conn.disconnect()
+            partial.delete()
         }
         out
     }
@@ -442,4 +452,24 @@ private suspend fun downloadAndInstall(
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     context.startActivity(intent)
+}
+
+@Suppress("DEPRECATION")
+private fun validateUpdateArchive(context: Context, apk: File) {
+    val pm = context.packageManager
+    val downloaded = pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
+        ?: throw java.io.IOException("Downloaded file is not a readable APK")
+    val current = pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+    fun certificates(info: android.content.pm.PackageInfo) = info.signingInfo?.apkContentsSigners
+        ?.map { signature -> MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
+            .joinToString("") { "%02x".format(it.toInt() and 255) } }?.toSet().orEmpty()
+    // The historical main-branch nightlies used a different engine. Do not silently replace
+    // SwanStation with one of those APKs even if its timestamp code and certificate match.
+    val compatibleEngine = !BuildConfig.SWANSTATION_CORE || ZipFile(apk).use { zip ->
+        listOf("lib/arm64-v8a/libemucorepsx.so", "lib/arm64-v8a/libswanstation.so").all { zip.getEntry(it) != null }
+    }
+    UpdatePolicy.archiveError(
+        UpdatePolicy.Archive(context.packageName, current.longVersionCode, certificates(current)),
+        UpdatePolicy.Archive(downloaded.packageName, downloaded.longVersionCode, certificates(downloaded), compatibleEngine),
+    )?.let { throw java.io.IOException(it) }
 }
