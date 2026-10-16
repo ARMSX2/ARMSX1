@@ -64,6 +64,7 @@ object TouchControls {
     private const val KEY_GESTURE_DTAP = "touch.gesture.doubleTap"
     private const val KEY_GESTURE_DTAP_HOLD = "touch.gesture.doubleTapHold"
     private const val KEY_MULTI_RADIUS = "touch.multiRadius"
+    private const val KEY_COMPACT_SHOULDERS = "touch.compactShoulders"
     private const val KEY_DPAD_SPACING = "touch.dpadSpacing"
     private const val KEY_FLOATING_STICK = "touch.floatingStick"
     private const val KEY_FULL_HALF_STICKS = "touch.fullHalfSticks"
@@ -180,6 +181,10 @@ object TouchControls {
     // buttons register a press from further out, so multitouch/rolling works with more
     // space between them. Persisted under KEY_MULTI_RADIUS. Default 0.62.
     val multiTouchRadius = mutableFloatStateOf(0.62f)
+
+    /** Optional rectangular shoulder targets, fitted to the artwork instead of the expanded
+     *  multi-touch circle/square. Global; off preserves existing layouts and muscle memory. */
+    val compactShoulders = mutableStateOf(false)
 
     // ---- Gesture control (PPSSPP-style, #SNAKEATER) --------------------------
     // Swipes and a double-tap on EMPTY screen area (never on a button — the gesture layer
@@ -582,6 +587,7 @@ object TouchControls {
         touchGliding.value = MainActivityRuntime.prefs.getBoolean(KEY_TOUCH_GLIDING, false)
         touchHaptics.value = MainActivityRuntime.prefs.getBoolean(KEY_TOUCH_HAPTICS, true)
         multiTouchRadius.floatValue = MainActivityRuntime.prefs.getFloat(KEY_MULTI_RADIUS, 0.62f).coerceIn(0.50f, 0.95f)
+        compactShoulders.value = MainActivityRuntime.prefs.getBoolean(KEY_COMPACT_SHOULDERS, false)
         dpadSpacing.floatValue = MainActivityRuntime.prefs.getFloat(KEY_DPAD_SPACING, DPAD_SPACING_DEFAULT).coerceIn(0.0f, 0.35f)
         floatingStick.value = MainActivityRuntime.prefs.getBoolean(KEY_FLOATING_STICK, false)
         fullHalfSticks.value = MainActivityRuntime.prefs.getBoolean(KEY_FULL_HALF_STICKS, false)
@@ -681,6 +687,7 @@ object TouchControls {
                 .putBoolean(KEY_TOUCH_GLIDING, touchGliding.value)
                 .putBoolean(KEY_TOUCH_HAPTICS, touchHaptics.value)
                 .putFloat(KEY_MULTI_RADIUS, multiTouchRadius.floatValue)
+                .putBoolean(KEY_COMPACT_SHOULDERS, compactShoulders.value)
                 .putFloat(KEY_DPAD_SPACING, dpadSpacing.floatValue)
                 .putBoolean(KEY_FLOATING_STICK, floatingStick.value)
                 .putBoolean(KEY_FULL_HALF_STICKS, fullHalfSticks.value)
@@ -1074,6 +1081,11 @@ object TouchControls {
 
     fun setMultiTouchRadius(v: Float) {
         multiTouchRadius.floatValue = v.coerceIn(0.50f, 0.95f)
+        persist()
+    }
+
+    fun setCompactShoulders(enabled: Boolean) {
+        compactShoulders.value = enabled
         persist()
     }
 

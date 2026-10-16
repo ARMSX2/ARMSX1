@@ -4,6 +4,12 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+Touch controls
+  * Add optional Compact shoulder touch areas in Pad settings and the touch-layout
+    editor. L1/L2/R1/R2 use artwork-fitted rectangular targets rather than the larger
+    circular/square areas, including multi-touch, gliding and tap-to-hold controls.
+    Button artwork, positions, sizes and existing defaults are unchanged.
+
 SBI files
   * Keep matching SBI subchannel files beside Android document-folder discs after
     staging and renaming, including CUE/CHD launches, playlist discs and disc swaps.

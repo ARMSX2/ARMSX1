@@ -485,11 +485,12 @@ private fun ButtonWidget(
     var localPressed by remember(cfg.id) { mutableStateOf(false) }
     val pressed = forcedPressed || localPressed
     val opacity = TouchControls.opacity.floatValue
+    val compact = if (!edit) compactShoulderExtent(cfg, cfg.sizeDp) else null
     val mod = Modifier
         .fillMaxSize()
         .let {
             if (edit) it.editGestures(cfg)
-            else if (inputEnabled) it.pressGestures(cfg.id.keycode, cfg.tapToHold) { p -> localPressed = p }
+            else if (inputEnabled && compact == null) it.pressGestures(cfg.id.keycode, cfg.tapToHold) { p -> localPressed = p }
             else it
         }
     // Pressed feedback: every button shrinks a hair AND darkens.
@@ -524,6 +525,12 @@ private fun ButtonWidget(
                     }
                 ),
         )
+        if (inputEnabled && compact != null) {
+            // Keep the artwork/layout unchanged. Only this smaller centered child owns input;
+            // the old square parent must not retain a pointer handler over the empty padding.
+            Box(Modifier.size(compact.width.dp, compact.height.dp)
+                .pressGestures(cfg.id.keycode, cfg.tapToHold, strictBounds = true) { p -> localPressed = p })
+        }
         if (edit) EditAdornment(cfg.id)
     }
 }
@@ -549,6 +556,14 @@ private fun skinPainter(key: String?): Painter? {
     val ctx = LocalContext.current
     val bmp = remember(active, key) { ControllerSkinStore.bitmapForKey(ctx, key) } ?: return null
     return remember(bmp) { BitmapPainter(bmp) }
+}
+
+/** Use the resting sprite so pressed feedback cannot move the target under a held finger. */
+@Composable
+private fun compactShoulderExtent(cfg: TouchButtonCfg, size: Float): TouchHitGeometry.Extent? {
+    if (!TouchControls.compactShoulders.value || cfg.id.kind != TouchButtonId.Kind.SHOULDER) return null
+    val painter = skinPainter(skinKeyFor(cfg.id)) ?: painterResource(drawableFor(cfg.id, false))
+    return TouchHitGeometry.fittedExtent(size, painter.intrinsicSize.width, painter.intrinsicSize.height)
 }
 
 /** Logical skin key for a button, or null for buttons with no skin slot. */
@@ -680,17 +695,19 @@ private fun UnifiedTouchLayer(
         val sizePx = with(density) { cfg.sizeDp.dp.toPx() }
         val cx = widthPx * cfg.xFrac
         val cy = heightPx * cfg.yFrac
-        UnifiedHit(id = cfg.id, cx = cx, cy = cy, radius = sizePx * TouchControls.multiTouchRadius.floatValue)
+        UnifiedHit(id = cfg.id, cx = cx, cy = cy, radius = sizePx * TouchControls.multiTouchRadius.floatValue,
+            compact = compactShoulderExtent(cfg, sizePx))
     }
     val foreignBounds = foreignRects.map { cfg ->
         val sizePx = with(density) { cfg.sizeDp.dp.toPx() }
         val cx = widthPx * cfg.xFrac
         val cy = heightPx * cfg.yFrac
+        val extent = compactShoulderExtent(cfg, sizePx) ?: TouchHitGeometry.Extent(sizePx, sizePx)
         UnifiedRect(
-            left = cx - sizePx / 2f,
-            top = cy - sizePx / 2f,
-            right = cx + sizePx / 2f,
-            bottom = cy + sizePx / 2f,
+            left = cx - extent.width / 2f,
+            top = cy - extent.height / 2f,
+            right = cx + extent.width / 2f,
+            bottom = cy + extent.height / 2f,
         )
     } + listOfNotNull(
         // #357: the top-center cog carve-out went away with the cog. PAUSE inherits its job as the
@@ -730,7 +747,7 @@ private fun UnifiedTouchLayer(
                         .filter { hit ->
                             val dx = pos.x - hit.cx
                             val dy = pos.y - hit.cy
-                            dx * dx + dy * dy <= hit.radius * hit.radius
+                            TouchHitGeometry.contains(dx, dy, hit.radius, hit.compact)
                         }
                         .map { it.id }
                         .toSet()
@@ -816,6 +833,7 @@ private data class UnifiedHit(
     val cx: Float,
     val cy: Float,
     val radius: Float,
+    val compact: TouchHitGeometry.Extent? = null,
 )
 
 private data class UnifiedRect(
@@ -1528,7 +1546,9 @@ private fun FullHalfStickLayer(layout: TouchLayout, widthPx: Float, heightPx: Fl
             val sizePx = with(density) { cfg.sizeDp.dp.toPx() }
             val cx = widthPx * cfg.xFrac
             val cy = heightPx * cfg.yFrac
-            UnifiedRect(cx - sizePx / 2f, cy - sizePx / 2f, cx + sizePx / 2f, cy + sizePx / 2f)
+            val extent = compactShoulderExtent(cfg, sizePx) ?: TouchHitGeometry.Extent(sizePx, sizePx)
+            UnifiedRect(cx - extent.width / 2f, cy - extent.height / 2f,
+                cx + extent.width / 2f, cy + extent.height / 2f)
         }
     val leftCodes = StickCodes(xPos = 111, xNeg = 113, yPos = 112, yNeg = 110)
     val rightCodes = StickCodes(xPos = 121, xNeg = 123, yPos = 122, yNeg = 120)
@@ -1633,16 +1653,20 @@ private fun isMultiTouchKind(kind: TouchButtonId.Kind): Boolean =
 private fun Modifier.pressGestures(
     keycode: Int,
     tapToHold: Boolean = false,
+    strictBounds: Boolean = false,
     onPressedChange: (Boolean) -> Unit,
 ) =
-    pointerInput(keycode, tapToHold) {
+    pointerInput(keycode, tapToHold, strictBounds) {
         var latched = false
+        var held = false
         try {
             awaitPointerEventScope {
                 while (true) {
                     val ev = awaitPointerEvent()
                     val down: PointerInputChange =
-                        ev.changes.firstOrNull { it.changedToDown() } ?: continue
+                        ev.changes.firstOrNull { it.changedToDown() && (!strictBounds ||
+                            (it.position.x >= 0f && it.position.y >= 0f &&
+                                it.position.x <= size.width && it.position.y <= size.height)) } ?: continue
                     val id = down.id
                     // Keep the controls awake while the user is actively tapping.
                     TouchControls.noteTouchInteraction()
@@ -1651,6 +1675,7 @@ private fun Modifier.pressGestures(
                         latched = !latched
                         onPressedChange(latched)
                         sendDigital(keycode, latched)
+                        held = latched
                         // Consume this finger's lifetime so the same press can't
                         // re-toggle; ignore other pointers.
                         while (true) {
@@ -1661,6 +1686,7 @@ private fun Modifier.pressGestures(
                     } else {
                         onPressedChange(true)
                         sendDigital(keycode, true)
+                        held = true
                         while (true) {
                             val next = awaitPointerEvent()
                             val nc = next.changes.firstOrNull { it.id == id }
@@ -1668,12 +1694,13 @@ private fun Modifier.pressGestures(
                         }
                         onPressedChange(false)
                         sendDigital(keycode, false)
+                        held = false
                     }
                 }
             }
         } finally {
-            // Disposed/reconfigured while latched → don't leave the key stuck down.
-            if (latched) {
+            // A touch-area/skin change can dispose either a latched or momentary press.
+            if (held) {
                 sendDigital(keycode, false)
                 onPressedChange(false)
             }
@@ -1916,6 +1943,9 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
             // Touch Gliding: drag a finger to hold every button it crosses (NetherSX2-style).
             ToolbarChip(if (TouchControls.touchGliding.value) str("touch.editor.glidingOn") else str("touch.editor.glidingOff")) {
                 TouchControls.setTouchGliding(!TouchControls.touchGliding.value)
+            }
+            ToolbarChip(if (TouchControls.compactShoulders.value) str("touch.editor.compactShouldersOn") else str("touch.editor.compactShouldersOff")) {
+                TouchControls.setCompactShoulders(!TouchControls.compactShoulders.value)
             }
             ToolbarChip(if (TouchControls.floatingStick.value) str("touch.editor.floatingStickOn") else str("touch.editor.floatingStickOff")) {
                 TouchControls.setFloatingStick(!TouchControls.floatingStick.value)

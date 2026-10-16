@@ -619,6 +619,12 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 description = str("pad.touchHaptics.description"),
             ) { TouchControls.setTouchHaptics(it) }
             SettingsDivider()
+            ToggleRow(
+                str("pad.compactShoulders.label"),
+                TouchControls.compactShoulders.value,
+                description = str("pad.compactShoulders.description"),
+            ) { TouchControls.setCompactShoulders(it) }
+            SettingsDivider()
             // Multi-touch reach: how far from a button's center a touch still counts.
             // Higher = press adjacent buttons together with more space between them.
             IntSliderRow(
