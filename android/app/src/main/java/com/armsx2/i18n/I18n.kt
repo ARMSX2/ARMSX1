@@ -1690,8 +1690,13 @@ val EN: Map<String, String> = mapOf(
     "renderer.wideUpscale.description" to
         "Desktop window height for the 16:9 path — no effect on Android, and not an " +
         "internal-resolution upscale.",
-    "renderer.debugPanel.label" to "Debug panel",
-    "renderer.debugPanel.description" to "Show the core's built-in debug overlay over the game.",
+    "renderer.debugPanel.label" to "Performance overlay",
+    "renderer.debugPanel.description" to "Show live performance text during gameplay. Minimal shows FPS/speed, Full shows all readings, and Custom uses the choices below. Uses the same mode as the quick menu; hidden while menus are open.",
+    "overlay.osd.customHelp" to "Choose the readings to display in Custom mode. Enable at least one; turning them all off leaves the overlay hidden.",
+    "overlay.osd.speed" to "Emulation speed",
+    "overlay.osd.cpu" to "Emulated CPU",
+    "overlay.osd.devices" to "SPU / MDEC / CD / DMA",
+    "overlay.osd.renderer" to "Active renderer",
     "renderer.reset.label" to "Restore video defaults",
     // Pause-menu Device section + the two PS1 stat toggles whose names are not pure hardware
     // (the R3000A / GTE / SPU / MDEC / CD-ROM / DMA rows stay literal — those are chip names).

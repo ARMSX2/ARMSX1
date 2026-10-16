@@ -552,11 +552,8 @@ fun Ps1VideoTab() {
         )
         SettingsDivider()
 
-        ToggleRow(
-            str("renderer.debugPanel.label"),
-            s.debugPanel,
-            description = str("renderer.debugPanel.description"),
-        ) { v -> editor.update { it.copy(debugPanel = v) } }
+        val osdScope = LocalPs1SettingsScope.current
+        PerformanceOverlaySettings(osdScope?.gameKey, osdScope?.contextKey)
         SettingsDivider()
 
         Ps1ActionRow(

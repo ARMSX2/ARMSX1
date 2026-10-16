@@ -1,6 +1,7 @@
 package com.armsx2.ui
 
 import com.armsx2.ui.InGameOverlay.OsdMode
+import com.armsx2.config.SettingsScope
 
 /** Small, testable preference boundary. Missing game overrides inherit; missing global = Off. */
 internal class OsdModePreferences(
@@ -18,6 +19,8 @@ internal class OsdModePreferences(
     fun override(game: String?): OsdMode? = game?.takeIf(String::isNotBlank)
         ?.let { parse(read(GAME_PREFIX + it)) }
     fun effective(game: String?): OsdMode = override(game) ?: global()
+    fun editingScope(game: String?): SettingsScope =
+        if (override(game) != null) SettingsScope.Game else SettingsScope.Global
     fun setGlobal(mode: OsdMode) = write(GLOBAL_KEY, mode.name)
     fun setGame(game: String, mode: OsdMode) {
         require(game.isNotBlank())

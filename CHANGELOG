@@ -4,6 +4,17 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+0.3.6
+-----
+
+Performance overlay
+  * Replace the disconnected Video debug-panel switch with the real Off/Minimal/Full/
+    Custom OSD controls, also available in Interface settings. Restore Custom reading
+    selection and keep game-specific settings separate from the all-games default.
+  * Open quick-menu OSD controls in This game scope when that game already has an
+    override, so changing the displayed mode is not silently masked by its Off setting.
+    Fresh installs remain Off by default; the overlay is hidden while menus are open.
+
 Touch controls
   * Save changes directly into an explicitly selected touch profile; add Update profile
     to the profile picker. No new-profile/delete workaround is needed. Selected profiles

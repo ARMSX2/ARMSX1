@@ -776,7 +776,9 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
             // = the detailed per-stat selection from All Settings > On-Screen.
             val osdModes = com.armsx2.ui.InGameOverlay.OsdMode.entries
             val osdGameKey = InGameOverlay.osdGameKey()
-            var osdForGame by remember(osdGameKey) { mutableStateOf(false) }
+            var osdForGame by remember(osdGameKey) {
+                mutableStateOf(InGameOverlay.osdEditingScope(osdGameKey) == com.armsx2.config.SettingsScope.Game)
+            }
             val osdScope = if (osdForGame && osdGameKey != null) com.armsx2.config.SettingsScope.Game
                 else com.armsx2.config.SettingsScope.Global
             MenuOrderItem("MenuCycleRow.overlay.osdScope") {

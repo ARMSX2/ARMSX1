@@ -18,20 +18,17 @@ import com.armsx2.ui.UiScale
 /**
  * Interface tab — how big the launcher's own chrome is drawn.
  *
- * This used to be the PS2 "On-Screen" tab: an OSD scale/colour pair plus fifteen toggles for the
- * emulator-drawn stats overlay (FPS/VPS/GS stats/GPU pipeline stats…). None of that survives the
- * PS1 port — the ARMSX1 core draws no OSD of its own (its only overlay is `[video].debug_panel`,
- * which lives on the Video tab), so those rows would have been switches wired to nothing.
- *
- * What is left is genuinely app-side and still works: [UiScale] resizes the Compose front-end, and
- * the hotkey-toast switch is a plain preference.
+ * Performance text is drawn by GameOsdOverlay, not the retired native debug_panel.
+ * Its mode/Custom choices share one store with Video and the quick menu.
  */
 @Composable
-fun OverlayTab() {
+fun OverlayTab(gameKey: String? = null, contextGameKey: String? = gameKey) {
     val scroll = settingsScrollState()
     ControllerAutoScroll(scroll)
 
     Column(modifier = Modifier.fillMaxWidth()) {
+        PerformanceOverlaySettings(gameKey, contextGameKey)
+        SettingsDivider()
         Text(
             str("overlay.interfaceScaling.description"),
             color = MaterialTheme.colorScheme.onSurfaceVariant,

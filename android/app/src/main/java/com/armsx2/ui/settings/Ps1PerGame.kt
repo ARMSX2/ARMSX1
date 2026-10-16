@@ -155,7 +155,6 @@ private val ROWS: List<RowKeys> = listOf(
     ),
     RowKeys(Ps1Tab.Video, "renderer.customRatio.label", listOf("video.display_aspect_custom")),
     RowKeys(Ps1Tab.Video, "renderer.wideUpscale.label", listOf("video.wide_upscale")),
-    RowKeys(Ps1Tab.Video, "renderer.debugPanel.label", listOf("video.debug_panel")),
     RowKeys(Ps1Tab.Video, "renderer.textureReplacements.label", listOf("video.texture_replacements")),
     RowKeys(Ps1Tab.Video, "renderer.textureDump.label", listOf("video.texture_dump")),
     RowKeys(Ps1Tab.Video, "renderer.textureDir.label", listOf("video.texture_dir")),

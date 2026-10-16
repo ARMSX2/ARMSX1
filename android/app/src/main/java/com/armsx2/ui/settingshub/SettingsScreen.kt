@@ -656,7 +656,7 @@ private fun CategoryContent(
         SettingsCategory.Network -> Ps1LibraryTab()
         SettingsCategory.Controls -> PadTab(viewModel.settings)
         SettingsCategory.Hotkeys -> HotkeysTab(viewModel.settings)
-        SettingsCategory.OnScreen -> OverlayTab()
+        SettingsCategory.OnScreen -> OverlayTab(viewModel.uiState.value.game?.settingsKey, contextGame?.settingsKey)
         SettingsCategory.Skins -> SkinsTab(viewModel.settings)
         SettingsCategory.Advanced -> ps1 { Ps1AdvancedTab() }
         // Keep game context/settings storage, without generic override UI:

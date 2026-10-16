@@ -46,6 +46,10 @@ object InGameOverlay {
         osdPreferences.override(game) != null
     }
 
+    fun osdEditingScope(game: String?): SettingsScope = osdPreferenceVersion.intValue.let {
+        osdPreferences.editingScope(game)
+    }
+
     fun clearGameOsdOverride(game: String) {
         osdPreferences.clearGame(game)
         osdPreferenceVersion.intValue++
@@ -54,10 +58,10 @@ object InGameOverlay {
 
     /** Set the OSD mode (from the in-game menu selector or the hotkey), apply it live, and
      *  persist it so it survives a relaunch — matching the old per-stat toggles' persistence. */
-    fun setOsdMode(mode: OsdMode, scope: SettingsScope = SettingsScope.Global) {
+    fun setOsdMode(mode: OsdMode, scope: SettingsScope = SettingsScope.Global, game: String? = osdGameKey()) {
         if (scope == SettingsScope.Game) {
-            val game = osdGameKey() ?: return
-            osdPreferences.setGame(game, mode)
+            val target = game?.takeIf(String::isNotBlank) ?: return
+            osdPreferences.setGame(target, mode)
         } else osdPreferences.setGlobal(mode)
         osdPreferenceVersion.intValue++
         applyStoredOsdMode()
