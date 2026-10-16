@@ -79,6 +79,7 @@ object TouchControls {
     // an independent per-serial layout (NOT a shared profile object), so editing
     // one game's layout never mutates what another game loads.
     private const val KEY_LAYOUT_GAME_PREFIX = "touch.layout.game."
+    private const val KEY_SOURCE_GAME_PREFIX = "touch.source.game."
     // Portable on-disk mirror of profiles, under <DataRoot>/inputprofiles/.
     private const val PROFILE_FILE_SUFFIX = ".touch.json"
 
@@ -120,6 +121,9 @@ object TouchControls {
 
     /** Name of the currently-active profile. Persisted. */
     val activeProfileName = mutableStateOf("Default")
+    /** True only for a shared profile, not a game-only override seeded from Default. */
+    val editingProfile = mutableStateOf(true)
+    private var globalProfileName = "Default"
 
     /** Live layout being rendered + edited. Diverges from the saved
      *  profile while editing; "Save" commits it back, "Discard" reloads. */
@@ -569,8 +573,10 @@ object TouchControls {
         profiles.addAll(list)
 
         val active = MainActivityRuntime.prefs.getString(KEY_ACTIVE, list.first().name) ?: list.first().name
-        activeProfileName.value = active
         val match = list.firstOrNull { it.name == active } ?: list.first()
+        globalProfileName = match.name
+        activeProfileName.value = match.name
+        editingProfile.value = true
         activeLayout.value = match.layoutFor(portrait.value).copy()
         opacity.floatValue = MainActivityRuntime.prefs.getFloat(KEY_OPACITY, 0.55f).coerceIn(0.0f, 1.0f)
         pressurePercent.intValue = MainActivityRuntime.prefs.getInt(KEY_PRESSURE_PERCENT, 50).coerceIn(5, 95)
@@ -673,7 +679,7 @@ object TouchControls {
         for (p in profiles) arr.put(p.toJson())
         MainActivityRuntime.prefs.edit {
             putString(KEY_PROFILES, arr.toString())
-                .putString(KEY_ACTIVE, activeProfileName.value)
+                .putString(KEY_ACTIVE, globalProfileName)
                 .putFloat(KEY_OPACITY, opacity.floatValue)
                 .putBoolean(KEY_FACE_MULTI, faceMultiTouch.value)
                 .putBoolean(KEY_GESTURE_ON, gestureEnabled.value)
@@ -715,72 +721,50 @@ object TouchControls {
         interactionTick.intValue++
     }
 
-    /** Commit the live edit. When a game is running, store the edited layout as
-     *  that game's OWN per-serial layout (touch.layout.game.<serial>) so it is
-     *  isolated from every other game and from the shared profiles — this is what
-     *  stops one game's edit from bleeding into the next. When no game is running
-     *  (library/global edit), fall back to overwriting the active profile so the
-     *  global Default still reflects the edit. */
     /** Re-read the active PROFILE for the current orientation.
      *
      *  The in-game path re-applies on rotate via applyForSerial, but that only runs while a VM is
      *  up — so a global-scope edit kept whichever orientation's layout happened to be loaded when
      *  the screen opened, and rotating showed the wrong one. */
     fun applyActiveProfileForOrientation() {
-        val match = profiles.firstOrNull { it.name == activeProfileName.value } ?: return
+        val match = profiles.firstOrNull { it.name == globalProfileName } ?: profiles.firstOrNull() ?: return
+        globalProfileName = match.name
+        activeProfileName.value = match.name
+        editingProfile.value = true
         activeLayout.value = match.layoutFor(portrait.value).copy()
         selectedButton.value = null
     }
 
-    fun saveLiveLayoutToActive() {
+    /** Save to the scope displayed by the editor: selected shared profile or game-only edit. */
+    fun saveLiveLayoutToActive(): Boolean {
         // gameIsRunning() is the OUTER gate. The per-serial/CRC isolation paths
         // must only run when a VM is actually up — keying off a merely-non-null
         // serial was wrong because MainActivityRuntime.currentGame (hence runningSerial()) stays
         // stale after Close Game, so a Global-Default edit from the main menu
         // would silently write into the LAST-PLAYED game's per-serial key.
-        if (gameIsRunning()) {
-            val serial = runningSerial()
-            if (serial != null) {
-                // In-game with a resolved serial -> isolated per-serial layout.
-                // Never touches any shared profile.
+        if (gameIsRunning() && !editingProfile.value) {
+            val key = runningGameKey()
+            if (key != null) {
                 MainActivityRuntime.prefs.edit {
                     putString(
-                        orient(KEY_LAYOUT_GAME_PREFIX + serial),
+                        orient(KEY_LAYOUT_GAME_PREFIX + key),
                         activeLayout.value.toJson().toString(),
                     )
+                    putString(KEY_SOURCE_GAME_PREFIX + key, "custom")
                 }
             } else {
-                // In-game but no serial (homebrew / BIOS / serial-less disc).
-                // Key by disc CRC so it stays isolated; if even the CRC is
-                // unknown, no-op with a warning rather than corrupting Default.
-                val crc = runCatching { NativeApp.getGameCRC() }.getOrNull()
-                    ?.trim()?.uppercase()?.takeIf { it.isNotEmpty() && it != "00000000" }
-                if (crc != null) {
-                    MainActivityRuntime.prefs.edit {
-                        putString(
-                            orient(KEY_LAYOUT_GAME_PREFIX + "crc." + crc),
-                            activeLayout.value.toJson().toString(),
-                        )
-                    }
-                } else {
-                    println(
-                        "@@ARMSX2_TOUCH@@ refusing to save in-game layout to global " +
-                            "Default: no serial/CRC resolved for running game"
-                    )
-                }
+                return false // Keep the editor open; never silently overwrite Default.
             }
         } else {
-            // No game running (library / Global Default edit) -> overwrite the
-            // active profile.
-            val idx = profiles.indexOfFirst { it.name == activeProfileName.value }
-            if (idx >= 0) {
-                // Only the orientation currently being edited. Writing .copy(layout = ...) here
-                // unconditionally is what made landscape and portrait clobber each other.
-                profiles[idx] = profiles[idx].withLayoutFor(portrait.value, activeLayout.value.copy())
-                persist()
-            }
+            val name = activeProfileName.value
+            val idx = profiles.indexOfFirst { it.name == name }
+            if (idx < 0) return false
+            profiles[idx] = TouchProfileSelection.updated(profiles, name, portrait.value, activeLayout.value)
+            bindProfileForRunningGame(name)
+            persist()
         }
         selectedButton.value = null
+        return true
     }
 
     /** Persist the live edit state under a new profile name. If the name
@@ -789,35 +773,44 @@ object TouchControls {
     fun saveAsNewProfile(name: String) {
         val trimmed = name.trim().ifEmpty { return }
         val existing = profiles.indexOfFirst { it.name == trimmed }
-        val newProf = (profiles.getOrNull(existing) ?: TouchProfile(trimmed, TouchLayout.default()))
-            .withLayoutFor(portrait.value, activeLayout.value.copy())
+        val newProf = TouchProfileSelection.updated(profiles, trimmed, portrait.value, activeLayout.value,
+            profiles.firstOrNull { it.name == activeProfileName.value })
         if (existing >= 0) profiles[existing] = newProf
         else profiles.add(newProf)
         activeProfileName.value = trimmed
+        editingProfile.value = true
         // Bind the new profile to the game currently running so it only applies
         // to THAT game (otherwise it becomes the globally-active profile and
         // bleeds into every other game's boot). No game running -> global only.
         // Gate on gameIsRunning() so a stale MainActivityRuntime.currentGame (after Close Game)
         // can't bind this profile to the last-played game from the library.
-        val serial = if (gameIsRunning()) runningSerial() else null
-        if (serial != null)
-            MainActivityRuntime.prefs.edit { putString(KEY_ACTIVE_GAME_PREFIX + serial, trimmed) }
+        if (!gameIsRunning()) globalProfileName = trimmed
+        bindProfileForRunningGame(trimmed)
         persist()
     }
 
     fun switchProfile(name: String) {
         val match = profiles.firstOrNull { it.name == name } ?: return
         activeProfileName.value = name
+        editingProfile.value = true
         activeLayout.value = match.layoutFor(portrait.value).copy()
         // When a game is running, remember this profile FOR that game so it
         // auto-applies on the next boot (per-game tier). With no game (library),
         // it's just the global default, persisted via KEY_ACTIVE in persist().
         // Gate on gameIsRunning() so a stale MainActivityRuntime.currentGame (after Close Game)
         // can't bind this from the library to the last-played game.
-        val serial = if (gameIsRunning()) runningSerial() else null
-        if (serial != null)
-            MainActivityRuntime.prefs.edit { putString(KEY_ACTIVE_GAME_PREFIX + serial, name) }
+        if (!gameIsRunning()) globalProfileName = name
+        bindProfileForRunningGame(name)
         persist()
+    }
+
+    private fun bindProfileForRunningGame(name: String) {
+        if (!gameIsRunning()) return
+        val key = runningGameKey() ?: return
+        MainActivityRuntime.prefs.edit {
+            putString(KEY_ACTIVE_GAME_PREFIX + key, name)
+            putString(KEY_SOURCE_GAME_PREFIX + key, "profile")
+        }
     }
 
     fun deleteProfile(name: String) {
@@ -825,6 +818,7 @@ object TouchControls {
         val idx = profiles.indexOfFirst { it.name == name }
         if (idx < 0) return
         profiles.removeAt(idx)
+        if (globalProfileName == name) globalProfileName = profiles.first().name
         if (activeProfileName.value == name) {
             val fallback = profiles.first()
             activeProfileName.value = fallback.name
@@ -832,6 +826,7 @@ object TouchControls {
         }
         // Drop any per-game overrides that pointed at the deleted profile.
         clearGameOverridesFor(name)
+        if (gameIsRunning()) applyForSerial(runningSerial()) else applyActiveProfileForOrientation()
         persist()
     }
 
@@ -841,8 +836,7 @@ object TouchControls {
         activeLayout.value = TouchLayout.defaultFor(portrait.value)
     }
 
-    /** True when a VM is up (RUNNING or PAUSED) — i.e. an in-game edit, where we
-     *  must NEVER fall back to overwriting the shared Default profile. */
+    /** A game-only edit must never accidentally fall back to a shared profile. */
     private fun gameIsRunning(): Boolean =
         MainActivityRuntime.eState.value == EmuState.RUNNING || MainActivityRuntime.eState.value == EmuState.PAUSED
 
@@ -870,68 +864,26 @@ object TouchControls {
         hint,
     )
 
+    private fun runningGameKey(hint: String? = null): String? = runningSerial(hint)
+        ?: runCatching { NativeApp.getGameCRC() }.getOrNull()?.trim()?.uppercase()
+            ?.takeIf { it.isNotEmpty() && it != "00000000" }?.let { "crc.$it" }
+
     // ---- Per-game tier + portable inputprofiles/ folder ----
 
-    /** Apply this game's touch layout on boot. Precedence:
-     *   1. A per-serial CUSTOM layout saved by the drag-and-Save editor
-     *      (touch.layout.game.<serial>) — fully isolated per game.
-     *   2. A legacy per-game profile-NAME binding (touch.active.game.<serial>),
-     *      written by the Profiles dialog — load that profile's layout.
-     *   3. No binding at all -> reset to the "Default" profile so an un-customized
-     *      game shows the default layout, NOT whatever named profile is globally
-     *      active (otherwise a "GT4" profile bleeds into every other game).
-     *  Does NOT persist (auto-apply must not overwrite the global selection). */
+    /** Explicit profile selections supersede old game overrides. Legacy installs keep their
+     *  custom-first ordering until a profile is explicitly chosen; no saved layout is deleted. */
     fun applyForSerial(serial: String?) {
         // Use EXACTLY the save path's resolution. The menu may supply a filename for a
         // CHD whose serial was unknown at scan time, while Save already used the core ID.
-        val effSerial = runningSerial(serial)
-        if (effSerial == null) {
-            // No serial — try the per-disc CRC layout key used by the in-game save
-            // safety net before giving up.
-            val crc = runCatching { NativeApp.getGameCRC() }.getOrNull()
-                ?.trim()?.uppercase()?.takeIf { it.isNotEmpty() && it != "00000000" }
-            if (crc != null) {
-                val rawCrc = readGameLayoutJson(KEY_LAYOUT_GAME_PREFIX + "crc." + crc)
-                if (rawCrc != null) {
-                    runCatching { TouchLayout.fromJson(JSONObject(rawCrc)) }.getOrNull()?.let {
-                        activeProfileName.value = "Default"
-                        activeLayout.value = it
-                        return
-                    }
-                }
-            }
-            return
-        }
-        // (1) Per-serial custom layout.
-        val rawLayout = readGameLayoutJson(KEY_LAYOUT_GAME_PREFIX + effSerial)
-        if (rawLayout != null) {
-            runCatching { TouchLayout.fromJson(JSONObject(rawLayout)) }.getOrNull()?.let {
-                activeProfileName.value = "Default"
-                activeLayout.value = it
-                return
-            }
-        }
-        // (2) Legacy per-game profile-name binding (Profiles dialog).
-        val name = MainActivityRuntime.prefs.getString(KEY_ACTIVE_GAME_PREFIX + effSerial, null)
-        if (name != null) {
-            val match = profiles.firstOrNull { it.name == name }
-            if (match != null) {
-                activeProfileName.value = name
-                activeLayout.value = match.layoutFor(portrait.value).copy()
-                return
-            }
-        }
-        // (3) No per-game record: reset to the "Default" profile (NOT the globally
-        //     active profile) so an un-customized game never inherits another
-        //     game's named layout.
-        val def = profiles.firstOrNull { it.name == "Default" } ?: profiles.firstOrNull()
-        if (def != null) {
-            activeProfileName.value = def.name
-            activeLayout.value = def.layoutFor(portrait.value).copy()
-        } else {
-            activeProfileName.value = "Default"
-            activeLayout.value = TouchLayout.defaultFor(portrait.value)
-        }
+        val key = runningGameKey(serial)
+        val raw = key?.let { readGameLayoutJson(KEY_LAYOUT_GAME_PREFIX + it) }
+        val custom = raw?.let { runCatching { TouchLayout.fromJson(JSONObject(it)) }.getOrNull() }
+        val name = key?.let { MainActivityRuntime.prefs.getString(KEY_ACTIVE_GAME_PREFIX + it, null) }
+        val preferProfile = key?.let { MainActivityRuntime.prefs.getString(KEY_SOURCE_GAME_PREFIX + it, null) } == "profile"
+        val selected = TouchProfileSelection.resolve(profiles, name, custom, preferProfile, portrait.value)
+        activeProfileName.value = selected.name
+        activeLayout.value = selected.layout
+        editingProfile.value = selected.editProfile
     }
 
     private fun clearGameOverridesFor(profileName: String) {
@@ -960,7 +912,7 @@ object TouchControls {
      *  game — so resolving a serial there would wrongly delete that game's
      *  custom layout. */
     fun clearGameLayoutIfRunning() {
-        if (gameIsRunning()) clearGameLayout(runningSerial())
+        if (gameIsRunning()) clearGameLayout(runningGameKey())
     }
 
     /** `<DataRoot>/inputprofiles/` (native creates it on init). Null when no

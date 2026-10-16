@@ -1830,6 +1830,7 @@ private fun EditAdornment(id: TouchButtonId? = null) {
 
 @Composable
 private fun EditToolbar(modifier: Modifier = Modifier) {
+    val saveFailureText = str("touch.editor.saveFailed")
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
@@ -1895,7 +1896,9 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
         // Scope hint: with no game running the editor edits the GLOBAL Default
         // layout (per-game layouts need a running disc).
         Text(
-            if (MainActivityRuntime.eState.value == EmuState.RUNNING || MainActivityRuntime.eState.value == EmuState.PAUSED)
+            if (TouchControls.editingProfile.value)
+                str("touch.editor.scopeProfile").replace("{name}", TouchControls.activeProfileName.value)
+            else if (MainActivityRuntime.eState.value == EmuState.RUNNING || MainActivityRuntime.eState.value == EmuState.PAUSED)
                 str("touch.editor.scopeGame")
             else str("touch.editor.scopeGlobal"),
             color = Color(0xFFFFD33A), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
@@ -1907,7 +1910,7 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ToolbarChip(str("action.save")) {
+            ToolbarChip(if (TouchControls.editingProfile.value) str("touch.editor.saveProfile") else str("touch.editor.saveGame")) {
                 // Commit the snap HERE, not only on finger-up.
                 //
                 // The editor draws every widget snapped to the grid, but the underlying fraction
@@ -1921,8 +1924,10 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
                 // Snapping at save time makes the saved layout equal what was on screen, whatever
                 // route the widget took to get there.
                 snapLayoutToGrid()
-                TouchControls.saveLiveLayoutToActive()
-                TouchControls.exitEditMode()
+                if (TouchControls.saveLiveLayoutToActive()) TouchControls.exitEditMode()
+                else MainActivityRuntime.instance?.let { activity ->
+                    android.widget.Toast.makeText(activity, saveFailureText, android.widget.Toast.LENGTH_LONG).show()
+                }
             }
             ToolbarChip(str("touch.editor.discard")) {
                 TouchControls.discardEdits()
@@ -2153,7 +2158,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                if (InGameOverlay.currentSerial.value != null)
+                if (MainActivityRuntime.eState.value == EmuState.RUNNING || MainActivityRuntime.eState.value == EmuState.PAUSED)
                     str("touch.profiles.infoGame")
                 else
                     str("touch.profiles.infoGlobal"),
@@ -2161,6 +2166,10 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                 fontSize = 11.sp,
             )
             Spacer(Modifier.height(4.dp))
+            ToolbarChip(str("touch.profiles.updateSelected").replace("{name}", TouchControls.activeProfileName.value)) {
+                TouchControls.saveAsNewProfile(TouchControls.activeProfileName.value)
+            }
+            Text(str("touch.profiles.updateInfo"), color = Color(0xFFAAAAAA), fontSize = 11.sp)
             for (p in TouchControls.profiles) {
                 val active = p.name == TouchControls.activeProfileName.value
                 Row(

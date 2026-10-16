@@ -5,6 +5,11 @@ Unreleased
 ----------
 
 Touch controls
+  * Save changes directly into an explicitly selected touch profile; add Update profile
+    to the profile picker. No new-profile/delete workaround is needed. Selected profiles
+    no longer get silently replaced by older game-only layouts on resume or rotation.
+    Keep portrait/landscape independent, preserve old game-only edits, distinguish shared
+    profile saves from game-only saves, and keep the global selection separate.
   * Add optional Compact shoulder touch areas in Pad settings and the touch-layout
     editor. L1/L2/R1/R2 use artwork-fitted rectangular targets rather than the larger
     circular/square areas, including multi-touch, gliding and tap-to-hold controls.
