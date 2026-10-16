@@ -283,13 +283,12 @@ data class GameInfo(
     val coverUrls: List<String> get() = buildList {
         localCoverPath()?.let { add(Uri.fromFile(File(it)).toString()) }
         val s = coverSerial ?: return@buildList
-        if (CoverArtStyle.use3d.value) {
-            add("https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/3d/$s.png")
-        }
-        com.armsx2.core.Ps1Covers.downloadedCover(s)?.let { add(Uri.fromFile(it).toString()) }
-        add(com.armsx2.core.Ps1Covers.coverUrl(s))
-        if (!CoverArtStyle.use3d.value) {
-            add("https://raw.githubusercontent.com/xlenore/psx-covers/main/covers/3d/$s.png")
+        val style = CoverArtStyle.use3d.value
+        for (candidate in listOf(s) + com.armsx2.core.Ps1TitleSerials.coverAlternatives(s)) {
+            val urls = com.armsx2.core.Ps1CoverIdentity.urls(candidate, style)
+            if (style) urls.firstOrNull()?.let { add(it) }
+            com.armsx2.core.Ps1Covers.downloadedCover(candidate)?.let { add(Uri.fromFile(it).toString()) }
+            if (style) addAll(urls.drop(1)) else addAll(urls)
         }
     }.distinct()
 
@@ -310,7 +309,7 @@ data class GameInfo(
      */
     val coverSerial: String? get() {
         CoverCatalogue.version.intValue // Re-resolve cached SAF rows when the bundled index is ready.
-        return serial?.takeIf { it.isNotBlank() }
+        return com.armsx2.core.Ps1CoverIdentity.serial(serial)
             ?: com.armsx2.core.Ps1TitleSerials.coverSerialFor(title, uri.lastPathSegment)
     }
 

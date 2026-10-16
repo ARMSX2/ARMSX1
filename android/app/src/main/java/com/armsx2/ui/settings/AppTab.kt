@@ -780,6 +780,7 @@ private fun BackupRestoreRows() {
                     else -> I18n.get("app.covers.done").replace("%d", result.downloaded.toString())
                 }
                 busy = false
+                com.armsx2.CoverCatalogue.refreshImages()
                 com.armsx2.core.Ps1Library.rescan.intValue++
             }
         }

@@ -9,6 +9,9 @@ object CoverCatalogue {
     val version = mutableIntStateOf(0)
     @Volatile private var loaded = false
 
+    /** Refreshing the library/downloaded art must also reset tiles whose URL list is unchanged. */
+    fun refreshImages() { version.intValue++ }
+
     @Synchronized fun load(context: Context) {
         if (loaded) return
         runCatching {

@@ -100,6 +100,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refresh() {
+        com.armsx2.CoverCatalogue.refreshImages()
         if (directories.isEmpty() || scanJob?.isActive == true) return
         // A full scan re-reads every disc, so it IS the retry — no need to do it twice.
         retriedSerials = true

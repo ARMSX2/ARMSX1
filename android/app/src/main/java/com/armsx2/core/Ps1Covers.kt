@@ -152,27 +152,48 @@ object Ps1Covers {
      *
      * **Blocking.** Call from an IO dispatcher.
      */
-    fun downloadCover(serial: String): Boolean {
-        if (serial.isBlank()) return false
-        downloadedCover(serial)?.let { return true }
+    @Synchronized fun downloadCover(serial: String): Boolean {
+        val identity = Ps1CoverIdentity.serial(serial) ?: return false
+        downloadedCover(identity)?.let { return true }
         val dir = coversDir() ?: return false
-        val target = File(dir, "${serial.uppercase(Locale.US)}.jpg")
+        val target = File(dir, "$identity.jpg")
         // Write to a temp name first: a half-written file that already has the final name would
         // be treated as a valid cover forever after.
         val temp = File(dir, ".${target.name}.part")
+        return (listOf(identity) + Ps1TitleSerials.coverAlternatives(identity)).any { candidate ->
+            downloadCoverFile(coverUrl(candidate), target, temp)
+        }
+    }
+
+    private fun downloadCoverFile(url: String, target: File, temp: File): Boolean {
         return runCatching {
-            val connection = (java.net.URL(coverUrl(serial)).openConnection() as java.net.HttpURLConnection).apply {
+            val connection = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                 connectTimeout = 15_000
                 readTimeout = 15_000
                 instanceFollowRedirects = true
             }
             try {
-                if (connection.responseCode != 200) return false
-                connection.inputStream.use { input -> temp.outputStream().use(input::copyTo) }
+                if (connection.responseCode != 200) {
+                    temp.delete()
+                    return false
+                }
+                connection.inputStream.use { input -> temp.outputStream().use { output ->
+                    val buffer = ByteArray(32 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        if (total > 16L * 1024 * 1024) throw java.io.IOException("Cover image exceeds size limit")
+                        output.write(buffer, 0, count)
+                    }
+                } }
             } finally {
                 connection.disconnect()
             }
-            if (temp.length() <= 0) {
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeFile(temp.absolutePath, bounds)
+            if (temp.length() <= 0 || bounds.outWidth <= 0 || bounds.outHeight <= 0) {
                 temp.delete()
                 false
             } else {

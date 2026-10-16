@@ -36,6 +36,8 @@ object Ps1TitleSerials {
         return index.size
     }
 
+    fun coverAlternatives(serial: String): List<String> = catalogue?.alternatives(serial).orEmpty()
+
     /** Normalised title → serial per disc, disc 1 first. */
     private val BY_TITLE: Map<String, List<String>> = mapOf(
         "dragonwarriorvii" to listOf("SLUS-01206", "SLUS-01346"),

@@ -4,6 +4,13 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+Cover art
+  * Retry temporary image/network failures and reload failed tiles when refreshing
+    the library or downloading covers, even when the game list has not changed.
+  * Normalise artwork serials and common filename serial/revision tags.
+  * Try verified same-title/region pressings and disc-one artwork when a later
+    disc has no image, without changing game/save/cheat identities or custom covers.
+
 Online updates
   * Restore update checks for the normal GitHub app; private builds remain isolated
     and Play builds still exclude the updater.
