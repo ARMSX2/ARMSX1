@@ -39,7 +39,8 @@ object AchievementsProgress {
         val json = runCatching { NativeApp.getAchievementsJSON() }.getOrNull().orEmpty()
         if (json.isEmpty()) return
         runCatching {
-            val items = JSONObject(json).optJSONArray("items") ?: return
+            val root = JSONObject(json)
+            val items = root.optJSONArray("items") ?: return
             val total = items.length()
             if (total == 0) return
             var softcore = 0
@@ -58,7 +59,7 @@ object AchievementsProgress {
                     softcore++
                 }
             }
-            PlayTime.recordAchievements(s, softcore, hardcore, total)
+            RaLibrary.recordLiveProgress(s, softcore, hardcore, total, root.optString("userName"))
         }
     }
 }

@@ -111,9 +111,14 @@ fun AchievementsScreen(onBack: () -> Unit, viewModel: AchievementsViewModel = vi
                     val compact = maxWidth < 820.dp
                     if (compact) {
                         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
-                            AchievementAccount(state, viewModel, Modifier.fillMaxWidth(), compact = true)
+                            var accountExpanded by rememberSaveable { mutableStateOf(false) }
+                            TextButton(onClick = { accountExpanded = !accountExpanded },
+                                modifier = Modifier.fillMaxWidth().controllerFocusable("ra.account.expand", onConfirm = {
+                                    accountExpanded = !accountExpanded
+                                })) { Text(str("ra.account.expand")) }
+                            if (accountExpanded) AchievementAccount(state, viewModel, Modifier.fillMaxWidth(), compact = true)
                             Spacer(Modifier.height(10.dp))
-                            AchievementList(state, Modifier.fillMaxWidth())
+                            AchievementContent(state, Modifier.fillMaxWidth())
                         }
                     } else {
                         Row(
@@ -121,7 +126,7 @@ fun AchievementsScreen(onBack: () -> Unit, viewModel: AchievementsViewModel = vi
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
                             AchievementAccount(state, viewModel, Modifier.width(286.dp), compact = false)
-                            AchievementList(state, Modifier.weight(1f))
+                            AchievementContent(state, Modifier.weight(1f))
                         }
                     }
                 }
@@ -383,6 +388,25 @@ private fun AchievementAccount(
 }
 
 @Composable
+private fun AchievementContent(state: AchievementsUiState, modifier: Modifier) {
+    var library by rememberSaveable {
+        mutableStateOf(com.armsx2.runtime.MainActivityRuntime.currentGame.value == null)
+    }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { library = true }, modifier = Modifier.controllerFocusable("ra.tab.library", onConfirm = { library = true })) {
+                Text(str("ra.library.games"), fontWeight = if (library) FontWeight.Bold else FontWeight.Normal)
+            }
+            TextButton(onClick = { library = false }, modifier = Modifier.controllerFocusable("ra.tab.current", onConfirm = { library = false })) {
+                Text(str("ra.currentGame"), fontWeight = if (!library) FontWeight.Bold else FontWeight.Normal)
+            }
+        }
+        if (library) LibraryAchievementBrowser(state.userName, Modifier.fillMaxWidth())
+        else AchievementList(state, Modifier.fillMaxWidth())
+    }
+}
+
+@Composable
 private fun AchievementList(state: AchievementsUiState, modifier: Modifier) {
     // Show subset tabs (Base Set / Bonus Subset / …) only when a game actually has more than
     // one subset; otherwise the list looks exactly as before. The selection survives the 3s
@@ -569,6 +593,7 @@ private fun LibraryProgressSection() {
     var key by remember { mutableStateOf(com.armsx2.RaLibrary.webApiKey) }
     val syncing = com.armsx2.RaLibrary.syncing.value
     val result = com.armsx2.RaLibrary.lastResult.value
+    val progress = com.armsx2.RaLibrary.syncProgress.value
 
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(str("ra.library.header"), style = MaterialTheme.typography.titleSmall)
@@ -631,11 +656,7 @@ private fun LibraryProgressSection() {
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(8.dp))
-        val sync = {
-            if (!com.armsx2.RaLibrary.syncNow()) {
-                com.armsx2.RaLibrary.lastResult.value = com.armsx2.i18n.I18n.get("ra.library.notReady")
-            }
-        }
+        val sync: () -> Unit = { com.armsx2.RaLibrary.syncNow() }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Button(
                 onClick = sync,
@@ -651,10 +672,12 @@ private fun LibraryProgressSection() {
                 }
                 Text(str(if (syncing) "ra.library.syncing" else "ra.library.sync"))
             }
-            if (result.isNotEmpty() && !syncing) {
+            val status = if (syncing) progress else result
+            if (status.isNotEmpty()) {
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    result,
+                    status,
+                    modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -737,7 +760,7 @@ private fun LoginPanel(loading: Boolean, onLogin: (String, String) -> Unit, modi
 }
 
 @Composable
-private fun AchievementRow(item: AchievementItem) {
+internal fun AchievementRow(item: AchievementItem, expanded: Boolean = false) {
     Surface(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(17.dp),
@@ -746,7 +769,10 @@ private fun AchievementRow(item: AchievementItem) {
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (item.iconUrl.isNotBlank()) {
-                AsyncImage(item.iconUrl, item.title, Modifier.size(52.dp).clip(RoundedCornerShape(12.dp)), contentScale = ContentScale.Crop)
+                com.armsx2.ui.common.FallbackCoverImage(listOf(item.iconUrl), item.title,
+                    Modifier.size(52.dp).clip(RoundedCornerShape(12.dp)), ContentScale.Crop) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("★") }
+                }
             } else {
                 Surface(Modifier.size(52.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
                     Box(contentAlignment = Alignment.Center) { Text("★") }
@@ -754,8 +780,8 @@ private fun AchievementRow(item: AchievementItem) {
             }
             Spacer(Modifier.width(13.dp))
             Column(Modifier.weight(1f)) {
-                Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(item.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = if (expanded) Int.MAX_VALUE else 1, overflow = TextOverflow.Ellipsis)
+                Text(item.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
                 if (item.progress.isNotBlank()) Text(item.progress, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {

@@ -4,6 +4,26 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+RetroAchievements
+  * Open a matched game's achievements directly in the menu without booting it:
+    badge/game artwork, full descriptions, points, unlock status, search and filters.
+    Details are fetched only on selection and cached per account for offline viewing.
+  * Add a searchable, paginated Library games view inside RetroAchievements for
+    verified matched games and softcore/hardcore progress, separate from Current game.
+    Already-synced results appear without another API/ROM scan, including unplayed games.
+  * Manual sync reloads the saved library and current account when needed; readiness
+    messages identify a missing API key, account, library or emulator initialization.
+  * Preserve sign-in progress and errors across the periodic account refresh, prevent
+    duplicate login requests, and report client/network failures instead of silently resetting.
+  * Library sync includes unlaunched games without a detected serial and safely prepares
+    Android document-folder images to calculate their real PlayStation achievement hash.
+  * Match and display web progress by library URI, without guessing identities from
+    filenames. Cache hashes per image/revision rather than sharing by serial.
+  * Show disc-check progress; distinguish unreadable images from unsupported hashes.
+    Reject incomplete/error API pages instead of overwriting earned counts with zero.
+  * Failed/incomplete scans no longer suppress automatic retries for a full day;
+    automatic syncs do not stage uncached document-folder ROMs.
+
 Cover art
   * Retry temporary image/network failures and reload failed tiles when refreshing
     the library or downloading covers, even when the game list has not changed.

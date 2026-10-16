@@ -35,7 +35,14 @@ object Ps1SafAccess {
         }
     }
 
-    fun prepare(context: Context, pathOrUri: String, cancelled: () -> Boolean = { false }): Session {
+    fun prepare(context: Context, pathOrUri: String, cancelled: () -> Boolean = { false }): Session =
+        prepareSession(context, pathOrUri, true, cancelled)
+
+    /** Hash only the boot image; do not enumerate sibling discs for a picker. */
+    fun prepareForHash(context: Context, pathOrUri: String): Session =
+        prepareSession(context, pathOrUri, false) { false }
+
+    private fun prepareSession(context: Context, pathOrUri: String, discoverDiscs: Boolean, cancelled: () -> Boolean): Session {
         if (!pathOrUri.startsWith("content://")) return Session(pathOrUri)
 
         val uri = Uri.parse(pathOrUri)
@@ -50,7 +57,7 @@ object Ps1SafAccess {
         return try {
             if (cancelled()) throw IOException("Game preparation cancelled")
             val name = displayName(context, uri)
-            val discs = if (Ps1SafText.extension(name) == "m3u") {
+            val discs = if (!discoverDiscs) emptyList() else if (Ps1SafText.extension(name) == "m3u") {
                 playlistDiscs(context.contentResolver, uri)
             } else {
                 // A single-file grant need not permit sibling listing. Still allow that game.

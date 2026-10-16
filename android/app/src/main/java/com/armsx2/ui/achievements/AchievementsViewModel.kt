@@ -7,6 +7,7 @@ import kr.co.iefriends.pcsx2.NativeApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -83,6 +84,14 @@ data class AchievementsUiState(
     val error: String? = null,
 )
 
+/** Native polling must not dismiss an in-flight login or an unacknowledged failure. */
+internal fun mergeAchievementSnapshot(current: AchievementsUiState, snapshot: AchievementsUiState): AchievementsUiState =
+    snapshot.copy(
+        loading = current.loading,
+        error = if (snapshot.loggedIn) null else current.error,
+        pendingHardcore = current.pendingHardcore,
+    )
+
 class AchievementsViewModel(application: Application) : AndroidViewModel(application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -96,7 +105,7 @@ class AchievementsViewModel(application: Application) : AndroidViewModel(applica
         // back from PlayTime to show progress on games that are not running.
         if (snapshot != null && snapshot.items.isNotEmpty()) {
             runCatching {
-                com.armsx2.PlayTime.recordAchievements(
+                com.armsx2.RaLibrary.recordLiveProgress(
                     com.armsx2.runtime.MainActivityRuntime.currentGame.value?.serial
                         ?: NativeApp.getGameSerial(),
                     // Mask when present, boolean otherwise; a hardcore unlock counts as softcore too.
@@ -107,34 +116,48 @@ class AchievementsViewModel(application: Application) : AndroidViewModel(applica
                     // report an unearned hardcore unlock for any build that omits the field.
                     snapshot.items.count { it.unlockedMask > 0 && (it.unlockedMask and 2) != 0 },
                     snapshot.items.size,
+                    snapshot.userName,
                 )
             }
         }
-        if (snapshot != null) state.value = snapshot.copy(
+        if (snapshot != null) state.value = mergeAchievementSnapshot(state.value, snapshot).copy(
             richPresence = runCatching { NativeApp.getRichPresence() }.getOrDefault(""),
-            // Preserve the transient confirm-dialog state across the 3s poll.
-            pendingHardcore = state.value.pendingHardcore,
         )
     }
 
     fun login(userName: String, password: String) {
+        if (state.value.loading) return
         if (userName.isBlank() || password.isBlank()) {
             state.value = state.value.copy(error = "Enter your RetroAchievements username and password.")
             return
         }
+        if (!MainActivityRuntime.nativeReady.value) {
+            state.value = state.value.copy(error = "RetroAchievements is not ready yet. Finish app setup and try again.")
+            return
+        }
+        state.value = state.value.copy(loading = true, error = null)
         scope.launch {
-            state.value = state.value.copy(loading = true, error = null)
-            val error = withContext(Dispatchers.IO) { NativeApp.loginAchievements(userName.trim(), password) }
-            if (error.isNullOrBlank()) {
+            try {
+                val error = withContext(Dispatchers.IO) { NativeApp.loginAchievements(userName.trim(), password) }
                 refresh()
+                if (!error.isNullOrBlank()) state.value = state.value.copy(error = error)
+                else if (!state.value.loggedIn) state.value = state.value.copy(
+                    error = "RetroAchievements sign-in did not complete. Please check your connection and try again.",
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                state.value = state.value.copy(error = "Unable to sign in to RetroAchievements. Please check your connection and try again.")
+            } catch (_: LinkageError) {
+                state.value = state.value.copy(error = "The RetroAchievements client is unavailable in this build.")
+            } finally {
                 state.value = state.value.copy(loading = false)
-            } else {
-                state.value = state.value.copy(loading = false, error = error)
             }
         }
     }
 
     fun logout() {
+        if (state.value.loading) return
         NativeApp.logoutAchievements()
         state.value = AchievementsUiState()
     }

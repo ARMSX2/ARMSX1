@@ -1407,7 +1407,8 @@ private fun GameMetadata(game: GameInfo) {
         if (played.isNotEmpty()) {
             Text("⏳ $played", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1)
         }
-        val ach = remember(game.serial, rev) { com.armsx2.PlayTime.achievements(game.serial) }
+        val raUser = com.armsx2.RaLibrary.userName
+        val ach = remember(game.uri, game.serial, rev, raUser) { com.armsx2.RaLibrary.progressFor(game) }
         ach?.let { p ->
             // Hardcore and softcore are different accomplishments on RetroAchievements — hardcore
             // forbids save states, cheats and slow motion — so they get different treatment rather

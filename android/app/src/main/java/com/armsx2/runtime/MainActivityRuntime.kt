@@ -4941,6 +4941,9 @@ open class MainActivityRuntime : ComponentActivity() {
     private fun handleFrontendBack() {
         com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.BACK)
         val nav = com.armsx2.navigation.UiNavigator
+        val achievementsMenu = nav.route.value == com.armsx2.navigation.AppRoute.Achievements ||
+            WindowImpl.inGameScreen.value == com.armsx2.ui.InGameScreen.Achievements
+        if (achievementsMenu && com.armsx2.achievements.RaDetailsNavigation.back()) return
         val onHome = nav.route.value == com.armsx2.navigation.AppRoute.Home
         when {
             nav.drawerOpen.value -> nav.drawerOpen.value = false
