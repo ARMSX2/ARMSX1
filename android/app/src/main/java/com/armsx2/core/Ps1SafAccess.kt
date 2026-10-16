@@ -63,7 +63,7 @@ object Ps1SafAccess {
                 // A single-file grant need not permit sibling listing. Still allow that game.
                 runCatching { discsForImage(context.contentResolver, uri, name) }.getOrDefault(emptyList())
             }
-            val launch = materialize(context.contentResolver, uri, name, root, 0, cancelled)
+            val launch = materialize(context.contentResolver, uri, name, root, 0, discoverDiscs, cancelled)
             Session(launch.absolutePath, root, discs)
         } catch (failure: Throwable) {
             runCatching { root.deleteRecursively() }
@@ -77,21 +77,25 @@ object Ps1SafAccess {
         displayName: String,
         root: File,
         depth: Int,
+        includeSbi: Boolean,
         cancelled: () -> Boolean,
     ): File {
         if (cancelled()) throw IOException("Game preparation cancelled")
         if (depth > MAX_PLAYLIST_DEPTH) throw IOException("Nested playlist depth exceeded")
         return when (Ps1SafText.extension(displayName)) {
-            "cue" -> materializeCue(resolver, uri, root, cancelled)
-            "m3u" -> materializePlaylist(resolver, uri, root, depth, cancelled)
+            "cue" -> materializeCue(resolver, uri, displayName, root, includeSbi, cancelled)
+            "m3u" -> materializePlaylist(resolver, uri, root, depth, includeSbi, cancelled)
             else -> copyDocument(resolver, uri, Ps1SafText.launchFileName(uri.toString(), displayName), root, cancelled)
+                .also { if (includeSbi) materializeSbi(resolver, uri, displayName, it, cancelled) }
         }
     }
 
     private fun materializeCue(
         resolver: ContentResolver,
         cueUri: Uri,
+        displayName: String,
         root: File,
+        includeSbi: Boolean,
         cancelled: () -> Boolean,
     ): File {
         val text = readSmallText(resolver, cueUri)
@@ -111,7 +115,29 @@ object Ps1SafAccess {
         }
 
         return File(root, Ps1SafText.launchFileName(cueUri.toString(), "game.cue"))
-            .also { it.writeText(Ps1SafText.rewriteCue(text, localNames)) }
+            .also {
+                it.writeText(Ps1SafText.rewriteCue(text, localNames))
+                if (includeSbi) materializeSbi(resolver, cueUri, displayName, it, cancelled, siblings)
+            }
+    }
+
+    private fun materializeSbi(
+        resolver: ContentResolver,
+        imageUri: Uri,
+        imageName: String,
+        localImage: File,
+        cancelled: () -> Boolean,
+        knownSiblings: Map<String, Uri>? = null,
+    ) {
+        // A single-document grant may not allow listing its parent. Don't break ordinary
+        // games in that case; the core still checks protected games for a usable SBI.
+        val siblings = knownSiblings ?: runCatching { siblingDocuments(resolver, imageUri) }
+            .getOrElse { return }
+        val count = Ps1Sbi.stage(imageName, localImage, siblings.keys, { name ->
+            resolver.openInputStream(siblings.getValue(name))
+                ?: throw IOException("Unable to read SBI file: $name")
+        }, cancelled)
+        if (count > 0) println("@@ARMSX_SBI_STAGED@@ files=$count")
     }
 
     private fun materializePlaylist(
@@ -119,6 +145,7 @@ object Ps1SafAccess {
         playlistUri: Uri,
         root: File,
         depth: Int,
+        includeSbi: Boolean,
         cancelled: () -> Boolean,
     ): File {
         val entries = Ps1SafText.playlistEntries(readSmallText(resolver, playlistUri))
@@ -128,7 +155,7 @@ object Ps1SafAccess {
             val requested = Ps1SafText.baseName(entry)
             val sibling = resolveReference(resolver, playlistUri, entry, siblings)
                 ?: continue
-            return materialize(resolver, sibling, requested, root, depth + 1, cancelled)
+            return materialize(resolver, sibling, requested, root, depth + 1, includeSbi, cancelled)
         }
         throw IOException("No accessible disc from the selected playlist was found")
     }

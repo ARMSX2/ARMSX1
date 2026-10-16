@@ -4,6 +4,14 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+SBI files
+  * Keep matching SBI subchannel files beside Android document-folder discs after
+    staging and renaming, including CUE/CHD launches, playlist discs and disc swaps.
+    Preserve numbered _1 through _5 SBI files for embedded multi-disc PBPs.
+  * Match sidecar names case-insensitively and reject malformed/incomplete SBI files
+    with a preparation error rather than silently handing unusable data to the core.
+    Achievement hash-only scans do not need or copy SBI files.
+
 RetroAchievements
   * Open a matched game's achievements directly in the menu without booting it:
     badge/game artwork, full descriptions, points, unlock status, search and filters.
