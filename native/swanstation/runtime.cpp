@@ -491,7 +491,7 @@ bool Invoke(std::function<bool()> fn) {
   {std::lock_guard lock(state_mutex);if(!active || stop)return false;work.emplace_back([fn=std::move(fn),promise]{promise->set_value(fn());});}
   wake.notify_all();if(result.wait_for(std::chrono::seconds(10))!=std::future_status::ready)return false;return result.get();
 }
-// A disc operation must not apply later after reporting a timeout. Cancel jobs
+// A disc/state mutation must not apply later after reporting a timeout. Cancel jobs
 // which have not started; once mounting has started, await its real result on
 // the caller's worker thread rather than claiming the original disc was kept.
 bool InvokeDisc(std::function<bool()> fn){
@@ -501,8 +501,10 @@ bool InvokeDisc(std::function<bool()> fn){
   struct Job {std::atomic<int> phase{0};std::promise<bool> done;};
   auto job=std::make_shared<Job>();auto result=job->done.get_future();
   {std::lock_guard lock(state_mutex);if(!active||stop)return false;
-    work.emplace_back([job,fn=std::move(fn)]{
+    const auto session=live_run_token;
+    work.emplace_back([job,session,fn=std::move(fn)]{
       int pending=0;if(!job->phase.compare_exchange_strong(pending,1)){job->done.set_value(false);return;}
+      if(!active||stop||live_run_token!=session){job->done.set_value(false);return;}
       try{job->done.set_value(fn());}catch(...){job->done.set_value(false);}
     });}
   wake.notify_all();
@@ -918,7 +920,7 @@ bool AtomicBytes(const std::string& path,const unsigned char* bytes,size_t size)
 }
 }
 bool SwanHost::Save(int slot){auto path=StatePath(slot);if(path.empty())return false;
-  return Invoke([path]{bridge_ctr_hud(false);auto size=core_retro_serialize_size();if(!size || size>63*1024*1024)return false;std::vector<unsigned char> bytes(size+80,0);
+  return InvokeDisc([path]{bridge_ctr_hud(false);auto size=core_retro_serialize_size();if(!size || size>63*1024*1024)return false;std::vector<unsigned char> bytes(size+80,0);
     std::memcpy(bytes.data(),"SWANST02",8);Write64(bytes.data()+8,bridge_card_digest());Write64(bytes.data()+16,size);
     Write64(bytes.data()+24,Hash(state_identity));std::memcpy(bytes.data()+32,StateCore,40);
     if(!core_retro_serialize(bytes.data()+80,size))return false;
@@ -930,7 +932,7 @@ bool SwanHost::Save(int slot){auto path=StatePath(slot);if(path.empty())return f
 bool SwanHost::Load(int slot){return LoadChecked(slot,true)==0;}
 int SwanHost::LoadChecked(int slot,bool ignore){auto path=StatePath(slot);if(path.empty())return -1;
   auto result=std::make_shared<int>(-1);
-  if(!Invoke([path,ignore,result]{auto bytes=ReadBytes(path);
+  if(!InvokeDisc([path,ignore,result]{auto bytes=ReadBytes(path);
     if(bytes.size()<80 || std::memcmp(bytes.data(),"SWANST02",8)!=0 || std::memcmp(bytes.data()+32,StateCore,40)!=0 ||
        Read64(bytes.data()+16)!=bytes.size()-80 || Read64(bytes.data()+24)!=Hash(state_identity) ||
        Read64(bytes.data()+72)!=crc32(0,bytes.data()+80,bytes.size()-80))return true;

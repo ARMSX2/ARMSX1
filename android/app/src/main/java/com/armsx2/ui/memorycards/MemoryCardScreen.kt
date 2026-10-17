@@ -5,6 +5,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +19,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -28,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,13 +54,8 @@ import java.util.Date
 /**
  * Memory-card manager for the PS1 core.
  *
- * The core attaches exactly two cards — `slot1.mcd` and `slot2.mcd` from its pref path (the app
- * files dir) — and nothing else, so this screen manages those two files rather than a library of
- * cards. Every PS2 notion the ARMSX2 original carried (8 MB/16 MB/32 MB/64 MB sizes, folder cards,
- * eight slots, `.ps2` files, per-game card overrides) is gone because the PS1 core has no equivalent:
- * a PS1 card is a fixed 128 KiB raw image, and the two paths are compiled in.
- *
- * [game] is only used for the "restart to apply" hint — cards cannot be scoped per game.
+ * Manages the actual Slot 1/2 files reported by SwanStation, not retired-core slot<N>.mcd files.
+ * [game] fixes the destination to that game's recorded mount; the global screen can choose a game.
  */
 @Composable
 fun MemoryCardScreen(
@@ -68,21 +67,45 @@ fun MemoryCardScreen(
     val state = viewModel.state.value
     val sessionActive = com.armsx2.runtime.MainActivityRuntime.eState.value != com.armsx2.EmuState.STOPPED
     var resetTarget by remember { mutableStateOf<MemoryCardSlot?>(null) }
-    var pendingImportSlot by remember { mutableStateOf<Int?>(null) }
-    var pendingExportSlot by remember { mutableStateOf<Int?>(null) }
+    // Document pickers can recreate the Activity (rotation, low memory). Plain remember
+    // loses the destination, making a successful file selection silently do nothing.
+    var pendingImportSlot by rememberSaveable { mutableStateOf<Int?>(null) }
+    var pendingImportPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingImportSource by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExportSlot by rememberSaveable { mutableStateOf<Int?>(null) }
+    var pendingExportPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExportSource by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedSource by rememberSaveable(game?.uri?.toString()) {
+        mutableStateOf(game?.uri?.toString())
+    }
+    var choosingGame by remember { mutableStateOf(false) }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val slot = pendingImportSlot
+        val path = pendingImportPath
+        val source = pendingImportSource
         pendingImportSlot = null
-        if (uri != null && slot != null) viewModel.import(slot, uri)
+        pendingImportPath = null
+        pendingImportSource = null
+        if (uri != null) {
+            if (slot != null && path != null) viewModel.import(slot, uri, path, source)
+            else viewModel.pickerFailed()
+        }
     }
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         val slot = pendingExportSlot
+        val path = pendingExportPath
+        val source = pendingExportSource
         pendingExportSlot = null
-        if (uri != null && slot != null) viewModel.export(slot, uri)
+        pendingExportPath = null
+        pendingExportSource = null
+        if (uri != null) {
+            if (slot != null && path != null) viewModel.export(slot, uri, path, source)
+            else viewModel.pickerFailed()
+        }
     }
 
-    LaunchedEffect(Unit) { viewModel.refresh() }
+    LaunchedEffect(selectedSource) { viewModel.refresh(selectedSource) }
 
     val content: @Composable () -> Unit = {
         Column(
@@ -96,7 +119,7 @@ fun MemoryCardScreen(
                     subtitle = "Slot 1 and Slot 2 · 128 KiB each",
                     leading = { RoundAction("←", str("action.back"), onBack) },
                     actions = {
-                        RoundAction("↻", str("games.card.refresh"), viewModel::refresh)
+                        RoundAction("↻", str("games.card.refresh"), { viewModel.refresh(selectedSource) })
                     },
                     horizontalPadding = 0.dp,
                 )
@@ -104,19 +127,51 @@ fun MemoryCardScreen(
 
             AboutCardsPanel(state.directory, game, sessionActive)
 
+            if (game == null) {
+                Box {
+                    OutlinedButton(
+                        onClick = { choosingGame = true },
+                        enabled = !state.busy && !sessionActive,
+                    ) {
+                        Text("Card for: " + (state.games.firstOrNull {
+                            it.uri.toString() == selectedSource
+                        }?.title ?: "Last launched game"))
+                    }
+                    DropdownMenu(expanded = choosingGame, onDismissRequest = { choosingGame = false }) {
+                        DropdownMenuItem(text = { Text("Last launched game") }, onClick = {
+                            selectedSource = null
+                            choosingGame = false
+                        })
+                        state.games.forEach { candidate ->
+                            DropdownMenuItem(text = { Text(candidate.title) }, onClick = {
+                                selectedSource = candidate.uri.toString()
+                                choosingGame = false
+                            })
+                        }
+                    }
+                }
+            }
             state.slots.forEach { slot ->
                 MemoryCardSlotRow(
                     item = slot,
-                    busy = state.busy || sessionActive,
-                    onCreate = { viewModel.create(slot.slot) },
-                    onReset = { resetTarget = slot },
+                    busy = state.busy || sessionActive || !slot.canManage,
+                    onCreate = { slot.file?.let { viewModel.create(slot.slot, it.absolutePath) } },
+                    onReset = { if (slot.canManage) resetTarget = slot },
                     onImport = {
+                        slot.file?.let { file ->
                         pendingImportSlot = slot.slot
-                        importer.launch(arrayOf("application/octet-stream", "*/*"))
+                        pendingImportPath = file.absolutePath
+                        pendingImportSource = selectedSource
+                        importer.launch(arrayOf("*/*"))
+                        }
                     },
                     onExport = {
+                        slot.file?.let { file ->
                         pendingExportSlot = slot.slot
-                        exporter.launch(slot.file.name)
+                        pendingExportPath = file.absolutePath
+                        pendingExportSource = selectedSource
+                        exporter.launch(file.name)
+                        }
                     },
                 )
             }
@@ -128,7 +183,7 @@ fun MemoryCardScreen(
 
     resetTarget?.let { item ->
         val confirm = {
-            viewModel.reset(item.slot)
+            item.file?.let { viewModel.reset(item.slot, it.absolutePath) }
             resetTarget = null
         }
         AlertDialog(
@@ -136,7 +191,7 @@ fun MemoryCardScreen(
             title = { Text("Erase slot ${item.slot}?") },
             text = {
                 Text(
-                    "This deletes ${item.file.name} and every save on it. A blank card is created " +
+                    "This deletes ${item.file?.name.orEmpty()} and every save on it. A blank card is created " +
                         "automatically the next time a game boots. Export it first if you want a backup.",
                 )
             },
@@ -171,8 +226,7 @@ fun MemoryCardScreen(
 }
 
 /**
- * The standing explanation of what this screen can and cannot do. Says out loud that cards are
- * shared by every game, because the core offers no per-game card path to hang a control off.
+ * Explain per-game/shared cards and the requirement to close the active native session first.
  */
 @Composable
 private fun AboutCardsPanel(directory: String, game: GameInfo?, sessionActive: Boolean) {
@@ -187,8 +241,10 @@ private fun AboutCardsPanel(directory: String, game: GameInfo?, sessionActive: B
             Spacer(Modifier.height(6.dp))
             Text(
                 "SwanStation uses a per-game card in Slot 1 and a shared card in Slot 2. " +
-                    "Each card is a raw 128 KiB file. This screen manages the actual cards from " +
-                    "your last boot; boot the desired game once before managing its Slot 1 card. " +
+                    "Each card is a raw 128 KiB file. Choose the game whose card you want to manage; " +
+                    "start and close it once if its card has not been identified yet. Imported cards " +
+                    "replace that game's selected slot, not a different game's last-used card. " +
+                    "The previous card is backed up in import-backups before replacement. " +
                     "Old-core slot1.mcd/slot2.mcd files are not moved or replaced. You can import " +
                     "a copy explicitly with Import after closing the game.",
                 style = MaterialTheme.typography.bodySmall,
@@ -237,7 +293,7 @@ private fun MemoryCardSlotRow(
                 Column(Modifier.weight(1f)) {
                     Text(slotLabel, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        item.file.name,
+                        item.file?.name ?: "—",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -245,6 +301,7 @@ private fun MemoryCardSlotRow(
                     )
                 }
                 when {
+                    !item.canManage -> StatusChip("Not loaded", MaterialTheme.colorScheme.onSurfaceVariant)
                     item.isValidSize -> StatusChip("Card inserted", Success)
                     item.exists -> StatusChip("Wrong size", Warning)
                     else -> StatusChip("Empty", MaterialTheme.colorScheme.onSurfaceVariant)
@@ -296,6 +353,7 @@ private fun MemoryCardSlotRow(
 
 /** One line of detail under a slot: size and, when the file is odd, why the core will reject it. */
 private fun slotDetail(item: MemoryCardSlot): String = when {
+    !item.canManage -> "—"
     item.isValidSize ->
         "${Ps1MemoryCards.describeSize(item.sizeBytes)} · last written ${formatTimestamp(item.modifiedAt)}"
     item.exists ->

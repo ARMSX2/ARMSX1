@@ -223,6 +223,11 @@ fun EmulationMenuScreen(viewModel: EmulationMenuViewModel = viewModel()) {
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val compact = maxWidth < 700.dp
+        // CompactMenuTabs is horizontal; MenuRail is vertical. Publish the actual
+        // responsive layout so hotkey-opened menus do not navigate the wrong axis.
+        androidx.compose.runtime.SideEffect {
+            EmulationMenuInputController.setHorizontalTabs(compact)
+        }
         AnimatedVisibility(
             visible = shown,
             enter = fadeIn(tween(190, easing = EaseOut)),
@@ -516,7 +521,7 @@ private fun MenuRailTab(tab: EmulationMenuTab, active: Boolean, onSelect: (Emula
         com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null
     val bring = remember { BringIntoViewRequester() }
     val label = str(tab.titleKey)
-    LaunchedEffect(active) { if (active) runCatching { bring.bringIntoView() } }
+    LaunchedEffect(active, focused) { if (focused) runCatching { bring.bringIntoView() } }
     Surface(
         onClick = { if (QuickMenuOrder.moving == null) { EmulationMenuInputController.focusTabs(); onSelect(tab) } },
         modifier = Modifier.size(56.dp).bringIntoViewRequester(bring).semantics { contentDescription = label },
@@ -548,7 +553,7 @@ private fun MenuTab(tab: EmulationMenuTab, active: Boolean, onSelect: (Emulation
     val focused = active && !EmulationMenuInputController.inContent.value &&
         com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null
     val bring = remember { BringIntoViewRequester() }
-    LaunchedEffect(active) { if (active) runCatching { bring.bringIntoView() } }
+    LaunchedEffect(active, focused) { if (focused) runCatching { bring.bringIntoView() } }
     Surface(
         onClick = { if (QuickMenuOrder.moving == null) { EmulationMenuInputController.focusTabs(); onSelect(tab) } },
         modifier = Modifier
@@ -703,6 +708,12 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
     ActionGrid(
         actions = listOf(
             MenuAction("resume", str("action.resume"), str("action.play"), "▶", Success, viewModel::resume),
+            MenuAction("saveState", str("savestate.title.save"), "Choose a save slot", "↥", null) {
+                InGameOverlay.openSaveStatePicker()
+            },
+            MenuAction("loadState", str("touch.stateAction.load"), "Choose a saved state", "↧", null) {
+                InGameOverlay.openLoadStatePicker()
+            },
             MenuAction("fastForward",
                 str("action.fastForward"),
                 // Fast-forward speed is configurable now (Ps1Settings.fastForwardSpeed, offered as
@@ -719,7 +730,7 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
             // resetGame, NOT restart: restart() tears the VM down and relaunches, which on this port
             // lands the user back in the library. resetGame() uses the core's own in-place reset
             // (psxe_host_request_reset). NOTE there are TWO entry points to this action — this
-            // row's onClick and EmulationMenuViewModel.activateSelection() index 2 for pad nav.
+            // row's onClick and EmulationMenuViewModel.activateSelection() for pad nav.
             // Changing only one leaves the bug alive on the other.
             MenuAction("reset", str("memcard.restart"), str("action.reset"), "↻", null, MainActivityRuntime::resetGame),
             MenuAction("swapDisc", str("action.swapDisc"), str("action.swapDisc.detail"), "⏏", null, MainActivityRuntime::promptSwapDisc),

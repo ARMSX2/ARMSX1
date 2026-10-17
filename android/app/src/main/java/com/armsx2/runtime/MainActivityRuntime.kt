@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.res.Configuration
-import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -594,6 +593,9 @@ open class MainActivityRuntime : ComponentActivity() {
         /** Run the blocking native session and make a rejected launch visible to the user.
          *  A clean game exit returns true; false means surface, native initialization, or boot failed. */
         private fun runVmThreadChecked(path: String, kind: String): Boolean {
+            // File URIs may be normalized to plain paths for boot. Bind the card to the
+            // library identity captured now, not a different selection made during shutdown.
+            val cardSource = currentGame.value?.uri?.toString()?.takeIf { it.isNotBlank() } ?: path
             val sessionSurface = freshSessionSurface()
             val surfaceReady = sessionSurface != null && runCatching {
                 sessionSurface.awaitInitialSurface(SURFACE_READY_TIMEOUT_MS)
@@ -647,7 +649,13 @@ open class MainActivityRuntime : ComponentActivity() {
                                 if (kind == "BIOS") "BIOS" else currentGame.value?.settingsKey.orEmpty(),
                                 path,
                             )
-                            NativeApp.runVMThreadForSession(prepared.launchPath, token)
+                            NativeApp.runVMThreadForSession(prepared.launchPath, token).also { booted ->
+                                if (booted && kind != "BIOS") runCatching {
+                                    instance?.applicationContext?.let { context ->
+                                        com.armsx2.core.Ps1MemoryCards.rememberSession(context, cardSource)
+                                    }
+                                }.onFailure { println("@@CARD_BINDING_FAILED@@ ${it.message}") }
+                            }
                         } finally {
                             NativeApp.releaseVMRun(token)
                             synchronized(vmLifecycleLock) {
@@ -1275,9 +1283,12 @@ open class MainActivityRuntime : ComponentActivity() {
                 // The PS1 path returns before the legacy launch code. Record the origin HERE,
                 // only for an accepted session, so Close can return external launches to their caller.
                 launchedExternally = external
-                // The PS1 path returns before the legacy launch code below.
                 // Restore the saved OSD on this PS1 path, which bypasses applyRendererPrefs().
                 InGameOverlay.applyStoredOsdMode()
+                // Claim gameplay orientation independently of the launcher preference.
+                emulationOwnsOrientation = true
+                instance?.applyEmulationOrientation()
+                // The PS1 path returns before the legacy launch code below.
                 // Arm the saved preference here, once an actual boot is accepted.
                 pendingAutoLoadOnBoot = pendingSlotLoadOnBoot == null &&
                     prefs.getBoolean("autoLoadOnBoot", false)
@@ -2228,7 +2239,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     if (advancingPolls < 3) return@repeat
                     // These native calls block until the emulation thread handles them.
                     // Never block Android's main/presentation thread while it does so.
-                    val loaded = withContext(Dispatchers.IO) {
+                    val loadResult = withContext(Dispatchers.IO) {
                         synchronized(vmLifecycleLock) {
                             if (vmRunGeneration != runGeneration || generation != vmRunningCallbackGeneration ||
                                 runToken == 0L || vmNativeRunToken != runToken || vmStopInProgress ||
@@ -2237,14 +2248,20 @@ open class MainActivityRuntime : ComponentActivity() {
                             if (requestedSlot == null && !NativeApp.hasAutosaveState())
                                 return@synchronized null
                             runCatching {
-                                if (requestedSlot != null) NativeApp.loadStateFromSlot(requestedSlot)
-                                else NativeApp.loadAutosaveState()
-                            }.getOrDefault(false)
+                                // Auto/cold loads used to bypass the card warning, restoring
+                                // an old card image over a successful import. Preserve the
+                                // current card; a manual load can ask whether to roll it back.
+                                NativeApp.loadStateFromSlotChecked(
+                                    requestedSlot ?: NativeApp.AUTOSAVE_SLOT, false,
+                                )
+                            }.getOrDefault(-1)
                         }
                     }
-                    if (loaded != null && vmRunGeneration == runGeneration && generation == vmRunningCallbackGeneration) {
-                        println("@@ANDROID_AUTOLOAD@@ slot=${requestedSlot ?: "auto"} loaded=$loaded")
-                        if (!loaded) reportAutoStateFailure(loading = true)
+                    if (loadResult != null && vmRunGeneration == runGeneration && generation == vmRunningCallbackGeneration) {
+                        println("@@ANDROID_AUTOLOAD@@ slot=${requestedSlot ?: "auto"} result=$loadResult")
+                        if (com.armsx2.ui.saves.AutoStateLoadPolicy.cardChanged(loadResult)) {
+                            com.armsx2.ui.GameOsd.toast(com.armsx2.i18n.I18n.get("savestate.autoLoad.cardChanged"))
+                        } else if (loadResult != NativeApp.STATE_OK) reportAutoStateFailure(loading = true)
                     }
                     return@launch
                 }
@@ -2904,16 +2921,14 @@ open class MainActivityRuntime : ComponentActivity() {
         // Emulation (game OR BIOS) uses the renderer rotation, resolved per-game when there is a
         // game and global otherwise; the launcher/library uses its own app-level rotation
         // (AetherSX2-style split). Both share the 0/1/2/3 mapping below.
-        val orientation = if (emulationOwnsOrientation)
+        val emulationMode = if (emulationOwnsOrientation)
             com.armsx2.config.ConfigStore.resolveForGame(currentGame.value?.settingsKey).orientation
-        else
-            com.armsx2.ui.theme.LauncherOrientationPreferences.mode.value
-        val requested = when (orientation) {
-            1 -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            2 -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-            3 -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-            else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
+        else 0
+        val requested = ScreenOrientationPolicy.requested(
+            emulating = emulationOwnsOrientation,
+            launcherMode = com.armsx2.ui.theme.LauncherOrientationPreferences.mode.value,
+            emulationMode = emulationMode,
+        )
         // ★ Only ASSIGN when it actually changes. Writing requestedOrientation makes Android
         // re-evaluate orientation even when the value is identical, and with the default
         // SCREEN_ORIENTATION_UNSPECIFIED there is no lock to hold it — so a handheld device can

@@ -415,13 +415,9 @@ fun TouchControlsOverlay() {
                     TouchButtonId.Kind.PRESSURE -> Unit
                     TouchButtonId.Kind.FASTFORWARD -> FastForwardWidget(cfg, edit)
                     TouchButtonId.Kind.MACRO -> MacroWidget(cfg, edit)
-                    // PS1 port: of the three STATEACTION buttons only SCREENSHOT survives.
-                    // The ARMSX core has no save-state implementation at all (nothing in
-                    // frontend/main.cpp reads or writes one), so the SAVE/LOAD buttons
-                    // render nothing rather than offering an action that cannot exist.
-                    // The TouchButtonId entries stay so saved layouts still parse.
-                    TouchButtonId.Kind.STATEACTION ->
-                        if (cfg.id == TouchButtonId.SCREENSHOT) StateActionWidget(cfg, edit) else Unit
+                    // SwanStation supports states. Honour saved SAVE/LOAD buttons in both
+                    // play and edit mode instead of hiding them behind the retired-core filter.
+                    TouchButtonId.Kind.STATEACTION -> StateActionWidget(cfg, edit)
 	                    else -> ButtonWidget(
 	                        cfg = cfg,
 	                        edit = edit,

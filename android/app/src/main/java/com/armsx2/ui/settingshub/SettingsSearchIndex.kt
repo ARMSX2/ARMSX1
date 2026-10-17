@@ -93,6 +93,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("renderer.lineDetect.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.deinterlace.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.overscan.label", true, SettingsCategory.Graphics),
+    SettingsSearchEntry("renderer.orientation.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.rotation.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.verticalSync.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.bilinear.label", true, SettingsCategory.Graphics),

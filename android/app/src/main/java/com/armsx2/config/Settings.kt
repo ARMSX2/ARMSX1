@@ -362,7 +362,8 @@ data class Settings(
     val customDriverId: String = "",
     /** Android activity screen orientation: 0 Use Device Setting · 1 Landscape · 2 Portrait
      *  · 3 Auto-Rotate. Applied via MainActivityRuntime.applyEmulationOrientation, resolved
-     *  per-game at game boot (global in the library/menus). Seeded from the legacy global
+     *  per-game at game boot (global for BIOS). The library uses LauncherOrientationPreferences.
+     *  Seeded from the legacy global
      *  "ui.orientation" pref on first load. */
     val orientation: Int = 0,
     /** GitHub #375: in PORTRAIT, top-align the render (true, default) instead of vertical-

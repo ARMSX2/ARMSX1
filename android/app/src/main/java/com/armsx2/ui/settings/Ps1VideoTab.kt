@@ -288,6 +288,9 @@ fun Ps1VideoTab() {
         )
         SettingsDivider()
 
+        GameplayOrientationSettings()
+        SettingsDivider()
+
         SegmentedRow(
             label = str("renderer.rotation.label"),
             options = Ps1Settings.DISPLAY_ROTATION_LABELS,

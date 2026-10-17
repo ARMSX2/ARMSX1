@@ -81,7 +81,9 @@ internal object QuickMenuOrder {
             (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }.distinct()
         }
         orders["Session"]?.let { previous ->
-            val updated = MenuOrderPolicy.insertAfterIfNew(previous, "action.discord", "action.screenshot")
+            val withDiscord = MenuOrderPolicy.insertAfterIfNew(previous, "action.discord", "action.screenshot")
+            val withSave = MenuOrderPolicy.insertAfterIfNew(withDiscord, "action.saveState", "action.resume")
+            val updated = MenuOrderPolicy.insertAfterIfNew(withSave, "action.loadState", "action.saveState")
             if (updated != previous) { orders = orders + ("Session" to updated); persist() }
         }
         children["tabs"] = tabs

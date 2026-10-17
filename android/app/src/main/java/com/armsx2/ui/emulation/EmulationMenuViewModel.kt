@@ -140,25 +140,22 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
             // Index-for-index with SessionPane's action list. It used to skip Fast-Forward
             // entirely (0 resume, 1 restart, ...), so activating index 1 with the pad restarted
             // the game instead of fast-forwarding it.
-            EmulationMenuTab.Session -> when (state.value.selectedAction) {
-                0 -> resume()
-                1 -> { MainActivityRuntime.instance?.toggleFastForward(); resume() }
-                2 -> MainActivityRuntime.resetGame()
-                3 -> MainActivityRuntime.promptSwapDisc()
-                else -> {
-                    when (val action = state.value.selectedAction - 4) {
-                        0 -> swapGame()
-                        1 -> MainActivityRuntime.closeGame()
-                        2 -> {
-                            MainActivityRuntime.instance?.let { com.armsx2.Screenshots.capture(it.applicationContext) }
-                            com.armsx2.ui.GameOsd.toast("Screenshot saved")
-                            resume()
-                        }
-                        // Repeated presses scrub further back without resuming.
-                        3 -> openDiscord()
-                        4 -> if (state.value.rewindEnabled) rewindStepBack()
-                    }
+            EmulationMenuTab.Session -> when (SessionActionPolicy.ids(state.value.rewindEnabled).getOrNull(state.value.selectedAction)) {
+                "resume" -> resume()
+                "saveState" -> InGameOverlay.openSaveStatePicker()
+                "loadState" -> InGameOverlay.openLoadStatePicker()
+                "fastForward" -> { MainActivityRuntime.instance?.toggleFastForward(); resume() }
+                "reset" -> MainActivityRuntime.resetGame()
+                "swapDisc" -> MainActivityRuntime.promptSwapDisc()
+                "swapGame" -> swapGame()
+                "close" -> MainActivityRuntime.closeGame()
+                "screenshot" -> {
+                    MainActivityRuntime.instance?.let { com.armsx2.Screenshots.capture(it.applicationContext) }
+                    com.armsx2.ui.GameOsd.toast("Screenshot saved")
+                    resume()
                 }
+                "discord" -> openDiscord()
+                "rewind" -> rewindStepBack()
             }
             // Graphics, Fixes and Performance are registry-driven panes — every control in them
             // registers with SettingsControllerNav and the router drives it directly — so there is
@@ -391,8 +388,7 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
     private fun actionCount(tab: EmulationMenuTab): Int = when (tab) {
         // Resume, Fast-Forward, Restart, Swap Disc, playlist discs, Swap Game, Close,
         // Screenshot, Discord, then optional Rewind; keep indices aligned with SessionPane.
-        EmulationMenuTab.Session -> 8 +
-            if (state.value.rewindEnabled) 1 else 0
+        EmulationMenuTab.Session -> SessionActionPolicy.ids(state.value.rewindEnabled).size
         // 0 for the three registry-driven panes: their rows are SettingsControllerNav items, not
         // indices into an action grid, so a non-zero count here would move a selection nothing
         // draws. Graphics was 4 against the old four-entry renderer picker.
@@ -417,12 +413,17 @@ object EmulationMenuInputController {
     private var owner: EmulationMenuViewModel? = null
     private var pendingTab: EmulationMenuTab? = null
 
-    // Two-zone navigation: the tab rail is on the RIGHT of the content pane.
-    // Up/Down choose tabs, Left (or A) enters the selected tab's options.
-    // Within options, Left moves/adjusts left, X moves/adjusts right, and Right
-    // (or B) returns directly to the tab rail without changing the chosen tab.
+    // Wide layouts have a vertical rail on the right; compact layouts have a
+    // horizontal strip above the content. Both key and stick/HAT paths use move().
     val inContent = androidx.compose.runtime.mutableStateOf(false)
+    private var horizontalTabs = false
     private val nav get() = com.armsx2.ui.settings.SettingsControllerNav
+
+    fun setHorizontalTabs(horizontal: Boolean) {
+        if (horizontalTabs == horizontal) return
+        cancelConfirm()
+        horizontalTabs = horizontal
+    }
 
     // Set by a modal panel drawn OVER the menu (Friends) for as long as it is open; the lambda
     // closes it.
@@ -545,28 +546,27 @@ object EmulationMenuInputController {
             return true
         }
         val viewModel = owner ?: return false
-        if (!inContent.value) {
-            // Tab rail: Left moves into the content displayed beside it.
-            when {
-                dy < 0 -> viewModel.cycleTab(-1)
-                dy > 0 -> viewModel.cycleTab(1)
-                dx < 0 -> enterContent()
+        when (MenuNavigationPolicy.move(horizontalTabs, inContent.value, dx, dy)) {
+            MenuNavigationPolicy.Move.PreviousTab -> viewModel.cycleTab(-1)
+            MenuNavigationPolicy.Move.NextTab -> viewModel.cycleTab(1)
+            MenuNavigationPolicy.Move.EnterContent -> enterContent()
+            MenuNavigationPolicy.Move.ExitContent -> exitContent()
+            MenuNavigationPolicy.Move.Up, MenuNavigationPolicy.Move.Down -> {
+                val direction = if (dy < 0) -1 else 1
+                val moved = nav.moveSpatial(0, direction)
+                // With tabs ABOVE the content, Up at its first row returns to them.
+                // Right remains a value adjustment, never a sideways escape to a top strip.
+                if (horizontalTabs && direction < 0 && !moved) exitContent()
+                else onVerticalNavigation?.invoke(direction, moved)
             }
-            return true
-        }
-        // Content pane: registry-driven. An extra press at an edge scrolls the full pane.
-        when {
-            dy != 0 -> {
-                val moved = nav.moveSpatial(0, dy)
-                onVerticalNavigation?.invoke(dy, moved)
-            }
-            dx < 0 -> if (!nav.adjust(-1)) nav.moveSpatial(-1, 0)
-            dx > 0 -> exitContent()
+            MenuNavigationPolicy.Move.Left -> if (!nav.adjust(-1)) nav.moveSpatial(-1, 0)
+            MenuNavigationPolicy.Move.Right -> if (!nav.adjust(1)) nav.moveSpatial(1, 0)
+            MenuNavigationPolicy.Move.None -> Unit
         }
         return true
     }
 
-    /** Right is reserved for returning to tabs; X keeps all horizontal choices/values reachable. */
+    /** X adjusts right in either layout (the wide layout reserves Right for its side rail). */
     fun nextOption(): Boolean {
         if (MainActivityRuntime.discPickerOpen.value) return true
         owner ?: return false

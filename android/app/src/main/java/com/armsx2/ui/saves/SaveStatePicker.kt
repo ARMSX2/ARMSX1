@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +56,7 @@ import com.armsx2.ui.common.RoundAction
 import com.armsx2.ui.settings.IntSliderRow
 import com.armsx2.ui.settings.controllerFocusable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kr.co.iefriends.pcsx2.NativeApp
@@ -99,13 +101,50 @@ fun SaveStatePickerScreen(mode: SaveMode, onBack: () -> Unit) {
     }
     // i18n KEY of the last slot-tap failure, shown in place of silently closing the picker.
     var failure by remember { mutableStateOf<String?>(null) }
+    var operationBusy by remember { mutableStateOf(false) }
+    // Do not resume the VM while a slot write/load or its card-warning dialog is pending.
+    BackHandler(enabled = operationBusy) { }
+    fun pick(selected: Int) {
+        if (operationBusy) return
+        operationBusy = true
+        failure = null
+        scope.launch {
+            try {
+                val outcome = withContext(Dispatchers.IO) {
+                    if (mode == SaveMode.Load) SaveStateGuard.load(selected)
+                    else if (NativeApp.saveStateToSlot(selected)) SaveStateGuard.Outcome.Loaded
+                    else SaveStateGuard.Outcome.Failed
+                }
+                when (outcome) {
+                    SaveStateGuard.Outcome.Loaded -> onBack()
+                    SaveStateGuard.Outcome.Cancelled -> Unit
+                    SaveStateGuard.Outcome.Failed -> {
+                        val hardcore = withContext(Dispatchers.IO) {
+                            runCatching { NativeApp.isHardcoreMode() }.getOrDefault(false)
+                        }
+                        failure = when {
+                            hardcore -> "savestate.error.hardcore"
+                            mode == SaveMode.Save -> "savestate.error.save"
+                            else -> "savestate.error.load"
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                failure = if (mode == SaveMode.Save) "savestate.error.save" else "savestate.error.load"
+            } finally {
+                operationBusy = false
+            }
+        }
+    }
 
     ArmsBackdrop {
         Column(Modifier.fillMaxSize()) {
             ArmsTopBar(
                 title = if (mode == SaveMode.Save) str("savestate.title.save")
                 else str("savestate.title.loadManage"),
-                leading = { RoundAction("←", str("action.back"), onBack) },
+                leading = { RoundAction("←", str("action.back"), { if (!operationBusy) onBack() }) },
             )
             failure?.let { key ->
                 Text(
@@ -141,70 +180,11 @@ fun SaveStatePickerScreen(mode: SaveMode, onBack: () -> Unit) {
                 ) {
                 if (mode == SaveMode.Load && hasAutosave) {
                     item(key = "autosave") {
-                        AutosaveTile {
-                            scope.launch(Dispatchers.IO) {
-                                when (SaveStateGuard.load(NativeApp.AUTOSAVE_SLOT)) {
-                                    SaveStateGuard.Outcome.Loaded -> withContext(Dispatchers.Main) { onBack() }
-                                    SaveStateGuard.Outcome.Cancelled -> Unit
-                                    else -> withContext(Dispatchers.Main) { failure = "savestate.error.load" }
-                                }
-                            }
-                        }
+                        AutosaveTile(enabled = !operationBusy) { pick(NativeApp.AUTOSAVE_SLOT) }
                     }
                 }
                     items((0 until SLOTS).toList(), key = { "slot_$it" }) { slot ->
-                        SlotTile(slot, mode) { selected ->
-                            scope.launch(Dispatchers.IO) {
-                                // The result used to be discarded and onBack() called either way, so
-                                // a refused save closed the picker looking exactly like a successful
-                                // one — no state written, no warning. That is the reported "closes
-                                // as if saved, takes 2-3 attempts". Stay open and say why instead.
-                                // Load goes through SaveStateGuard: it may put the memory-card
-                                // divergence question to the user and suspend here until it is
-                                // answered. Cancel is NOT a failure — nothing was touched — so
-                                // it leaves the picker open with no error banner.
-                                var cancelled = false
-                                val ok = when (mode) {
-                                    SaveMode.Save -> NativeApp.saveStateToSlot(selected)
-                                    SaveMode.Load -> when (SaveStateGuard.load(selected)) {
-                                        SaveStateGuard.Outcome.Loaded -> true
-                                        SaveStateGuard.Outcome.Cancelled -> {
-                                            cancelled = true
-                                            false
-                                        }
-                                        SaveStateGuard.Outcome.Failed -> false
-                                    }
-                                }
-                                val busy = !ok && mode == SaveMode.Save &&
-                                    runCatching { NativeApp.isMemcardBusy() }.getOrDefault(false)
-                                val hardcore = !ok &&
-                                    runCatching { NativeApp.isHardcoreMode() }.getOrDefault(false)
-                                withContext(Dispatchers.Main) {
-                                    if (ok) {
-                                        failure = null
-                                        onBack()
-                                    } else if (cancelled) {
-                                        // The user was warned and said no. Stay exactly where
-                                        // they were; an error banner here would be a lie.
-                                        failure = null
-                                    } else {
-                                        // Store the KEY, not the resolved text — str() is
-                                        // @Composable and this is a coroutine, and keeping the key
-                                        // lets the banner re-translate on a language switch.
-                                        failure = when {
-                                            // RA hardcore forbids save states outright, and the
-                                            // refusal happens inside VMManager — below every exit
-                                            // this JNI logs — so it surfaced as a bare "couldn't
-                                            // load that slot" with nothing in logcat. Name it.
-                                            hardcore -> "savestate.error.hardcore"
-                                            busy -> "savestate.error.memcardBusy"
-                                            mode == SaveMode.Save -> "savestate.error.save"
-                                            else -> "savestate.error.load"
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        SlotTile(slot, mode, busy = operationBusy, onPick = ::pick)
                     }
                 }
             }
@@ -303,7 +283,7 @@ private fun ToggleRow(controllerId: String, label: String, checked: Boolean, onC
 }
 
 @Composable
-private fun AutosaveTile(onPick: () -> Unit) {
+private fun AutosaveTile(enabled: Boolean = true, onPick: () -> Unit) {
     val gamePath by produceState<String?>(initialValue = null) {
         value = withContext(Dispatchers.IO) { runCatching { NativeApp.getAutosaveGamePath() }.getOrNull() }
     }
@@ -316,9 +296,10 @@ private fun AutosaveTile(onPick: () -> Unit) {
         }
     }
     TileFrame(
-        controllerId = "save.autosave",
+        controllerId = if (enabled) "save.autosave" else null,
         borderColor = Color(0xFFFFB347).copy(alpha = 0.7f),
         backgroundColor = Color(0xFF2F2820),
+        enabled = enabled,
         onClick = onPick,
     ) {
         image?.let {
@@ -335,7 +316,7 @@ private fun AutosaveTile(onPick: () -> Unit) {
 }
 
 @Composable
-private fun SlotTile(slot: Int, mode: SaveMode, onPick: (Int) -> Unit) {
+private fun SlotTile(slot: Int, mode: SaveMode, busy: Boolean = false, onPick: (Int) -> Unit) {
     val gamePath by produceState<String?>(initialValue = null, slot) {
         value = withContext(Dispatchers.IO) { runCatching { NativeApp.getGamePathSlot(slot) }.getOrNull() }
     }
@@ -349,7 +330,7 @@ private fun SlotTile(slot: Int, mode: SaveMode, onPick: (Int) -> Unit) {
     }
     val empty = gamePath.isNullOrEmpty()
     // Load: empty slots disabled. Save: any slot is a valid target.
-    val enabled = mode == SaveMode.Save || !empty
+    val enabled = !busy && (mode == SaveMode.Save || !empty)
     TileFrame(
         controllerId = if (enabled) "save.slot.$slot" else null,
         borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),

@@ -10,6 +10,37 @@ Performance overlay persistence
     than an in-memory Off default. Preserve Custom flags and explicit game overrides;
     fresh installs still default to Off.
 
+In-game menu navigation
+  * Match controller directions to the responsive menu layout. Compact horizontal tabs use
+    Left/Right and Down enters their options; wide vertical tabs retain Up/Down and Left.
+    Content uses Up/Down in both layouts. D-pad keys and analog/HAT navigation share this
+    policy; gameplay mappings are unchanged.
+
+Independent launcher and gameplay orientation
+  * Restore Emulation Screen Orientation in Video settings: Device, Landscape, Portrait,
+    and Auto-Rotate, with a separate per-game choice and Use global option. Landscape games
+    work even with Android locked to portrait; the library keeps its independently selected
+    orientation, including landscape. Image rotation remains a separate control.
+    Claim gameplay orientation on the normal PS1 launch path, not only legacy renderer setup.
+
+Memory cards and save states
+  * Keep Slot 1 and Slot 2 visible even when a game's card path is not yet available.
+    Show a minimal status without extra UI instructions; never redirect an unresolved card
+    operation to another game's save file.
+  * Track each game's actual mounted cards and add a game selector to the memory-card manager.
+    Never redirect a selected game's Slot 1 import to the last game booted; unidentified games
+    ask for one normal boot first. Preserve a backup of an existing card before import.
+  * Automatic/cold state loads check for changed cards and keep the current card instead of
+    silently restoring an older card image over imported/in-game saves. Manual loads retain
+    their confirmation. Prevent repeated picker requests and cancel queued state mutations
+    after timeout or session shutdown rather than applying them after reporting failure.
+  * Preserve memory-card import/export destinations across Android picker screen recreation;
+    show an error instead of silently ignoring a returned file. Refuse to redirect a pending
+    operation if the active card or data folder changes. Existing cards remain session-locked.
+  * Restore Save/Load State touch buttons hidden by a retired-core check and add visible
+    Save/Load actions immediately after Resume in the quick menu. Controller actions share
+    stable IDs, and existing custom menu orders gain the new actions without being reset.
+
 0.3.6
 -----
 
