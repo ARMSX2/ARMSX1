@@ -104,6 +104,23 @@ fun AchievementsScreen(onBack: () -> Unit, viewModel: AchievementsViewModel = vi
                     }
                 },
             )
+            GlassPanel(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
+                Column {
+                    SettingSwitchRow(
+                        title = str("ra.enabled"),
+                        description = str("ra.enabled.desc"),
+                        checked = state.enabled,
+                        onCheckedChange = { viewModel.setOption("enabled", it) },
+                        modifier = Modifier.controllerFocusable("ra.enabled",
+                            onConfirm = { viewModel.setOption("enabled", !state.enabled) },
+                            onLeft = { if (state.enabled) viewModel.setOption("enabled", false) },
+                            onRight = { if (!state.enabled) viewModel.setOption("enabled", true) }),
+                    )
+                    if (state.trackingRestartRequired) Text(str("ra.enabled.relaunch"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             if (!state.loggedIn) {
                 LoginPanel(state.loading, viewModel::login, Modifier.fillMaxWidth())
             } else {

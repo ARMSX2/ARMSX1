@@ -4,6 +4,27 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+RetroAchievements library and testing
+  * Show cached achievement availability/progress over grid and shelf covers, including
+    PS one styling and recent games. Unplayed matched games show 0/total; distinguish
+    hardcore progress/mastery from softcore completion. Keep badges visible with titles
+    hidden, without extra network requests or badges on shelf reflections.
+  * Add a persistent Enable RetroAchievements switch at the top of the achievements
+    screen. Off unloads the active set, stops evaluation/submissions and clears indicators
+    without signing out or deleting synced library progress. Re-enabling during testing
+    waits for a fresh game launch so test-state memory cannot earn retroactive credit.
+    Reject queued game submissions from an earlier tracking generation; requests already
+    transmitted cannot be recalled. Hardcore support is unchanged.
+
+Audio synchronization
+  * Bound the SwanStation host audio queue relative to the selected startup reserve,
+    instead of retaining up to about 1.49 seconds of stale PCM in its backing ring.
+    Drop excess old audio after queue overruns with a short cross-fade and preserve
+    complete stereo frames, including oversized batches. Keep the existing startup
+    crackle protection and user buffer choice; discard muted/paused PCM before resume.
+  * Include queue depth, latency bound, trimmed frames, underruns and Android device
+    buffer size in session reports to distinguish host backlog from output/recording delay.
+
 Performance overlay persistence
   * Restore the saved OSD mode at app startup and on the normal PS1 launch path (which
     bypasses legacy renderer setup). Render from the saved global/per-game mode rather

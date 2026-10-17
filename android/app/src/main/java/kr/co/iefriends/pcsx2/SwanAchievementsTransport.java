@@ -26,6 +26,7 @@ public final class SwanAchievementsTransport {
     public static void option(String key,int value){Context ctx=context();if(ctx!=null)ctx.getSharedPreferences("swan-ra",Context.MODE_PRIVATE).edit().putInt("option."+key,value).apply();}
     public static void notifyUnlock(String title,int points,int seconds){Context ctx=context();if(ctx==null)return;
         new Handler(Looper.getMainLooper()).post(()->{
+            if(optionValue("enabled",1)==0)return;
             if(optionValue("notifications",1)!=0)com.armsx2.ui.GameOsd.INSTANCE.achievementNote("Achievement unlocked: "+title+" ("+points+" points)",seconds*1000L,optionValue("notificationPosition",1));
             new Thread(com.armsx2.AchievementsProgress::snapshotCurrentGame,"swan-ach-progress").start();
             if(optionValue("soundEffects",1)!=0){String sound=ctx.getSharedPreferences("swan-ra",Context.MODE_PRIVATE).getString("sound","");
@@ -37,6 +38,7 @@ public final class SwanAchievementsTransport {
         try {java.io.File file=new java.io.File(path);if(!path.isEmpty()&&(!file.isFile()||!file.getCanonicalPath().startsWith(ctx.getFilesDir().getCanonicalPath()+"/")))return;
             ctx.getSharedPreferences("swan-ra",Context.MODE_PRIVATE).edit().putString("sound",path).apply();}catch(java.io.IOException ignored){} }
     public static void event(int kind,int id,String text,boolean visible){new Handler(Looper.getMainLooper()).post(()->{
+        if(kind!=3&&optionValue("enabled",1)==0)return;
         if(kind==0){if(optionValue("leaderboardNotifications",1)!=0)com.armsx2.ui.GameOsd.INSTANCE.achievementNote(text,optionValue("leaderboardsDuration",10)*1000L,optionValue("notificationPosition",1));}
         else if(kind==3)com.armsx2.ui.GameOsd.INSTANCE.clearAchievementIndicators();
         else com.armsx2.ui.GameOsd.INSTANCE.achievementIndicator((kind==1?"challenge.":"leaderboard.")+id,visible?text:"",optionValue("overlayPosition",8));
@@ -44,6 +46,8 @@ public final class SwanAchievementsTransport {
     public static String[] request(String address,String post,String contentType) {
         HttpsURLConnection connection=null;
         try {
+            if(!com.armsx2.achievements.RaSubmissionPolicy.allowed(optionValue("enabled",1)!=0,address,post))
+                return new String[]{"-1",""};
             URL url=new URL(address);
             if(!url.getProtocol().equals("https")||!url.getHost().equals("retroachievements.org")||url.getPort()!=-1||url.getUserInfo()!=null)
                 return new String[]{"-1",""};

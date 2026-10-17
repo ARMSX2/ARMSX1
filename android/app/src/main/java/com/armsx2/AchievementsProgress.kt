@@ -40,6 +40,7 @@ object AchievementsProgress {
         if (json.isEmpty()) return
         runCatching {
             val root = JSONObject(json)
+            if (!root.optBoolean("enabled", true) || !root.optBoolean("trackingActive", true)) return
             val items = root.optJSONArray("items") ?: return
             val total = items.length()
             if (total == 0) return

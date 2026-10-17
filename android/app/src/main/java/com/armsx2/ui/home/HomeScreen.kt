@@ -1232,7 +1232,7 @@ private fun GameGridCard(
     if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
         PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), selected, GridLabels.show.value,
             Modifier.fillMaxWidth(), onClick = { onSelect(); onLaunch() }, onDetails = onDetails) {
-            GameCover(game, it)
+            GameCover(game, it, achievementBadge = true)
         }
         return
     }
@@ -1247,6 +1247,7 @@ private fun GameGridCard(
                 .fillMaxWidth()
                 .aspectRatio(coverAspectRatio())
                 .coverFrame(selected, 2.5.dp),
+            achievementBadge = true,
         )
         if (GridLabels.show.value) {
             Spacer(Modifier.height(4.dp))
@@ -1300,7 +1301,7 @@ private fun GameListCard(game: GameInfo, selected: Boolean, onClick: () -> Unit,
 private fun RecentGameCard(game: GameInfo, selected: Boolean = false, onClick: () -> Unit, onDetails: () -> Unit) {
     if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
         PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), selected, true,
-            Modifier.width(120.dp), onClick = onClick, onDetails = onDetails) { GameCover(game, it) }
+            Modifier.width(120.dp), onClick = onClick, onDetails = onDetails) { GameCover(game, it, achievementBadge = true) }
         return
     }
     Column(
@@ -1312,6 +1313,7 @@ private fun RecentGameCard(game: GameInfo, selected: Boolean = false, onClick: (
             game,
             Modifier.fillMaxWidth().aspectRatio(coverAspectRatio())
                 .coverFrame(selected, 2.5.dp),
+            achievementBadge = true,
         )
         Spacer(Modifier.height(5.dp))
         Text(game.displayTitle(EnglishTitles.enabled.value), style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1407,8 +1409,7 @@ private fun GameMetadata(game: GameInfo) {
         if (played.isNotEmpty()) {
             Text("⏳ $played", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, maxLines = 1)
         }
-        val raUser = com.armsx2.RaLibrary.userName
-        val ach = remember(game.uri, game.serial, rev, raUser) { com.armsx2.RaLibrary.progressFor(game) }
+        val ach = rememberLibraryAchievementProgress(game)
         ach?.let { p ->
             // Hardcore and softcore are different accomplishments on RetroAchievements — hardcore
             // forbids save states, cheats and slow motion — so they get different treatment rather
@@ -1499,6 +1500,7 @@ private fun GameCover(
     // covers whose source art is a touch taller than the 0.7 slot.
     contentScale: ContentScale = ContentScale.Fit,
     placeholderText: Boolean = true,
+    achievementBadge: Boolean = false,
 ) {
     val context = LocalContext.current
     // Read the 3D-cover flag explicitly (not just via game.coverUrl, which is
@@ -1511,13 +1513,17 @@ private fun GameCover(
     val models = remember(custom, game, use3d, CustomCovers.version.value, catalogueVersion) {
         listOfNotNull(custom) + game.coverUrls
     }
-    FallbackCoverImage(
-        models = models,
-        contentDescription = game.displayTitle(EnglishTitles.enabled.value),
-        modifier = modifier.clip(RoundedCornerShape(cornerRadius)),
-        contentScale = contentScale,
-    ) {
-        CoverPlaceholder(game.displayTitle(EnglishTitles.enabled.value), game.serial, showText = placeholderText)
+    Box(modifier.clip(RoundedCornerShape(cornerRadius))) {
+        FallbackCoverImage(
+            models = models,
+            contentDescription = game.displayTitle(EnglishTitles.enabled.value),
+            modifier = Modifier.fillMaxSize(),
+            contentScale = contentScale,
+        ) {
+            CoverPlaceholder(game.displayTitle(EnglishTitles.enabled.value), game.serial, showText = placeholderText)
+        }
+        if (achievementBadge) LibraryAchievementBadge(game,
+            Modifier.align(Alignment.TopEnd).padding(4.dp))
     }
 }
 
@@ -1946,7 +1952,7 @@ private fun GameShelf(
                 itemsIndexed(games, key = { _, game -> game.uri.toString() }) { i, game ->
                     PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), startIndex + i == selectedIndex,
                         GridLabels.show.value, Modifier.width(coverWidth),
-                        onClick = { onLaunch(game) }, onDetails = { onDetails(game) }) { GameCover(game, it) }
+                        onClick = { onLaunch(game) }, onDetails = { onDetails(game) }) { GameCover(game, it, achievementBadge = true) }
                 }
             }
         } else {
@@ -1954,7 +1960,7 @@ private fun GameShelf(
                 games.forEachIndexed { i, game ->
                     PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), startIndex + i == selectedIndex,
                         GridLabels.show.value, Modifier.width(coverWidth),
-                        onClick = { onLaunch(game) }, onDetails = { onDetails(game) }) { GameCover(game, it) }
+                        onClick = { onLaunch(game) }, onDetails = { onDetails(game) }) { GameCover(game, it, achievementBadge = true) }
                 }
                 repeat((slotsPerRow - games.size).coerceAtLeast(0)) { Spacer(Modifier.width(coverWidth)) }
             }
@@ -2054,6 +2060,7 @@ private fun ShelfGameCard(game: GameInfo, width: Dp, reflectionHeight: Dp, selec
                 ),
             cornerRadius = 0.dp,
             contentScale = ContentScale.Fit,
+            achievementBadge = true,
         )
         // A faint mirror of the cover on the shelf surface just in front of it.
         // clipToBounds keeps it to reflectionHeight — without it the full flipped

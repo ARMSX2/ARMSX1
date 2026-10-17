@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Independently authored host for the vendored MIT rcheevos client.
 #include "achievements.h"
+#include "achievement_tracking.h"
 #include "rc_client.h"
 #include "rc_hash.h"
 #include "rc_consoles.h"
@@ -32,9 +33,10 @@ rc_client_async_handle_t* loading=nullptr;
 uint32_t(*read_memory)(uint32_t,uint8_t*,uint32_t)=nullptr;
 std::string game_hash;
 bool game_running=false;
+SwanAchievements::TrackingPolicy tracking;
 thread_local unsigned hash_subimage=0;
 void*(*hash_open_subimage)(const char*,uint32_t,unsigned)=nullptr;
-std::map<std::string,bool> settings{{"notifications",true},{"leaderboardNotifications",true},{"overlays",true},{"lbOverlays",true},{"soundEffects",true},{"encoreMode",false},{"spectatorMode",false},{"unofficialTestMode",false}};
+std::map<std::string,bool> settings{{"enabled",true},{"notifications",true},{"leaderboardNotifications",true},{"overlays",true},{"lbOverlays",true},{"soundEffects",true},{"encoreMode",false},{"spectatorMode",false},{"unofficialTestMode",false}};
 std::map<std::string,int> number_settings{{"notificationsDuration",5},{"leaderboardsDuration",10},{"notificationPosition",1},{"overlayPosition",8}};
 std::set<uint32_t> primed;
 struct Env {
@@ -58,8 +60,13 @@ void Worker(){for(;;){std::function<void()> job;
 }}
 void Server(const rc_api_request_t* request,rc_client_server_callback_t callback,void* opaque,rc_client_t*) {
   const std::string url=request->url?request->url:"",post=request->post_data?request->post_data:"",type=request->content_type?request->content_type:"";
-  Queue([url,post,type,callback,opaque]{Env env;std::pair<std::string,std::string> response{"-2",""};
-    if(env.value){auto address=env.value->NewStringUTF(url.c_str()),body=env.value->NewStringUTF(post.c_str()),content=env.value->NewStringUTF(type.c_str());
+  const bool submission=SwanAchievements::IsSubmission(post)||SwanAchievements::IsSubmission(url);
+  uint64_t generation;bool admitted;
+  {std::lock_guard lock(mutex);generation=tracking.Generation();admitted=tracking.Active();}
+  Queue([url,post,type,callback,opaque,submission,generation,admitted]{Env env;std::pair<std::string,std::string> response{"-2",""};
+    bool allowed;{std::lock_guard lock(mutex);allowed=!submission||(admitted&&tracking.CanDispatch(generation));}
+    if(!allowed)response={"-1",""};
+    if(allowed&&env.value){auto address=env.value->NewStringUTF(url.c_str()),body=env.value->NewStringUTF(post.c_str()),content=env.value->NewStringUTF(type.c_str());
       auto result=static_cast<jobjectArray>(env.value->CallStaticObjectMethod(transport,request_method,address,body,content));
       if(env.value->ExceptionCheck())env.value->ExceptionClear();else response=Pair(env.value,result);
       if(result)env.value->DeleteLocalRef(result);env.value->DeleteLocalRef(address);env.value->DeleteLocalRef(body);env.value->DeleteLocalRef(content);}
@@ -71,7 +78,7 @@ void Server(const rc_api_request_t* request,rc_client_server_callback_t callback
 uint32_t Read(uint32_t address,uint8_t* buffer,uint32_t count,rc_client_t*){return read_memory?read_memory(address,buffer,count):0;}
 rc_clock_t Time(const rc_client_t*){return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 void Loaded(int,const char*,rc_client_t*,void*){loading=nullptr;}
-void Load(){if(!client||!game_running||game_hash.empty()||!rc_client_get_user_info(client))return;
+void Load(){if(!client||!tracking.Active()||!game_running||game_hash.empty()||!rc_client_get_user_info(client))return;
   if(loading){rc_client_abort_async(client,loading);loading=nullptr;}
   loading=rc_client_begin_load_game(client,game_hash.c_str(),Loaded,nullptr);
 }
@@ -79,6 +86,7 @@ void Logged(int result,const char*,rc_client_t*,void*){if(result==RC_OK){const a
 void Overlay(int kind,int id,const char* text,bool visible){Env env;if(!env.value||!transport)return;
   auto value=env.value->NewStringUTF(text?text:"");env.value->CallStaticVoidMethod(transport,event_method,kind,id,value,jboolean(visible));env.value->DeleteLocalRef(value);if(env.value->ExceptionCheck())env.value->ExceptionClear();}
 void Event(const rc_client_event_t* event,rc_client_t*) {
+  if(!tracking.Active())return;
   if(event->achievement){if(event->type==RC_CLIENT_EVENT_ACHIEVEMENT_CHALLENGE_INDICATOR_SHOW)primed.insert(event->achievement->id);
     if(event->type==RC_CLIENT_EVENT_ACHIEVEMENT_CHALLENGE_INDICATOR_HIDE||event->type==RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED)primed.erase(event->achievement->id);
     if(event->type==RC_CLIENT_EVENT_ACHIEVEMENT_CHALLENGE_INDICATOR_SHOW&&settings["overlays"])Overlay(1,event->achievement->id,event->achievement->title,true);
@@ -107,6 +115,7 @@ void SwanAchievements::Initialize(JNIEnv* env,uint32_t(*reader)(uint32_t,uint8_t
   rc_client_set_hardcore_enabled(client,0);rc_client_set_allow_background_memory_reads(client,0);
   rc_client_set_get_time_millisecs_function(client,Time);rc_client_set_event_handler(client,Event);
   for(auto& item:settings){auto name=env->NewStringUTF(item.first.c_str());item.second=env->CallStaticIntMethod(transport,option_value_method,name,int(item.second))!=0;env->DeleteLocalRef(name);}
+  tracking.Enabled(settings["enabled"]);
   for(auto& item:number_settings){auto name=env->NewStringUTF(item.first.c_str());item.second=env->CallStaticIntMethod(transport,option_value_method,name,item.second);env->DeleteLocalRef(name);}
   rc_client_set_encore_mode_enabled(client,settings["encoreMode"]);rc_client_set_spectator_mode_enabled(client,settings["spectatorMode"]);rc_client_set_unofficial_enabled(client,settings["unofficialTestMode"]);
   std::thread(Worker).detach();
@@ -143,13 +152,23 @@ std::string SwanAchievements::Login(std::string user,std::string password){
   return future.get();
 }
 void SwanAchievements::Logout(){std::lock_guard lock(mutex);if(client){if(loading)rc_client_abort_async(client,loading);loading=nullptr;rc_client_logout(client);}Store("","");primed.clear();Overlay(3,0,"",false);}
-void SwanAchievements::Game(std::string path,unsigned subimage){auto hash=Hash(std::move(path),subimage);std::lock_guard lock(mutex);game_hash=std::move(hash);game_running=true;primed.clear();Load();}
+void SwanAchievements::BeginSession(){std::lock_guard lock(mutex);tracking.Begin();}
+void SwanAchievements::EndSession(){std::lock_guard lock(mutex);tracking.End();Unload();game_hash.clear();}
+void SwanAchievements::Game(std::string path,unsigned subimage){
+  {std::lock_guard lock(mutex);if(!tracking.Active())return;}
+  auto hash=Hash(std::move(path),subimage);std::lock_guard lock(mutex);if(!tracking.Active())return;
+  game_hash=std::move(hash);game_running=true;primed.clear();Load();}
 void SwanAchievements::Unload(){std::lock_guard lock(mutex);game_running=false;if(client){if(loading)rc_client_abort_async(client,loading);loading=nullptr;rc_client_unload_game(client);}primed.clear();Overlay(3,0,"",false);}
-void SwanAchievements::Frame(){std::lock_guard lock(mutex);if(client&&game_running)rc_client_do_frame(client);}
+void SwanAchievements::Frame(){std::lock_guard lock(mutex);if(client&&game_running&&tracking.Active())rc_client_do_frame(client);}
 void SwanAchievements::Reset(){std::lock_guard lock(mutex);if(client)rc_client_reset(client);primed.clear();Overlay(3,0,"",false);}
-std::string SwanAchievements::Presence(){std::lock_guard lock(mutex);char text[2048]{};if(client)rc_client_get_rich_presence_message(client,text,sizeof(text));return text;}
+std::string SwanAchievements::Presence(){std::lock_guard lock(mutex);char text[2048]{};if(client&&tracking.Active())rc_client_get_rich_presence_message(client,text,sizeof(text));return text;}
 void SwanAchievements::Option(std::string key,bool enabled){std::lock_guard lock(mutex);if(!settings.count(key))return;settings[key]=enabled;
   Env env;if(env.value&&transport){auto name=env.value->NewStringUTF(key.c_str());env.value->CallStaticVoidMethod(transport,option_method,name,int(enabled));env.value->DeleteLocalRef(name);if(env.value->ExceptionCheck())env.value->ExceptionClear();}
+  if(key=="enabled"){
+    tracking.Enabled(enabled);
+    if(!enabled){Unload();game_hash.clear();}
+    return;
+  }
   if(!client)return;
   if((key=="overlays"||key=="lbOverlays")&&!enabled)Overlay(3,0,"",false);
   if(key=="encoreMode")rc_client_set_encore_mode_enabled(client,enabled);
@@ -160,7 +179,8 @@ void SwanAchievements::OptionInt(std::string key,int value){std::lock_guard lock
   Env env;if(env.value&&transport){auto name=env.value->NewStringUTF(key.c_str());env.value->CallStaticVoidMethod(transport,option_method,name,bounded);env.value->DeleteLocalRef(name);if(env.value->ExceptionCheck())env.value->ExceptionClear();}}
 void SwanAchievements::UnlockSound(std::string path){Env env;if(env.value&&transport){auto value=env.value->NewStringUTF(path.c_str());env.value->CallStaticVoidMethod(transport,sound_method,value);env.value->DeleteLocalRef(value);if(env.value->ExceptionCheck())env.value->ExceptionClear();}}
 std::string SwanAchievements::JSON(){std::lock_guard lock(mutex);std::ostringstream out;const auto* user=client?rc_client_get_user_info(client):nullptr;
-  out<<"{\"loggedIn\":"<<(user?"true":"false")<<",\"hardcore\":false,\"userName\":"<<Quote(user?user->username:"")<<",\"score\":"<<(user?user->score:0)<<",\"softcoreScore\":"<<(user?user->score_softcore:0)<<",\"avatarUrl\":"<<Quote(user?user->avatar_url:"");
+  out<<"{\"trackingActive\":"<<(tracking.Active()?"true":"false")<<",\"trackingRestartRequired\":"<<(tracking.RestartRequired()?"true":"false");
+  out<<",\"loggedIn\":"<<(user?"true":"false")<<",\"hardcore\":false,\"userName\":"<<Quote(user?user->username:"")<<",\"score\":"<<(user?user->score:0)<<",\"softcoreScore\":"<<(user?user->score_softcore:0)<<",\"avatarUrl\":"<<Quote(user?user->avatar_url:"");
   for(const auto& item:settings)out<<','<<Quote(item.first.c_str())<<':'<<(item.second?"true":"false");
   for(const auto& item:number_settings)out<<','<<Quote(item.first.c_str())<<':'<<item.second;
   const auto* game=client?rc_client_get_game_info(client):nullptr;

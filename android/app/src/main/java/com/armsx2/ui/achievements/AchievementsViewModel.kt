@@ -43,6 +43,8 @@ data class Subset(
 )
 
 data class AchievementsUiState(
+    val enabled: Boolean = true,
+    val trackingRestartRequired: Boolean = false,
     val loggedIn: Boolean = false,
     val userName: String = "",
     val hardcore: Boolean = false,
@@ -194,6 +196,7 @@ class AchievementsViewModel(application: Application) : AndroidViewModel(applica
     fun setOption(key: String, enabled: Boolean) {
         NativeApp.setAchievementsOption(key, enabled)
         state.value = when (key) {
+            "enabled" -> state.value.copy(enabled = enabled)
             "notifications" -> state.value.copy(notifications = enabled)
             "leaderboardNotifications" -> state.value.copy(leaderboardNotifications = enabled)
             "overlays" -> state.value.copy(overlays = enabled)
@@ -204,6 +207,7 @@ class AchievementsViewModel(application: Application) : AndroidViewModel(applica
             "unofficialTestMode" -> state.value.copy(unofficialTestMode = enabled)
             else -> state.value
         }
+        if (key == "enabled") refresh()
     }
 
     /** Integer-valued options: notification/leaderboard durations and the two overlay positions.
@@ -228,6 +232,8 @@ class AchievementsViewModel(application: Application) : AndroidViewModel(applica
         if (json.isBlank()) return state.value
         val root = JSONObject(json)
         return AchievementsUiState(
+            enabled = root.optBoolean("enabled", true),
+            trackingRestartRequired = root.optBoolean("trackingRestartRequired", false),
             loggedIn = root.optBoolean("loggedIn"),
             userName = root.optString("userName").also {
                 // Persist it: a library-wide progress sync runs with no game loaded, so the
