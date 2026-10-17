@@ -171,12 +171,6 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         // does NOT follow the Global/Game toggle the rest of this tab does.
         Ps1PadDeviceSection()
         SettingsDivider()
-        Text(
-            str("pad.instruction.tapThenPress"),
-            color = Color(0xFFBBBBBB),
-            fontSize = 15.sp,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
-        )
         // Per-game scope hint (#246): the buttons / sticks below follow the
         // Global/Game toggle at the top of the menu. Spell out the current tier
         // here since this tab scrolls far from that toggle.
@@ -495,7 +489,6 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         // ControllerMappings' profile section for why.
         CollapsibleSection(str("pad.section.padProfiles"), initiallyExpanded = false) {
             SettingsDivider()
-            HelpText(str("pad.padProfiles.info"))
             val newName = remember { mutableStateOf("") }
             val profiles = remember { mutableStateOf<List<String>>(emptyList()) }
             // listProfiles() reads the portable inputprofiles/ folder, so it rides an IO

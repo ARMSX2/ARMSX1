@@ -40,6 +40,7 @@
 #include "disc_switch.h"
 #include "audio_warmup.h"
 #include "audio_queue.h"
+#include "gl_presentation.h"
 #ifndef ARMSX_SOURCE_COMMIT
 #define ARMSX_SOURCE_COMMIT "unknown"
 #endif
@@ -371,9 +372,7 @@ bool CreateGraphics(bool angle) {
   EGLint ca[]={EGL_CONTEXT_CLIENT_VERSION,3,EGL_NONE};context=eglCreateContext(display,egl_config,EGL_NO_CONTEXT,ca);
   EGLint pa[]={EGL_WIDTH,1,EGL_HEIGHT,1,EGL_NONE};pbuffer=eglCreatePbufferSurface(display,egl_config,pa);
   if(context==EGL_NO_CONTEXT || pbuffer==EGL_NO_SURFACE || !eglMakeCurrent(display,pbuffer,pbuffer,context))return false;
-  const char* vertex="#version 300 es\nprecision highp float;out vec2 uv;uniform bool flip;uniform vec2 uvScale;uniform int rotation;void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);vec2 q=rotation==90?vec2(1.-p.y,p.x):rotation==180?1.-p:rotation==270?vec2(p.y,1.-p.x):p;uv=vec2(q.x,flip?1.-q.y:q.y)*uvScale;gl_Position=vec4(p*2.-1.,0.,1.);}";
-  const char* fragment="#version 300 es\nprecision mediump float;in vec2 uv;uniform sampler2D image;out vec4 color;void main(){color=texture(image,uv);}";
-  GLuint vs=Compile(GL_VERTEX_SHADER,vertex), fs=Compile(GL_FRAGMENT_SHADER,fragment);if(!vs||!fs)return false;
+  GLuint vs=Compile(GL_VERTEX_SHADER,SwanGLPresentation::VertexShader), fs=Compile(GL_FRAGMENT_SHADER,SwanGLPresentation::FragmentShader);if(!vs||!fs)return false;
   shader=glCreateProgram();glAttachShader(shader,vs);glAttachShader(shader,fs);glLinkProgram(shader);glDeleteShader(vs);glDeleteShader(fs);
   GLint okay=0;glGetProgramiv(shader,GL_LINK_STATUS,&okay);if(!okay)return false;
   glGenVertexArrays(1,&vao);glGenTextures(1,&upload_texture);return true;
@@ -393,6 +392,7 @@ void AllocateTarget() {
   if(framebuffer)glDeleteFramebuffers(1,&framebuffer);if(frame_texture)glDeleteTextures(1,&frame_texture);if(depth_buffer)glDeleteRenderbuffers(1,&depth_buffer);
   glGenTextures(1,&frame_texture);glBindTexture(GL_TEXTURE_2D,frame_texture);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
   glGenFramebuffers(1,&framebuffer);glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,frame_texture,0);
   if(hardware.depth || hardware.stencil) {
     glGenRenderbuffers(1,&depth_buffer);glBindRenderbuffer(GL_RENDERBUFFER,depth_buffer);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH24_STENCIL8,w,h);
@@ -438,6 +438,7 @@ void Video(const void* data,unsigned width,unsigned height,size_t pitch) {
     texture=upload_texture;glBindTexture(GL_TEXTURE_2D,texture);glPixelStorei(GL_UNPACK_ALIGNMENT,1);
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width,height,0,GL_RGBA,GL_UNSIGNED_BYTE,rgba.data());
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
   }
   if(window_surface!=EGL_NO_SURFACE && !presentation_suspended) {
     EGLint ww=0,wh=0;eglQuerySurface(display,window_surface,EGL_WIDTH,&ww);eglQuerySurface(display,window_surface,EGL_HEIGHT,&wh);
@@ -450,9 +451,14 @@ void Video(const void* data,unsigned width,unsigned height,size_t pitch) {
     const auto rect=SwanPresentation::Fit(ww,wh,width,height,aspect,display_options);
     glViewport(rect.x,wh-rect.y-rect.height,rect.width,rect.height);
     glUseProgram(shader);glBindVertexArray(vao);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,texture);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
     glUniform1i(glGetUniformLocation(shader,"image"),0);glUniform1i(glGetUniformLocation(shader,"flip"),!filtered&&data!=RETRO_HW_FRAME_BUFFER_VALID);
     glUniform1i(glGetUniformLocation(shader,"rotation"),display_options.rotation);
-    glUniform2f(glGetUniformLocation(shader,"uvScale"),filtered||software_video?1.f:float(width)/target_width,filtered||software_video?1.f:float(height)/target_height);
+    const auto sampling=filtered?SwanGLPresentation::SampleBounds(ww,wh,ww,wh):software_video?
+      SwanGLPresentation::SampleBounds(width,height,width,height):SwanGLPresentation::SampleBounds(width,height,target_width,target_height);
+    glUniform2f(glGetUniformLocation(shader,"uvScale"),sampling.scale_x,sampling.scale_y);
+    glUniform2f(glGetUniformLocation(shader,"uvMin"),sampling.min_x,sampling.min_y);
+    glUniform2f(glGetUniformLocation(shader,"uvMax"),sampling.max_x,sampling.max_y);
     glDrawArrays(GL_TRIANGLES,0,3);eglSwapBuffers(display,window_surface);
   }
   glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);frames++;

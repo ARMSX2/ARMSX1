@@ -109,6 +109,7 @@ fun AppNavigation() {
                 AppRoute.News -> NewsScreen(onBack = UiNavigator::home)
                 AppRoute.Friends -> FriendsScreen(onBack = UiNavigator::home)
                 AppRoute.About -> AboutScreen(onBack = UiNavigator::home)
+                AppRoute.Manual -> com.armsx2.ui.manual.ManualScreen(onBack = UiNavigator::home)
             }
         }
 

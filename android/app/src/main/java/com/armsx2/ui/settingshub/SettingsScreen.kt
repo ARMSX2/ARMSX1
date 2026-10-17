@@ -484,9 +484,8 @@ private fun SettingsCategoryBar(
         }
     }
     Column(Modifier.fillMaxWidth()) {
-        Text(if (moving != null) "Move tab: ◀ / ▶ · A or Y to save · B to cancel"
-            else "Hold a tab to drag · Y to move",
-            Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelMedium)
+        if (moving != null) Text("Moving tab", Modifier.padding(horizontal = 12.dp),
+            style = MaterialTheme.typography.labelMedium)
         Row(
             modifier = Modifier.onGloballyPositioned { viewportBounds = it.boundsInRoot() }
                 .horizontalScroll(scroll).padding(vertical = 6.dp),

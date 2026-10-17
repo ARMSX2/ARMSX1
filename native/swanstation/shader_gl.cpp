@@ -17,6 +17,7 @@ void Texture(GLuint& texture,unsigned width,unsigned height){if(!texture)glGenTe
   // filter. The host images contain exactly one level; bound their range so
   // GLES considers them complete rather than sampling opaque black.
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_BASE_LEVEL,0);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,0);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);}
 void Framebuffer(GLuint& fbo,GLuint texture){if(!fbo)glGenFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,fbo);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);}
 void FreeChain(){if(chain){auto* api=SwanShaders::Functions();if(api)SwanShaders::Check(api->gl_free(&chain));chain=nullptr;}active=false;}

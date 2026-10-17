@@ -99,9 +99,6 @@ fun HotkeyBindings(showHeader: Boolean = true) {
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
         )
-        HelpText(
-            str("hotkeys.help"),
-        )
         // PS1 port: only the hotkeys the ARMSX core can actually serve are listed. The
         // ControllerMappings.ps1Hotkeys documents the supported actions; both runtime
         // dispatch paths handle each action listed here.

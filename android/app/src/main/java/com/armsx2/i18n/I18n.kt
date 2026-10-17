@@ -160,6 +160,11 @@ fun str(key: String): String {
  * renaming a key orphans it in every translation JSON.
  */
 val EN: Map<String, String> = mapOf(
+    "manual.title" to "Instruction Manual",
+    "ra.library.controlPanel" to "RetroAchievements control panel",
+    "games.empty.collectionStatus" to "This collection contains no games.",
+    "games.empty.noFolders.status" to "No game folders have been added.",
+    "games.empty.filteredStatus" to "No games match the current view.",
     "collections.title" to "Collections",
     "collections.all" to "All games",
     "collections.create" to "New collection",

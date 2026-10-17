@@ -1212,7 +1212,8 @@ private fun LazyGridScope.emptyLibrary(noFolders: Boolean, collection: Boolean =
     item(span = { GridItemSpan(maxLineSpan) }) {
         EmptyState(
             title = if (collection) str("collections.empty") else if (noFolders) str("games.empty.noFolders.title") else str("games.search.placeholder"),
-            message = if (collection) str("collections.emptyHint") else if (noFolders) str("games.empty.noFolders.body") else str("games.search.hint"),
+            message = str(if (collection) "games.empty.collectionStatus" else if (noFolders)
+                "games.empty.noFolders.status" else "games.empty.filteredStatus"),
             actionLabel = if (collection) str("collections.title") else if (noFolders) str("games.toolbar.setup") else null,
             onAction = if (collection) onCollections else if (noFolders) MainActivityRuntime::reopenSetup else null,
             modifier = Modifier.fillMaxWidth().height(260.dp),

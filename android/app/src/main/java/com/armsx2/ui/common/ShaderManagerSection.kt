@@ -301,13 +301,6 @@ fun ShaderManagerSection() {
         }
 
         message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-        if (installed.isNotEmpty()) {
-            Text(
-                str("renderer.shaderPack.hint"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
     }
 }
 

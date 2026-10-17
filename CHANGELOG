@@ -4,6 +4,28 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+Instruction manual
+  * Add a searchable offline Instruction Manual near the bottom of the sidebar, with
+    topic-based sections for setup, storage, library, all settings categories, controls,
+    saves, cheats, achievements, texture/shader packs, updates and troubleshooting.
+    Support touch/controller reading, readable wrapping text and return-to-contents navigation.
+  * Move persistent how-to/navigation instructions for tab rearranging, button binding,
+    hotkey capture, mapping profiles, skin import, shader activation, sound-effect packs
+    and API-key setup into the manual. Keep settings'
+    what-it-does descriptions, active input prompts, scope/status information and safety warnings.
+
+OpenGL presentation edges
+  * Correct the bottom-origin VRAM offset for OpenGL's interleaved display fields.
+    The old calculation sampled one texel below the intended image, exposing font/data
+    fragments at the BIOS bottom edge. Preserve both fields and valid image rows;
+    leave separate-field and progressive scanout unchanged. Apply a verified build-copy
+    hook without changing the pinned upstream checkout or cropping the image.
+  * Use high-precision texture coordinates and clamp the final sampling footprint to the
+    current frame's first/last texel centers, not the full backing allocation. Prevent stray
+    edge pixels during scaled BIOS/game output in OpenGL, ANGLE and the Software presenter's
+    flipped upload path. Cover plain and shader-filtered output without cropping, zooming or
+    changing Vulkan presentation.
+
 RetroAchievements library and testing
   * Show cached achievement availability/progress over grid and shelf covers, including
     PS one styling and recent games. Unplayed matched games show 0/total; distinguish

@@ -142,7 +142,6 @@ private fun ControllerBindings(state: ControllerManagerUiState, viewModel: Contr
     Column(modifier) {
         SectionTitle(
             if (state.section == ControllerSection.Buttons) str("pad.section.buttonMapping") else str("hotkeys.header"),
-            if (state.section == ControllerSection.Buttons) str("pad.instruction.tapThenPress") else str("hotkeys.help"),
         )
         if (state.section == ControllerSection.Buttons) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

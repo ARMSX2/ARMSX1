@@ -144,11 +144,6 @@ fun SkinsTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Text(str("skins.title"), color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-        Text(
-            str("skins.description"),
-            color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp,
-            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
-        )
 
         ActionRow(str("skins.importFolder"), "skins-import-folder") { folderLauncher.launch(null) }
         SettingsDivider()

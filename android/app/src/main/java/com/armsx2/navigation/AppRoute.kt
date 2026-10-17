@@ -22,6 +22,7 @@ sealed interface AppRoute {
     data object News : AppRoute
     data object Friends : AppRoute
     data object About : AppRoute
+    data object Manual : AppRoute
 }
 
 enum class SettingsCategory {
@@ -65,6 +66,7 @@ object UiNavigator {
             drawerOpen.value = false
             return true
         }
+        if (route.value == AppRoute.Manual && ManualReaderNavigation.back()) return true
         when (route.value) {
             AppRoute.Language -> {
                 route.value = AppRoute.Settings(SettingsCategory.General)
