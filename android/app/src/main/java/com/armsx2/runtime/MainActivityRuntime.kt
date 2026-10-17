@@ -1276,6 +1276,8 @@ open class MainActivityRuntime : ComponentActivity() {
                 // only for an accepted session, so Close can return external launches to their caller.
                 launchedExternally = external
                 // The PS1 path returns before the legacy launch code below.
+                // Restore the saved OSD on this PS1 path, which bypasses applyRendererPrefs().
+                InGameOverlay.applyStoredOsdMode()
                 // Arm the saved preference here, once an actual boot is accepted.
                 pendingAutoLoadOnBoot = pendingSlotLoadOnBoot == null &&
                     prefs.getBoolean("autoLoadOnBoot", false)
@@ -3089,6 +3091,9 @@ open class MainActivityRuntime : ComponentActivity() {
             // re-resolves per-game at boot.
             customDriverId.value = g0.customDriverId.takeIf { it.isNotBlank() }
         }
+        // Restore the saved mode before the frontend is first drawn in this process.
+        // Missing preferences still resolve to Off; never write that default over a choice.
+        InGameOverlay.applyStoredOsdMode()
         com.armsx2.StartupTrace.mark("config-global")
         surface.value = EmulationSurface(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -3352,6 +3357,9 @@ open class MainActivityRuntime : ComponentActivity() {
                 // resolved tier changes. The explicit calls elsewhere are kept: they fire on
                 // the non-Compose paths (boot, settings edit) without waiting for recomposition.
                 androidx.compose.runtime.LaunchedEffect(currentGame.value?.settingsKey) {
+                    // Also restore the OSD on game switches and when a direct boot's
+                    // identity becomes known. The renderer itself reads persisted modes.
+                    InGameOverlay.applyStoredOsdMode()
                     instance?.applyEmulationOrientation()
                 }
                 // Keep Android's high-refresh vote scoped to an active VM. PAUSED

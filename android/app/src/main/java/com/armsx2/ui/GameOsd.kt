@@ -293,7 +293,10 @@ fun GameOsdOverlay() {
         settings = runCatching { ConfigStore.resolveForGame(settingsKey) }.getOrDefault(Settings())
     }
 
-    val mode = InGameOverlay.osdMode.value
+    // The normal PS1 boot does not pass through legacy applyRendererPrefs(). Reading its
+    // in-memory mirror left a fresh process at Off until the user changed modes again.
+    // Render from the persisted, game-resolved source of truth instead of that boot cache.
+    val mode = InGameOverlay.configuredOsdMode(com.armsx2.config.SettingsScope.Game, settingsKey)
     val showFps = OsdModePolicy.includes(mode, settings.osdShowFps, minimal = true)
     val showSpeed = OsdModePolicy.includes(mode, settings.osdShowSpeed, minimal = true)
     val showNotes = settings.osdShowMessages

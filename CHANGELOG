@@ -4,6 +4,12 @@ ARMSX1 — Changelog
 Unreleased
 ----------
 
+Performance overlay persistence
+  * Restore the saved OSD mode at app startup and on the normal PS1 launch path (which
+    bypasses legacy renderer setup). Render from the saved global/per-game mode rather
+    than an in-memory Off default. Preserve Custom flags and explicit game overrides;
+    fresh installs still default to Off.
+
 0.3.6
 -----
 
