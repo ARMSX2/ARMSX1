@@ -15,6 +15,7 @@ void Close();
 bool Ready();
 std::vector<unsigned char> Pixels(unsigned width,unsigned height);
 void Driver(std::string directory,std::string name,std::string redirect,std::string hooks);
+bool DriverVariables(const std::string& variables);
 void Presentation(SwanPresentation::Options options);
 bool ShaderActive();
 }

@@ -5,16 +5,9 @@ import android.view.InputDevice
 /**
  * Auto-assigns physical controllers to PS1 pad slots.
  *
- * First distinct gamepad = Player 1 (slot 0); the next = Player 2 (slot 1, hot-plugged via
- * [onPlayer2Joined]); any further pads fold into Player 1.
- *
- * PS1 PORT: there is no "2 ports x 4 taps" tier. The PlayStation Multitap puts FOUR pads
- * behind ONE controller port, so the claimable slots are 0..3 and they are the tap's
- * A/B/C/D — see psx/input/multitap.c. With the tap off only slot 0 exists, because the core
- * drops any player above 0 when the port holds a plain pad (psx_pad_button_press_player).
- * The backing array is kept at 8 entries only so the per-slot scratch arrays in
- * MainActivityRuntime (which are `Array(8)`) stay index-compatible — slots 4..7 are never
- * claimed.
+ * First distinct gamepad = Player 1, the next = Player 2, up to the selected 2/4/8-player
+ * limit. The native SwanStation adapter translates these logical players to physical
+ * ports and Multitap slots. Pads beyond the selected limit retain the legacy P1 fallback.
  *
  * The on-screen touch controls and all menu navigation always use slot 0 — they never go
  * through here. Reset on VM start AND stop ([reset]) so each session re-pairs
@@ -33,36 +26,28 @@ object PadRouter {
     private val slots = IntArray(8) { -1 }
     @Volatile private var pad2Enabled = false
 
-    /**
-     * Claimable slots RIGHT NOW.
-     *
-     * One without a Multitap, four with one. It is derived rather than constant because a
-     * claim that has nowhere to land is a black hole: before the tap existed, the second
-     * controller to enumerate (very common on a handheld — built-in pad takes slot 0, a
-     * paired Bluetooth pad takes slot 1) claimed a slot the core dropped every input for,
-     * and simply went dead. Anything past the cap folds onto Player 1, which is always a
-     * destination that exists.
-     */
-    private fun maxSlots(): Int = if (multitapEnabled) 4 else 1
+    /** Claim only the slots the selected setup exposes to the core. */
+    private fun maxSlots(): Int = multiplayerMode.players
 
-    /** Whether controller port 1 currently holds a Multitap.
-     *
-     *  Seeded at startup from `[input] multitap` and updated by the Multitap toggles; the
-     *  matching native (NativeApp.setMultitapEnabled) swaps the device in the core. Keeping
-     *  the two in step is what makes players 2-4 claimable at the moment the tap is plugged
-     *  in — this used to be a permanently-false stub, so extra pads had nowhere to go. */
-    @Volatile var multitapEnabled = false
+    /** Seeded at startup and kept in step with the resolved active game's core settings. */
+    @Volatile var multiplayerMode = com.armsx2.config.MultiplayerMode.STANDARD
         private set
+    val multitapEnabled: Boolean get() = multiplayerMode != com.armsx2.config.MultiplayerMode.STANDARD
 
     /** Turn the tap tier on or off. Slots above the new cap are released so a pad that was
      *  parked on (say) slot 3 re-claims from the top instead of staying somewhere the core
      *  no longer reads. Does NOT touch the core — the caller pushes
      *  NativeApp.setMultitapEnabled / persists `[input] multitap` itself. */
     fun setMultitapEnabled(enabled: Boolean) {
-        if (multitapEnabled == enabled) return
-        multitapEnabled = enabled
+        setMultiplayerMode(if (enabled) com.armsx2.config.MultiplayerMode.FOUR_PLAYERS else com.armsx2.config.MultiplayerMode.STANDARD)
+    }
+
+    fun setMultiplayerMode(mode: com.armsx2.config.MultiplayerMode): Boolean {
+        if (multiplayerMode == mode) return false
+        multiplayerMode = mode
         val cap = maxSlots()
         for (i in cap until slots.size) slots[i] = -1
+        return true
     }
 
     /** Fired exactly once, the first time the 2nd controller (slot 1 = P2 main) joins,
@@ -97,7 +82,7 @@ object PadRouter {
     /** True once a second controller has joined this session (P2 main is live). */
     fun coopActive(): Boolean = slots[1] != -1
 
-    /** Players currently holding a slot. 1 with a lone pad, up to 4 behind a Multitap. */
+    /** Players currently holding a slot, up to the selected setup's limit. */
     fun activePlayers(): Int = (0 until maxSlots()).count { slots[it] != -1 }.coerceAtLeast(1)
 
     /** Android InputDevice id assigned to a pad slot, or -1 if unclaimed.

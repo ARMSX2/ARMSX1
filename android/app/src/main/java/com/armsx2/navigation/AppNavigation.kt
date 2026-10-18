@@ -23,7 +23,6 @@ import com.armsx2.ui.bios.BiosManagerScreen
 import com.armsx2.ui.controls.ControllerManagerScreen
 import com.armsx2.ui.about.AboutScreen
 import com.armsx2.ui.friends.FriendsScreen
-import com.armsx2.ui.news.NewsScreen
 import com.armsx2.ui.home.HomeScreen
 import com.armsx2.ui.memorycards.MemoryCardScreen
 import com.armsx2.ui.language.LanguageScreen
@@ -91,10 +90,15 @@ fun AppNavigation() {
                     onBack = UiNavigator::home,
                     onOpenAbout = { UiNavigator.navigate(AppRoute.About) },
                 )
-                is AppRoute.BiosManager -> BiosManagerScreen(onBack = UiNavigator::home, game = destination.game)
-                AppRoute.MemoryCardManager -> MemoryCardScreen(onBack = UiNavigator::home)
-                AppRoute.SaveManager -> SaveManagerScreen(onBack = UiNavigator::home)
+                is AppRoute.BiosManager -> BiosManagerScreen(onBack = { UiNavigator.back() }, game = destination.game)
+                AppRoute.GameManager -> com.armsx2.ui.games.GameManagerScreen(
+                    onBack = UiNavigator::home,
+                )
+                AppRoute.MemoryCardManager -> MemoryCardScreen(onBack = { UiNavigator.back() })
+                AppRoute.SaveManager -> SaveManagerScreen(onBack = { UiNavigator.back() })
                 AppRoute.ControllerManager -> ControllerManagerScreen(onBack = UiNavigator::home)
+                AppRoute.Customisation -> com.armsx2.ui.customisation.CustomisationScreen(onBack = UiNavigator::home)
+                AppRoute.AppHotkeys -> com.armsx2.ui.controls.AppHotkeysScreen(onBack = UiNavigator::home)
                 // Cheats. Was the lifted PS2 Patch Manager (PNACH, PS2 serials, five empty
                 // NativeApp stubs behind every apply button); it is gone.
                 AppRoute.PatchManager -> Ps1CheatsScreen(onBack = UiNavigator::home)
@@ -106,7 +110,6 @@ fun AppNavigation() {
                 // Controls, Patches...). It used to return to the Settings tab, which was already
                 // odd and became simply wrong once About moved out of the settings tab strip and
                 // into the drawer — you were sent to a screen you had not come from.
-                AppRoute.News -> NewsScreen(onBack = UiNavigator::home)
                 AppRoute.Friends -> FriendsScreen(onBack = UiNavigator::home)
                 AppRoute.About -> AboutScreen(onBack = UiNavigator::home)
                 AppRoute.Manual -> com.armsx2.ui.manual.ManualScreen(onBack = UiNavigator::home)

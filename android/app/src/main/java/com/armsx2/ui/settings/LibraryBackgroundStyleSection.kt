@@ -21,14 +21,14 @@ import com.armsx2.ui.home.LibraryBackground
 import com.armsx2.ui.home.LibraryBackgroundStyle
 
 @Composable
-fun LibraryBackgroundStyleSection() {
+fun LibraryBackgroundStyleSection(showTitle: Boolean = true) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { LibraryBackground.ensureLoaded() }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { LibraryBackground.set(context, it) }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(str("app.bg.style"), style = MaterialTheme.typography.titleMedium)
+        if (showTitle) Text(str("app.bg.style"), style = MaterialTheme.typography.titleMedium)
         if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
             Text(str("app.interface.background"), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -4,6 +4,10 @@ package com.armsx2.ui.settings
 internal object Ps1OverrideNoticePolicy {
     fun isCheatSetting(key: String): Boolean = key.startsWith("cheats.")
 
+    // Preserve legacy config data without resurfacing the removed, inactive option in the UI.
+    fun visibleSettings(overrides: Map<String, String>): Map<String, String> =
+        overrides.filterKeys { it != "input.analog_mode_default" }
+
     fun visibleOverrides(overrides: Map<String, String>): Map<String, String> =
-        overrides.filterKeys { !isCheatSetting(it) }
+        visibleSettings(overrides).filterKeys { !isCheatSetting(it) }
 }

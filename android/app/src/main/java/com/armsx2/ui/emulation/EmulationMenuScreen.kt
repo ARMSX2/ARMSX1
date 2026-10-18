@@ -1556,7 +1556,8 @@ private fun ControlsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         )
     }
     MenuOrderItem("MenuSwitchRow.pad.multitap.label") {
-        MenuSwitchRow(str("pad.multitap.label"), state.multitapEnabled, onCheckedChange = viewModel::setMultitap)
+        // Keep the old order ID so customised quick-menu ordering survives the UI change.
+        com.armsx2.ui.common.MultiplayerSection(state.multiplayerMode, viewModel::setMultiplayerMode)
     }
     MenuOrderItem("CollapsibleSection.tab.hotkeys") {
         com.armsx2.ui.settings.CollapsibleSection(str("tab.hotkeys"), initiallyExpanded = false) {

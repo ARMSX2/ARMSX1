@@ -37,13 +37,8 @@ import com.armsx2.config.Ps1SettingsStore
  * Shared plumbing for the PS1 settings tabs.
  *
  * Every emulator-facing tab in this package now edits ONE object — [Ps1Settings] — and persists
- * through [Ps1SettingsStore], which rewrites the native `settings.toml` that `frontend/config.c`
- * parses at launch. There is no live-apply path: the PS1 core runs in its own SDL activity and
- * re-reads the file when it starts, so every change is written to disk immediately and takes
- * effect on the next launch.
- *
- * (The old PS2 tabs went through `ConfigStore`/`InGameOverlay.saveSettings` + ~134 JNI setters.
- * None of that exists for ARMSX1; `NativeApp` is a no-op shim.)
+ * through [Ps1SettingsStore]. The SwanStation adapter reads the rendered `settings.toml` at boot;
+ * the push helpers below also apply supported pacing, display, input and texture edits live.
  */
 internal class Ps1SettingsEditor(
     private val context: Context,
@@ -98,6 +93,12 @@ internal class Ps1SettingsEditor(
         // index on the emulation thread, so a pack dropped in while a game runs is picked up
         // without a restart. push(context) re-resolves the active scope, same reason as above.
         com.armsx2.core.Ps1Textures.push(context)
+    }
+
+    /** Re-read from disk — used after something outside the tab touched the file. */
+    fun setMultiplayerMode(mode: com.armsx2.config.MultiplayerMode) {
+        state.value = Ps1SettingsStore.setMultiplayerMode(context, gameKey, mode)
+        com.armsx2.core.Ps1Emulation.push(context)
     }
 
     /** Re-read from disk — used after something outside the tab touched the file. */

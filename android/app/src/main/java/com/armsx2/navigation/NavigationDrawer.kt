@@ -9,7 +9,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.EaseIn
 import androidx.compose.animation.core.EaseOut
-import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -49,7 +48,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -128,15 +126,11 @@ fun NavigationDrawer(
     onNavigate: (AppRoute) -> Unit,
 ) {
     BackHandler(enabled = visible, onBack = onDismiss)
-    val scrimState = remember { MutableTransitionState(false) }
-    val panelState = remember { MutableTransitionState(false) }
-    LaunchedEffect(visible) {
-        scrimState.targetState = visible
-        panelState.targetState = visible
-    }
+    // Drive visibility directly so a Start release does not need another
+    // coroutine/recomposition before the menu begins responding.
     Box(Modifier.fillMaxSize()) {
         AnimatedVisibility(
-            visibleState = scrimState,
+            visible = visible,
             enter = fadeIn(tween(210, easing = EaseOut)),
             exit = fadeOut(tween(250, easing = EaseIn)),
         ) {
@@ -148,7 +142,7 @@ fun NavigationDrawer(
             )
         }
         AnimatedVisibility(
-            visibleState = panelState,
+            visible = visible,
             enter = slideInHorizontally(tween(320, easing = EaseOut)) { -it },
             exit = slideOutHorizontally(tween(220, easing = EaseIn)) { -it },
             modifier = Modifier.align(Alignment.CenterStart),
@@ -215,22 +209,18 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
     val primary = listOf(
         DrawerItem("games.section.library", "🎮", AppRoute.Home),
         // Boot straight into the PlayStation system BIOS with no disc — distinct from "BIOS
-        // Location" below, which only points the emulator at your BIOS file.
+        // Location" in Game Manager, which manages the emulator's BIOS files.
         DrawerItem("bios.boot.title", "▶️", onAction = { MainActivityRuntime.startBios(); onDismiss() }),
         DrawerItem("ra.title", "🏆", AppRoute.Achievements, iconRes = com.armsx2.R.drawable.ic_trophy,
             iconTint = TrophyGold),
         DrawerItem("action.settings", "⚙️", AppRoute.Settings()),
     )
     val managers = listOf(
-        // Moved off the library overflow menu, which was its only entry point. Sits first, beside
-        // BIOS Location: both answer "where are my files".
-        DrawerItem("games.overflow.setup", "📂",
-            onAction = { MainActivityRuntime.reopenSetup(); onDismiss() }),
-        DrawerItem("setup.step.bios.title", "📀", AppRoute.BiosManager()),
-        DrawerItem("memcard.title", "💾", AppRoute.MemoryCardManager),
-        DrawerItem("savestate.title.loadManage", "📥", AppRoute.SaveManager),
         DrawerItem("tab.controls", "🕹️", AppRoute.ControllerManager),
         DrawerItem("cheats.title", "✦", AppRoute.PatchManager),
+        DrawerItem("tab.customisation", "🎨", AppRoute.Customisation),
+        DrawerItem("tab.gameManager", "🗂️", AppRoute.GameManager),
+        DrawerItem("app.hotkeys.title", "⌨️", AppRoute.AppHotkeys),
     )
     // Link-out rows: they reuse the existing onAction path (like Boot BIOS) rather than a
     // destination, so they leave the drawer via startActivity and close it behind them.
@@ -240,10 +230,6 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
         DrawerItem("about.github", "🐙", iconRes = com.armsx2.R.drawable.ic_github,
             onAction = { openExternalUrl(context, GithubUrl); onDismiss() }),
         DrawerItem("about.website", "🌐", onAction = { openExternalUrl(context, WebsiteUrl); onDismiss() }),
-        // In-app release notes. A destination rather than a link-out because the point is to read
-        // what changed without leaving for a browser — the GitHub row above is still there for
-        // anyone who wants the repo itself.
-        DrawerItem("news.title", "📰", AppRoute.News),
         DrawerItem("friends.title", "👥", AppRoute.Friends, friendsBadge = true),
         DrawerItem("manual.title", "📖", AppRoute.Manual),
         // About left the settings tab strip: it is a read-only page, not a setting, and it sat in
@@ -372,11 +358,15 @@ private fun sameDestination(current: AppRoute, target: AppRoute): Boolean = when
     is AppRoute.BiosManager -> current is AppRoute.BiosManager
     AppRoute.MemoryCardManager -> current is AppRoute.MemoryCardManager
     AppRoute.SaveManager -> current is AppRoute.SaveManager
+    AppRoute.GameManager -> current is AppRoute.GameManager ||
+        current is AppRoute.MemoryCardManager || current is AppRoute.SaveManager ||
+        (current is AppRoute.BiosManager && current.game == null)
     AppRoute.ControllerManager -> current is AppRoute.ControllerManager
     AppRoute.PatchManager -> current is AppRoute.PatchManager
+    AppRoute.Customisation -> current is AppRoute.Customisation
+    AppRoute.AppHotkeys -> current is AppRoute.AppHotkeys
     AppRoute.Achievements -> current is AppRoute.Achievements
     AppRoute.Language -> current is AppRoute.Language
-    AppRoute.News -> current is AppRoute.News
     AppRoute.Friends -> current is AppRoute.Friends
     AppRoute.About -> current is AppRoute.About
     AppRoute.Manual -> current is AppRoute.Manual

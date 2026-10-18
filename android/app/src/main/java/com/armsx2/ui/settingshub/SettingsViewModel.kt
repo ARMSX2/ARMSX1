@@ -39,6 +39,25 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         uiState.value = uiState.value.copy(category = category)
     }
 
+    /** Controls owns both physical mappings and the scoped emulated-port layout. */
+    fun resetCoreControls() {
+        val context = getApplication<Application>()
+        val gameKey = uiState.value.game?.settingsKey
+        if (gameKey != null) {
+            com.armsx2.config.Ps1SettingsStore.clearOverrides(context, gameKey,
+                listOf("input.multitap", "input.multitap_port2", "input.controller1_type", "input.controller2_type"))
+        } else {
+            com.armsx2.config.Ps1SettingsStore.update(context, null) {
+                it.withMultiplayerMode(com.armsx2.config.MultiplayerMode.STANDARD).copy(
+                    controller1Type = com.armsx2.config.Ps1ControllerType.DUALSHOCK,
+                    controller2Type = com.armsx2.config.Ps1ControllerType.DUALSHOCK,
+                )
+            }
+            com.armsx2.config.Ps1GameSettings.version.intValue++
+        }
+        com.armsx2.core.Ps1Emulation.push(context)
+    }
+
     /**
      * Reset ONLY the tab currently being shown.
      *

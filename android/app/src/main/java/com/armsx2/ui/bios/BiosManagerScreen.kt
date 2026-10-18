@@ -54,7 +54,12 @@ import com.armsx2.ui.settings.controllerFocusable
 import com.armsx2.ui.theme.Success
 
 @Composable
-fun BiosManagerScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: BiosManagerViewModel = viewModel()) {
+fun BiosManagerScreen(
+    onBack: () -> Unit,
+    game: GameInfo? = null,
+    viewModel: BiosManagerViewModel = viewModel(),
+    embedded: Boolean = false,
+) {
     val state = viewModel.state.value
     var deleteTarget by remember { mutableStateOf<InstalledBios?>(null) }
     var actionsMenuExpanded by remember { mutableStateOf(false) }
@@ -70,19 +75,37 @@ fun BiosManagerScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Bio
     // the library; null (drawer) falls back to the loaded game. setGameContext also refreshes.
     LaunchedEffect(game?.settingsKey) { viewModel.setGameContext(game?.settingsKey) }
 
-    ArmsBackdrop {
+    val content: @Composable () -> Unit = {
         // Column + verticalScroll (not LazyColumn): controller nav registers rows via a SideEffect
         // when they compose, and LazyColumn never composes off-screen rows — so on a pad the
         // selection would stick partway down and the camera wouldn't follow. Composing every row
         // keeps registry nav + bringIntoView working. The BIOS list is short, so there's no cost.
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+            modifier = (if (embedded) Modifier.fillMaxWidth() else Modifier
+                .fillMaxSize().verticalScroll(rememberScrollState()))
                 .padding(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            ArmsTopBar(
+            if (embedded) {
+                // Use the Game Manager's existing scroll and heading; keep all
+                // BIOS tools directly reachable by touch and controller.
+                Column {
+                    TextButton(
+                        onClick = { picker.launch(arrayOf("application/octet-stream", "*/*")) },
+                        modifier = Modifier.controllerFocusable("bios.importFile", onConfirm = {
+                            picker.launch(arrayOf("application/octet-stream", "*/*"))
+                        }),
+                    ) { Text(str("action.import")) }
+                    TextButton(
+                        onClick = { folderPicker.launch(null) },
+                        modifier = Modifier.controllerFocusable("bios.importFolder", onConfirm = { folderPicker.launch(null) }),
+                    ) { Text(str("action.importFolder")) }
+                    TextButton(
+                        onClick = viewModel::refresh,
+                        modifier = Modifier.controllerFocusable("bios.refresh", onConfirm = viewModel::refresh),
+                    ) { Text(str("games.card.refresh")) }
+                }
+            } else ArmsTopBar(
                 title = str("setup.page.bios.title"),
                 leading = { RoundAction("←", str("action.back"), onBack) },
                 actions = {
@@ -134,6 +157,7 @@ fun BiosManagerScreen(onBack: () -> Unit, game: GameInfo? = null, viewModel: Bio
             Spacer(Modifier.height(12.dp))
         }
     }
+    if (embedded) content() else ArmsBackdrop { content() }
 
     deleteTarget?.let { item ->
         AlertDialog(

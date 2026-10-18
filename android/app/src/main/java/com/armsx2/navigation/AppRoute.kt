@@ -15,11 +15,13 @@ sealed interface AppRoute {
     data class BiosManager(val game: GameInfo? = null) : AppRoute
     data object MemoryCardManager : AppRoute
     data object SaveManager : AppRoute
+    data object GameManager : AppRoute
     data object ControllerManager : AppRoute
     data object PatchManager : AppRoute
+    data object Customisation : AppRoute
+    data object AppHotkeys : AppRoute
     data object Achievements : AppRoute
     data object Language : AppRoute
-    data object News : AppRoute
     data object Friends : AppRoute
     data object About : AppRoute
     data object Manual : AppRoute
@@ -68,6 +70,15 @@ object UiNavigator {
         }
         if (route.value == AppRoute.Manual && ManualReaderNavigation.back()) return true
         when (route.value) {
+            is AppRoute.BiosManager -> {
+                route.value = if ((route.value as AppRoute.BiosManager).game == null)
+                    AppRoute.GameManager else AppRoute.Home
+                return true
+            }
+            AppRoute.MemoryCardManager, AppRoute.SaveManager -> {
+                route.value = AppRoute.GameManager
+                return true
+            }
             AppRoute.Language -> {
                 route.value = AppRoute.Settings(SettingsCategory.General)
                 return true

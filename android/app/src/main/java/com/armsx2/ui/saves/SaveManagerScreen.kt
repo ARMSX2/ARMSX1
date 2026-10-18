@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -48,17 +49,33 @@ import com.armsx2.ui.common.SectionTitle
 import com.armsx2.ui.settings.controllerFocusable
 
 @Composable
-fun SaveManagerScreen(onBack: () -> Unit, viewModel: SaveManagerViewModel = viewModel()) {
+fun SaveManagerScreen(onBack: () -> Unit, viewModel: SaveManagerViewModel = viewModel(), embedded: Boolean = false) {
     val state = viewModel.state.value
     LaunchedEffect(Unit) { viewModel.refresh() }
 
-    ArmsBackdrop {
+    val content: @Composable () -> Unit = {
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            // A finite viewport keeps the lazy list safe inside Game Manager's outer scroll.
+            modifier = if (embedded) Modifier.fillMaxWidth().heightIn(max = 560.dp) else Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
         ) {
             item {
+                if (embedded) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        if (state.saves.isNotEmpty()) {
+                            OutlinedButton(onClick = viewModel::backupAll,
+                                modifier = Modifier.controllerFocusable("saveMgr.backup", onConfirm = viewModel::backupAll)) {
+                                Text(str("savestate.backup"))
+                            }
+                            Spacer(Modifier.width(7.dp))
+                        }
+                        OutlinedButton(onClick = viewModel::refresh,
+                            modifier = Modifier.controllerFocusable("saveMgr.refresh", onConfirm = viewModel::refresh)) {
+                            Text(str("games.card.refresh"))
+                        }
+                    }
+                } else {
                 ArmsTopBar(
                     title = str("savestate.title.loadManage"),
                     leading = { RoundAction("←", str("action.back"), onBack) },
@@ -70,6 +87,7 @@ fun SaveManagerScreen(onBack: () -> Unit, viewModel: SaveManagerViewModel = view
                     },
                     horizontalPadding = 0.dp,
                 )
+                }
             }
 
             state.gameTitle?.let { title ->
@@ -99,6 +117,7 @@ fun SaveManagerScreen(onBack: () -> Unit, viewModel: SaveManagerViewModel = view
             item { Spacer(Modifier.height(12.dp)) }
         }
     }
+    if (embedded) content() else ArmsBackdrop { content() }
 
     (state.error ?: state.message)?.let { message ->
         AlertDialog(

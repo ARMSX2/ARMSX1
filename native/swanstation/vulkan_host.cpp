@@ -14,12 +14,22 @@
 #include <atomic>
 #include "shader_api.h"
 #include "vulkan_surface.h"
+#include "driver_environment.h"
+#include <cstdlib>
 namespace {
 void* loader=nullptr;
 PFN_vkGetInstanceProcAddr entry=nullptr;
 PFN_vkGetDeviceProcAddr device_entry=nullptr;
 std::mutex queue_mutex;
 std::string driver_dir,driver_name,redirect_dir,hook_dir;
+SwanDriverEnvironment::Values driver_variables;
+SwanDriverEnvironment::Environment driver_environment;
+std::optional<std::string> ReadEnvironment(const std::string& key) {
+  const auto* value=std::getenv(key.c_str());return value?std::optional<std::string>(value):std::nullopt;
+}
+bool WriteEnvironment(const std::string& key,const std::optional<std::string>& value) {
+  return (value?setenv(key.c_str(),value->c_str(),1):unsetenv(key.c_str()))==0;
+}
 SwanPresentation::Options presentation;
 SwanShaders::Handle shader_chain=nullptr;
 uint64_t shader_generation=0;size_t shader_counter=0;
@@ -110,17 +120,23 @@ bool SwanVulkan::Negotiate(const retro_hw_render_context_negotiation_interface_v
   // Always resolve the newly selected driver; never reuse the last session's selection.
   loader=nullptr;entry=nullptr;device_entry=nullptr;
   const bool custom=!driver_dir.empty()&&!driver_name.empty();
+  if(!driver_environment.Restore(WriteEnvironment)){Error("Could not restore driver environment.");return false;}
   if(custom){
     const auto name=std::filesystem::path(driver_name);
     std::error_code error;const auto folder=std::filesystem::canonical(driver_dir,error);
     const auto file=std::filesystem::canonical(folder/name,error);
     const bool safe=!error&&name.filename()==name&&file.parent_path()==folder&&
       (folder.string().rfind("/data/user/",0)==0||folder.string().rfind("/data/data/",0)==0);
-    if(safe){const int flags=ADRENOTOOLS_DRIVER_CUSTOM|(redirect_dir.empty()?0:ADRENOTOOLS_DRIVER_FILE_REDIRECT);
+    if(safe){
+      if(!driver_environment.Apply(driver_variables,ReadEnvironment,WriteEnvironment)){Error("Could not apply driver environment.");return false;}
+      const int flags=ADRENOTOOLS_DRIVER_CUSTOM|(redirect_dir.empty()?0:ADRENOTOOLS_DRIVER_FILE_REDIRECT);
       loader=adrenotools_open_libvulkan(RTLD_NOW,flags,nullptr,hook_dir.c_str(),driver_dir.c_str(),driver_name.c_str(),redirect_dir.empty()?nullptr:redirect_dir.c_str(),nullptr);}
     if(!loader)Error("Custom Vulkan loader unavailable; using system Vulkan for this boot.");
   }
-  if(!loader)loader=dlopen("libvulkan.so",RTLD_NOW|RTLD_LOCAL);
+  if(!loader){
+    if(!driver_environment.Restore(WriteEnvironment)){Error("Could not restore system driver environment.");return false;}
+    loader=dlopen("libvulkan.so",RTLD_NOW|RTLD_LOCAL);
+  }
   if(!loader)return false;
   entry=reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(loader,"vkGetInstanceProcAddr"));if(!entry)return false;
   const char* extensions[]={VK_KHR_SURFACE_EXTENSION_NAME,VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
@@ -270,6 +286,7 @@ void SwanVulkan::Close(){
   if(retained_window)ANativeWindow_release(retained_window);retained_window=nullptr;negotiated=false;rotation_chain=false;
   acquired=complete=signal_semaphore=VK_NULL_HANDLE;fence=VK_NULL_HANDLE;pool=VK_NULL_HANDLE;command=VK_NULL_HANDLE;has_image=false;waits.clear();core_commands.clear();
   // Keep the loader resident: the pinned core may retain proc-address trampolines.
+  if(!driver_environment.Restore(WriteEnvironment))Error("Could not restore driver environment after shutdown.");
 }
 std::vector<unsigned char> SwanVulkan::Pixels(unsigned width,unsigned height) {
   if(!core.device||!has_image||!width||!height||width>8192||height>8192)return {};
@@ -303,3 +320,7 @@ void SwanVulkan::Driver(std::string directory,std::string name,std::string redir
 }
 void SwanVulkan::Presentation(SwanPresentation::Options options){presentation=options;}
 bool SwanVulkan::ShaderActive(){return shader_active;}
+bool SwanVulkan::DriverVariables(const std::string& variables){
+  SwanDriverEnvironment::Values parsed;if(!SwanDriverEnvironment::Parse(variables,parsed))return false;
+  driver_variables=std::move(parsed);return true;
+}

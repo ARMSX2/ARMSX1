@@ -209,11 +209,7 @@ fun SettingsScreen(
     val tabOrder = SettingsTabOrder.order.value
     val ui = viewModel.uiState.value
     val contentReady = ui.game?.uri?.toString() == scopeGame?.uri?.toString()
-    val displayedCategory = if (scopeGame != null && ui.category == SettingsCategory.General) {
-        SettingsCategory.Performance
-    } else {
-        ui.category
-    }
+    val displayedCategory = visibleSettingsCategory(ui.category, scopeGame != null)
 
     // L1/R1 tab cycling — registered only while this screen is composed. The visible-tab
     // filter has to match SettingsCategoryBar's, or the shoulders would land on a tab the
@@ -222,10 +218,8 @@ fun SettingsScreen(
     val gameSpecific = scopeGame != null
     DisposableEffect(displayedCategory, gameSpecific, tabOrder) {
         SettingsCategoryNav.cycle = { direction ->
-            val tabs = tabOrder.filterNot {
-                it == SettingsCategory.About ||
-                    (gameSpecific && it == SettingsCategory.General) ||
-                    (!gameSpecific && it == SettingsCategory.Info)
+            val tabs = tabOrder.filter {
+                it != SettingsCategory.About && settingsCategoryVisible(it, gameSpecific)
             }
             val current = tabs.indexOf(displayedCategory)
             if (current >= 0 && tabs.isNotEmpty()) {
@@ -350,6 +344,7 @@ fun SettingsScreen(
                     // Controls lives in ControllerMappings, outside the Settings object, so it
                     // resets through its own path. Per-game scope drops that game's overrides.
                     com.armsx2.input.ControllerMappings.resetAllControls(scopeGame?.settingsKey)
+                    viewModel.resetCoreControls()
                 } else {
                     viewModel.resetCurrentScope(displayedCategory)
                 }
@@ -412,12 +407,9 @@ private fun SettingsCategoryBar(
     // each selected chip's bringIntoView then scrolls it into view as the selector moves.
     val sections = SettingsTabOrder.order.value.mapNotNull { category ->
         settingsSections().find { it.category == category }
-    }.filterNot {
-        // General is redundant per-game (redirects to Performance); Info only makes
-        // sense for a specific game, so hide it in the global settings.
-        (gameSpecific && it.category == SettingsCategory.General) ||
-            (!gameSpecific && it.category == SettingsCategory.Info) ||
-            (gameSpecific && it.category == SettingsCategory.About)
+    }.filter {
+        // Global controls live in the library sidebar; retain game-specific overrides here.
+        settingsCategoryVisible(it.category, gameSpecific)
     }
     val context = LocalContext.current
     val scroll = rememberScrollState()
@@ -653,7 +645,7 @@ private fun CategoryContent(
             onBack = {}, game = contextGame, embedded = true,
         )
         SettingsCategory.Network -> Ps1LibraryTab()
-        SettingsCategory.Controls -> PadTab(viewModel.settings)
+        SettingsCategory.Controls -> ps1 { PadTab(viewModel.settings) }
         SettingsCategory.Hotkeys -> HotkeysTab(viewModel.settings)
         SettingsCategory.OnScreen -> OverlayTab(viewModel.uiState.value.game?.settingsKey, contextGame?.settingsKey)
         SettingsCategory.Skins -> SkinsTab(viewModel.settings)

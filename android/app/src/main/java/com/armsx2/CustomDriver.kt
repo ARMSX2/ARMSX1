@@ -445,6 +445,9 @@ object CustomDriver {
     }
 
     fun applyToNative(context: Context, installed: InstalledDriver?) {
+        // Use the cold-start snapshot: Mesa may cache flags for this entire process.
+        if (!NativeApp.setDriverDebugVariables(DriverDebugPreferences.nativeValues(context, installed)))
+            Log.w(TAG, "Driver variables not queued; renderer active or validation failed.")
         if (installed == null) {
             NativeApp.setCustomVulkanDriver("", "", "", "")
             return

@@ -252,6 +252,15 @@ object ControllerMappings {
         MainActivityRuntime.prefs.edit { putBoolean(scopedKey(invXKey(left), serial), on) }
     fun setStickInvertY(left: Boolean, on: Boolean, serial: String? = null) =
         MainActivityRuntime.prefs.edit { putBoolean(scopedKey(invYKey(left), serial), on) }
+    // A single dropdown represents both existing flags without losing mixed legacy values.
+    fun setStickInversion(left: Boolean, horizontal: Boolean, vertical: Boolean, serial: String? = null) {
+        MainActivityRuntime.prefs.edit {
+            putBoolean(scopedKey(invXKey(left), serial), horizontal)
+            putBoolean(scopedKey(invYKey(left), serial), vertical)
+        }
+        invalidateRuntimeCaches()
+        stickBindTick.value++
+    }
     fun setStickSwapXY(left: Boolean, on: Boolean, serial: String? = null) =
         MainActivityRuntime.prefs.edit { putBoolean(scopedKey(swapKey(left), serial), on) }
 
@@ -441,9 +450,13 @@ object ControllerMappings {
         MainActivityRuntime.instance?.applicationContext
 
     fun multitapEnabled(): Boolean {
-        val ctx = ps1Context() ?: return false
-        return runCatching { com.armsx2.config.Ps1SettingsStore.active(ctx).multitap }
-            .getOrDefault(false)
+        return multiplayerMode() != com.armsx2.config.MultiplayerMode.STANDARD
+    }
+
+    fun multiplayerMode(): com.armsx2.config.MultiplayerMode {
+        val ctx = ps1Context() ?: return com.armsx2.config.MultiplayerMode.STANDARD
+        return runCatching { com.armsx2.config.Ps1SettingsStore.active(ctx).multiplayerMode }
+            .getOrDefault(com.armsx2.config.MultiplayerMode.STANDARD)
     }
 
     /** Persist the tap state, push it into the running core, and re-cap slot routing. All
@@ -451,16 +464,17 @@ object ControllerMappings {
      *  the next frame, the native alone reverts on the next launch, and without the router
      *  players 2-4 can never claim a slot to be routed. */
     fun setMultitapEnabled(on: Boolean) {
-        PadRouter.setMultitapEnabled(on)
+        setMultiplayerMode(if (on) com.armsx2.config.MultiplayerMode.FOUR_PLAYERS else com.armsx2.config.MultiplayerMode.STANDARD)
+    }
 
+    /** Quick-menu edits belong to the running game's tier, not the global baseline. */
+    fun setMultiplayerMode(mode: com.armsx2.config.MultiplayerMode) {
         val ctx = ps1Context() ?: return
-
         runCatching {
             val store = com.armsx2.config.Ps1SettingsStore
-            store.save(ctx, store.load(ctx).copy(multitap = on))
+            store.setMultiplayerMode(ctx, store.activeGameKey, mode)
         }
-
-        runCatching { kr.co.iefriends.pcsx2.NativeApp.setMultitapEnabled(on) }
+        com.armsx2.core.Ps1Emulation.push(ctx)
     }
 
     // ---- Gyroscope / motion controls (per-game aware) ---------------------
@@ -668,6 +682,23 @@ object ControllerMappings {
         invalidateRuntimeCaches()
     }
 
+    /** Replaces only this player's mapping tier. Never touches system hotkeys or controller type. */
+    internal fun applyAutomaticMapping(plan: ControllerAutoMapping.Plan, player: Int, serial: String?): Boolean {
+        if (!plan.usable) return false
+        val values = plan.preferenceValues(player, serial, actions.map { it.id })
+        MainActivityRuntime.prefs.edit {
+            values.forEach { (key, value) ->
+                when (value) {
+                    is Int -> putInt(key, value)
+                    is String -> putString(key, value)
+                }
+            }
+        }
+        invalidateRuntimeCaches()
+        stickBindTick.value++
+        return true
+    }
+
     /** Unbind a pad button: store KEYCODE_UNKNOWN — the same "unbound" sentinel the
      *  analog-toggle action already uses by default. physicalFor() then returns UNKNOWN
      *  (never matches a real key in targetForPhysical), labelForKey shows "Not set", and
@@ -676,6 +707,17 @@ object ControllerMappings {
     fun clearAction(action: Action, player: Int = 0, serial: String? = null) {
         MainActivityRuntime.prefs.edit().putInt(scopedKey(playerPrefix(player) + KEY_PREFIX + action.id, serial), KeyEvent.KEYCODE_UNKNOWN).apply()
         invalidateRuntimeCaches()
+    }
+
+    /** Explicitly unbind every button at this tier; removing keys would restore defaults instead. */
+    fun clearBindings(player: Int, serial: String? = null) {
+        MainActivityRuntime.prefs.edit {
+            actions.forEach { action ->
+                putInt(scopedKey(playerPrefix(player) + KEY_PREFIX + action.id, serial), KeyEvent.KEYCODE_UNKNOWN)
+            }
+        }
+        invalidateRuntimeCaches()
+        stickBindTick.value++
     }
 
     /** Reset button binds for [player]. serial=null clears the GLOBAL binds; a

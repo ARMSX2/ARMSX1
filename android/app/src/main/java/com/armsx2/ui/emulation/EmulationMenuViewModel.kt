@@ -29,7 +29,7 @@ data class EmulationMenuUiState(
     val settings: Settings = Settings(),
     val touchControlsVisible: Boolean = true,
     val rumbleEnabled: Boolean = true,
-    val multitapEnabled: Boolean = false,
+    val multiplayerMode: com.armsx2.config.MultiplayerMode = com.armsx2.config.MultiplayerMode.STANDARD,
     // Rewind ([emulation] rewind). The Session pane only shows its row when this is on —
     // with rewind off there is no buffer, so a row could only ever report "nothing to
     // rewind to". rewindStepLabel is how far one press goes, derived from the configured
@@ -93,7 +93,7 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
             settings = settings,
             touchControlsVisible = com.armsx2.ui.touch.TouchControls.visible.value,
             rumbleEnabled = ControllerMappings.rumbleEnabled(),
-            multitapEnabled = ControllerMappings.multitapEnabled(),
+            multiplayerMode = ps1.multiplayerMode,
             rewindEnabled = ps1.rewind,
             rewindStepLabel = String.format(
                 java.util.Locale.US, "%.2gs",
@@ -322,12 +322,9 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
         state.value = state.value.copy(rumbleEnabled = enabled)
     }
 
-    fun setMultitap(enabled: Boolean) {
-        // Real now: persists [input] multitap, pushes NativeApp.setMultitapEnabled into the
-        // running core, and re-caps PadRouter so players 2-4 can claim a slot. It used to be
-        // a no-op stub behind a live-looking switch.
-        ControllerMappings.setMultitapEnabled(enabled)
-        state.value = state.value.copy(multitapEnabled = enabled)
+    fun setMultiplayerMode(mode: com.armsx2.config.MultiplayerMode) {
+        ControllerMappings.setMultiplayerMode(mode)
+        state.value = state.value.copy(multiplayerMode = ControllerMappings.multiplayerMode())
     }
 
     /** One rewind step, from the Session pane's row. Stays in the menu so it can be pressed

@@ -141,16 +141,28 @@ object Ps1SettingsStore {
         return next
     }
 
+    /** A preset owns both ports, even when one already equals the global value. */
+    fun setMultiplayerMode(context: Context, gameKey: String?, mode: MultiplayerMode): Ps1Settings {
+        if (gameKey == null) return update(context, null) { it.withMultiplayerMode(mode) }
+        Ps1GameSettings.putOverrides(gameKey, mode.overrides())
+        render(context)
+        return load(context, gameKey)
+    }
+
     /** Drop [tomlKeys] from [gameKey] so they follow the global layer again, and re-render. */
     fun clearOverrides(context: Context, gameKey: String?, tomlKeys: Collection<String>) {
         Ps1GameSettings.clearOverrides(gameKey, tomlKeys)
         render(context)
+        if (tomlKeys.any { it == "input.multitap" || it == "input.multitap_port2" })
+            com.armsx2.core.Ps1Emulation.push(context)
     }
 
     /** Drop EVERY override for [gameKey], and re-render. */
     fun clearAllOverrides(context: Context, gameKey: String?) {
+        val hadMultiplayer = Ps1GameSettings.overridesFor(gameKey).keys.any { it == "input.multitap" || it == "input.multitap_port2" }
         Ps1GameSettings.clearAll(gameKey)
         render(context)
+        if (hadMultiplayer) com.armsx2.core.Ps1Emulation.push(context)
     }
 
     /**
@@ -449,7 +461,10 @@ object Ps1SettingsStore {
         appendLine()
         appendLine("[input]")
         appendLine("    analog_mode_default = ${s.analogModeDefault}")
+        appendLine("    controller1_type = ${str(s.controller1Type.configValue)}")
+        appendLine("    controller2_type = ${str(s.controller2Type.configValue)}")
         appendLine("    multitap = ${s.multitap}")
+        appendLine("    multitap_port2 = ${s.multitapPort2}")
         appendLine()
         appendLine("[emulation]")
         // MUST be written, like every other key in this file: serialize() rebuilds each
@@ -579,12 +594,13 @@ object Ps1SettingsStore {
             "line_detect" -> s.copy(lineDetect = unquote(value))
             else -> s
         }
-        // A MISSING [input] section keeps Ps1Settings()'s default (analog ON) — which is what
-        // we want for every settings.toml written before this key existed. Only an explicit
-        // `false` turns it off.
+        // Retain the legacy analog value for compatibility, not as an active controller option.
         "input" -> when (key) {
             "analog_mode_default" -> s.copy(analogModeDefault = value.toBoolean())
+            "controller1_type" -> s.copy(controller1Type = Ps1ControllerType.fromConfig(unquote(value)))
+            "controller2_type" -> s.copy(controller2Type = Ps1ControllerType.fromConfig(unquote(value)))
             "multitap" -> s.copy(multitap = value.toBoolean())
+            "multitap_port2" -> s.copy(multitapPort2 = value.toBoolean())
             else -> s
         }
         // A MISSING [emulation] section keeps the Ps1Settings() defaults (rewind off,

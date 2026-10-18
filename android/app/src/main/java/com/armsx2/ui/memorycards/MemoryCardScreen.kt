@@ -123,6 +123,14 @@ fun MemoryCardScreen(
                     },
                     horizontalPadding = 0.dp,
                 )
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    val refresh = { viewModel.refresh(selectedSource) }
+                    OutlinedButton(onClick = refresh,
+                        modifier = Modifier.controllerFocusable("memcard.refresh", onConfirm = refresh)) {
+                        Text(str("games.card.refresh"))
+                    }
+                }
             }
 
             AboutCardsPanel(state.directory, game, sessionActive)

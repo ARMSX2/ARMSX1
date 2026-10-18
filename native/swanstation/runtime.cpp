@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // New libretro frontend. No current-DuckStation or post-LGPL ARMSX1 code is used.
 #include "runtime.h"
+#include "multiplayer.h"
+#include "controller_devices.h"
 #include "libretro.h"
 #include <android/native_window_jni.h>
 #include <android/log.h>
@@ -76,8 +78,10 @@ std::atomic<int> frames{0}, speed{100};
 std::atomic<int64_t> audio_nonzero{0};
 std::atomic<float> fps{0}, nominal{60}, fast_speed{2};
 std::atomic<bool> limit_speed{true};
-std::array<std::array<std::atomic<int16_t>,16>,4> buttons{};
-std::array<std::array<std::atomic<int16_t>,4>,4> axes{};
+std::array<std::array<std::atomic<int16_t>,16>,8> buttons{};
+std::array<std::array<std::atomic<int16_t>,4>,8> axes{};
+unsigned multiplayer_mode=0;
+std::array<unsigned,2> controller_devices{SwanControllers::DualShock,SwanControllers::DualShock};
 std::thread::id emulation_thread;
 uint64_t next_run_token=1, reserved_run_token=0, live_run_token=0, cancelled_run_token=0;
 ANativeWindow* window=nullptr;
@@ -201,7 +205,10 @@ void ReadConfig() {
   // Keep existing per-title cards in place. The manager resolves their real core paths.
   options["swanstation_MemoryCards_Card1Type"]="PerGameTitle";
   options["swanstation_MemoryCards_Card2Type"]="Shared";
-  options["swanstation_ControllerPorts_MultitapMode"]=values["input.multitap"]=="true"?"Port1Only":"Disabled";
+  multiplayer_mode=SwanMultiplayer::FromPorts(values["input.multitap"]=="true",values["input.multitap_port2"]=="true");
+  options["swanstation_ControllerPorts_MultitapMode"]=SwanMultiplayer::CoreMode(multiplayer_mode);
+  controller_devices={SwanControllers::Parse(values["input.controller1_type"]),
+                      SwanControllers::Parse(values["input.controller2_type"])};
   put("emulation.runahead","swanstation_Main_RunaheadFrameCount","0");
   options["swanstation_GPU_TextureFilter"]=values["video.texture_filter"]=="bilinear"?"Bilinear":values["video.texture_filter"]=="xbr"?"xBR":"Nearest";
   put("video.widescreen_hack","swanstation_GPU_WidescreenHack","false");
@@ -309,13 +316,11 @@ bool Environment(unsigned command,void* data) {
 }
 void InputPoll() {}
 int16_t Input(unsigned port,unsigned device,unsigned index,unsigned id) {
+  const int player=SwanMultiplayer::PlayerForPort(multiplayer_mode,port);
+  if(player<0)return 0;
+  port=static_cast<unsigned>(player);
   if(port>=buttons.size())return 0;
-  if(device==RETRO_DEVICE_JOYPAD && id==RETRO_DEVICE_ID_JOYPAD_MASK) {
-    unsigned mask=0;for(unsigned b=0;b<16;b++) if(buttons[port][b])mask|=1u<<b;return static_cast<int16_t>(mask);
-  }
-  if(device==RETRO_DEVICE_JOYPAD && id<16)return buttons[port][id]?1:0;
-  if(device==RETRO_DEVICE_ANALOG && index<2 && id<2)return axes[port][index*2+id];
-  return 0;
+  return SwanControllers::Read(device,index,id,buttons[port],axes[port]);
 }
 aaudio_data_callback_result_t AudioOutput(AAudioStream*,void*,void* output,int32_t count) {
   if(count<=0)return AAUDIO_CALLBACK_RESULT_CONTINUE;
@@ -677,7 +682,11 @@ bool SwanHost::Run(std::string path,uint64_t token) {
   unsigned revision=~0u;UpdateWindow(revision);
   core_retro_set_environment(Environment);core_retro_set_video_refresh(Video);core_retro_set_audio_sample(AudioSample);core_retro_set_audio_sample_batch(AudioBatch);
   bridge_statistics_reset();
-  core_retro_set_input_poll(InputPoll);core_retro_set_input_state(Input);core_retro_init();
+  core_retro_set_input_poll(InputPoll);core_retro_set_input_state(Input);
+  // Set devices before Initialize loads controller settings, not after the BIOS is booted.
+  for(unsigned port=0;port<buttons.size();++port)
+    core_retro_set_controller_port_device(port,SwanControllers::ForPort(multiplayer_mode,port,controller_devices));
+  core_retro_init();
   retro_game_info game{game_path.empty()?nullptr:game_path.c_str(),nullptr,0,nullptr};
   const bool loaded=core_retro_load_game(game_path.empty()?nullptr:&game);
   if(loaded) {
@@ -697,8 +706,6 @@ bool SwanHost::Run(std::string path,uint64_t token) {
       " serial="+SwanDiagnostics::Quote(texture_serial)+" nominal_hz="+std::to_string(nominal.load())+
       " presenter_gl_vendor="+SwanDiagnostics::Quote(presenter_vendor?presenter_vendor:"unavailable")+
       " presenter_gl_renderer="+SwanDiagnostics::Quote(presenter_renderer?presenter_renderer:"unavailable"));
-    core_retro_set_controller_port_device(0,RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_ANALOG,0));
-    for(unsigned player=1;player<4;player++)core_retro_set_controller_port_device(player,RETRO_DEVICE_JOYPAD);
     {
       char serial[32]{};bridge_disc_serial(game_path.c_str(),serial,sizeof(serial));
       std::lock_guard lock(state_mutex);
@@ -833,7 +840,7 @@ float SwanHost::NominalFPS(){return nominal;}
 int SwanHost::Frames(){return frames;}
 int64_t SwanHost::AudioNonZero(){return audio_nonzero;}
 void SwanHost::Button(int player,int key,int range,bool down){
-  if(player<0 || player>=4)return;int id=-1;
+  if(player<0 || player>=static_cast<int>(buttons.size()))return;int id=-1;
   switch(key){case 19:id=RETRO_DEVICE_ID_JOYPAD_UP;break;case 20:id=RETRO_DEVICE_ID_JOYPAD_DOWN;break;case 21:id=RETRO_DEVICE_ID_JOYPAD_LEFT;break;case 22:id=RETRO_DEVICE_ID_JOYPAD_RIGHT;break;
     case 96:id=RETRO_DEVICE_ID_JOYPAD_B;break;case 97:id=RETRO_DEVICE_ID_JOYPAD_A;break;case 99:id=RETRO_DEVICE_ID_JOYPAD_Y;break;case 100:id=RETRO_DEVICE_ID_JOYPAD_X;break;
     case 102:id=RETRO_DEVICE_ID_JOYPAD_L;break;case 103:id=RETRO_DEVICE_ID_JOYPAD_R;break;case 104:id=RETRO_DEVICE_ID_JOYPAD_L2;break;case 105:id=RETRO_DEVICE_ID_JOYPAD_R2;break;
@@ -842,9 +849,25 @@ void SwanHost::Button(int player,int key,int range,bool down){
   if((key>=110 && key<=113)||(key>=120 && key<=123)){int base=key>=120?2:0,offset=key%10;int16_t value=down?std::clamp(range,0,32767):0;
     axes[player][base+(offset==0||offset==2?1:0)]=(offset==0||offset==3)?-value:value;}
 }
-void SwanHost::Analog(int player,int stick,int x,int y){if(player<0||player>=4||stick<0||stick>1)return;
+void SwanHost::Analog(int player,int stick,int x,int y){if(player<0||player>=static_cast<int>(axes.size())||stick<0||stick>1)return;
   axes[player][stick*2]=std::clamp((x-128)*256,-32768,32767);axes[player][stick*2+1]=std::clamp((y-128)*256,-32768,32767);}
 void SwanHost::ResetButtons(){for(auto& pad:buttons)for(auto& b:pad)b=0;for(auto& pad:axes)for(auto& a:pad)a=0;}
+void SwanHost::Multiplayer(unsigned mode){Invoke([mode]{
+  const auto next=mode<=3?mode:0;
+  if(multiplayer_mode!=next)ResetButtons();
+  multiplayer_mode=next;options["swanstation_ControllerPorts_MultitapMode"]=SwanMultiplayer::CoreMode(next);
+  for(unsigned port=0;port<buttons.size();++port)
+    core_retro_set_controller_port_device(port,SwanControllers::ForPort(next,port,controller_devices));
+  options_changed=true;return true;
+});}
+void SwanHost::ControllerTypes(unsigned first,unsigned second){Invoke([first,second]{
+  const std::array<unsigned,2> next{SwanControllers::Sanitize(first),SwanControllers::Sanitize(second)};
+  if(next==controller_devices)return true;
+  controller_devices=next;ResetButtons();ClearRewind();
+  for(unsigned port=0;port<buttons.size();++port)
+    core_retro_set_controller_port_device(port,SwanControllers::ForPort(multiplayer_mode,port,controller_devices));
+  return true;
+});}
 void SwanHost::Option(std::string key,std::string value){Invoke([key=std::move(key),value=std::move(value)]{options[key]=value;options_changed=true;return true;});}
 void SwanHost::Reset(){Invoke([]{bridge_ctr_hud(false);core_retro_reset();SwanAchievements::Reset();ClearRewind();
   {std::lock_guard lock(audio_mutex);audio_queue.Clear();audio_warmup.Reset();}return true;});}
@@ -1032,6 +1055,8 @@ void SwanHost::GlDriver(std::string driver){std::lock_guard lock(state_mutex);if
 bool SwanHost::CustomDriver(std::string directory,std::string name,std::string redirect,std::string hooks){std::lock_guard lock(state_mutex);
   if(live_run_token)return false;SwanVulkan::Driver(std::move(directory),std::move(name),std::move(redirect),std::move(hooks));return true;}
 std::string SwanHost::GlDriver(){std::lock_guard lock(state_mutex);return requested_gl_driver=="angle"?"angle":"system";}
+bool SwanHost::DriverVariables(std::string variables){std::lock_guard lock(state_mutex);
+  return !live_run_token&&SwanVulkan::DriverVariables(variables);}
 void SwanHost::DisplayAspect(int mode){Invoke([mode]{display_options.aspect=std::clamp(mode,0,3);UpdateCoreAspect();return true;});}
 void SwanHost::DisplayCustom(float ratio){if(std::isfinite(ratio))Invoke([ratio]{display_options.custom=std::clamp(ratio,0.25f,4.f);UpdateCoreAspect();return true;});}
 void SwanHost::DisplayStretch(bool value){Invoke([value]{display_options.stretch=value;return true;});}

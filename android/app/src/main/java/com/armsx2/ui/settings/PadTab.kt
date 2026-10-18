@@ -31,6 +31,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,29 +56,43 @@ import com.armsx2.ui.Colors
 import com.armsx2.ui.touch.TouchButtonId
 import com.armsx2.ui.touch.TouchControls
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kr.co.iefriends.pcsx2.NativeApp
 
 @Composable
-fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
+fun PadTab(
+    state: MutableState<Settings>,
+    sectionTabs: Boolean = false,
+    forceGlobal: Boolean = false,
+    playerState: androidx.compose.runtime.MutableIntState? = null,
+    captureReset: Int = 0,
+) {
     val scroll = settingsScrollState()
-    ControllerAutoScroll(scroll)
     val capture = remember { mutableStateOf<ControllerMappings.Action?>(null) }
     // Local co-op: which player's mapping this tab is editing (0 = P1, 1 = P2).
-    val editPlayer = remember { mutableIntStateOf(0) }
+    val localPlayer = remember { mutableIntStateOf(0) }
+    val section = ControllerSections.selected.value
+    val editPlayer = if (sectionTabs && section.playerIndex != null) {
+        remember(section) { mutableIntStateOf(section.playerIndex) }
+    } else playerState ?: localPlayer
+    // HotkeysTab hosts its own scroll controller; never run two repeat loops on one pane.
+    if (!sectionTabs || section != ControllerSection.Hotkeys) ControllerAutoScroll(scroll)
+    val sectionScope = rememberCoroutineScope()
+    val newProfileName = rememberSaveable { mutableStateOf("") }
     // Per-game controller settings (issue #246): the input-mapping layer (button
     // binds, stick modes, custom stick codes) follows the SAME Global/Game scope
     // the other tabs use — the ScopeToggle shown above this tab drives it. In Game
     // scope with a known serial, edits write per-game overrides; otherwise global.
     val padScope = com.armsx2.ui.InGameOverlay.settingsScope.value
-    val padSerial = com.armsx2.ui.InGameOverlay.currentSerial.value?.takeIf { it.isNotEmpty() }
+    val padSerial = if (forceGlobal) null else com.armsx2.ui.InGameOverlay.currentSerial.value?.takeIf { it.isNotEmpty() }
     val editSerial: String? = if (padScope == com.armsx2.config.SettingsScope.Game) padSerial else null
     // Bindings are CAPTURED asynchronously (arm, then press a button), so the write
     // tier is re-derived LIVE at capture time rather than from the composition-time
     // editSerial — guarantees a scope flip between arming and pressing still lands on
     // the tier shown. (Display rows use editSerial, which is correct at composition.)
     val liveEditSerial: () -> String? = {
-        if (com.armsx2.ui.InGameOverlay.settingsScope.value == com.armsx2.config.SettingsScope.Game)
+        if (!forceGlobal && com.armsx2.ui.InGameOverlay.settingsScope.value == com.armsx2.config.SettingsScope.Game)
             com.armsx2.ui.InGameOverlay.currentSerial.value?.takeIf { it.isNotEmpty() } else null
     }
     val ctx = LocalContext.current
@@ -86,6 +102,15 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
     val macroCapture = remember { mutableStateOf<TouchButtonId?>(null) }
 
     val stickCapture = ControllerMappings.captureStickDir
+    LaunchedEffect(section, sectionTabs, captureReset) {
+        if (sectionTabs) section.playerIndex?.let { playerState?.intValue = it }
+        // A binding capture must never remain armed on a different section's page.
+        capture.value = null
+        macroCapture.value = null
+        stickCapture.value = null
+        ControllerMappings.padCapturing.value = false
+        ControllerMappings.endHotkeyCapture()
+    }
     LaunchedEffect(capture.value, stickCapture.value, macroCapture.value) {
         // Tell MainActivityRuntime.dispatchKeyEvent to stop intercepting controller buttons for
         // overlay nav while we're capturing, so B/A/Y/etc. reach onPreviewKeyEvent
@@ -101,6 +126,8 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         onDispose {
             ControllerMappings.padCapturing.value = false
             ControllerMappings.captureStickDir.value = null
+            ControllerMappings.capturePadAction.value = null
+            ControllerMappings.endHotkeyCapture()
         }
     }
 
@@ -166,49 +193,79 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 true
             },
     ) {
-        // Emulated-pad section. Deliberately ABOVE the per-game scope hint below: this is a
-        // core setting written to settings.toml (not a mapping), so it is always global and
-        // does NOT follow the Global/Game toggle the rest of this tab does.
-        Ps1PadDeviceSection()
-        SettingsDivider()
-        // Per-game scope hint (#246): the buttons / sticks below follow the
-        // Global/Game toggle at the top of the menu. Spell out the current tier
-        // here since this tab scrolls far from that toggle.
-        Text(
-            when {
-                editSerial != null -> "● Editing controls for THIS GAME ($editSerial) — switch to Global up top to change all games."
-                padSerial != null -> str("pad.scopeHint.globalWithGameHint")
-                else -> str("pad.scopeHint.global")
+        if (sectionTabs) ControllerSectionTabs(
+            selected = section,
+            onSelect = {
+                capture.value = null
+                macroCapture.value = null
+                stickCapture.value = null
+                ControllerMappings.padCapturing.value = false
+                ControllerMappings.endHotkeyCapture()
+                ControllerSections.selected.value = it
+                it.playerIndex?.let { player -> playerState?.intValue = player }
+                sectionScope.launch { scroll.scrollTo(0) }
             },
-            color = if (editSerial != null) Colors.pasx2_blue else Color(0xFF9A9A9A),
-            fontSize = 14.sp,
-            fontWeight = if (editSerial != null) FontWeight.Bold else FontWeight.Normal,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
         )
         SettingsDivider()
+        // Core device settings follow the same Global / This game choice as mappings.
+        if (!sectionTabs || section == ControllerSection.Multiplayer) Ps1PadDeviceSection(showTypes = !sectionTabs)
+        // Scoped Settings still explains its edit tier; the global-only sidebar needs no notice.
+        if (!sectionTabs) {
+            Text(
+                when {
+                    editSerial != null -> "● Editing controls for THIS GAME ($editSerial) — switch to Global up top to change all games."
+                    padSerial != null -> str("pad.scopeHint.globalWithGameHint")
+                    else -> str("pad.scopeHint.global")
+                },
+                color = if (editSerial != null) Colors.pasx2_blue else Color(0xFF9A9A9A),
+                fontSize = 14.sp,
+                fontWeight = if (editSerial != null) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+            SettingsDivider()
+        }
+        if (sectionTabs && section.editsPlayer) {
+            Ps1ControllerTypeSection(editPlayer.intValue)
+            AutomaticMappingSection(editPlayer.intValue, editSerial) {
+                capture.value = null
+                macroCapture.value = null
+                ControllerMappings.captureStickDir.value = null
+                ControllerMappings.padCapturing.value = false
+                refreshToken.intValue++
+            }
+            ClearBindingsRow(editPlayer.intValue, editSerial) {
+                capture.value = null
+                macroCapture.value = null
+                ControllerMappings.captureStickDir.value = null
+                ControllerMappings.padCapturing.value = false
+                refreshToken.intValue++
+            }
+        }
         // Open the on-screen touch-layout editor straight from here (no need to be
         // in-game). Closes the settings overlay and drops into edit mode over the
         // game/library. With no game running it edits the Global Default layout.
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(rowAura())
-                .clickable { com.armsx2.ui.InGameOverlay.editTouchLayout() }
-                .controllerFocusable(
-                    controllerId = "pad-edit-touch",
-                    onConfirm = { com.armsx2.ui.InGameOverlay.editTouchLayout() },
+        if (!sectionTabs || section == ControllerSection.Touch) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(rowAura())
+                    .clickable { com.armsx2.ui.InGameOverlay.editTouchLayout() }
+                    .controllerFocusable(
+                        controllerId = "pad-edit-touch",
+                        onConfirm = { com.armsx2.ui.InGameOverlay.editTouchLayout() },
+                    )
+                    .padding(horizontal = 6.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    str("pad.editTouchLayout"),
+                    color = Colors.pasx2_blue, fontSize = 16.sp, fontWeight = FontWeight.Bold,
                 )
-                .padding(horizontal = 6.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                str("pad.editTouchLayout"),
-                color = Colors.pasx2_blue, fontSize = 16.sp, fontWeight = FontWeight.Bold,
-            )
+            }
+            SettingsDivider()
         }
-        SettingsDivider()
         // Loose state reads kept at the top of the grouped area so they always
         // recompose the tab regardless of which sections are collapsed.
         @Suppress("UNUSED_EXPRESSION") TouchControls.macroBindTick.value
@@ -221,7 +278,8 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         ControllerMappings.stickBindTick.value
         // Macros section — extracted so the in-game Controls tab can reuse it. Here in the
         // full Pad tab we pass the physical-trigger capture host, so the "Bind" column is live.
-        MacrosSection(
+        if (!sectionTabs || section == ControllerSection.Settings) MacrosSection(
+            standalone = false,
             macroCapture = macroCapture,
             onArmCapture = { mid ->
                 macroCapture.value = if (macroCapture.value == mid) null else mid
@@ -229,12 +287,12 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 ControllerMappings.captureStickDir.value = null
             },
         )
-        CollapsibleSection(str("pad.section.playerRumble"), initiallyExpanded = false) {
+        ControllerPageSection(!sectionTabs, str("pad.section.playerRumble"), false) {
             // Local co-op: pick which player's buttons / stick mode you're editing. P2 is
             // the second controller to press a button in-game (auto-assigned). Stick
             // feel (deadzone / sensitivity / acceleration) and the D-pad-as-stick toggle
             // below are shared by both players.
-            SegmentedRow(
+            if (!sectionTabs) SegmentedRow(
                 label = str("pad.editing.label"),
                 options = listOf(str("pad.player1"), str("pad.player2")),
                 selectedIndex = editPlayer.intValue,
@@ -313,7 +371,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             }
             SettingsDivider()
         }
-        CollapsibleSection(str("pad.section.analogSticks"), initiallyExpanded = false) {
+        ControllerPageSection(!sectionTabs, str("pad.section.analogSticks"), false) {
             // Analog stick remapping — make a physical stick act as the D-pad or the
             // face buttons (great for fighting games on analog-centric controllers).
             run {
@@ -403,8 +461,13 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         // Motion / gyroscope controls. Shared with the in-game pause menu's Controls tab
         // (com.armsx2.ui.settings.GyroSection). Here it follows the Pad tab's Global/Game
         // scope (editSerial) and shares the tab's refreshToken so it re-reads live.
-        GyroSection(editSerial = editSerial, externalRefresh = refreshToken)
-        CollapsibleSection(str("pad.section.buttonMapping"), initiallyExpanded = false) {
+        if (!sectionTabs || section == ControllerSection.Settings) GyroSection(editSerial = editSerial, externalRefresh = refreshToken, standalone = false)
+        ControllerPageSection(!sectionTabs || section.editsPlayer,
+            str(if (sectionTabs) "pad.section.bindings" else "pad.section.buttonMapping"), false) {
+            // A touch collapse must not leave an invisible binding capture consuming keys.
+            DisposableEffect(Unit) {
+                onDispose { capture.value = null }
+            }
             ControllerMappings.actions.forEach { action ->
                 val physical = ControllerMappings.physicalForScope(action, editPlayer.intValue, editSerial)
                 PadBindingRow(
@@ -420,7 +483,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 )
                 // Turbo / rapid-fire toggle — only meaningful once the button is
                 // bound to a physical controller button.
-                if (physical != android.view.KeyEvent.KEYCODE_UNKNOWN) {
+                if (!sectionTabs && physical != android.view.KeyEvent.KEYCODE_UNKNOWN) {
                     val turbo = remember(action.id, editPlayer.intValue, refreshToken.intValue) {
                         mutableStateOf(ControllerMappings.isTurboAction(action, editPlayer.intValue))
                     }
@@ -481,15 +544,34 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                     color = Colors.pasx2_blue, fontSize = 16.sp, fontWeight = FontWeight.Bold,
                 )
             }
+            if (sectionTabs) {
+                SettingsDivider()
+                for (left in listOf(true, false)) {
+                    val prefix = if (left) "pad.leftStick" else "pad.rightStick"
+                    val mode = (if (ControllerMappings.stickInvertXScope(left, editSerial)) 1 else 0) +
+                        (if (ControllerMappings.stickInvertYScope(left, editSerial)) 2 else 0)
+                    ControllerTypePicker(
+                        player = editPlayer.intValue,
+                        label = str("$prefix.inversion.label"),
+                        options = listOf(str("pad.inversion.off"), str("pad.inversion.horizontal"),
+                            str("pad.inversion.vertical"), str("pad.inversion.both")),
+                        selectedIndex = mode,
+                        description = str("pad.inversion.description") + " " + str("pad.inversion.shared"),
+                    ) { selected ->
+                        ControllerMappings.setStickInversion(left, selected and 1 != 0, selected and 2 != 0, editSerial)
+                        refreshToken.intValue++
+                    }
+                }
+            }
         }
         // Named mapping profiles (#186). Sits right under the mapping rows because it
         // acts on exactly what they show: the CURRENT player and the CURRENT scope.
         // Save snapshots that map; applying a profile overwrites it. Feel settings
         // (deadzone/sensitivity/rumble) are deliberately not part of a profile — see
         // ControllerMappings' profile section for why.
-        CollapsibleSection(str("pad.section.padProfiles"), initiallyExpanded = false) {
+        ControllerPageSection(!sectionTabs, str("pad.section.padProfiles"), false) {
             SettingsDivider()
-            val newName = remember { mutableStateOf("") }
+            val newName = newProfileName
             val profiles = remember { mutableStateOf<List<String>>(emptyList()) }
             // listProfiles() reads the portable inputprofiles/ folder, so it rides an IO
             // hop rather than landing in composition. Re-runs when a profile is
@@ -589,7 +671,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 }
             }
         }
-        CollapsibleSection(str("pad.section.onScreenControls"), initiallyExpanded = false) {
+        ControllerPageSection(!sectionTabs || section == ControllerSection.Touch, str("pad.section.onScreenControls"), sectionTabs) {
             // Controller hotkeys now live in their own dedicated "Hotkeys" tab
             // (see HotkeysTab) so they're easier to find than buried under Pad.
             SettingsDivider()
@@ -645,6 +727,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             // UsbDevices.applyAtBoot() and Lightgun.load() at startup, so deleting them would
             // break a file this port must not edit. Only the UI entry point is gone.
         }
+        if (sectionTabs && section == ControllerSection.Hotkeys) HotkeysTab(state)
     }
 }
 
@@ -653,37 +736,67 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
  * The emulated pad DEVICE, as opposed to everything else on this tab (which maps physical or
  * on-screen inputs onto it).
  *
- * One row today: which mode the DualShock reports at boot. It edits [com.armsx2.config.Ps1Settings]
- * and therefore `settings.toml`, read by `frontend/config.c` ([input] analog_mode_default) and
- * applied in `ArmsxSession::launch()` via `psxi_sda_set_analog_mode()`. That makes it a
- * next-launch setting and an always-global one — it is NOT part of the Global/Game mapping scope
- * the rest of this tab follows, which is why it sits above that hint.
+ * The scoped PS1 editor persists the emulated device and multiplayer layout separately from
+ * physical button mappings. Multiplayer changes also update the running core and input router.
  */
 @Composable
-private fun Ps1PadDeviceSection() {
-    val editor = rememberPs1SettingsEditor()
-    ToggleRow(
-        str("pad.analogStart.label"),
-        editor.value.analogModeDefault,
-        description = str("pad.analogStart.description"),
-        idSuffix = "ps1.analogModeDefault",
-    ) { v -> editor.update { it.copy(analogModeDefault = v) } }
-    SettingsDivider()
-    // Multitap. Writes [input] multitap and live-applies through Ps1Emulation ->
-    // NativeApp.setMultitapEnabled, which swaps the device in controller port 1 at the next
-    // instruction boundary. The warning in the description is not padding: a tap really does
-    // make a non-multitap game see NO controller, exactly as real hardware does.
-    ToggleRow(
-        str("pad.multitap4.label"),
-        editor.value.multitap,
-        description = str("pad.multitap4.description"),
-        idSuffix = "ps1.multitap",
-    ) { v ->
-        editor.update { it.copy(multitap = v) }
-        // Keep the routing layer in step in the same gesture: without this, slots 2-4 stay
-        // unclaimable until the app restarts and the extra controllers look dead.
-        com.armsx2.input.PadRouter.setMultitapEnabled(v)
+private fun ClearBindingsRow(player: Int, serial: String?, onInteraction: () -> Unit) {
+    val title = str("pad.clearBindings.label")
+    val description = str("pad.clearBindings.description")
+    val message = str("pad.clearBindings.confirm").format(player + 1)
+    val clear = {
+        // A touch request can arrive during button capture; release it before the prompt owns A/B.
+        onInteraction()
+        com.armsx2.ui.common.GlobalConfirm.ask(
+            title = title,
+            message = message,
+            confirmLabel = title,
+            destructive = true,
+        ) {
+            ControllerMappings.clearBindings(player, serial)
+            onInteraction()
+        }
     }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+        .background(rowAura())
+        .controllerFocusable("pad-clear-bindings:$player", onConfirm = clear)
+        .clickable(onClick = clear).padding(horizontal = 12.dp, vertical = 14.dp)) {
+        Text(title, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleMedium)
+        Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium)
+    }
+    SettingsDivider()
+}
+
+@Composable
+private fun Ps1PadDeviceSection(showTypes: Boolean) {
+    val editor = rememberPs1SettingsEditor()
+    if (showTypes) {
+        Ps1ControllerTypeSection(0)
+        Ps1ControllerTypeSection(1)
+    }
+    com.armsx2.ui.common.MultiplayerSection(editor.value.multiplayerMode) { mode ->
+        editor.setMultiplayerMode(mode)
+    }
+}
+
+@Composable
+private fun Ps1ControllerTypeSection(player: Int) {
+    val editor = rememberPs1SettingsEditor()
+    val types = com.armsx2.config.Ps1ControllerType.entries
+    ControllerTypePicker(
+        player = player,
+        label = str(if (player == 1) "pad.controllerType.player2" else "pad.controllerType.player1"),
+        options = types.map { str(it.labelKey) },
+        selectedIndex = editor.value.controllerType(player).ordinal,
+        description = str("pad.controllerType.description"),
+        onSelected = { editor.update { s -> s.withControllerType(player, types[it]) } },
+    )
+    if (editor.value.controllerType(player) == com.armsx2.config.Ps1ControllerType.GUNCON ||
+        editor.value.controllerType(player) == com.armsx2.config.Ps1ControllerType.MOUSE) {
+        HelpText(str("pad.controllerType.pointer"))
+    }
+    SettingsDivider()
 }
 
 /**
@@ -693,17 +806,17 @@ private fun Ps1PadDeviceSection() {
  * widget (see GestureLayer). Off by default, so nothing changes unless someone opts in.
  */
 @Composable
-private fun GestureControlSection(refreshToken: MutableState<Int>) {
+private fun GestureControlSection(refreshToken: MutableState<Int>, standalone: Boolean = false) {
     @Suppress("UNUSED_EXPRESSION")
     refreshToken.value
-    CollapsibleSection(str("pad.gesture.section"), initiallyExpanded = false) {
+    ControllerSectionBody(str("pad.gesture.section"), standalone) {
         ToggleRow(
             str("pad.gesture.enable.label"),
             TouchControls.gestureEnabled.value,
             description = str("pad.gesture.enable.description"),
         ) { TouchControls.setGestureEnabled(it); refreshToken.value++ }
 
-        if (!TouchControls.gestureEnabled.value) return@CollapsibleSection
+        if (!TouchControls.gestureEnabled.value) return@ControllerSectionBody
 
         SettingsDivider()
         // Each direction picks a PS2 button (or None). Same code space as the on-screen buttons.
@@ -995,11 +1108,12 @@ private fun StickPickItem(label: String, selected: Boolean, onClick: () -> Unit)
 internal fun GyroSection(
     editSerial: String? = null,
     externalRefresh: androidx.compose.runtime.MutableIntState? = null,
+    standalone: Boolean = false,
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val localToken = remember { androidx.compose.runtime.mutableIntStateOf(0) }
     val refreshToken = externalRefresh ?: localToken
-    CollapsibleSection(str("pad.gyro.section"), initiallyExpanded = false) {
+    ControllerSectionBody(str("pad.gyro.section"), standalone) {
         @Suppress("UNUSED_EXPRESSION")
         refreshToken.intValue
         val gyroMode = ControllerMappings.gyroModeScope(editSerial)
@@ -1107,13 +1221,14 @@ internal fun GyroSection(
 internal fun MacrosSection(
     macroCapture: MutableState<TouchButtonId?>? = null,
     onArmCapture: ((TouchButtonId) -> Unit)? = null,
+    standalone: Boolean = false,
 ) {
     val macroDialogFor = remember { mutableStateOf<TouchButtonId?>(null) }
     // Recompose when any macro's button set / physical bind changes.
     @Suppress("UNUSED_EXPRESSION")
     TouchControls.macroBindTick.value
     val physicalSupported = onArmCapture != null
-    CollapsibleSection(str("pad.section.macros"), initiallyExpanded = false) {
+    ControllerSectionBody(str("pad.section.macros"), standalone) {
         Text(
             str("pad.macros.header"),
             color = Color(0xFFBBBBBB),

@@ -52,7 +52,11 @@ import kotlinx.coroutines.withContext
  * built-in look for any image a skin doesn't provide.
  */
 @Composable
-fun SkinsTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
+fun SkinsTab(
+    @Suppress("UNUSED_PARAMETER") state: MutableState<Settings>,
+    forceGlobal: Boolean = false,
+    collapsibleOptions: Boolean = false,
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val scroll = settingsScrollState()
@@ -91,7 +95,8 @@ fun SkinsTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
     // game (Game scope) or globally. Inside Game scope the user still chooses whether
     // this game pins its own skin or just follows the global one — that's [perGame],
     // which is the presence of the per-game override, not a separate preference.
-    val skinSerial = com.armsx2.ui.InGameOverlay.currentSerial.value?.takeIf { it.isNotEmpty() }
+    val skinSerial = if (forceGlobal) null else
+        com.armsx2.ui.InGameOverlay.currentSerial.value?.takeIf { it.isNotEmpty() }
     val gameScope = com.armsx2.ui.InGameOverlay.settingsScope.value ==
         com.armsx2.config.SettingsScope.Game && skinSerial != null
     val perGame = remember(refresh.intValue, skinSerial) {
@@ -138,6 +143,55 @@ fun SkinsTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         }
     }
 
+    fun loadRemoteSkins() {
+        // Fetch only when Download skins is opened. The job belongs to this
+        // screen, not the collapsible content, so collapsing cannot strand it.
+        if (remote.value == null && !loadingRemote.value) {
+            loadingRemote.value = true
+            scope.launch {
+                val list = withContext(Dispatchers.IO) { SkinRepo.fetch() }
+                remote.value = list
+                loadingRemote.value = false
+                if (list.isEmpty()) status.value = I18n.get("skins.browse.failed")
+            }
+        }
+    }
+
+    val downloadableSkins: @Composable () -> Unit = {
+        if (loadingRemote.value) {
+            Text(
+                str("skins.browse.loading"), color = Color(0xFFAACCFF), fontSize = 15.sp,
+                modifier = Modifier.padding(vertical = 6.dp),
+            )
+        }
+        val list = remote.value.orEmpty()
+        for (r in list) {
+            SettingsDivider()
+            RemoteSkinRow(
+                skin = r,
+                preview = previews[r.filePath],
+                installing = installing.value == r.filePath,
+                onInstall = {
+                    if (installing.value == null) {
+                        installing.value = r.filePath
+                        status.value = null
+                        scope.launch {
+                            val id = withContext(Dispatchers.IO) { SkinRepo.install(ctx, r) }
+                            installing.value = null
+                            if (id != null) {
+                                ControllerSkinStore.setActive(ctx, id, editSerial)
+                                refresh.intValue++
+                                status.value = I18n.get("skins.status.importedAndSelected")
+                            } else {
+                                status.value = I18n.get("skins.browse.installFailed")
+                            }
+                        }
+                    }
+                },
+            )
+        }
+    }
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -145,64 +199,28 @@ fun SkinsTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
     ) {
         Text(str("skins.title"), color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, fontWeight = FontWeight.Bold)
 
-        ActionRow(str("skins.importFolder"), "skins-import-folder") { folderLauncher.launch(null) }
-        SettingsDivider()
-        ActionRow(str("skins.importZip"), "skins-import-zip") {
-            zipLauncher.launch(
-                arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
-            )
-        }
-        SettingsDivider()
-        ActionRow(
-            if (browseOpen.value) str("skins.browse.hide") else str("skins.browse"),
-            "skins-browse",
-        ) {
-            browseOpen.value = !browseOpen.value
-            // Fetch once, on first open — not at tab composition. The list is a network
-            // round trip nobody who only wants to switch skins should pay for.
-            if (browseOpen.value && remote.value == null && !loadingRemote.value) {
-                loadingRemote.value = true
-                scope.launch {
-                    val list = withContext(Dispatchers.IO) { SkinRepo.fetch() }
-                    remote.value = list
-                    loadingRemote.value = false
-                    if (list.isEmpty()) status.value = I18n.get("skins.browse.failed")
-                }
+        SkinOptionsSection(str("skins.import.title"), collapsibleOptions) {
+            ActionRow(str("skins.importFolder"), "skins-import-folder") { folderLauncher.launch(null) }
+            SettingsDivider()
+            ActionRow(str("skins.importZip"), "skins-import-zip") {
+                zipLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream"))
             }
         }
-        if (browseOpen.value) {
-            if (loadingRemote.value) {
-                Text(
-                    str("skins.browse.loading"), color = Color(0xFFAACCFF), fontSize = 15.sp,
-                    modifier = Modifier.padding(vertical = 6.dp),
-                )
+        SettingsDivider()
+        if (collapsibleOptions) {
+            CollapsibleSection(str("skins.browse")) {
+                androidx.compose.runtime.LaunchedEffect(Unit) { loadRemoteSkins() }
+                downloadableSkins()
             }
-            val list = remote.value.orEmpty()
-            for (r in list) {
-                SettingsDivider()
-                RemoteSkinRow(
-                    skin = r,
-                    preview = previews[r.filePath],
-                    installing = installing.value == r.filePath,
-                    onInstall = {
-                        if (installing.value == null) {
-                            installing.value = r.filePath
-                            status.value = null
-                            scope.launch {
-                                val id = withContext(Dispatchers.IO) { SkinRepo.install(ctx, r) }
-                                installing.value = null
-                                if (id != null) {
-                                    ControllerSkinStore.setActive(ctx, id, editSerial)
-                                    refresh.intValue++
-                                    status.value = I18n.get("skins.status.importedAndSelected")
-                                } else {
-                                    status.value = I18n.get("skins.browse.installFailed")
-                                }
-                            }
-                        }
-                    },
-                )
+        } else {
+            ActionRow(
+                if (browseOpen.value) str("skins.browse.hide") else str("skins.browse"),
+                "skins-browse",
+            ) {
+                browseOpen.value = !browseOpen.value
+                if (browseOpen.value) loadRemoteSkins()
             }
+            if (browseOpen.value) downloadableSkins()
         }
         SettingsDivider()
 
@@ -216,67 +234,78 @@ fun SkinsTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
         }
 
         Spacer(Modifier.height(10.dp))
-        // Only offered with a game in hand — a per-game switch in the global screen
-        // would have no game to be "per".
-        if (gameScope && skinSerial != null) {
-            ToggleRow(
-                str("skins.perGame.label"),
-                perGame,
-                description = str("skins.perGame.description"),
-            ) { on ->
-                if (on) {
-                    // Seed the override with what the game already shows, so turning this
-                    // on changes NOTHING until a row below is picked. Flipping straight to
-                    // the built-in look would be a surprise edit, not a scope change.
-                    ControllerSkinStore.setActive(
-                        ctx,
-                        ControllerSkinStore.activeForScope(ctx, null),
-                        skinSerial,
-                    )
-                } else {
-                    ControllerSkinStore.clearGameOverride(ctx, skinSerial)
-                }
-                refresh.intValue++
-            }
-            SettingsDivider()
-        }
-        Text(
+        SkinOptionsSection(
             if (perGame) str("skins.activeSkin.game") else str("skins.activeSkin"),
-            color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(bottom = 4.dp),
-        )
+            collapsibleOptions,
+        ) {
+            // Only offered with a game in hand — a per-game switch in the global screen
+            // would have no game to be "per".
+            if (gameScope && skinSerial != null) {
+                ToggleRow(
+                    str("skins.perGame.label"),
+                    perGame,
+                    description = str("skins.perGame.description"),
+                ) { on ->
+                    if (on) {
+                        // Seed the override with what the game already shows, so turning this
+                        // on changes NOTHING until a row below is picked. Flipping straight to
+                        // the built-in look would be a surprise edit, not a scope change.
+                        ControllerSkinStore.setActive(
+                            ctx,
+                            ControllerSkinStore.activeForScope(ctx, null),
+                            skinSerial,
+                        )
+                    } else {
+                        ControllerSkinStore.clearGameOverride(ctx, skinSerial)
+                    }
+                    refresh.intValue++
+                }
+                SettingsDivider()
+            }
+            if (!collapsibleOptions) Text(
+                if (perGame) str("skins.activeSkin.game") else str("skins.activeSkin"),
+                color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
 
-        SkinRow(
-            name = str("skins.builtinDefault"),
-            selected = activeId == null,
-            controllerId = "skin-builtin",
-            onSelect = { ControllerSkinStore.setActive(ctx, null, editSerial); refresh.intValue++ },
-            onDelete = null,
-        )
-        for (b in ControllerSkinStore.BUILTIN) {
-            SettingsDivider()
             SkinRow(
-                name = b.name,
-                selected = activeId == b.id,
-                controllerId = "skin-${b.id}",
-                onSelect = { ControllerSkinStore.setActive(ctx, b.id, editSerial); refresh.intValue++ },
+                name = str("skins.builtinDefault"),
+                selected = activeId == null,
+                controllerId = "skin-builtin",
+                onSelect = { ControllerSkinStore.setActive(ctx, null, editSerial); refresh.intValue++ },
                 onDelete = null,
             )
-        }
-        for (s in skins) {
-            SettingsDivider()
-            SkinRow(
-                name = "${s.name}  ·  ${s.imageCount} images",
-                selected = activeId == s.id,
-                controllerId = "skin-${s.id}",
-                onSelect = { ControllerSkinStore.setActive(ctx, s.id, editSerial); refresh.intValue++ },
-                onDelete = {
-                    ControllerSkinStore.delete(ctx, s.id)
-                    refresh.intValue++
-                },
-            )
+            for (b in ControllerSkinStore.BUILTIN) {
+                SettingsDivider()
+                SkinRow(
+                    name = b.name,
+                    selected = activeId == b.id,
+                    controllerId = "skin-${b.id}",
+                    onSelect = { ControllerSkinStore.setActive(ctx, b.id, editSerial); refresh.intValue++ },
+                    onDelete = null,
+                )
+            }
+            for (s in skins) {
+                SettingsDivider()
+                SkinRow(
+                    name = "${s.name}  ·  ${s.imageCount} images",
+                    selected = activeId == s.id,
+                    controllerId = "skin-${s.id}",
+                    onSelect = { ControllerSkinStore.setActive(ctx, s.id, editSerial); refresh.intValue++ },
+                    onDelete = {
+                        ControllerSkinStore.delete(ctx, s.id)
+                        refresh.intValue++
+                    },
+                )
+            }
         }
     }
+}
+
+/** Keep per-game Settings unchanged; only sidebar Customisation uses dropdowns. */
+@Composable
+private fun SkinOptionsSection(title: String, collapsible: Boolean, content: @Composable () -> Unit) {
+    if (collapsible) CollapsibleSection(title, content = content) else content()
 }
 
 /** One downloadable skin: preview thumbnail, name + metadata, and a Get button. */

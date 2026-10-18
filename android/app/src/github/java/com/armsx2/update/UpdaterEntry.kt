@@ -65,7 +65,7 @@ import android.content.pm.PackageManager
  * build if either reaches a play artifact; build-play-aab.sh re-checks the finished .aab.
  *
  * ORG vs REPO: the GitHub org is ARMSX2 and this repo is ARMSX1 — `ARMSX2/ARMSX1`. Neither
- * `ARMSX1/ARMSX1` nor `ARMSX2/ARMSX2` (the PS2 sibling) is this app. Matches News.kt's endpoint.
+ * `ARMSX1/ARMSX1` nor `ARMSX2/ARMSX2` (the PS2 sibling) is this app.
  *
  * Stable releases use semantic tags; nightly CI uses dated tags and timestamp version codes.
  * UpdatePolicy keeps these channels separate, and archive identity is checked before installation.

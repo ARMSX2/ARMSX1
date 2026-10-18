@@ -32,7 +32,12 @@ object Ps1Emulation {
     /** Push an in-memory snapshot, for callers that already hold one. */
     fun push(s: Ps1Settings) {
         runCatching {
-            NativeApp.setMultitapEnabled(s.multitap)
+            val mode = s.multiplayerMode
+            if (com.armsx2.input.PadRouter.setMultiplayerMode(mode)) {
+                com.armsx2.runtime.MainActivityRuntime.instance?.resetPadState()
+            }
+            NativeApp.setMultiplayerMode(mode.nativeValue)
+            NativeApp.setControllerTypes(s.controller1Type.deviceId, s.controller2Type.deviceId)
             // Passing enabled = false frees the snapshot ring immediately, which is the whole
             // point of routing the switch through the core rather than only through the file.
             NativeApp.setRewind(s.rewind, s.rewindSeconds, s.rewindFrequency)

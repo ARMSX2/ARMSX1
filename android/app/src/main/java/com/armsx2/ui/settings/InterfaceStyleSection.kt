@@ -15,9 +15,9 @@ import com.armsx2.ui.theme.InterfacePreferences
 import com.armsx2.ui.theme.InterfaceStyle
 
 @Composable
-fun InterfaceStyleSection() {
+fun InterfaceStyleSection(showTitle: Boolean = true) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(str("app.interface.style"), style = MaterialTheme.typography.titleMedium)
+        if (showTitle) Text(str("app.interface.style"), style = MaterialTheme.typography.titleMedium)
         Text(str("app.interface.desc"), style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

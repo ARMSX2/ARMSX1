@@ -119,7 +119,7 @@ internal fun Ps1Scoped(
 
 // ---- row -> settings.toml keys -------------------------------------------------------------
 
-internal enum class Ps1Tab { Video, Emulation, Audio, Bios, Advanced, Cheats }
+internal enum class Ps1Tab { Video, Emulation, Audio, Bios, Advanced, Cheats, Controls }
 
 private class RowKeys(val tab: Ps1Tab, val labelKey: String, val keys: List<String>)
 
@@ -138,6 +138,11 @@ private class RowKeys(val tab: Ps1Tab, val labelKey: String, val keys: List<Stri
  * it hide.
  */
 private val ROWS: List<RowKeys> = listOf(
+    RowKeys(Ps1Tab.Controls, "pad.controllerType.player1", listOf("input.controller1_type")),
+    RowKeys(Ps1Tab.Controls, "pad.controllerType.player2", listOf("input.controller2_type")),
+    RowKeys(Ps1Tab.Controls, "pad.multiplayer.label", listOf("input.multitap", "input.multitap_port2")),
+    RowKeys(Ps1Tab.Controls, "pad.multiplayer.port1", listOf("input.multitap")),
+    RowKeys(Ps1Tab.Controls, "pad.multiplayer.port2", listOf("input.multitap_port2")),
     // Video
     RowKeys(Ps1Tab.Video, "renderer.gpuBackend.label", listOf("video.gpu_backend")),
     RowKeys(Ps1Tab.Video, "renderer.hwRasterizer.label", listOf("video.renderer")),
@@ -260,6 +265,7 @@ internal fun ps1KeysForCategory(category: SettingsCategory): List<String> {
         SettingsCategory.Advanced -> Ps1Tab.Advanced
         // The enum value is still called Patches; the tab is Cheats. See settingsSections().
         SettingsCategory.Patches -> Ps1Tab.Cheats
+        SettingsCategory.Controls -> Ps1Tab.Controls
         else -> return emptyList()
     }
     return ROWS.filter { it.tab == tab }.flatMap { it.keys }.distinct()
@@ -276,6 +282,7 @@ internal fun ps1CategoryIsPerGameCapable(category: SettingsCategory): Boolean = 
     // a cheat belongs to one disc. The tab resolves the game itself so the scope switch never
     // leaves it showing a list that belongs to nobody.
     SettingsCategory.Patches,
+    SettingsCategory.Controls,
     -> true
     else -> false
 }
@@ -406,7 +413,7 @@ internal fun Ps1PerGamePanel(category: SettingsCategory) {
     }
 
     val target = if (scope.perGame) scope.gameKey else scope.contextKey
-    val overrides = Ps1GameSettings.overridesFor(target)
+    val overrides = Ps1OverrideNoticePolicy.visibleSettings(Ps1GameSettings.overridesFor(target))
     if (target == null || overrides.isEmpty()) return
 
     val thisGame = str("scope.thisGame")

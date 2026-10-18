@@ -463,6 +463,8 @@ public class NativeApp {
 	public static native void setCustomVulkanDriver(
 		String driverDir, String driverName,
 		String redirectDir, String hookLibDir);
+	/** Validated literal Mesa variables, queued before opening a custom ICD. */
+	public static native boolean setDriverDebugVariables(String variables);
 
 	/** Which GLES implementation the OpenGL presentation backend binds to:
 	 *  {@code "system"} or {@code "angle"} (ANGLE = Google's GLES-on-Vulkan
@@ -593,6 +595,9 @@ public class NativeApp {
 	 *  Real hardware behaves identically — that is why an SCPH-1070 has a physical
 	 *  1-player/multitap switch. */
 	public static native void setMultitapEnabled(boolean enabled);
+	/** Port bits: 0 = standard, 1 = port 1, 2 = port 2, 3 = both. */
+	public static native void setMultiplayerMode(int mode);
+	public static native void setControllerTypes(int controller1, int controller2);
 
 	/** Rewind: keep a ring of save states and step backwards through it
 	 *  (psx/rewind.h). [seconds] 1..60, [frequency] 1..8 snapshots per second.
@@ -670,11 +675,8 @@ public class NativeApp {
 		}
 	}
 
-	/** Players the core can address: four, because a Multitap in port 1 carries four pads
-	 *  (PSXI_MULTITAP_SLOTS). With no tap attached the core DROPS players 1..3 rather than
-	 *  folding them onto player 1, so a mis-routed pad reads as a dead player rather than
-	 *  two people sharing one controller. */
-	public static final int MAX_PLAYERS = 4;
+	/** Logical player capacity; the native adapter maps the selected 2/4/8-player layout. */
+	public static final int MAX_PLAYERS = 8;
 
 	// Per-direction stick magnitudes, collapsed into the two absolute axes the PS1
 	// pad actually has. [player][stick][direction]; stick 0 = left, 1 = right.

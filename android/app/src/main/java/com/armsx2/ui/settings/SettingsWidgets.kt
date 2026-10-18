@@ -13,6 +13,10 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -71,8 +75,11 @@ import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -453,6 +460,7 @@ internal fun Modifier.controllerFocusable(
     onLeft: (() -> Unit)? = null,
     onRight: (() -> Unit)? = null,
     layer: String? = null,
+    showOutline: Boolean = true,
 ): Modifier = composed {
     val menuMoveTarget = com.armsx2.ui.emulation.LocalMenuMoveTarget.current
     var focused by remember { mutableStateOf(false) }
@@ -522,7 +530,7 @@ internal fun Modifier.controllerFocusable(
             }
         }
         .selectionOutline(
-            (selected || (focused && !SettingsControllerNav.hasSelection() &&
+            showOutline && (selected || (focused && !SettingsControllerNav.hasSelection() &&
                 layer == SettingsControllerNav.activeLayer.value)) &&
                 !com.armsx2.ui.home.LibraryKeyboard.visible.value &&
                 !com.armsx2.ui.settingshub.SettingsSearch.visible.value &&
@@ -1015,7 +1023,26 @@ fun SegmentedRow(
 ) {
     // Menu SFX: a select blip when the chosen option changes — covers the chip tap and the
     // controller's confirm/left/right, which all route through onChange.
-    val emit: (Int) -> Unit = { com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.SELECT); onChange(it) }
+    var revealRequest by remember { mutableIntStateOf(0) }
+    val emit: (Int) -> Unit = {
+        com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.SELECT)
+        revealRequest++ // Also reveal an unchanged selection at either end after a manual swipe.
+        onChange(it)
+    }
+    val optionScroll = rememberLazyListState()
+    var optionViewportWidth by remember { mutableIntStateOf(0) }
+    LaunchedEffect(label, selectedIndex, options, optionViewportWidth, revealRequest) {
+        if (optionViewportWidth <= 0 || selectedIndex !in options.indices) return@LaunchedEffect
+        // Wait for new labels/viewport widths to be measured. Only scroll horizontally:
+        // bringing a chip into view through all ancestors can jump the whole settings page.
+        withFrameNanos { }
+        val layout = optionScroll.layoutInfo
+        val item = layout.visibleItemsInfo.firstOrNull { it.index == selectedIndex }
+        if (item == null || item.offset < layout.viewportStartOffset ||
+            item.offset + item.size > layout.viewportEndOffset) {
+            optionScroll.animateScrollToItem(selectedIndex)
+        }
+    }
     Box(
         Modifier
             .fillMaxWidth()
@@ -1063,15 +1090,18 @@ fun SegmentedRow(
                 )
             }
             Spacer(Modifier.height(10.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            LazyRow(
+                state = optionScroll,
+                modifier = Modifier.fillMaxWidth().onSizeChanged { optionViewportWidth = it.width },
+                contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                options.forEachIndexed { idx, option ->
+                itemsIndexed(options) { idx, option ->
                     val on = idx == selectedIndex
                     Box(
                         Modifier
                             .defaultMinSize(minHeight = 42.dp)
+                            .semantics { selected = on }
                             .clip(RoundedCornerShape(12.dp))
                             .background(if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)
                             .border(
@@ -1197,7 +1227,7 @@ private fun Int.floorMod(modulus: Int): Int =
     if (modulus <= 0) 0 else ((this % modulus) + modulus) % modulus
 
 @Composable
-private fun InfoHint(title: String, message: String) {
+internal fun InfoHint(title: String, message: String) {
     var open by remember { mutableStateOf(false) }
     Box(
         modifier = Modifier

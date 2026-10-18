@@ -229,6 +229,7 @@ fun DriverManagerSection() {
 
         if (busyId == "import") Text(str("backend.driver.installing"), color = MaterialTheme.colorScheme.onSurfaceVariant)
         message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+        DriverDebugOptionsSection()
     }
 }
 

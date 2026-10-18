@@ -128,6 +128,9 @@ extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setCustom
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setGlDriver(JNIEnv* env,jclass cls, jstring driver) {
     SwanHost::GlDriver(Utf(env,driver));
 }
+extern "C" JNIEXPORT jboolean JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setDriverDebugVariables(JNIEnv* env,jclass, jstring variables) {
+    return SwanHost::DriverVariables(Utf(env,variables));
+}
 extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getGlDriver(JNIEnv* env,jclass cls) {
     return String(env,SwanHost::GlDriver());
 }
@@ -184,7 +187,13 @@ extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setPadAna
     SwanHost::Analog(player,stick,x,y);
 }
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setMultitapEnabled(JNIEnv* env,jclass cls, jboolean enabled) {
-    SwanHost::Option("swanstation_ControllerPorts_MultitapMode",enabled?"Port1Only":"Disabled");
+    SwanHost::Multiplayer(enabled?1:0);
+}
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setMultiplayerMode(JNIEnv*,jclass,jint mode) {
+    SwanHost::Multiplayer(static_cast<unsigned>(mode));
+}
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setControllerTypes(JNIEnv*,jclass,jint first,jint second) {
+    SwanHost::ControllerTypes(static_cast<unsigned>(first),static_cast<unsigned>(second));
 }
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setRewind(JNIEnv* env,jclass cls, jboolean enabled, jint seconds, jint frequency) {
     SwanHost::Rewind(enabled,seconds,frequency);

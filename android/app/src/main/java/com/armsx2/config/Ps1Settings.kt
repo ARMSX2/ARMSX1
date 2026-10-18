@@ -146,17 +146,11 @@ data class Ps1Settings(
     // path under the app's data root, because the core does not know the disc serial.
     val textureDir: String = "",
     // [input]
-    // Which mode the emulated pad reports when a game boots.
-    //
-    // Default OFF = digital, matching real hardware. This was briefly defaulted ON for
-    // discoverability (the DualShock's ANALOG button has no standard Android keycode, so
-    // sticks do nothing until the user finds the binding) and that turned out to break
-    // input outright in pre-DualShock games: Crash Bandicoot (1996) predates the pad and
-    // mis-handles one that reports model 0x73 at boot, leaving BOTH the touch overlay and
-    // a physical pad dead. Discoverability is not worth breaking 1996-era titles — turn it
-    // on per taste, and the live toggle (pad code 200 / the "Analog (toggle)" bind) still
-    // works either way.
+    // Legacy value retained for config round trips only; no SwanStation UI/runtime effect.
     val analogModeDefault: Boolean = false,
+    // Keep the existing DualShock default when upgrading an installation with saved mappings.
+    val controller1Type: Ps1ControllerType = Ps1ControllerType.DUALSHOCK,
+    val controller2Type: Ps1ControllerType = Ps1ControllerType.DUALSHOCK,
     // Multitap in controller port 1 — four players share one port (psx/input/multitap.c).
     // Default OFF, and not just out of caution: a tap answers the pad poll with its OWN id
     // (0x80) instead of a controller's, so a game that does not understand multitaps reports
@@ -164,6 +158,8 @@ data class Ps1Settings(
     // SCPH-1070 carries a physical 1-player/multitap switch. Live: NativeApp.setMultitapEnabled
     // swaps the device in the port while a game runs; this field is what a relaunch reads.
     val multitap: Boolean = false,
+    // Preserve the old port-1 key for existing global/per-game configurations.
+    val multitapPort2: Boolean = false,
     // [emulation]
     // Rewind: a ring of save states taken every Nth frame, stepped backwards on demand.
     //
@@ -205,6 +201,13 @@ data class Ps1Settings(
     val folders: List<String> = emptyList(),
     val recursiveFolders: List<String> = emptyList(),
 ) {
+    fun controllerType(player: Int): Ps1ControllerType = if (player == 1) controller2Type else controller1Type
+    fun withControllerType(player: Int, type: Ps1ControllerType): Ps1Settings =
+        if (player == 1) copy(controller2Type = type) else copy(controller1Type = type)
+
+    val multiplayerMode: MultiplayerMode get() = MultiplayerMode.fromPorts(multitap, multitapPort2)
+    fun withMultiplayerMode(mode: MultiplayerMode): Ps1Settings = copy(multitap = mode.port1, multitapPort2 = mode.port2)
+
     companion object {
         const val CPU_CACHED = "cached"
         const val CPU_INTERPRETER = "interpreter"

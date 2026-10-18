@@ -2317,6 +2317,14 @@ open class MainActivityRuntime : ComponentActivity() {
             Runtime.getRuntime().exit(0)
         }
 
+        /** Do not kill a VM while its memory-card/state writes are still unwinding. */
+        fun restartAppIfIdle(context: Context): Boolean = synchronized(vmLifecycleLock) {
+            if (eState.value != EmuState.STOPPED || vmRunLoopActive || vmStopInProgress ||
+                runCatching { NativeApp.hasActiveVM() }.getOrDefault(true)) return false
+            restartApp(context)
+            true
+        }
+
         fun renderOpenGL() {
             NativeApp.renderOpenGL()
         }
@@ -2910,6 +2918,7 @@ open class MainActivityRuntime : ComponentActivity() {
         pendingSingleHotkeys.clear()
         axisHotkeyHeld.clear()
         deviceHeldKeys.clear()
+        com.armsx2.input.AppHotkeys.resetInput()
     }
 
     /** Apply the user's Emulation Screen Orientation choice, resolved per-game (∘ global).
@@ -3046,6 +3055,7 @@ open class MainActivityRuntime : ComponentActivity() {
         // Restore the saved rumble master toggle into the native gate (NativeApp.onPadRumble).
         // ★ FIRST touch of NativeApp on this thread: its <clinit> System.loadLibrary's libSDL2 +
         // libarmsx (+libc++_shared). Pasx2Application's warm-up worker has normally already done it.
+        com.armsx2.DriverDebugPreferences.initialize(applicationContext)
         NativeApp.sRumbleEnabled = ControllerMappings.rumbleEnabled()
         com.armsx2.StartupTrace.mark("native-lib")
         // Push the saved haptic strength + achievement-sound volume into their native gates before
@@ -3055,7 +3065,7 @@ open class MainActivityRuntime : ComponentActivity() {
         // Seed the pad-router's multitap gate before any in-game input is dispatched, so slot
         // routing (1 slot vs the tap's 4) is correct from the first controller event. Reads
         // [input] multitap out of settings.toml, which is also what the core boots with.
-        com.armsx2.input.PadRouter.setMultitapEnabled(ControllerMappings.multitapEnabled())
+        com.armsx2.input.PadRouter.setMultiplayerMode(ControllerMappings.multiplayerMode())
         // #394: watch for controller unplug / re-enumeration so a departed pad frees its slot (see
         // inputDeviceListener). Registered until onDestroy so a sleep/wake remove is caught even
         // while the activity is paused.
@@ -3685,6 +3695,14 @@ open class MainActivityRuntime : ComponentActivity() {
         if (forwardKeyToUsbKeyboard(event, kc)) {
             return true
         }
+        val appHotkeysAllowed = appHotkeysMenuAllowed()
+        if (newKeyPress && kc in setOf(com.armsx2.input.AppHotkeys.SELECT, com.armsx2.input.AppHotkeys.START) && appHotkeysAllowed) {
+            stopNavRepeat()
+            com.armsx2.ui.settings.SettingsControllerNav.setScrollVelocity(0f)
+            com.armsx2.ui.home.HomeInputController.scroll(0f)
+        }
+        if (com.armsx2.input.AppHotkeys.handle(event, newKeyPress, appHotkeysAllowed,
+                ::openAppHotkeyPage, ::handleAppStartTap)) return true
         // System-hotkey capture (from the Hotkeys tab). Handled here, not in
         // Compose, so it can capture KEYCODE_BACK and back-paddle keys (the back
         // dispatcher swallows those before they'd reach onPreviewKeyEvent).
@@ -3740,6 +3758,24 @@ open class MainActivityRuntime : ComponentActivity() {
             }
             return true
         }
+        if (com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value?.startsWith("controller-type:") == true) {
+            val pickerNav = com.armsx2.ui.settings.SettingsControllerNav
+            when (kc) {
+                KeyEvent.KEYCODE_DPAD_UP -> { if (newKeyPress) pickerNav.move(-1); return true }
+                KeyEvent.KEYCODE_DPAD_DOWN -> { if (newKeyPress) pickerNav.move(1); return true }
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1 -> return true
+                KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                    if (newKeyPress) pickerNav.confirm()
+                    return true
+                }
+                KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK -> {
+                    if (newKeyPress) com.armsx2.ui.settings.ControllerTypePickerNav.back()
+                    return true
+                }
+            }
+        }
         if (com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value == null &&
             !com.armsx2.navigation.UiNavigator.drawerOpen.value &&
             !com.armsx2.ui.home.LibraryKeyboard.visible.value &&
@@ -3751,19 +3787,7 @@ open class MainActivityRuntime : ComponentActivity() {
         // it as a generic confirm button and launch the selected game.
         if (kc == KeyEvent.KEYCODE_BUTTON_START && controllerDrivesFrontend() &&
             !com.armsx2.ui.home.CollectionsInputController.active()) {
-            if (WindowImpl.showLibrary.value &&
-                event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                WindowImpl.dismissGameLibrary()
-            } else if (!WindowImpl.overlayVisible.value &&
-                WindowImpl.inGameScreen.value == null &&
-                !com.armsx2.ui.MemoryCardManager.visible.value &&
-                com.armsx2.navigation.UiNavigator.route.value == com.armsx2.navigation.AppRoute.Home &&
-                event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0
-            ) {
-                val drawer = com.armsx2.navigation.UiNavigator.drawerOpen
-                drawer.value = !drawer.value
-            }
-            // Consume both edges and repeat events on all frontend surfaces.
+            // Eligible Start taps are handled on release above. A hold never opens/dismisses UI.
             return true
         }
         // L1/R1 flick between settings tabs (as the old Refresh UI did). Handled here, not in
@@ -3773,6 +3797,20 @@ open class MainActivityRuntime : ComponentActivity() {
         // in-game L1/R1 still goes to the pad untouched. Placed after the capture blocks so
         // binding a shoulder button still works.
         if (kc == KeyEvent.KEYCODE_BUTTON_L1 || kc == KeyEvent.KEYCODE_BUTTON_R1) {
+            val controllerTabs = com.armsx2.ui.settings.ControllerSections.cycle
+            if (controllerTabs != null) {
+                // Sidebar Controls owns its section tabs, including when opened over
+                // a game. Capture handlers above retain first refusal for L/R binds.
+                val blocked = com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value != null ||
+                    com.armsx2.navigation.UiNavigator.drawerOpen.value ||
+                    com.armsx2.ui.home.LibraryKeyboard.visible.value ||
+                    com.armsx2.ui.settingshub.SettingsSearch.visible.value ||
+                    com.armsx2.ui.common.ShaderParamsEditor.visible
+                if (!blocked && newKeyPress)
+                    controllerTabs(if (kc == KeyEvent.KEYCODE_BUTTON_L1) -1 else 1)
+                // Consume release/repeat too: no leak to gameplay or background Settings.
+                return true
+            }
             val cycleTab = com.armsx2.ui.settingshub.SettingsCategoryNav.cycle
             if (cycleTab != null) {
                 if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
@@ -4718,7 +4756,9 @@ open class MainActivityRuntime : ComponentActivity() {
         // KeyEvent and route it through dispatchKeyEvent (which reaches both the pad
         // capture in Compose and the hotkey capture in dispatchKeyEvent), and
         // consume the motion so nothing navigates.
-        if (ControllerMappings.padCapturing.value || ControllerMappings.captureHotkey.value != null) {
+        if (ControllerMappings.padCapturing.value || ControllerMappings.captureHotkey.value != null ||
+            (appHotkeysMenuAllowed() && (com.armsx2.input.AppHotkeys.capture.value != null ||
+                com.armsx2.input.AppHotkeys.holdsModifier(ev.deviceId)))) {
             return handleCaptureMotion(ev)
         }
         captureHatX = 0
@@ -4956,6 +4996,42 @@ open class MainActivityRuntime : ComponentActivity() {
             com.armsx2.ui.MemoryCardManager.visible.value ||
             eState.value != EmuState.RUNNING
 
+    private fun appHotkeysMenuAllowed(): Boolean =
+        setupComplete.value && !setupEditorVisible.value && controllerDrivesFrontend() &&
+            !ControllerMappings.padCapturing.value && ControllerMappings.captureHotkey.value == null &&
+            ControllerMappings.capturePadAction.value == null &&
+            !com.armsx2.ui.home.LibraryKeyboard.visible.value &&
+            !com.armsx2.ui.home.CollectionsInputController.active() &&
+            !com.armsx2.ui.common.ShaderParamsEditor.visible &&
+            !com.armsx2.ui.MemoryCardManager.visible.value &&
+            !com.armsx2.ui.settingshub.SettingsSearch.visible.value &&
+            !com.armsx2.ui.touch.TouchControls.editMode.value &&
+            com.armsx2.ui.common.GlobalConfirm.pending.value == null &&
+            com.armsx2.ui.settings.SettingsControllerNav.activeLayer.value.let { it == null || it == "drawer" }
+
+    private fun handleAppStartTap() {
+        if (WindowImpl.showLibrary.value) WindowImpl.dismissGameLibrary()
+        else if (!WindowImpl.overlayVisible.value && WindowImpl.inGameScreen.value == null &&
+            !com.armsx2.ui.MemoryCardManager.visible.value) {
+            val drawer = com.armsx2.navigation.UiNavigator.drawerOpen
+            drawer.value = !drawer.value
+        }
+    }
+
+    private fun openAppHotkeyPage(action: com.armsx2.input.AppHotkeyAction) {
+        stopNavRepeat()
+        // Stay paused when navigating from a game menu; never close/restart the game.
+        if (eState.value != EmuState.STOPPED) WindowImpl.openGameLibrary()
+        val destination = when (action) {
+            com.armsx2.input.AppHotkeyAction.CONTROLS -> com.armsx2.navigation.AppRoute.ControllerManager
+            com.armsx2.input.AppHotkeyAction.BIOS -> com.armsx2.navigation.AppRoute.BiosManager()
+            com.armsx2.input.AppHotkeyAction.SAVES -> com.armsx2.navigation.AppRoute.SaveManager
+            com.armsx2.input.AppHotkeyAction.LIBRARY -> com.armsx2.navigation.AppRoute.Home
+            com.armsx2.input.AppHotkeyAction.SETTINGS -> com.armsx2.navigation.AppRoute.Settings()
+        }
+        com.armsx2.navigation.UiNavigator.navigate(destination)
+    }
+
     // B / BACK from any frontend surface EXCEPT the pause overlay, the memcard
     // dialog and the library cover grid (each consumes its own B earlier). Peels
     // the topmost layer: modal dialog > nav drawer > in-game manager screen >
@@ -4963,6 +5039,7 @@ open class MainActivityRuntime : ComponentActivity() {
     // the library overlay itself > a root sub-route > (root Home) open the drawer.
     private fun handleFrontendBack() {
         com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.BACK)
+        if (com.armsx2.ui.settings.ControllerTypePickerNav.back()) return
         val nav = com.armsx2.navigation.UiNavigator
         val achievementsMenu = nav.route.value == com.armsx2.navigation.AppRoute.Achievements ||
             WindowImpl.inGameScreen.value == com.armsx2.ui.InGameScreen.Achievements
@@ -5325,7 +5402,8 @@ open class MainActivityRuntime : ComponentActivity() {
         // Binding may have completed mid-loop (endHotkeyCapture); drop any held
         // state so the next capture session starts clean (incl. heldKeys, since no
         // UP will ever arrive for these synthetic codes).
-        if (ControllerMappings.captureHotkey.value == null && !ControllerMappings.padCapturing.value) {
+        if (ControllerMappings.captureHotkey.value == null && !ControllerMappings.padCapturing.value &&
+            com.armsx2.input.AppHotkeys.capture.value == null && !com.armsx2.input.AppHotkeys.holdsModifier(ev.deviceId)) {
             heldKeys.removeAll(captureHeldSynth)
             deviceHeldKeys[ev.deviceId]?.removeAll(captureHeldSynth)
             captureHeldSynth.clear()
