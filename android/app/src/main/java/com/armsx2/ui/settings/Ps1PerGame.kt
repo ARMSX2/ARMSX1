@@ -188,7 +188,6 @@ private val ROWS: List<RowKeys> = listOf(
     RowKeys(Ps1Tab.Audio, "audio.ffVolume.label", listOf("audio.fast_forward_volume")),
     // BIOS
     RowKeys(Ps1Tab.Bios, "bios.model.label", listOf("bios.preferred_model")),
-    RowKeys(Ps1Tab.Bios, "bios.forced.label", listOf("bios.override_file")),
     RowKeys(Ps1Tab.Bios, "bios.searchFolder.label", listOf("bios.search_path")),
     // Advanced
     // Logging and Quiet are ONE switch in the core written as two keys, so either row owns both —

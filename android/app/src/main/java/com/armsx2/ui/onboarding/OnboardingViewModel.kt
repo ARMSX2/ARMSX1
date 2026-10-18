@@ -208,21 +208,11 @@ class OnboardingViewModel(application: Application) : AndroidViewModel(applicati
         MainActivityRuntime.biosDir.value = null
         MainActivityRuntime.prefs.edit().putString("bios", target.absolutePath).remove("biosDir").apply()
 
-        /*
-            The two lines above are the ARMSX2 inheritance: there, the BIOS reached the core as
-            EmuFolders::Bios via NativeApp.initializeOnce, so a SharedPreference was the whole
-            story. The PS1 core does not read that at all — it reads settings.toml's [bios]
-            section. Without this the wizard reported success, the preference was written, and
-            the core still booted with `bios_override=(none) bios_search=bios` and refused every
-            game with "No BIOS could be resolved". Setting the folder as well as the file keeps
-            the model-based search working for anyone who later changes preferred_model.
-            The Settings -> BIOS tab already wrote these; only onboarding was missed, so the bug
-            only ever bit people setting a BIOS for the FIRST time.
-        */
+        // Keep imported dumps discoverable without creating a hidden forced-file override.
         runCatching {
             Ps1SettingsStore.update(context, null) {
                 it.copy(
-                    biosOverrideFile = target.absolutePath,
+                    preferredModel = com.armsx2.core.Ps1Config.modelForBios(target) ?: it.preferredModel,
                     biosSearchPath = target.parent ?: it.biosSearchPath,
                 )
             }

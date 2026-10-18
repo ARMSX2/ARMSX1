@@ -1508,6 +1508,9 @@ open class MainActivityRuntime : ComponentActivity() {
                         // The core reads BIOS + resources from disk during boot; make sure the
                         // background prepare has finished before handing it a path.
                         awaitAssetsReady()
+                        // BIOS-only boot uses the global model choice, never the last game's layer.
+                        com.armsx2.config.Ps1SettingsStore.setActiveGame(ctx, null)
+                        com.armsx2.core.Ps1Pacing.invalidate()
                         runVmThreadChecked("", "BIOS")
                     } catch (t: Throwable) {
                         println("@@ARMSX_VM_ERROR@@ ${t.message}")

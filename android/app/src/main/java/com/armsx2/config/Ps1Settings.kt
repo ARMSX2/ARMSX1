@@ -31,7 +31,7 @@ data class Ps1Settings(
     // [bios]
     val biosSearchPath: String = "bios",
     val preferredModel: String = "SCPH-1001",
-    val biosOverrideFile: String = "",
+    val biosOverrideFile: String = "",           // Read-only legacy import location; never forces selection.
     // [runtime]
     val displayScale: Int = 3,                   // 1..6
     val loggingEnabled: Boolean = false,

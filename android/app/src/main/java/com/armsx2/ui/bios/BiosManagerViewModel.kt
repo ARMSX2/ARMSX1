@@ -74,14 +74,17 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    /** Pin [item] as THIS game's BIOS (per-game override in the ConfigStore Game tier),
-     *  mirroring the per-game memory card. applyRendererPrefs applies it at the next boot,
-     *  so restart the game to take effect. No-op when no game is loaded. */
+    /** Use this dump's console model for this game at the next boot. */
     fun assignToGame(item: InstalledBios) {
         val key = state.value.gameKey ?: return
         val resolved = ConfigStore.resolveForGame(key)
         val ok = runCatching {
             ConfigStore.save(SettingsScope.Game, key, resolved.copy(biosFilename = item.file.name))
+            com.armsx2.core.Ps1Config.modelForBios(item.file)?.let { model ->
+                // An explicit per-game choice stays pinned even if it equals today's global model.
+                com.armsx2.config.Ps1GameSettings.putOverrides(key, mapOf("bios.preferred_model" to "\"$model\""))
+                com.armsx2.config.Ps1SettingsStore.render(getApplication())
+            }
         }.isSuccess
         if (!ok) state.value = state.value.copy(error = "Unable to set a per-game BIOS.")
         refresh()
@@ -91,7 +94,10 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
     fun clearGameBios() {
         val key = state.value.gameKey ?: return
         val resolved = ConfigStore.resolveForGame(key)
-        runCatching { ConfigStore.save(SettingsScope.Game, key, resolved.copy(biosFilename = "")) }
+        runCatching {
+            ConfigStore.save(SettingsScope.Game, key, resolved.copy(biosFilename = ""))
+            com.armsx2.config.Ps1SettingsStore.clearOverrides(getApplication(), key, listOf("bios.preferred_model"))
+        }
         refresh()
     }
 
@@ -137,6 +143,12 @@ class BiosManagerViewModel(application: Application) : AndroidViewModel(applicat
     fun select(file: File) {
         MainActivityRuntime.bios.value = file.absolutePath
         MainActivityRuntime.prefs.edit().putString("bios", file.absolutePath).apply()
+        com.armsx2.config.Ps1SettingsStore.update(getApplication(), null) {
+            it.copy(
+                preferredModel = com.armsx2.core.Ps1Config.modelForBios(file) ?: it.preferredModel,
+                biosSearchPath = file.parent ?: it.biosSearchPath,
+            )
+        }
         refresh()
     }
 

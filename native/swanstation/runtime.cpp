@@ -223,9 +223,11 @@ void ReadConfig() {
   UpdateCoreAspect();
   options["swanstation_Display_CropMode"]=values["video.overscan_crop"]=="small"?"Overscan":values["video.overscan_crop"]=="full"?"Borders":"None";
   options["swanstation_GPU_DownsampleMode"]=values["video.downsample"]=="true"?"Box":"Disabled";
-  const auto bios=values["bios.override_file"];
-  if(!bios.empty())for(const auto* key:{"swanstation_BIOS_PathNTSCU","swanstation_BIOS_PathNTSCJ","swanstation_BIOS_PathPAL"})
-    options[key]=std::filesystem::path(bios).is_absolute()?std::filesystem::path(bios).lexically_relative(bios_root).string():bios;
+  // Android resolves preferred_model against verified imported BIOS identities.
+  // Ignore the retired override_file key, even in a hand-edited/older config.
+  const auto bios=values["bios.resolved_file"];
+  for(const auto* key:{"swanstation_BIOS_PathNTSCU","swanstation_BIOS_PathNTSCJ","swanstation_BIOS_PathPAL"})
+    options[key]=bios.empty()?std::string():std::filesystem::path(bios).is_absolute()?std::filesystem::path(bios).lexically_relative(bios_root).string():bios;
   options["swanstation_Logging_LogLevel"]="Info";
 }
 std::string OptionValue(const char* key) {auto it=options.find(key);return it==options.end()?std::string():it->second;}

@@ -1906,24 +1906,14 @@ val EN: Map<String, String> = mapOf(
 
     // --- BIOS tab ---
     "bios.intro" to
-        "The PlayStation needs a BIOS dump. Pick the console model you want the core to prefer, or " +
-        "import one specific file to force it.",
+        "The PlayStation needs a BIOS dump. The selected console model is matched against your imported BIOS files.",
     "bios.model.label" to "Preferred console model",
     "bios.model.description" to
-        "Which dump the auto-selector picks when several are found in the BIOS folder. Ignored " +
-        "while a BIOS file is forced below.",
-    "bios.forced.label" to "Forced BIOS file",
-    "bios.forced.description" to
-        "settings.toml [bios].override_file — overrides the model preference.",
-    "bios.forced.none" to "Not set (auto-select)",
-    "bios.forced.missing" to "%s (missing)",
-    "bios.forced.size" to "%s · %d KB",
+        "Prefers an imported dump matching this console model at the next game start. If unavailable, selects an available BIOS automatically.",
     "bios.import.label" to "Import BIOS file…",
-    "bios.import.description" to "Copies the dump into the emulator's own folder and forces it.",
+    "bios.import.description" to "Adds a recognised PlayStation dump to the available BIOS files without changing the selected model.",
     "bios.import.ok" to "BIOS imported",
     "bios.import.failed" to "Could not read that file",
-    "bios.clearForced.label" to "Clear forced BIOS",
-    "bios.clearForced.description" to "Go back to auto-selecting from the BIOS folder.",
     "bios.searchFolder.label" to "BIOS search folder",
     "bios.searchFolder.description" to "Relative to the emulator's data folder: %s",
     "bios.bundled.label" to "Bundled BIOS",
@@ -1932,7 +1922,7 @@ val EN: Map<String, String> = mapOf(
     "bios.bundled.present" to "Present",
     "bios.bundled.absent" to "Not installed",
     "bios.reset.label" to "Restore BIOS defaults",
-    "bios.reset.description" to "Back to SCPH-1001 with no forced file.",
+    "bios.reset.description" to "Restores the SCPH-1001 model preference. Imported BIOS files are kept.",
 
     // --- Advanced tab ---
     "advanced.intro" to
