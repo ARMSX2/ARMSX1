@@ -119,6 +119,14 @@ class MemoryCardViewModel(application: Application) : AndroidViewModel(applicati
         state.value = state.value.copy(error = "The selected card slot was lost. Please tap Import or Export again.")
     }
 
+    fun importAll(uri: Uri, folder: Boolean) {
+        var result = ""
+        runAction(success = { result }, failure = { it }) {
+            val games = GameLibraryRepository(getApplication()).loadCached().games
+            result = com.armsx2.core.Ps1BulkCards.import(getApplication(), uri, folder, games).toString()
+        }
+    }
+
     private fun checkPickerTarget(slot: Int, expectedPath: String, source: String?) {
         com.armsx2.core.Ps1CardTransferTarget.check(slot, expectedPath,
             Ps1MemoryCards.cardFile(getApplication<Application>(), slot, source))

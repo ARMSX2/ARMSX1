@@ -160,7 +160,7 @@ class EmulationSurface(context: Context) :
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
             !gameActive ||
             !holder.surface.isValid ||
-            (!lowLatencyEnabled() && displayRefreshPreference() == 0)
+            (!lowLatencyEnabled() && displayRefreshPreference() == 0 && presentationMultiple() == 1)
         ) {
             clearFrameRatePreference()
             return
@@ -219,6 +219,11 @@ class EmulationSurface(context: Context) :
         ConfigStore.resolveForGame(settingsKey).displayRefreshRate
     }.getOrDefault(0)
 
+    private fun presentationMultiple(): Int = runCatching {
+        val s = com.armsx2.config.Ps1SettingsStore.active(context)
+        if (s.framePresentation == "off") 1 else s.presentationMultiplier.coerceIn(2, 4)
+    }.getOrDefault(1)
+
     private fun lowLatencyEnabled(): Boolean = runCatching {
         val settingsKey = MainActivityRuntime.currentGame.value?.settingsKey
             ?: NativeApp.getGameSerial().takeIf { it.isNotBlank() }
@@ -240,6 +245,13 @@ class EmulationSurface(context: Context) :
             .distinct()
             .toList()
         if (rates.isEmpty()) return current.refreshRate
+
+        val multiple = presentationMultiple()
+        if (multiple > 1) {
+            return rates.minByOrNull { abs(it - nominalRate * multiple) }
+                ?.takeIf { abs(it - nominalRate * multiple) <= RATE_MATCH_TOLERANCE_HZ }
+                ?: current.refreshRate
+        }
 
         val explicit = displayRefreshPreference()
         if (explicit != 0) {

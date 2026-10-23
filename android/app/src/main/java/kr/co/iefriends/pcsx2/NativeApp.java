@@ -549,9 +549,9 @@ public class NativeApp {
 	/** The three GLES-rasterizer video options, pushed together because the backend
 	 *  stores them together (frontend/gpu_hw_gl.c).
 	 *  textureFilter 0 = nearest (default), 1 = bilinear, 2 = xBR-style — textured
-	 *  polygons only. downsample 0 = off, 2..8 = box factor; the effective factor is the
-	 *  largest divisor of the internal scale that is <= it, so it is off at 1x.
-	 *  lineDetect 0 = disabled, 1 = quads, 2 = basic.
+	 *  polygons only. downsample 0 = off, -1 = Adaptive, positive = Box (including old
+	 *  factor values). Adaptive falls back to Box on GLES; both are inactive at 1x.
+	 *  lineDetect is retained for ABI compatibility and is not implemented by this core.
 	 *  Boot-time values come from settings.toml ({@code [video] texture_filter},
 	 *  {@code downsample}, {@code line_detect}). */
 	public static native void setGlVideoOptions(int textureFilter, int downsample, int lineDetect);
@@ -1160,7 +1160,11 @@ public class NativeApp {
 	public static native void onNativeSurfaceCreated(long ownerToken);
 	public static native void onNativeSurfaceChanged(Surface surface, int w, int h, long ownerToken);
 	public static native void onNativeSurfaceDestroyed(long ownerToken);
-	public static void setDisplayRefreshRate(float hz) {  }
+	public static native void setDisplayRefreshRate(float hz);
+	public static native void setFramePresentation(int mode, int multiple);
+	public static native void configureSwanCardPaths(String first, String second);
+	/** Eight ports, each with 16 libretro joypad bits followed by four signed stick axes. */
+	public static native int[] getControlInputSnapshot();
 
 	/** Implemented natively. BLOCKING: boots [path] and runs the emulation loop until
 	 *  shutdown(). Call on a dedicated thread, after onNativeSurfaceChanged. */

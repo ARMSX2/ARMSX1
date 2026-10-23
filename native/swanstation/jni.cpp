@@ -54,6 +54,13 @@ extern "C" JNIEXPORT jlong JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getAudio
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setShaderChain(JNIEnv* env,jclass cls, jboolean enabled, jstring presetPath) {
     SwanShaders::Select(enabled,Utf(env,presetPath));
 }
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setDisplayRefreshRate(JNIEnv*,jclass,jfloat hz){SwanHost::DisplayRefresh(hz);}
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setFramePresentation(JNIEnv*,jclass,jint mode,jint multiple){SwanHost::FramePresentation(mode,multiple);}
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_configureSwanCardPaths(JNIEnv* env,jclass,jstring first,jstring second){SwanHost::ConfigureCardPaths(Utf(env,first),Utf(env,second));}
+extern "C" JNIEXPORT jintArray JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getControlInputSnapshot(JNIEnv* env,jclass){
+  const auto values=SwanHost::InputSnapshot();auto result=env->NewIntArray(values.size());
+  if(result&&!values.empty())env->SetIntArrayRegion(result,0,values.size(),values.data());return result;
+}
 extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_shaderPresetParams(JNIEnv* env,jclass cls, jstring presetPath) {
     return String(env,SwanShaders::ParametersJSON(Utf(env,presetPath)));
 }
@@ -169,7 +176,7 @@ extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setDispla
 }
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setGlVideoOptions(JNIEnv* env,jclass cls, jint textureFilter, jint downsample, jint lineDetect) {
     SwanHost::Option("swanstation_GPU_TextureFilter",textureFilter==1?"Bilinear":textureFilter==2?"xBR":"Nearest");
-    SwanHost::Option("swanstation_GPU_DownsampleMode",downsample>0?"Box":"Disabled");
+    SwanHost::Option("swanstation_GPU_DownsampleMode",downsample==-1?"Adaptive":downsample>0?"Box":"Disabled");
 }
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setPs1TextureOptions(JNIEnv* env,jclass cls, jboolean dump, jboolean replace, jstring dir) {
     SwanHost::Textures(dump,replace,Utf(env,dir));

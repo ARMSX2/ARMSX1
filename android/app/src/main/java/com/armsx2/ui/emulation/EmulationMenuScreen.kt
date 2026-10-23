@@ -1210,6 +1210,12 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     MenuOrderItem("ShaderManagerSection.item") {
         com.armsx2.ui.common.ShaderManagerSection()
     }
+    MenuOrderItem("FramePresentationSection.item") {
+        com.armsx2.ui.settings.FramePresentationSettings(ps1,
+            onMode = { mode -> editPs1 { it.copy(framePresentation = mode) } },
+            onMultiplier = { multiple -> editPs1 { it.copy(presentationMultiplier = multiple) } },
+        )
+    }
 }
 
 @Composable
@@ -1520,6 +1526,11 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
             MenuOrderItem("MenuSwitchRow.overlay.toggle.onScreenNotifications") {
                 MenuSwitchRow(str("overlay.toggle.onScreenNotifications"), settings.osdShowMessages) { value ->
                     viewModel.updateSettings { it.copy(osdShowMessages = value) }
+                }
+            }
+            MenuOrderItem("MenuSwitchRow.overlay.toggle.controlInputs") {
+                MenuSwitchRow(str("overlay.toggle.controlInputs"), settings.osdShowInputs) { value ->
+                    viewModel.updateSettings { it.copy(osdShowInputs = value) }
                 }
             }
         }

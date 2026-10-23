@@ -22,7 +22,7 @@ void Texture(GLuint& texture,unsigned width,unsigned height){if(!texture)glGenTe
 void Framebuffer(GLuint& fbo,GLuint texture){if(!fbo)glGenFramebuffers(1,&fbo);glBindFramebuffer(GL_FRAMEBUFFER,fbo);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);}
 void FreeChain(){if(chain){auto* api=SwanShaders::Functions();if(api)SwanShaders::Check(api->gl_free(&chain));chain=nullptr;}active=false;}
 }
-uint32_t SwanShaders::DrawGL(uint32_t source,uint32_t core_framebuffer,unsigned width,unsigned height,unsigned window_width,unsigned window_height,bool software){
+uint32_t SwanShaders::DrawGL(uint32_t source,uint32_t core_framebuffer,unsigned width,unsigned height,unsigned window_width,unsigned window_height,bool software,unsigned subframe,unsigned total,float nominal){
   const auto selection=Selected();
   if(selection.generation!=generation){FreeChain();generation=selection.generation;
     if(selection.enabled&&!selection.path.empty()){auto* api=Functions();Handle preset=nullptr;
@@ -40,7 +40,10 @@ uint32_t SwanShaders::DrawGL(uint32_t source,uint32_t core_framebuffer,unsigned 
   glDisable(GL_SCISSOR_TEST);glBlitFramebuffer(0,0,width,height,0,software?height:0,width,software?0:height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
   glBindFramebuffer(GL_FRAMEBUFFER,output_fbo);glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);
   auto* api=Functions();const GlImage input{input_texture,GL_RGBA8,width,height},output{output_texture,GL_RGBA8,window_width,window_height};
-  const bool okay=Check(api->gl_frame(&chain,counter++,input,output,nullptr,nullptr,nullptr));active=okay;
+  FrameOptions frame;frame.total_subframes=total;frame.current_subframe=subframe;
+  frame.frames_per_second=nominal;frame.frametime_delta=uint32_t(1000.f/nominal);
+  const bool okay=Check(api->gl_frame(&chain,counter,input,output,nullptr,nullptr,&frame));active=okay;
+  if(subframe==total)counter++;
   if(!okay){FreeChain();__android_log_write(ANDROID_LOG_WARN,"SwanShaders","GLES frame failed; keeping plain presentation.");return 0;}
   return output_texture;
 }

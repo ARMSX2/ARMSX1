@@ -43,6 +43,7 @@
 #include "audio_warmup.h"
 #include "audio_queue.h"
 #include "gl_presentation.h"
+#include "frame_presentation.h"
 #ifndef ARMSX_SOURCE_COMMIT
 #define ARMSX_SOURCE_COMMIT "unknown"
 #endif
@@ -60,6 +61,7 @@ std::string data_root, bios_root, config_path, save_root, game_path;
 std::string state_identity, state_source, requested_identity, requested_source;
 std::string current_serial;
 std::array<std::string,2> last_card_paths;
+std::array<std::string,2> requested_card_paths;
 std::map<std::string,std::string> config_values;
 std::vector<SwanCatalogue::Group> cheat_groups;
 std::atomic<int> cheats_armed{0};
@@ -78,6 +80,8 @@ std::atomic<int> frames{0}, speed{100};
 std::atomic<int64_t> audio_nonzero{0};
 std::atomic<float> fps{0}, nominal{60}, fast_speed{2};
 std::atomic<bool> limit_speed{true};
+std::atomic<float> display_refresh{0};
+std::atomic<int> frame_presentation{0},presentation_multiple{2};
 std::array<std::array<std::atomic<int16_t>,16>,8> buttons{};
 std::array<std::array<std::atomic<int16_t>,4>,8> axes{};
 unsigned multiplayer_mode=0;
@@ -180,6 +184,7 @@ void UpdateCoreAspect() {
   options["swanstation_Display_CustomAspectRatioDenominator"]=std::to_string(denominator);
   options_changed=true;
 }
+int ConfigInt(const char* key,int fallback,int minimum,int maximum);
 void ReadConfig() {
   std::ifstream stream(config_path); std::string line,section;
   std::map<std::string,std::string> values;
@@ -205,6 +210,16 @@ void ReadConfig() {
   // Keep existing per-title cards in place. The manager resolves their real core paths.
   options["swanstation_MemoryCards_Card1Type"]="PerGameTitle";
   options["swanstation_MemoryCards_Card2Type"]="Shared";
+  for(unsigned slot=0;slot<2;++slot){
+    const auto& path=requested_card_paths[slot];std::error_code error;
+    const auto canonical=std::filesystem::canonical(path,error);
+    const auto root=std::filesystem::weakly_canonical(save_root);
+    const bool valid=!error&&canonical.parent_path()==root&&canonical.extension()==".mcd"&&
+      std::filesystem::file_size(canonical,error)==128*1024&&!error;
+    const auto prefix="swanstation_MemoryCards_Card"+std::to_string(slot+1);
+    options[prefix+"Path"]=valid?canonical.string():"";
+    if(valid)options[prefix+"Type"]="Shared";
+  }
   multiplayer_mode=SwanMultiplayer::FromPorts(values["input.multitap"]=="true",values["input.multitap_port2"]=="true");
   options["swanstation_ControllerPorts_MultitapMode"]=SwanMultiplayer::CoreMode(multiplayer_mode);
   controller_devices={SwanControllers::Parse(values["input.controller1_type"]),
@@ -222,7 +237,9 @@ void ReadConfig() {
   options["swanstation_TextureReplacements_EnableVRAMWriteReplacements"]=(values["video.texture_dump"]=="true"||values["video.texture_replacements"]=="true")?"true":"false";
   UpdateCoreAspect();
   options["swanstation_Display_CropMode"]=values["video.overscan_crop"]=="small"?"Overscan":values["video.overscan_crop"]=="full"?"Borders":"None";
-  options["swanstation_GPU_DownsampleMode"]=values["video.downsample"]=="true"?"Box":"Disabled";
+  options["swanstation_GPU_DownsampleMode"]=SwanFramePresentation::Downsample(values["video.downsample"]);
+  frame_presentation=values["video.frame_presentation"]=="bfi"?1:values["video.frame_presentation"]=="shader_subframes"?2:0;
+  presentation_multiple=ConfigInt("video.presentation_multiplier",2,2,4);
   // Android resolves preferred_model against verified imported BIOS identities.
   // Ignore the retired override_file key, even in a hand-edited/older config.
   const auto bios=values["bios.resolved_file"];
@@ -424,10 +441,24 @@ void Video(const void* data,unsigned width,unsigned height,size_t pitch) {
   if(!data || stop)return;
   const auto present_start=Clock::now();
   video_width=width;video_height=height;
+  const auto selected=SwanShaders::Selected();
+  const int mode=frame_presentation.load();
+  const float rate=std::max(1.f,nominal.load());
+  const unsigned count=SwanFramePresentation::Count(mode,presentation_multiple.load(),display_refresh.load(),rate,
+    limit_speed&&!fast&&!rewind_active&&speed==100,!paused&&!presentation_suspended,
+    selected.enabled&&!selected.path.empty()&&(SwanShaders::ActiveGL()||SwanVulkan::ShaderActive()));
+  auto wait_slot=[&](unsigned slot){if(!slot)return;
+    const auto deadline=present_start+std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(double(slot)/(rate*count)));
+    std::unique_lock lock(state_mutex);wake.wait_until(lock,deadline,[]{return stop||paused||presentation_suspended;});};
   if(SwanVulkan::Ready() && data==RETRO_HW_FRAME_BUFFER_VALID){
     const float aspect=SwanPresentation::Aspect(display_options,av.geometry.aspect_ratio);
     SwanVulkan::Presentation(display_options);
-    if(!SwanVulkan::Present(width,height,aspect,presentation_suspended)){JavaNotice("Vulkan presentation failed; closing this session safely.");stop=true;}
+    for(unsigned slot=0;slot<count&&!stop;++slot){
+      wait_slot(slot);if(slot&&(paused||presentation_suspended))break;
+      const bool black=mode==1&&slot>0;
+      if(!SwanVulkan::Present(width,height,aspect,presentation_suspended,black,
+         mode==2?slot+1:1,mode==2?count:1,rate)){JavaNotice("Vulkan presentation failed; closing this session safely.");stop=true;}
+    }
     frames++;present_ms+=std::chrono::duration<double,std::milli>(Clock::now()-present_start).count();return;
   }
   software_video=data!=RETRO_HW_FRAME_BUFFER_VALID;
@@ -449,7 +480,14 @@ void Video(const void* data,unsigned width,unsigned height,size_t pitch) {
   }
   if(window_surface!=EGL_NO_SURFACE && !presentation_suspended) {
     EGLint ww=0,wh=0;eglQuerySurface(display,window_surface,EGL_WIDTH,&ww);eglQuerySurface(display,window_surface,EGL_HEIGHT,&wh);
-    const auto filtered=SwanShaders::DrawGL(texture,framebuffer,width,height,ww,wh,software_video);
+    const auto source_texture=texture;
+    eglSwapInterval(display,count>1?1:0);
+    for(unsigned slot=0;slot<count&&!stop;++slot){
+    wait_slot(slot);if(slot&&(paused||presentation_suspended))break;
+    if(mode==1&&slot>0){PresentBlank();continue;}
+    texture=source_texture;
+    const auto filtered=SwanShaders::DrawGL(texture,framebuffer,width,height,ww,wh,software_video,
+      mode==2?slot+1:1,mode==2?count:1,rate);
     if(filtered)texture=filtered;
     glBindFramebuffer(GL_FRAMEBUFFER,0);glDisable(GL_SCISSOR_TEST);glDisable(GL_DEPTH_TEST);glDisable(GL_BLEND);
     glDisable(GL_CULL_FACE);glDisable(GL_STENCIL_TEST);glDisable(GL_RASTERIZER_DISCARD);glBindSampler(0,0);
@@ -467,6 +505,7 @@ void Video(const void* data,unsigned width,unsigned height,size_t pitch) {
     glUniform2f(glGetUniformLocation(shader,"uvMin"),sampling.min_x,sampling.min_y);
     glUniform2f(glGetUniformLocation(shader,"uvMax"),sampling.max_x,sampling.max_y);
     glDrawArrays(GL_TRIANGLES,0,3);eglSwapBuffers(display,window_surface);
+    }
   }
   glBindFramebuffer(GL_FRAMEBUFFER,framebuffer);frames++;
   present_ms+=std::chrono::duration<double,std::milli>(Clock::now()-present_start).count();
@@ -854,6 +893,16 @@ void SwanHost::Button(int player,int key,int range,bool down){
 void SwanHost::Analog(int player,int stick,int x,int y){if(player<0||player>=static_cast<int>(axes.size())||stick<0||stick>1)return;
   axes[player][stick*2]=std::clamp((x-128)*256,-32768,32767);axes[player][stick*2+1]=std::clamp((y-128)*256,-32768,32767);}
 void SwanHost::ResetButtons(){for(auto& pad:buttons)for(auto& b:pad)b=0;for(auto& pad:axes)for(auto& a:pad)a=0;}
+std::vector<int> SwanHost::InputSnapshot(){
+  std::vector<int> snapshot(8*20);if(!active||paused)return snapshot;
+  for(size_t port=0;port<8;port++){
+    for(size_t id=0;id<16;id++)snapshot[port*20+id]=buttons[port][id].load();
+    for(size_t id=0;id<4;id++)snapshot[port*20+16+id]=axes[port][id].load();
+  }return snapshot;
+}
+void SwanHost::DisplayRefresh(float hz){display_refresh=std::isfinite(hz)&&hz>=30&&hz<=500?hz:0;}
+void SwanHost::ConfigureCardPaths(std::string first,std::string second){std::lock_guard lock(state_mutex);if(!active)requested_card_paths={std::move(first),std::move(second)};}
+void SwanHost::FramePresentation(int mode,int multiple){frame_presentation=mode>=0&&mode<=2?mode:0;presentation_multiple=std::clamp(multiple,2,4);}
 void SwanHost::Multiplayer(unsigned mode){Invoke([mode]{
   const auto next=mode<=3?mode:0;
   if(multiplayer_mode!=next)ResetButtons();

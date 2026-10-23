@@ -79,6 +79,14 @@ fun MemoryCardScreen(
         mutableStateOf(game?.uri?.toString())
     }
     var choosingGame by remember { mutableStateOf(false) }
+    var bulkUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var bulkFolder by rememberSaveable { mutableStateOf(false) }
+    val bulkZipPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) { bulkUri = uri.toString(); bulkFolder = false }
+    }
+    val bulkFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) { bulkUri = uri.toString(); bulkFolder = true }
+    }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val slot = pendingImportSlot
@@ -134,6 +142,18 @@ fun MemoryCardScreen(
             }
 
             AboutCardsPanel(state.directory, game, sessionActive)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val zip = { bulkZipPicker.launch(arrayOf("*/*")) }
+                val folder = { bulkFolderPicker.launch(null) }
+                OutlinedButton(onClick = zip, enabled = !state.busy && !sessionActive,
+                    modifier = Modifier.weight(1f).controllerFocusable("memcard.bulk.zip", onConfirm = zip)) {
+                    Text("Import cards ZIP")
+                }
+                OutlinedButton(onClick = folder, enabled = !state.busy && !sessionActive,
+                    modifier = Modifier.weight(1f).controllerFocusable("memcard.bulk.folder", onConfirm = folder)) {
+                    Text("Import cards folder")
+                }
+            }
 
             if (game == null) {
                 Box {
@@ -188,6 +208,18 @@ fun MemoryCardScreen(
         }
     }
     if (embedded) content() else ArmsBackdrop { content() }
+
+    bulkUri?.let { selected ->
+        val confirm = { bulkUri = null; viewModel.importAll(android.net.Uri.parse(selected), bulkFolder) }
+        AlertDialog(onDismissRequest = { bulkUri = null }, title = { Text("Import all memory cards?") },
+            text = { Text("Copies raw 128 KiB cards and automatically assigns unambiguous game ID or exact " +
+                "title/filename matches to your scanned library. Matching games will use the imported cards " +
+                "on their next launch. Old card files are kept, never overwritten. Unmatched or ambiguous " +
+                "cards are kept unassigned. Save states are not included.") },
+            confirmButton = { TextButton(onClick = confirm,
+                modifier = Modifier.controllerFocusable("memcard.bulk.confirm", onConfirm = confirm)) { Text("Import and assign") } },
+            dismissButton = { TextButton(onClick = { bulkUri = null }) { Text(str("action.cancel")) } })
+    }
 
     resetTarget?.let { item ->
         val confirm = {
@@ -245,16 +277,13 @@ private fun AboutCardsPanel(directory: String, game: GameInfo?, sessionActive: B
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
     ) {
         Column(Modifier.padding(13.dp)) {
-            Text("How memory cards work here", style = MaterialTheme.typography.titleMedium)
+            Text("Memory card storage", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(6.dp))
             Text(
-                "SwanStation uses a per-game card in Slot 1 and a shared card in Slot 2. " +
-                    "Each card is a raw 128 KiB file. Choose the game whose card you want to manage; " +
-                    "start and close it once if its card has not been identified yet. Imported cards " +
-                    "replace that game's selected slot, not a different game's last-used card. " +
-                    "The previous card is backed up in import-backups before replacement. " +
-                    "Old-core slot1.mcd/slot2.mcd files are not moved or replaced. You can import " +
-                    "a copy explicitly with Import after closing the game.",
+                "Slot 1 defaults to a per-game card; Slot 2 defaults to a shared card. " +
+                    "Bulk imports copy raw 128 KiB card images and assign unique game matches " +
+                    "without overwriting old card files. Single-slot replacement retains a backup. " +
+                    "Memory cards and emulator save states are different formats.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

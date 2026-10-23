@@ -295,6 +295,9 @@ dependencies {
     // synthetic PS1 disc images and reads them back: disc identification is pure java.io with no
     // Android API in it, which is exactly what makes it testable without a device.
     testImplementation 'junit:junit:4.13.2'
+    // android.jar exposes throwing JSON stubs to JVM tests. Use a real parser
+    // for host-side serialization/API tests; this is not packaged into the APK.
+    testImplementation 'org.json:json:20240303'
     androidTestImplementation 'androidx.test:runner:1.7.0'
     androidTestImplementation 'androidx.test.ext:junit:1.3.0'
 

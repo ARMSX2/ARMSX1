@@ -998,13 +998,16 @@ private fun Modifier.macroPressGestures(macroId: TouchButtonId) =
                     sendDigital(code, pressed)
                 }
                 TouchControls.noteTouchInteraction()
-                while (true) {
-                    val next = awaitPointerEvent()
-                    val nc = next.changes.firstOrNull { it.id == change.id }
-                    if (nc == null || !nc.pressed) break
-                }
-                TouchControls.fireMacro(macroId, "touch", false) { code, pressed ->
-                    sendDigital(code, pressed)
+                try {
+                    while (true) {
+                        val next = awaitPointerEvent()
+                        val nc = next.changes.firstOrNull { it.id == change.id }
+                        if (nc == null || !nc.pressed) break
+                    }
+                } finally {
+                    TouchControls.fireMacro(macroId, "touch", false) { code, pressed ->
+                        sendDigital(code, pressed)
+                    }
                 }
             }
         }
@@ -1016,6 +1019,8 @@ private fun Modifier.macroPressGestures(macroId: TouchButtonId) =
  *  button set in Pad settings → Touch Macros. An unconfigured macro is a no-op. */
 @Composable
 private fun MacroWidget(cfg: TouchButtonCfg, edit: Boolean) {
+    val held = !edit && TouchControls.isMacroHeld(cfg.id)
+    val pressedBlue = Color(0xFF64B5FF)
     if (edit) {
         Box(
             modifier = Modifier.fillMaxSize().editGestures(cfg),
@@ -1037,7 +1042,9 @@ private fun MacroWidget(cfg: TouchButtonCfg, edit: Boolean) {
                 .fillMaxSize()
                 // No dark circle behind custom art — the pack draws its own shape, and the backing
                 // would show as a disc behind a square button.
-                .then(if (skin == null) Modifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.30f * opacity)) else Modifier)
+                .then(if (skin == null) Modifier.clip(CircleShape).background(
+                    if (held) pressedBlue.copy(alpha = 0.65f * opacity)
+                    else Color.Black.copy(alpha = 0.30f * opacity)) else Modifier)
                 .macroPressGestures(cfg.id),
             contentAlignment = Alignment.Center,
         ) {
@@ -1047,12 +1054,13 @@ private fun MacroWidget(cfg: TouchButtonCfg, edit: Boolean) {
                     contentDescription = cfg.id.label,
                     contentScale = ContentScale.Fit,
                     alpha = opacity,
+                    colorFilter = if (held) ColorFilter.tint(pressedBlue, BlendMode.Modulate) else null,
                     modifier = Modifier.fillMaxSize(),
                 )
             } else {
                 Text(
                     cfg.id.label,
-                    color = Color.White.copy(alpha = legibleAlpha(opacity, 0.35f)),
+                    color = (if (held) pressedBlue else Color.White).copy(alpha = legibleAlpha(opacity, 0.35f)),
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                 )

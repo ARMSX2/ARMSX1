@@ -125,10 +125,11 @@ data class Ps1Settings(
     // Texture filtering in the GLES rasterizer, applied to textured POLYGONS. nearest is what
     // has always shipped and the only mode the 1x parity gate is meaningful under.
     val textureFilter: String = FILTER_NEAREST,   // nearest | bilinear | xbr
-    // Box downsampling factor: render at the internal scale, then average NxN back down.
-    // 0 = off. The core reduces the request to the largest divisor of the internal scale, so
-    // it does nothing at 1x. NOT coerced against a local range here on purpose.
+    // 0 = disabled, -1 = adaptive, positive = box. Old factor values remain Box.
     val downsample: Int = 0,
+    // Presentation only: never run emulation/audio again for an inserted frame.
+    val framePresentation: String = "off", // off | bfi | shader_subframes
+    val presentationMultiplier: Int = 2,
     // Deinterlacing for 480-line modes. weave is the historical behaviour.
     val deinterlace: String = DEINTERLACE_WEAVE,  // legacy weave means core default; progressive disables interlacing
     val overscanCrop: String = OVERSCAN_NONE,     // none | small | full
@@ -314,13 +315,11 @@ data class Ps1Settings(
         val DISPLAY_ROTATIONS = listOf(0, 90, 180, 270)
         val DISPLAY_ROTATION_LABELS = listOf("0°", "90°", "180°", "270°")
 
-        /** Box downsampling factors offered by the UI; 0 = off. The core clamps the request
-         *  down to a divisor of the internal scale, so an unusable pick degrades to off
-         *  rather than being rejected. */
-        val DOWNSAMPLE_FACTORS = listOf(0, 2, 3, 4)
+        /** Stable mode values; historical positive factors are read as Box. */
+        val DOWNSAMPLE_FACTORS = listOf(0, 1, -1)
 
         fun downsampleLabel(factor: Int): String =
-            if (factor < 2) I18n.get("common.off") else "1/$factor"
+            when { factor == -1 -> "Adaptive"; factor > 0 -> "Box"; else -> I18n.get("common.off") }
 
         /** Index helpers so a value written by hand into settings.toml that this build does
          *  not know about shows as the default instead of crashing a picker. */

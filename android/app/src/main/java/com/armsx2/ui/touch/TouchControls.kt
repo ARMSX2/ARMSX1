@@ -455,6 +455,8 @@ object TouchControls {
 
     private val macroHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val macroRunnables = HashMap<String, Runnable>()
+    private val heldMacroKeys = androidx.compose.runtime.mutableStateMapOf<String, TouchButtonId>()
+    fun isMacroHeld(id: TouchButtonId): Boolean = heldMacroKeys.values.any { it == id }
 
     /**
      * Press ([down]) or release a macro, honouring its [macroFrequency].
@@ -477,6 +479,7 @@ object TouchControls {
         val wantsPressure = MACRO_CODE_PRESSURE in codes
         val buttons = codes.filter { it != MACRO_CODE_PRESSURE }
         val runKey = "${id.name}:$key"
+        if (down) heldMacroKeys[runKey] = id else heldMacroKeys.remove(runKey)
         if (!down) {
             macroRunnables.remove(runKey)?.let { macroHandler.removeCallbacks(it) }
             buttons.forEach { emit(it, false) }

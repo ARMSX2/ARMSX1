@@ -15,6 +15,14 @@ struct Options {size_t version;uint32_t frames_in_flight;bool force_no_mipmaps,u
 struct GlOptions {size_t version;uint16_t glsl_version;bool use_dsa,force_no_mipmaps,disable_cache;};
 struct GlImage {uint32_t handle,format,width,height;};
 struct Viewport {float x,y;uint32_t width,height;};
+// Full official 0.12.0 repr(C) frame options, shared by GL and Vulkan.
+struct FrameOptions {
+  size_t version=5;bool clear_history=false;int32_t frame_direction=1;
+  uint32_t rotation=0,total_subframes=1,current_subframe=1;
+  float aspect_ratio=0,frames_per_second=60;uint32_t frametime_delta=0;
+  uint32_t color_space=0;float brightness_nits=200;uint32_t expand_gamut=0;
+  float gyroscope[3]{},accelerometer[3]{},accelerometer_rest[3]{};
+};
 struct Parameter {const char* name;const char* description;float initial,minimum,maximum,step;};
 struct Parameters {const Parameter* parameters;uint64_t length;};
 struct Api {
@@ -38,7 +46,7 @@ struct Selection {uint64_t generation=1;bool enabled=false;std::string path;std:
 Selection Selected();
 void Select(bool enabled,std::string path);
 void SetParameters(std::string path,std::map<std::string,float> parameters);
-uint32_t DrawGL(uint32_t source,uint32_t core_framebuffer,unsigned width,unsigned height,unsigned window_width,unsigned window_height,bool software);
+uint32_t DrawGL(uint32_t source,uint32_t core_framebuffer,unsigned width,unsigned height,unsigned window_width,unsigned window_height,bool software,unsigned subframe=1,unsigned total=1,float nominal=60);
 void CloseGL();
 bool ActiveGL();
 }

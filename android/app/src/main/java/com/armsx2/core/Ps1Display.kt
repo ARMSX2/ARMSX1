@@ -28,6 +28,9 @@ object Ps1Display {
     fun push(context: Context) {
         val s = runCatching { Ps1SettingsStore.active(context) }.getOrNull() ?: return
         push(s)
+        com.armsx2.runtime.MainActivityRuntime.surface.value?.let { surface ->
+            surface.post { surface.applyFrameRatePreference() }
+        }
     }
 
     /** Push an in-memory snapshot, for callers that already hold one. */
@@ -40,6 +43,10 @@ object Ps1Display {
             NativeApp.setDisplayAspect(mode)
             NativeApp.setStretchMode(s.stretchMode)
             NativeApp.setIntegerScaling(s.integerScaling)
+            NativeApp.setFramePresentation(
+                when (s.framePresentation) { "bfi" -> 1; "shader_subframes" -> 2; else -> 0 },
+                s.presentationMultiplier.coerceIn(2, 4),
+            )
         }
     }
 }

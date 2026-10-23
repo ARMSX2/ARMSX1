@@ -9,7 +9,7 @@ namespace SwanVulkan {
 bool Negotiate(const retro_hw_render_context_negotiation_interface_vulkan*, ANativeWindow*);
 const retro_hw_render_interface_vulkan* Interface();
 bool Window(ANativeWindow*);
-bool Present(unsigned width,unsigned height,float aspect,bool suspended);
+bool Present(unsigned width,unsigned height,float aspect,bool suspended,bool black=false,unsigned subframe=1,unsigned total=1,float nominal=60);
 void Blank();
 void Close();
 bool Ready();

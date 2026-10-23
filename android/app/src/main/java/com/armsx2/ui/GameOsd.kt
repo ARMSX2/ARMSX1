@@ -311,12 +311,23 @@ fun GameOsdOverlay() {
     val showResolution = OsdModePolicy.includes(mode, settings.osdShowResolution)
     val showRenderer = OsdModePolicy.includes(mode, settings.osdShowHardwareInfo)
     val showHostUsage = OsdModePolicy.includes(mode, settings.osdShowHostUsage)
+    val showInputs = OsdModePolicy.includes(mode, settings.osdShowInputs)
+    var inputLines by remember { mutableStateOf(listOf<String>()) }
 
     // Poll the core for the real rates. Cheap (2 Hz, two non-blocking atomic reads) and gated on
     // BOTH rows — the speed row is a percentage of the measured rate, so polling only for the FPS
     // row would leave "Emulation speed" alone on screen showing nothing. Stopped while paused: a
     // paused core reports 0 and the block already says PAUSED.
     val pausedNow = GameOsd.paused.value
+    LaunchedEffect(inGame, showInputs, pausedNow, overlayOpen) {
+        inputLines = emptyList()
+        if (!inGame || !showInputs || pausedNow || overlayOpen) return@LaunchedEffect
+        while (true) {
+            inputLines = runCatching { ControlInputReadings.lines(NativeApp.getControlInputSnapshot()) }
+                .getOrDefault(emptyList())
+            delay(33)
+        }
+    }
     val needsRates = showFps || showSpeed
     LaunchedEffect(inGame, needsRates, pausedNow) {
         if (!inGame || !needsRates || pausedNow) return@LaunchedEffect
@@ -574,6 +585,14 @@ fun GameOsdOverlay() {
                 statLines.forEach { line ->
                     Text(line, style = textStyle, softWrap = false, maxLines = 1)
                 }
+            }
+        }
+
+        if (showInputs && !overlayOpen && !pausedNow && inputLines.isNotEmpty()) {
+            Column(Modifier.align(Alignment.BottomStart).padding(8.dp)
+                .clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 8.dp, vertical = 4.dp)) {
+                inputLines.forEach { Text(it, style = textStyle, maxLines = 1, softWrap = false) }
             }
         }
 

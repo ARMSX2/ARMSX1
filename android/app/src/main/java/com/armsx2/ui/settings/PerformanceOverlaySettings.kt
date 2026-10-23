@@ -59,5 +59,6 @@ internal fun PerformanceOverlaySettings(gameKey: String?, contextGameKey: String
         ToggleRow(str("overlay.toggle.internalResolution"), custom.osdShowResolution) { update(custom.copy(osdShowResolution = it)) }
         ToggleRow(str("overlay.osd.renderer"), custom.osdShowHardwareInfo) { update(custom.copy(osdShowHardwareInfo = it)) }
         ToggleRow(str("overlay.toggle.deviceUsage"), custom.osdShowHostUsage) { update(custom.copy(osdShowHostUsage = it)) }
+        ToggleRow(str("overlay.toggle.controlInputs"), custom.osdShowInputs) { update(custom.copy(osdShowInputs = it)) }
     }
 }

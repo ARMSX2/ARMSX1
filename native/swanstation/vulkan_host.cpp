@@ -207,7 +207,7 @@ bool SwanVulkan::Window(ANativeWindow* window) {
 }
 const retro_hw_render_interface_vulkan* SwanVulkan::Interface(){return negotiated?&api:nullptr;}
 bool SwanVulkan::Ready(){return negotiated;}
-bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspended) {
+bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspended,bool black,unsigned subframe,unsigned total,float nominal) {
   if(!core.device)return false;std::lock_guard lock(queue_mutex);
   const bool draw=swapchain&&!suspended;
   const auto selection=SwanShaders::Selected();
@@ -234,9 +234,9 @@ bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspen
   if(!Begin())return false;
   if(draw){const auto target=swap_images[index];
     Barrier(target,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkClearColorValue black{{0,0,0,1}};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-    vkCmdClearColorImage(command,target,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&black,1,&range);
-    const bool filtered=has_image&&width&&height&&shader_chain;
+    VkClearColorValue clear_black{{0,0,0,1}};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    vkCmdClearColorImage(command,target,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&clear_black,1,&range);
+    const bool filtered=!black&&has_image&&width&&height&&shader_chain;
     if(filtered){
       Barrier(target,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
       Barrier(image.create_info.image,image.image_layout,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT);
@@ -245,10 +245,13 @@ bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspen
       auto* api=SwanShaders::Functions();
       const SwanShaders::Image source{image.create_info.image,image.create_info.format,width,height},destination{target,swap_format,extent.width,extent.height};
       const auto matrix=SwanPresentation::Matrix(presentation.rotation);
-      if(!SwanShaders::Check(api->frame(&shader_chain,command,shader_counter++,source,destination,&viewport,matrix.data(),nullptr))){Error("Vulkan shader frame failed.");return false;}
+      SwanShaders::FrameOptions frame;frame.total_subframes=total;frame.current_subframe=subframe;
+      frame.frames_per_second=nominal;frame.frametime_delta=uint32_t(1000.f/nominal);
+      if(!SwanShaders::Check(api->frame(&shader_chain,command,shader_counter,source,destination,&viewport,matrix.data(),&frame))){Error("Vulkan shader frame failed.");return false;}
+      if(subframe==total)shader_counter++;
       shader_active=selection.enabled;
       Barrier(image.create_info.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,image.image_layout,VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT);
-    }else if(has_image && width&&height) {
+    }else if(!black&&has_image && width&&height) {
       Barrier(image.create_info.image,image.image_layout,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_ACCESS_MEMORY_WRITE_BIT|VK_ACCESS_MEMORY_READ_BIT,VK_ACCESS_TRANSFER_READ_BIT);
       const auto rect=SwanPresentation::Fit(extent.width,extent.height,width,height,aspect,presentation);
       VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstSubresource=blit.srcSubresource;

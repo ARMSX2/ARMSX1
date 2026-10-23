@@ -468,6 +468,8 @@ object Ps1SettingsStore {
         appendLine("    widescreen_hack = ${s.widescreenHack}")
         appendLine("    texture_filter = ${str(s.textureFilter)}")
         appendLine("    downsample = ${s.downsample}")
+        appendLine("    frame_presentation = ${str(s.framePresentation)}")
+        appendLine("    presentation_multiplier = ${s.presentationMultiplier.coerceIn(2, 4)}")
         appendLine("    deinterlace = ${str(s.deinterlace)}")
         appendLine("    overscan_crop = ${str(s.overscanCrop)}")
         appendLine("    display_rotation = ${s.displayRotation}")
@@ -603,7 +605,15 @@ object Ps1SettingsStore {
             // No coerceIn: the native side owns the range and clamps the request down to a
             // divisor of the internal scale. Clamping here against a stale local list is how
             // a newly-added value gets silently eaten.
-            "downsample" -> s.copy(downsample = value.trim().toIntOrNull() ?: s.downsample)
+            "downsample" -> s.copy(downsample = when (value.trim()) {
+                "true" -> 1
+                "false" -> 0
+                else -> value.trim().toIntOrNull() ?: s.downsample
+            })
+            "frame_presentation" -> s.copy(framePresentation = unquote(value).takeIf {
+                it in listOf("off", "bfi", "shader_subframes")
+            } ?: "off")
+            "presentation_multiplier" -> s.copy(presentationMultiplier = (value.trim().toIntOrNull() ?: 2).coerceIn(2, 4))
             "deinterlace" -> s.copy(deinterlace = unquote(value))
             "overscan_crop" -> s.copy(overscanCrop = unquote(value))
             "display_rotation" -> s.copy(displayRotation = value.trim().toIntOrNull() ?: s.displayRotation)

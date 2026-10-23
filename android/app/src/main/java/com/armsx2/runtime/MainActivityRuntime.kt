@@ -649,6 +649,9 @@ open class MainActivityRuntime : ComponentActivity() {
                                 if (kind == "BIOS") "BIOS" else currentGame.value?.settingsKey.orEmpty(),
                                 path,
                             )
+                            com.armsx2.core.Ps1MemoryCards.configureImported(
+                                checkNotNull(instance?.applicationContext), if (kind == "BIOS") "" else cardSource,
+                            )
                             NativeApp.runVMThreadForSession(prepared.launchPath, token).also { booted ->
                                 if (booted && kind != "BIOS") runCatching {
                                     instance?.applicationContext?.let { context ->

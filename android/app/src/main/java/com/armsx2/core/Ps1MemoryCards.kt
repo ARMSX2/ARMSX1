@@ -43,7 +43,8 @@ object Ps1MemoryCards {
         require(slot in SLOTS)
         if (gameSource == null) return Ps1Config.memoryCardFile(context, slot)
         val root = cardDirectory(context)
-        return Ps1CardBindings.resolve(root, gameSource, slot)
+        return Ps1CardBindings.imported(root, gameSource, slot)
+            ?: Ps1CardBindings.resolve(root, gameSource, slot)
             ?: if (slot == 2) File(root, "duckstation_shared_card_2.mcd")
             else throw IOException("Start and close this game once to identify its Slot 1 card. No other game's card was selected.")
     }
@@ -56,6 +57,15 @@ object Ps1MemoryCards {
             File(path)
         }
         Ps1CardBindings.remember(cardDirectory(context), gameSource, cards)
+    }
+
+    /** Configure the next session, including clearing a previous game's imported paths. */
+    fun configureImported(context: Context, source: String) {
+        val root = cardDirectory(context)
+        kr.co.iefriends.pcsx2.NativeApp.configureSwanCardPaths(
+            Ps1CardBindings.imported(root, source, 1)?.absolutePath.orEmpty(),
+            Ps1CardBindings.imported(root, source, 2)?.absolutePath.orEmpty(),
+        )
     }
 
     /** The native SwanStation save directory, independent of the currently selected game. */

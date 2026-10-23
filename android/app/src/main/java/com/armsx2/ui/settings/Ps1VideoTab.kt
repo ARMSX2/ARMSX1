@@ -237,19 +237,38 @@ fun Ps1VideoTab() {
         SegmentedRow(
             label = str("renderer.downsample.label"),
             options = Ps1Settings.DOWNSAMPLE_FACTORS.map { Ps1Settings.downsampleLabel(it) },
-            selectedIndex = Ps1Settings.DOWNSAMPLE_FACTORS.indexOf(s.downsample)
+            selectedIndex = Ps1Settings.DOWNSAMPLE_FACTORS.indexOf(if (s.downsample > 0) 1 else s.downsample)
                 .coerceAtLeast(0),
-            description = str("renderer.downsample.description") + " " +
-                if (s.hwRasterizer && s.internalScale > 1) {
-                    str("renderer.downsample.active").format(s.internalScale)
-                } else {
-                    str("renderer.downsample.inactive")
-                },
+            description = "Box averages the higher-resolution image back to native size. " +
+                "Adaptive preserves detail while smoothing edges (Vulkan hardware only; " +
+                "OpenGL and ANGLE fall back to Box). Requires hardware rendering above 1×. " +
+                "Adaptive uses a power-of-two internal scale, so 3× becomes 2×.",
             onChange = { idx ->
                 val next = Ps1Settings.DOWNSAMPLE_FACTORS[idx]
                 editor.update { it.copy(downsample = next) }
                 pushGlVideoOptions(s.textureFilter, next, s.lineDetect)
             },
+        )
+        SettingsDivider()
+
+        // Same preset/parameter editor and storage tiers as the pause menu.
+        val shaderSettings = com.armsx2.ui.InGameOverlay.settingsState.value
+        com.armsx2.ui.common.ShaderChainSection(
+            enabled = shaderSettings.shaderChainEnabled,
+            preset = shaderSettings.shaderChainPreset,
+            params = shaderSettings.shaderChainParams,
+            onEnabledChange = { com.armsx2.ui.InGameOverlay.saveSettings(
+                com.armsx2.ui.InGameOverlay.settingsState.value.copy(shaderChainEnabled = it)) },
+            onPresetChange = { com.armsx2.ui.InGameOverlay.saveSettings(
+                com.armsx2.ui.InGameOverlay.settingsState.value.copy(shaderChainPreset = it)) },
+            onParamsChange = { com.armsx2.ui.InGameOverlay.saveSettings(
+                com.armsx2.ui.InGameOverlay.settingsState.value.copy(shaderChainParams = it)) },
+        )
+        com.armsx2.ui.common.ShaderManagerSection()
+        SettingsDivider()
+        FramePresentationSettings(s,
+            onMode = { mode -> editor.update { it.copy(framePresentation = mode) } },
+            onMultiplier = { multiple -> editor.update { it.copy(presentationMultiplier = multiple) } },
         )
         SettingsDivider()
 
@@ -580,6 +599,8 @@ fun Ps1VideoTab() {
                     widescreenHack = d.widescreenHack,
                     textureFilter = d.textureFilter,
                     downsample = d.downsample,
+                    framePresentation = d.framePresentation,
+                    presentationMultiplier = d.presentationMultiplier,
                     deinterlace = d.deinterlace,
                     overscanCrop = d.overscanCrop,
                     displayRotation = d.displayRotation,
