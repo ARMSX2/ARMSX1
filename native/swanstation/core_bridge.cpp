@@ -18,6 +18,9 @@
 #include "core/host_interface.h"
 #include "core/host_display.h"
 #include "statistics.h"
+#include "gpu_pipeline.h"
+#include "checked_lut.h"
+#include "cpu_optimizations.h"
 #include "ctr_hud.h"
 #include "common/vulkan/context.h"
 #include "xxhash.h"
@@ -27,11 +30,22 @@
 #include <algorithm>
 #include <cstring>
 #include <cctype>
+#include <cstdio>
 
 namespace { bool texture_dump=false,texture_replace=false;std::string texture_directory;std::set<std::string> dumped;uint64_t dumped_bytes=0;
 uint64_t texture_lookups=0,texture_writes=0,texture_hits=0;
 }
 SwanTelemetry::Window SwanTelemetry::counters;
+extern "C" RETRO_API void swan_pipeline_configure(SwanGpuPipeline::Dispatch dispatch){SwanGpuPipeline::Configure(dispatch);}
+extern "C" RETRO_API bool swan_pipeline_active(){return SwanGpuPipeline::Active();}
+extern "C" RETRO_API bool swan_pipeline_failed(){return SwanGpuPipeline::Failed();}
+extern "C" RETRO_API bool swan_pipeline_frames(unsigned capacity){
+  if(g_settings.runahead_frames)capacity=0;
+  for(const auto type:g_settings.controller_types)
+    if(type==ControllerType::NamcoGunCon||type==ControllerType::PlayStationMouse)capacity=0;
+  SwanGpuPipeline::ConfigureFrames(capacity);return SwanGpuPipeline::QueuesFrames();
+}
+extern "C" RETRO_API unsigned swan_pipeline_frame_metric(unsigned kind){return kind==2?unsigned(SwanGpuPipeline::QueuesFrames()):kind?SwanGpuPipeline::PeakFrames():SwanGpuPipeline::QueuedFrames();}
 extern "C" RETRO_API void swan_statistics_reset(){SwanTelemetry::counters.Reset();}
 extern "C" RETRO_API void swan_statistics_begin(bool enabled){
   SwanTelemetry::counters.Begin(enabled,TimingEvents::GetGlobalTickCounter());
@@ -40,7 +54,9 @@ extern "C" RETRO_API void swan_statistics_end(){SwanTelemetry::counters.End(Timi
 extern "C" RETRO_API void swan_statistics_read(double* output,size_t capacity){
   if(!output||capacity<SwanTelemetry::Count)return;
   auto values=SwanTelemetry::counters.Take();
-  if(g_host_interface)if(const auto* display=g_host_interface->GetDisplay()){
+  const auto geometry=SwanGpuPipeline::Geometry();
+  if(SwanGpuPipeline::QueuesFrames()&&geometry.aspect>0){values[23]=geometry.width;values[24]=geometry.height;}
+  else if(g_host_interface)if(const auto* display=g_host_interface->GetDisplay()){
     values[23]=display->GetDisplayWidth();values[24]=display->GetDisplayHeight();
   }
   values[30]=SwanTelemetry::counters.scale?double(SwanTelemetry::counters.scale):-1;
@@ -97,6 +113,7 @@ void swan_dump_vram(uint32_t width,uint32_t height,const void* data) {
   std::filesystem::remove(temp,error);
 }
 extern "C" RETRO_API void swan_texture_options(bool dump,bool replace,const char* directory) {
+  SwanGpuPipeline::Sync();
   texture_dump=dump;texture_replace=replace;texture_directory=directory?directory:"";dumped.clear();dumped_bytes=0;
   texture_lookups=texture_writes=texture_hits=0;
   if(!texture_directory.empty()&&(dump||replace)){std::error_code error;std::filesystem::create_directories(texture_directory+"/dump",error);std::filesystem::create_directories(texture_directory+"/replacements",error);}
@@ -154,6 +171,31 @@ extern "C" RETRO_API bool swan_validate_cheat(const char* text) {
   return text && CheatList::ParseLibretroCheat(&code, text);
 }
 extern "C" RETRO_API uint32_t swan_guest_frame() { return System::GetFrameNumber(); }
+
+// Called only by the emulation owner. Report settings after game compatibility
+// rules, rather than inferring the active memory path from Android preferences.
+extern "C" RETRO_API bool swan_cpu_diagnostics(char* output,size_t capacity) {
+  if(!output||!capacity)return false;
+  output[0]=0;if(!System::IsValid())return false;
+  const auto packets=SwanGpuPipeline::ReadPacketMetrics();
+  const auto cpu_opt=SwanCpuOpt::ReadMetrics();
+  const int written=std::snprintf(output,capacity,
+    "effective_cpu=%s effective_fastmem=%s effective_fastmem_active=%d effective_fastmem_rewrite=%d "
+    "effective_block_linking=%d effective_icache=%d effective_memory_exceptions=%d "
+    "effective_cpu_overclock=%d effective_cpu_clock_ratio=%u/%u effective_checked_lut=%d "
+    "gpu_pooled_packets=%zu gpu_heap_packets=%zu gpu_payload_growths=%zu "
+    "cpu_optimization_mask=%u fused_loads=%zu guided_evictions=%zu register_renames=%zu "
+    "manual_code_pages=%zu code_guard_checks=%zu jit_interpreter_fallbacks=%zu",
+    Settings::GetCPUExecutionModeName(g_settings.cpu_execution_mode),
+    Settings::GetCPUFastmemModeName(g_settings.cpu_fastmem_mode),int(g_settings.IsUsingFastmem()),
+    int(g_settings.cpu_fastmem_rewrite),int(g_settings.cpu_recompiler_block_linking),
+    int(g_settings.cpu_recompiler_icache),int(g_settings.cpu_recompiler_memory_exceptions),
+    int(g_settings.cpu_overclock_active),g_settings.cpu_overclock_numerator,g_settings.cpu_overclock_denominator,
+    int(SwanCheckedLut::Enabled()),packets.pooled,packets.heap_fallbacks,packets.payload_growths,
+    SwanCpuOpt::Mask(),cpu_opt.fused_loads,cpu_opt.guided_evictions,cpu_opt.renames,
+    SwanCpuOpt::ManualPages(),cpu_opt.guard_checks,cpu_opt.fallbacks);
+  return written>=0&&size_t(written)<capacity;
+}
 
 // Disc reader ABI for the official rcheevos PlayStation content hash (including CHD).
 struct SwanHashDisc { std::unique_ptr<CDImage> image; uint32_t start; };

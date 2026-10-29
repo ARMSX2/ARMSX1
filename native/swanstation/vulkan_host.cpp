@@ -12,9 +12,14 @@
 #include <android/log.h>
 #include <filesystem>
 #include <atomic>
+#include <chrono>
+#include <sstream>
 #include "shader_api.h"
 #include "vulkan_surface.h"
 #include "driver_environment.h"
+#include "frame_slots.h"
+#include "presentation_feedback.h"
+#include "presentation_order.h"
 #include <cstdlib>
 namespace {
 void* loader=nullptr;
@@ -46,20 +51,35 @@ VkSurfaceKHR surface=VK_NULL_HANDLE;
 VkSwapchainKHR swapchain=VK_NULL_HANDLE;
 VkExtent2D extent{};
 std::vector<VkImage> swap_images;
-VkCommandPool pool=VK_NULL_HANDLE;
 VkCommandBuffer command=VK_NULL_HANDLE;
-VkFence fence=VK_NULL_HANDLE;
-VkSemaphore acquired=VK_NULL_HANDLE,complete=VK_NULL_HANDLE,signal_semaphore=VK_NULL_HANDLE;
+struct Frame {VkCommandPool pool{};VkCommandBuffer command{};VkFence fence{};VkSemaphore acquired{};};
+std::array<Frame,3> frames{};
+SwanFrames::Slots slots;
+unsigned requested_frames=2;
+bool requested_vsync=true,requested_matched=true;
+std::atomic<int> active_present_mode{int(SwanFramePacing::PresentMode::Fifo)};
+bool synchronization_failed=false;
+double last_wait_ms=0;
+unsigned shader_width=0,shader_height=0;
+std::vector<VkSemaphore> present_complete;
+VkSemaphore signal_semaphore=VK_NULL_HANDLE;
 retro_vulkan_image image{};
 bool has_image=false;
 std::vector<VkSemaphore> waits;
 std::vector<VkCommandBuffer> core_commands;
-#define INSTANCE_FUNCTIONS(X) X(vkDestroyInstance) X(vkCreateAndroidSurfaceKHR) X(vkDestroySurfaceKHR) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceFormatProperties)
-#define DEVICE_FUNCTIONS(X) X(vkDestroyDevice) X(vkDeviceWaitIdle) X(vkQueueWaitIdle) X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkResetCommandPool) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCmdPipelineBarrier) X(vkCmdBlitImage) X(vkCmdClearColorImage) X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences) X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkQueueSubmit) X(vkCreateBuffer) X(vkDestroyBuffer) X(vkGetBufferMemoryRequirements) X(vkAllocateMemory) X(vkFreeMemory) X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCmdCopyImageToBuffer)
+PFN_vkGetPastPresentationTimingGOOGLE past_timing=nullptr;
+PFN_vkGetRefreshCycleDurationGOOGLE refresh_timing=nullptr;
+std::atomic<bool> timing_supported{false};
+std::atomic<uint64_t> refresh_ns{0},timed_presents{0};
+SwanFramePacing::Feedback display_feedback;
+uint32_t present_id=0;
+#define INSTANCE_FUNCTIONS(X) X(vkDestroyInstance) X(vkCreateAndroidSurfaceKHR) X(vkDestroySurfaceKHR) X(vkEnumeratePhysicalDevices) X(vkEnumerateDeviceExtensionProperties) X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) X(vkGetPhysicalDeviceSurfaceFormatsKHR) X(vkGetPhysicalDeviceSurfacePresentModesKHR) X(vkGetPhysicalDeviceSurfaceSupportKHR) X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceFormatProperties)
+#define DEVICE_FUNCTIONS(X) X(vkDestroyDevice) X(vkDeviceWaitIdle) X(vkCreateSwapchainKHR) X(vkDestroySwapchainKHR) X(vkGetSwapchainImagesKHR) X(vkAcquireNextImageKHR) X(vkQueuePresentKHR) X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkResetCommandPool) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkCmdPipelineBarrier) X(vkCmdBlitImage) X(vkCmdClearColorImage) X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences) X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkQueueSubmit) X(vkCreateBuffer) X(vkDestroyBuffer) X(vkGetBufferMemoryRequirements) X(vkAllocateMemory) X(vkFreeMemory) X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory) X(vkCmdCopyImageToBuffer)
 #define DECLARE(name) PFN_##name name=nullptr;
 INSTANCE_FUNCTIONS(DECLARE) DEVICE_FUNCTIONS(DECLARE)
 #undef DECLARE
 void Error(const char* text) {__android_log_write(ANDROID_LOG_ERROR,"SwanVulkan",text);}
+int64_t TimeNs(){return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 void Barrier(VkImage target,VkImageLayout before,VkImageLayout after,VkAccessFlags source,VkAccessFlags destination) {
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   barrier.srcAccessMask=source;barrier.dstAccessMask=destination;barrier.oldLayout=before;barrier.newLayout=after;
@@ -68,38 +88,73 @@ void Barrier(VkImage target,VkImageLayout before,VkImageLayout after,VkAccessFla
   vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
 }
 bool Begin() {
-  if(vkWaitForFences(core.device,1,&fence,VK_TRUE,2000000000ull)!=VK_SUCCESS)return false;
-  if(vkResetCommandPool(core.device,pool,0)!=VK_SUCCESS)return false;
+  auto& frame=frames[slots.Current()];
+  if(slots.Pending(slots.Current())) {
+    if(vkWaitForFences(core.device,1,&frame.fence,VK_TRUE,2000000000ull)!=VK_SUCCESS)return false;
+    slots.Retired(slots.Current());
+  }
+  command=frame.command;
+  if(vkResetCommandPool(core.device,frame.pool,0)!=VK_SUCCESS)return false;
   VkCommandBufferBeginInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};info.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   return vkBeginCommandBuffer(command,&info)==VK_SUCCESS;
 }
-bool Submit(bool with_window) {
+bool Submit(bool with_window,uint32_t image_index=0) {
   if(vkEndCommandBuffer(command)!=VK_SUCCESS)return false;
-  std::vector<VkSemaphore> wait=waits;waits.clear();if(with_window)wait.push_back(acquired);
+  auto& frame=frames[slots.Current()];
+  std::vector<VkSemaphore> wait=waits;waits.clear();if(with_window)wait.push_back(frame.acquired);
   std::vector<VkPipelineStageFlags> stages(wait.size(),VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-  std::vector<VkSemaphore> signals;if(with_window)signals.push_back(complete);if(signal_semaphore)signals.push_back(signal_semaphore);signal_semaphore=VK_NULL_HANDLE;
+  std::vector<VkSemaphore> signals;if(with_window)signals.push_back(present_complete.at(image_index));if(signal_semaphore)signals.push_back(signal_semaphore);signal_semaphore=VK_NULL_HANDLE;
   auto commands=core_commands;core_commands.clear();commands.push_back(command);
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.waitSemaphoreCount=wait.size();submit.pWaitSemaphores=wait.data();submit.pWaitDstStageMask=stages.data();
   submit.commandBufferCount=commands.size();submit.pCommandBuffers=commands.data();submit.signalSemaphoreCount=signals.size();submit.pSignalSemaphores=signals.data();
-  if(vkResetFences(core.device,1,&fence)!=VK_SUCCESS)return false;
-  return vkQueueSubmit(core.queue,1,&submit,fence)==VK_SUCCESS;
+  if(vkResetFences(core.device,1,&frame.fence)!=VK_SUCCESS)return false;
+  if(vkQueueSubmit(core.queue,1,&submit,frame.fence)!=VK_SUCCESS)return false;
+  slots.Submitted();return true;
 }
 void DestroySwapchain() {
   if(!core.device)return;
   if(vkDeviceWaitIdle)vkDeviceWaitIdle(core.device);
+  for(const auto semaphore:present_complete)if(semaphore)vkDestroySemaphore(core.device,semaphore,nullptr);
+  present_complete.clear();
   if(shader_chain){auto* api=SwanShaders::Functions();if(api)SwanShaders::Check(api->free(&shader_chain));shader_chain=nullptr;}
   shader_generation=0;shader_counter=0;shader_active=false;
+  shader_width=shader_height=0;
+  refresh_ns=0;SwanVulkan::ResetTimingWindow();
   if(swapchain)vkDestroySwapchainKHR(core.device,swapchain,nullptr);swapchain=VK_NULL_HANDLE;swap_images.clear();
   if(surface)vkDestroySurfaceKHR(instance,surface,nullptr);surface=VK_NULL_HANDLE;
+}
+void CollectDisplayTiming() {
+  if(!timing_supported.load()||!swapchain||!past_timing)return;
+  if(refresh_timing){VkRefreshCycleDurationGOOGLE cycle{};
+    if(refresh_timing(core.device,swapchain,&cycle)==VK_SUCCESS && cycle.refreshDuration>=2000000 && cycle.refreshDuration<=40000000)
+      refresh_ns=cycle.refreshDuration;}
+  uint32_t count=0;
+  if(past_timing(core.device,swapchain,&count,nullptr)!=VK_SUCCESS||!count||count>1024)return;
+  std::vector<VkPastPresentationTimingGOOGLE> values(count);
+  const auto result=past_timing(core.device,swapchain,&count,values.data());
+  if(result!=VK_SUCCESS&&result!=VK_INCOMPLETE)return;
+  count=std::min(count,uint32_t(values.size()));
+  std::sort(values.begin(),values.begin()+count,[](const auto& a,const auto& b){return int32_t(a.presentID-b.presentID)<0;});
+  for(uint32_t i=0;i<count;++i){const auto& value=values[i];
+    display_feedback.Record(value.presentID,value.actualPresentTime,value.desiredPresentTime,refresh_ns.load());
+    SwanFramePacing::PresentationRecovery().Observe(value.presentID,int64_t(value.actualPresentTime));}
 }
 void SetImage(void*,const retro_vulkan_image* value,uint32_t count,const VkSemaphore* semaphores,uint32_t family) {
   has_image=value && (family==VK_QUEUE_FAMILY_IGNORED || family==core.queue_family_index);
   if(has_image)image=*value;
   waits.clear();if(count&&semaphores)waits.assign(semaphores,semaphores+count);
 }
-uint32_t SyncIndex(void*) {return 0;}
-uint32_t SyncMask(void*) {return 1;}
-void WaitIndex(void*) {if(fence)vkWaitForFences(core.device,1,&fence,VK_TRUE,2000000000ull);}
+uint32_t SyncIndex(void*) {return uint32_t(slots.Current());}
+uint32_t SyncMask(void*) {return (1u<<slots.Count())-1;}
+void WaitIndex(void*) {
+  // Used by checked core hooks before its single shared output image is
+  // replaced or destroyed. A submit fence covers image reads, not scanout.
+  for(size_t i=0;i<slots.Count();++i)if(slots.Pending(i)) {
+    const auto result=vkWaitForFences(core.device,1,&frames[i].fence,VK_TRUE,UINT64_MAX);
+    if(result!=VK_SUCCESS){Error("Presentation fence wait failed");synchronization_failed=true;vkDeviceWaitIdle(core.device);}
+    slots.Retired(i);
+  }
+}
 void Commands(void*,uint32_t count,const VkCommandBuffer* buffers){core_commands.clear();if(count&&buffers)core_commands.assign(buffers,buffers+count);}
 void Lock(void*){queue_mutex.lock();}
 void Unlock(void*){queue_mutex.unlock();}
@@ -113,7 +168,9 @@ bool SwanVulkan::Negotiate(const retro_hw_render_context_negotiation_interface_v
   struct Rollback {bool committed=false;~Rollback(){if(!committed){
     static void* core_library=dlopen("libswanstation.so",RTLD_NOW|RTLD_LOCAL);
     auto abort=reinterpret_cast<void(*)()>(core_library?dlsym(core_library,"swan_vulkan_abort"):nullptr);if(abort)abort();SwanVulkan::Close();}}} rollback;
-  negotiated=false;
+  negotiated=false;synchronization_failed=false;
+  timing_supported=false;past_timing=nullptr;refresh_timing=nullptr;present_id=0;
+  refresh_ns=0;SwanVulkan::ResetTimingWindow();
 #define CLEAR_FUNCTION(name) name=nullptr;
   INSTANCE_FUNCTIONS(CLEAR_FUNCTION) DEVICE_FUNCTIONS(CLEAR_FUNCTION)
 #undef CLEAR_FUNCTION
@@ -150,21 +207,44 @@ bool SwanVulkan::Negotiate(const retro_hw_render_context_negotiation_interface_v
 #undef LOAD_INSTANCE
   if(window){VkAndroidSurfaceCreateInfoKHR surface_info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};surface_info.window=window;
     if(vkCreateAndroidSurfaceKHR(instance,&surface_info,nullptr,&surface)!=VK_SUCCESS)return false;}
-  const char* device_extensions[]={VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  // Select the same first device as the pinned core, then enable the timing
+  // extension only when that actual system/custom driver advertises it.
+  uint32_t gpu_count=0;
+  if(vkEnumeratePhysicalDevices(instance,&gpu_count,nullptr)!=VK_SUCCESS||!gpu_count)return false;
+  std::vector<VkPhysicalDevice> gpus(gpu_count);
+  if(vkEnumeratePhysicalDevices(instance,&gpu_count,gpus.data())!=VK_SUCCESS)return false;
+  const auto selected_gpu=gpus.front();
+  std::vector<const char*> device_extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  uint32_t extension_count=0;
+  if(vkEnumerateDeviceExtensionProperties(selected_gpu,nullptr,&extension_count,nullptr)==VK_SUCCESS){
+    std::vector<VkExtensionProperties> available(extension_count);
+    if(vkEnumerateDeviceExtensionProperties(selected_gpu,nullptr,&extension_count,available.data())==VK_SUCCESS)
+      for(const auto& extension:available)if(std::strcmp(extension.extensionName,VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME)==0){
+        device_extensions.push_back(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);break;}
+  }
   // The pinned core owns its helper resources; the returned device belongs to this host.
-  if(!requested->create_device(&core,instance,VK_NULL_HANDLE,surface,entry,device_extensions,1,nullptr,0,nullptr))return false;
+  if(!requested->create_device(&core,instance,selected_gpu,surface,entry,device_extensions.data(),uint32_t(device_extensions.size()),nullptr,0,nullptr))return false;
   device_entry=reinterpret_cast<PFN_vkGetDeviceProcAddr>(entry(instance,"vkGetDeviceProcAddr"));if(!device_entry)return false;
 #define LOAD_DEVICE(name) name=reinterpret_cast<PFN_##name>(device_entry(core.device,#name));if(!name)return false;
   DEVICE_FUNCTIONS(LOAD_DEVICE)
 #undef LOAD_DEVICE
-  VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool_info.queueFamilyIndex=core.queue_family_index;pool_info.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-  if(vkCreateCommandPool(core.device,&pool_info,nullptr,&pool)!=VK_SUCCESS)return false;
-  VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};allocate.commandPool=pool;allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
-  if(vkAllocateCommandBuffers(core.device,&allocate,&command)!=VK_SUCCESS)return false;
-  VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fence_info.flags=VK_FENCE_CREATE_SIGNALED_BIT;
-  if(vkCreateFence(core.device,&fence_info,nullptr,&fence)!=VK_SUCCESS)return false;
-  VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-  if(vkCreateSemaphore(core.device,&semaphore_info,nullptr,&acquired)!=VK_SUCCESS || vkCreateSemaphore(core.device,&semaphore_info,nullptr,&complete)!=VK_SUCCESS)return false;
+  if(device_extensions.size()>1){
+    past_timing=reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(device_entry(core.device,"vkGetPastPresentationTimingGOOGLE"));
+    refresh_timing=reinterpret_cast<PFN_vkGetRefreshCycleDurationGOOGLE>(device_entry(core.device,"vkGetRefreshCycleDurationGOOGLE"));
+    timing_supported=past_timing&&refresh_timing;
+  }
+  slots.Reset(requested_frames);
+  for(size_t i=0;i<slots.Count();++i) {
+    auto& frame=frames[i];
+    VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool_info.queueFamilyIndex=core.queue_family_index;pool_info.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if(vkCreateCommandPool(core.device,&pool_info,nullptr,&frame.pool)!=VK_SUCCESS)return false;
+    VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};allocate.commandPool=frame.pool;allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
+    if(vkAllocateCommandBuffers(core.device,&allocate,&frame.command)!=VK_SUCCESS)return false;
+    VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fence_info.flags=VK_FENCE_CREATE_SIGNALED_BIT;
+    if(vkCreateFence(core.device,&fence_info,nullptr,&frame.fence)!=VK_SUCCESS)return false;
+    VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    if(vkCreateSemaphore(core.device,&semaphore_info,nullptr,&frame.acquired)!=VK_SUCCESS)return false;
+  }
   api.interface_type=RETRO_HW_RENDER_INTERFACE_VULKAN;api.interface_version=RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION;api.handle=nullptr;
   api.instance=instance;api.gpu=core.gpu;api.device=core.device;api.queue=core.queue;api.queue_index=core.queue_family_index;
   api.get_instance_proc_addr=entry;api.get_device_proc_addr=device_entry;api.set_image=SetImage;api.get_sync_index=SyncIndex;api.get_sync_index_mask=SyncMask;
@@ -201,15 +281,39 @@ bool SwanVulkan::Window(ANativeWindow* window) {
   chain.compositeAlpha=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   if(!(capabilities.supportedCompositeAlpha&chain.compositeAlpha))chain.compositeAlpha=static_cast<VkCompositeAlphaFlagBitsKHR>(capabilities.supportedCompositeAlpha&-capabilities.supportedCompositeAlpha);
   chain.presentMode=VK_PRESENT_MODE_FIFO_KHR;chain.clipped=VK_TRUE;
+  if(!requested_vsync||!requested_matched) {
+    uint32_t modes_count=0;vkGetPhysicalDeviceSurfacePresentModesKHR(core.gpu,surface,&modes_count,nullptr);
+    std::vector<VkPresentModeKHR> modes(modes_count);
+    if(vkGetPhysicalDeviceSurfacePresentModesKHR(core.gpu,surface,&modes_count,modes.data())==VK_SUCCESS) {
+      const auto mode=SwanFramePacing::ChoosePresentMode(requested_vsync,requested_matched,
+        std::find(modes.begin(),modes.end(),VK_PRESENT_MODE_MAILBOX_KHR)!=modes.end(),
+        std::find(modes.begin(),modes.end(),VK_PRESENT_MODE_IMMEDIATE_KHR)!=modes.end());
+      if(mode==SwanFramePacing::PresentMode::Mailbox)chain.presentMode=VK_PRESENT_MODE_MAILBOX_KHR;
+      else if(mode==SwanFramePacing::PresentMode::Immediate)chain.presentMode=VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+  }
   if(vkCreateSwapchainKHR(core.device,&chain,nullptr,&swapchain)!=VK_SUCCESS)return false;
+  active_present_mode=int(chain.presentMode==VK_PRESENT_MODE_MAILBOX_KHR?SwanFramePacing::PresentMode::Mailbox:
+    chain.presentMode==VK_PRESENT_MODE_IMMEDIATE_KHR?SwanFramePacing::PresentMode::Immediate:SwanFramePacing::PresentMode::Fifo);
   vkGetSwapchainImagesKHR(core.device,swapchain,&count,nullptr);swap_images.resize(count);
-  return vkGetSwapchainImagesKHR(core.device,swapchain,&count,swap_images.data())==VK_SUCCESS;
+  if(vkGetSwapchainImagesKHR(core.device,swapchain,&count,swap_images.data())!=VK_SUCCESS)return false;
+  present_complete.resize(count,VK_NULL_HANDLE);
+  VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+  for(auto& semaphore:present_complete)if(vkCreateSemaphore(core.device,&semaphore_info,nullptr,&semaphore)!=VK_SUCCESS)return false;
+  CollectDisplayTiming();
+  return true;
 }
 const retro_hw_render_interface_vulkan* SwanVulkan::Interface(){return negotiated?&api:nullptr;}
 bool SwanVulkan::Ready(){return negotiated;}
-bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspended,bool black,unsigned subframe,unsigned total,float nominal) {
-  if(!core.device)return false;std::lock_guard lock(queue_mutex);
-  const bool draw=swapchain&&!suspended;
+bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspended,bool black,unsigned subframe,unsigned total,float nominal,int64_t desired_time,int64_t submit_time,void (*wait)(int64_t),SwanFramePacing::PresentRequest recovery) {
+  if(!core.device||synchronization_failed)return false;std::lock_guard lock(queue_mutex);
+  last_wait_ms=0;
+  auto& control=SwanFramePacing::PresentationRecovery();control.Policy(recovery);
+  CollectDisplayTiming();
+  const bool skip=swapchain&&!suspended&&control.Skip(recovery,TimeNs());
+  // Even a recovery drop submits the core's waits/commands/signals below. It
+  // does not acquire a window image or strand a presentation semaphore.
+  const bool draw=swapchain&&!suspended&&!skip;
   const auto selection=SwanShaders::Selected();
   const bool rotated=presentation.rotation!=0;
   if(has_image&&(selection.generation!=shader_generation||rotated!=rotation_chain)){vkDeviceWaitIdle(core.device);
@@ -219,7 +323,7 @@ bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspen
     if(swap_color_attachment&&!path.empty()){
       auto* api=SwanShaders::Functions();SwanShaders::Handle preset=nullptr;
       if(api&&SwanShaders::Check(api->preset_create(path.c_str(),&preset))){
-        SwanShaders::Options options{5,1,true,false,true};SwanShaders::Device device{core.gpu,instance,core.device,core.queue,entry};
+        SwanShaders::Options options{5,uint32_t(slots.Count()),true,false,true};SwanShaders::Device device{core.gpu,instance,core.device,core.queue,entry};
         if(SwanShaders::Check(api->create(&preset,device,&options,&shader_chain))&&selection.enabled)for(const auto& parameter:selection.parameters)SwanShaders::Check(api->parameter(&shader_chain,parameter.first.c_str(),parameter.second));
         if(preset)SwanShaders::Check(api->preset_free(&preset));
       }
@@ -227,11 +331,19 @@ bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspen
     }
   }
   uint32_t index=0;
-  if(draw){auto result=vkAcquireNextImageKHR(core.device,swapchain,2000000000ull,acquired,VK_NULL_HANDLE,&index);
-    if(result==VK_ERROR_OUT_OF_DATE_KHR){if(!Window(retained_window)||!swapchain)return false;
-      result=vkAcquireNextImageKHR(core.device,swapchain,2000000000ull,acquired,VK_NULL_HANDLE,&index);}
-    if(result!=VK_SUCCESS&&result!=VK_SUBOPTIMAL_KHR)return false;}
+  // Subframe shader calls reuse the same librashader frame index. Retire them
+  // explicitly rather than reusing descriptor/feedback resources in flight.
+  if(shader_chain && (total>1 || shader_width!=width || shader_height!=height))WaitIndex(nullptr);
+  if(synchronization_failed)return false;
+  shader_width=width;shader_height=height;
   if(!Begin())return false;
+  if(draw){const auto acquire_start=std::chrono::steady_clock::now();
+    auto result=vkAcquireNextImageKHR(core.device,swapchain,2000000000ull,frames[slots.Current()].acquired,VK_NULL_HANDLE,&index);
+    last_wait_ms+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-acquire_start).count();
+    if(result==VK_ERROR_OUT_OF_DATE_KHR){if(!Window(retained_window)||!swapchain)return false;
+      if(!Begin())return false;
+      result=vkAcquireNextImageKHR(core.device,swapchain,2000000000ull,frames[slots.Current()].acquired,VK_NULL_HANDLE,&index);}
+    if(result!=VK_SUCCESS&&result!=VK_SUBOPTIMAL_KHR)return false;}
   if(draw){const auto target=swap_images[index];
     Barrier(target,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);
     VkClearColorValue clear_black{{0,0,0,1}};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
@@ -262,32 +374,49 @@ bool SwanVulkan::Present(unsigned width,unsigned height,float aspect,bool suspen
     }
     Barrier(target,filtered?VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,filtered?VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT:VK_ACCESS_TRANSFER_WRITE_BIT,0);
   }
-  if(!Submit(draw))return false;
-  if(draw){VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&complete;present.swapchainCount=1;present.pSwapchains=&swapchain;present.pImageIndices=&index;
+  return SwanFramePacing::PresentPreparedFrame([&]{
+    if(!Submit(draw,index))return false;
+    slots.Advance();return true;
+  },[&]{if(draw&&wait)wait(submit_time);},[&]{
+    if(!draw)return true;
+    VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&present_complete[index];present.swapchainCount=1;present.pSwapchains=&swapchain;present.pImageIndices=&index;
+    VkPresentTimeGOOGLE time{++present_id,desired_time>0?uint64_t(desired_time):0};
+    VkPresentTimesInfoGOOGLE times{VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE};
+    if(timing_supported.load()){
+      times.swapchainCount=1;times.pTimes=&time;present.pNext=&times;
+      if(time.desiredPresentTime)++timed_presents;
+    }
+    const auto present_start=std::chrono::steady_clock::now();
+    if(timing_supported.load())control.Submitted(time.presentID,recovery,TimeNs());
     const auto result=vkQueuePresentKHR(core.queue,&present);
-    // One in-flight frame: safe reuse of the core image and binary presentation semaphore.
-    if(vkQueueWaitIdle(core.queue)!=VK_SUCCESS)return false;
+    if(result==VK_SUCCESS||result==VK_SUBOPTIMAL_KHR)control.Presented(recovery,TimeNs());
+    last_wait_ms+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-present_start).count();
+    // Feedback is collected before the next acquire, once per frame, so
+    // recovery decisions see the newest available short-history samples.
+    // Submission resources retire on their own fence. Presentation semaphore
+    // reuse is protected by reacquiring this swapchain image, not that fence.
     if(result==VK_ERROR_OUT_OF_DATE_KHR)return Window(retained_window);
     // Android may report SUBOPTIMAL every frame when identity differs from the
     // panel transform. This is intentional compositor rotation, not a stale
     // swapchain. Real resize/recreation is handled by Window/OUT_OF_DATE; do not
     // stall and recreate shader resources on every otherwise-successful frame.
-    return result==VK_SUCCESS||result==VK_SUBOPTIMAL_KHR;}
-  return true;
+    return result==VK_SUCCESS||result==VK_SUBOPTIMAL_KHR;
+  });
 }
 void SwanVulkan::Blank(){has_image=false;if(core.device)Present(0,0,4.f/3,false);}
 void SwanVulkan::Close(){
   if(core.device && vkDeviceWaitIdle)vkDeviceWaitIdle(core.device);
   if(core.device && vkDestroySwapchainKHR)DestroySwapchain();
-  if(core.device){if(acquired&&vkDestroySemaphore)vkDestroySemaphore(core.device,acquired,nullptr);if(complete&&vkDestroySemaphore)vkDestroySemaphore(core.device,complete,nullptr);
-    if(fence&&vkDestroyFence)vkDestroyFence(core.device,fence,nullptr);if(pool&&vkDestroyCommandPool)vkDestroyCommandPool(core.device,pool,nullptr);}
+  if(core.device)for(auto& frame:frames){if(frame.acquired&&vkDestroySemaphore)vkDestroySemaphore(core.device,frame.acquired,nullptr);
+    if(frame.fence&&vkDestroyFence)vkDestroyFence(core.device,frame.fence,nullptr);if(frame.pool&&vkDestroyCommandPool)vkDestroyCommandPool(core.device,frame.pool,nullptr);}
   if(negotiation.destroy_device)negotiation.destroy_device();
   if(core.device&&vkDestroyDevice)vkDestroyDevice(core.device,nullptr);
   if(surface&&vkDestroySurfaceKHR)vkDestroySurfaceKHR(instance,surface,nullptr);
   if(instance&&vkDestroyInstance)vkDestroyInstance(instance,nullptr);
   core={};api={};negotiation={};image={};instance=VK_NULL_HANDLE;surface=VK_NULL_HANDLE;swapchain=VK_NULL_HANDLE;
   if(retained_window)ANativeWindow_release(retained_window);retained_window=nullptr;negotiated=false;rotation_chain=false;
-  acquired=complete=signal_semaphore=VK_NULL_HANDLE;fence=VK_NULL_HANDLE;pool=VK_NULL_HANDLE;command=VK_NULL_HANDLE;has_image=false;waits.clear();core_commands.clear();
+  frames={};slots.Reset(requested_frames);signal_semaphore=VK_NULL_HANDLE;command=VK_NULL_HANDLE;has_image=false;waits.clear();core_commands.clear();
+  timing_supported=false;refresh_ns=0;past_timing=nullptr;refresh_timing=nullptr;
   // Keep the loader resident: the pinned core may retain proc-address trampolines.
   if(!driver_environment.Restore(WriteEnvironment))Error("Could not restore driver environment after shutdown.");
 }
@@ -310,13 +439,45 @@ std::vector<unsigned char> SwanVulkan::Pixels(unsigned width,unsigned height) {
       VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={width,height,1};
       vkCmdCopyImageToBuffer(command,image.create_info.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,buffer,1,&copy);
       Barrier(image.create_info.image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,image.image_layout,VK_ACCESS_TRANSFER_READ_BIT,VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT);
-      if(Submit(false)&&vkWaitForFences(core.device,1,&fence,VK_TRUE,2000000000ull)==VK_SUCCESS){void* mapped=nullptr;
+      if(Submit(false)&&vkWaitForFences(core.device,1,&frames[slots.Current()].fence,VK_TRUE,2000000000ull)==VK_SUCCESS){void* mapped=nullptr;
         if(vkMapMemory(core.device,memory,0,size,0,&mapped)==VK_SUCCESS){output.resize(size);std::memcpy(output.data(),mapped,size);vkUnmapMemory(core.device,memory);
           if(image.create_info.format==VK_FORMAT_B8G8R8A8_UNORM)for(size_t i=0;i<output.size();i+=4)std::swap(output[i],output[i+2]);}
       }
     }
   }
-  vkDeviceWaitIdle(core.device);vkDestroyBuffer(core.device,buffer,nullptr);if(memory)vkFreeMemory(core.device,memory,nullptr);return output;
+  vkDeviceWaitIdle(core.device);slots.Advance();vkDestroyBuffer(core.device,buffer,nullptr);if(memory)vkFreeMemory(core.device,memory,nullptr);return output;
+}
+void SwanVulkan::ConfigurePacing(bool vsync,unsigned queued_frames) {
+  // Session configuration only, before negotiation; no live resource resize.
+  if(core.device)return;
+  requested_vsync=vsync;requested_matched=true;requested_frames=std::clamp(queued_frames,1u,3u);
+}
+double SwanVulkan::LastWaitMs(){return last_wait_ms;}
+bool SwanVulkan::Vsync(bool enabled,bool matched) {
+  if(requested_vsync==enabled&&requested_matched==matched)return true;
+  requested_vsync=enabled;requested_matched=matched;
+  // Speed/fast-forward transitions are infrequent. Recreate through the same
+  // retirement path so FIFO cannot silently cap an unthrottled session.
+  return !core.device || Window(retained_window);
+}
+void SwanVulkan::ResetTimingWindow(){
+  const auto now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  display_feedback.Reset(uint64_t(now));timed_presents=0;
+  SwanFramePacing::PresentationRecovery().Reset(now);
+}
+int64_t SwanVulkan::LastDisplayTime(){return int64_t(display_feedback.Last());}
+float SwanVulkan::RefreshHz(){const auto ns=refresh_ns.load();return ns?float(1e9/double(ns)):0;}
+std::string SwanVulkan::TimingSnapshot(){
+  const auto feedback=display_feedback.Read();
+  std::ostringstream out;out<<"Vulkan display timing: supported="<<timing_supported.load()
+    <<" timestamped="<<timed_presents.load()<<" feedback_frames="<<feedback.frames
+    <<" mean_present_ms="<<(feedback.gaps?double(feedback.sum)/feedback.gaps/1e6:0)
+    <<" worst_present_ms="<<double(feedback.maximum)/1e6<<" unexpected_late="<<feedback.late
+    <<" feedback_intervals="<<feedback.gaps<<" missing_feedback="<<feedback.missing
+    <<" coalesced_feedback="<<feedback.coalesced<<" present_mode="
+    <<(active_present_mode==int(SwanFramePacing::PresentMode::Mailbox)?"mailbox":
+       active_present_mode==int(SwanFramePacing::PresentMode::Immediate)?"immediate":"fifo");
+  return out.str();
 }
 void SwanVulkan::Driver(std::string directory,std::string name,std::string redirect,std::string hooks){
   driver_dir=std::move(directory);driver_name=std::move(name);redirect_dir=std::move(redirect);hook_dir=std::move(hooks);

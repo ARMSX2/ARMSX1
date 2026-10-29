@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+cmake_minimum_required(VERSION 3.25)
+get_filename_component(root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+file(READ "${root}/build-core/swan_lut_cpu_recompiler_code_generator_generic.cpp" generic)
+file(READ "${root}/build-core/swan_lut_cpu_recompiler_code_generator_aarch64.cpp" arm64)
+file(READ "${root}/native/swanstation/checked_lut.h" policy)
+string(REGEX MATCHALL "g_settings.cpu_fastmem_rewrite \\|\\| SwanCheckedLut::Enabled\\(\\)" gates "${generic}")
+list(LENGTH gates gate_count)
+if(NOT gate_count EQUAL 2)
+  message(FATAL_ERROR "Both dynamic memory access gates must retain the original rewrite path")
+endif()
+foreach(kind IN ITEMS Load Store)
+  string(FIND "${arm64}" "void CodeGenerator::Emit${kind}GuestMemoryFastmem(" begin)
+  string(FIND "${arm64}" "void CodeGenerator::Emit${kind}GuestMemorySlowmem(" end)
+  math(EXPR length "${end}-${begin}")
+  string(SUBSTRING "${arm64}" ${begin} ${length} emitter)
+  foreach(required IN ITEMS
+      "m_emit->Cbnz(GetFastmemBasePtrReg(), &base_ready);"
+      "m_emit->Tst(GetHostReg32(address_reg), size == RegSize_16 ? 1 : 3);"
+      "m_emit->Cbnz(GetHostReg64(RARG1), &mapped);"
+      "if (!swan_checked_lut) m_block->loadstore_backpatch_info.push_back(bpi);"
+      "Emit${kind}GuestMemorySlowmem(cbi, address, size,")
+    string(FIND "${emitter}" "${required}" present)
+    if(present LESS 0)
+      message(FATAL_ERROR "Missing ${kind} safety seam: ${required}")
+    endif()
+  endforeach()
+  string(REGEX MATCHALL "EmitBranch\\(GetCurrentFarCodePointer\\(\\), false\\)" guards "${emitter}")
+  list(LENGTH guards count)
+  if(NOT count EQUAL 3)
+    message(FATAL_ERROR "${kind}: base, alignment and mapped-page checks must use existing slow handler")
+  endif()
+endforeach()
+foreach(required IN ITEMS "CPU_AARCH64" "SWAN_CHECKED_LUT_FASTMEM" "g_settings.IsUsingFastmem()"
+    "g_settings.cpu_fastmem_mode==CPUFastmemMode::LUT" "!g_settings.cpu_fastmem_rewrite")
+  string(FIND "${policy}" "${required}" found)
+  if(found LESS 0)
+    message(FATAL_ERROR "Missing checked LUT applicability condition: ${required}")
+  endif()
+endforeach()
+message(STATUS "Checked LUT: original rewrite path, null base/page, alignment, write protection and slow handlers retained")

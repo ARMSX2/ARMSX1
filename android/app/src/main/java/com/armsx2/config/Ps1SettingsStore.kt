@@ -264,6 +264,11 @@ object Ps1SettingsStore {
      */
     private fun overlay(base: String, overrides: Map<String, String>): String {
         val remaining = LinkedHashMap(overrides.filterKeys { it in PER_GAME_KEYS })
+        // A legacy per-game GL-worker choice must override the new hardware-worker default.
+        if (remaining["video.threaded_gl_submission"] == "true" && "video.threaded_hardware_backend" !in remaining)
+            remaining["video.threaded_hardware_backend"] = "false"
+        if (remaining["video.threaded_hardware_backend"] == "true" && "video.threaded_gl_submission" !in remaining)
+            remaining["video.threaded_gl_submission"] = "false"
         if (remaining.isEmpty()) return base
 
         val out = StringBuilder()
@@ -410,6 +415,11 @@ object Ps1SettingsStore {
         appendLine("[cpu]")
         appendLine("    execution_mode  = ${str(s.cpuEngine)}")
         appendLine("    fast_boot       = ${s.fastBoot}")
+        appendLine("    fastmem_mode = ${str(s.cpuFastmemMode)}")
+        appendLine("    block_linking = ${s.cpuBlockLinking}")
+        appendLine("    instruction_cache = ${s.cpuInstructionCache}")
+        appendLine("    fastmem_rewrite = ${s.cpuFastmemRewrite}")
+        appendLine("    cd_read_thread = ${s.cdReadThread}")
         appendLine()
         appendLine("[runtime]")
         appendLine("    display_scale = ${s.displayScale}")
@@ -445,6 +455,11 @@ object Ps1SettingsStore {
         appendLine()
         appendLine("[video]")
         appendLine("    vsync = ${s.vsync}")
+        appendLine("    optimal_frame_pacing = ${s.optimalFramePacing}")
+        appendLine("    sync_host_refresh = ${s.syncHostRefresh}")
+        appendLine("    reduce_input_latency = ${s.reduceInputLatency}")
+        appendLine("    frame_time_buffer_ms = ${s.frameTimeBufferMs.coerceIn(0, 10)}")
+        appendLine("    max_queued_frames = ${s.maxQueuedFrames.coerceIn(1, 3)}")
         appendLine("    gpu_backend = ${str(s.gpuBackend)}")
         appendLine("    texture_scale_mode = ${s.textureScaleMode}")
         appendLine("    debug_panel = ${s.debugPanel}")
@@ -458,6 +473,12 @@ object Ps1SettingsStore {
         // saves anything — the setting would appear to work, then silently revert.
         appendLine("    renderer = ${str(if (s.hwRasterizer) "hardware" else "software")}")
         appendLine("    internal_scale = ${s.internalScale}")
+        appendLine("    threaded_gl_submission = ${s.threadedGlSubmission}")
+        appendLine("    threaded_hardware_backend = ${s.threadedHardwareBackend}")
+        appendLine("    software_gpu_thread = ${s.softwareGpuThread}")
+        appendLine("    software_readbacks = ${s.softwareReadbacks}")
+        appendLine("    shader_precompile = ${str(s.shaderPrecompile)}")
+        appendLine("    texture_preload = ${s.texturePreload}")
         appendLine("    pgxp = ${s.pgxp}")
         appendLine("    accurate_mask_bit = ${s.accurateMaskBit}")
         appendLine("    accurate_dither = ${s.accurateDither}")
@@ -520,6 +541,7 @@ object Ps1SettingsStore {
     private fun parse(text: String): Ps1Settings {
         var s = Ps1Settings()
         var section = ""
+        var explicitHardwareWorker = false
         for (raw in text.lineSequence()) {
             val line = stripComment(raw).trim()
             if (line.isEmpty()) continue
@@ -531,9 +553,10 @@ object Ps1SettingsStore {
             if (eq < 0) continue
             val key = line.substring(0, eq).trim()
             val value = line.substring(eq + 1).trim()
+            if (section == "video" && key == "threaded_hardware_backend") explicitHardwareWorker = true
             s = apply(s, section, key, value)
         }
-        return s
+        return if (!explicitHardwareWorker && s.threadedGlSubmission) s.copy(threadedHardwareBackend = false) else s
     }
 
     private fun apply(s: Ps1Settings, section: String, key: String, value: String): Ps1Settings = when (section) {
@@ -547,6 +570,11 @@ object Ps1SettingsStore {
         "cpu" -> when (key) {
             "execution_mode" -> s.copy(cpuEngine = unquote(value))
             "fast_boot" -> s.copy(fastBoot = value.trim().equals("true", ignoreCase = true))
+            "fastmem_mode" -> s.copy(cpuFastmemMode = unquote(value).takeIf { it in listOf("Disabled", "LUT", "MMap") } ?: "LUT")
+            "block_linking" -> s.copy(cpuBlockLinking = value.trim().toBooleanStrictOrNull() ?: true)
+            "instruction_cache" -> s.copy(cpuInstructionCache = value.trim().toBooleanStrictOrNull() ?: false)
+            "fastmem_rewrite" -> s.copy(cpuFastmemRewrite = value.trim().toBooleanStrictOrNull() ?: false)
+            "cd_read_thread" -> s.copy(cdReadThread = value.trim().toBooleanStrictOrNull() ?: true)
             else -> s
         }
         "runtime" -> when (key) {
@@ -582,6 +610,11 @@ object Ps1SettingsStore {
         }
         "video" -> when (key) {
             "vsync" -> s.copy(vsync = value.toBoolean())
+            "optimal_frame_pacing" -> s.copy(optimalFramePacing = value.trim().toBooleanStrictOrNull() ?: true)
+            "sync_host_refresh" -> s.copy(syncHostRefresh = value.trim().toBooleanStrictOrNull() ?: false)
+            "reduce_input_latency" -> s.copy(reduceInputLatency = value.trim().toBooleanStrictOrNull() ?: false)
+            "frame_time_buffer_ms" -> s.copy(frameTimeBufferMs = (value.trim().toIntOrNull() ?: 2).coerceIn(0, 10))
+            "max_queued_frames" -> s.copy(maxQueuedFrames = (value.trim().toIntOrNull() ?: 2).coerceIn(1, 3))
             "gpu_backend" -> s.copy(gpuBackend = unquote(value))
             "texture_scale_mode" -> s.copy(textureScaleMode = value.toBoolean())
             "debug_panel" -> s.copy(debugPanel = value.toBoolean())
@@ -594,6 +627,12 @@ object Ps1SettingsStore {
             // No coerceIn here on purpose: the native side owns the 1..8 range, and clamping a
             // value against a stale local range is how a newly-added option gets eaten.
             "internal_scale" -> s.copy(internalScale = value.trim().toIntOrNull() ?: s.internalScale)
+            "threaded_gl_submission" -> s.copy(threadedGlSubmission = value.trim().toBooleanStrictOrNull() ?: false)
+            "threaded_hardware_backend" -> s.copy(threadedHardwareBackend = value.trim().toBooleanStrictOrNull() ?: true)
+            "software_gpu_thread" -> s.copy(softwareGpuThread = value.trim().toBooleanStrictOrNull() ?: true)
+            "software_readbacks" -> s.copy(softwareReadbacks = value.trim().toBooleanStrictOrNull() ?: false)
+            "shader_precompile" -> s.copy(shaderPrecompile = unquote(value).takeIf { it in listOf("Disabled", "Enabled", "Lazy") } ?: "Lazy")
+            "texture_preload" -> s.copy(texturePreload = value.trim().toBooleanStrictOrNull() ?: false)
             "pgxp" -> s.copy(pgxp = value.trim().equals("true", ignoreCase = true))
             "accurate_mask_bit" -> s.copy(accurateMaskBit = value.toBoolean())
             "accurate_dither" -> s.copy(accurateDither = value.toBoolean())

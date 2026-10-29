@@ -147,6 +147,18 @@ object DiagnosticsReport {
         }
         w.appendLine("source commit: ${BuildConfig.SOURCE_COMMIT}")
         w.appendLine("diagnostic build: ${BuildConfig.DIAGNOSTIC_BUILD}")
+        if (BuildConfig.PACING_DIAGNOSTICS) {
+            w.appendLine("pacing diagnostic patch: pacing-probe-v1 (local changes over source commit)")
+            w.appendLine("Pacing capture is active; broad diagnostic logcat/heartbeat capture is not required.")
+            val manager = context.getSystemService(android.hardware.display.DisplayManager::class.java)
+            runCatching { manager.displays.forEach { display ->
+                w.appendLine("display ${display.displayId}: ${display.name} actual_hz=${display.refreshRate} " +
+                    "mode=${display.mode.modeId} size=${display.mode.physicalWidth}x${display.mode.physicalHeight}")
+                w.appendLine("supported modes: " + display.supportedModes.joinToString { mode ->
+                    "${mode.modeId}:${mode.physicalWidth}x${mode.physicalHeight}@${mode.refreshRate}"
+                })
+            } }.onFailure { w.appendLine("Display mode metadata unavailable: ${it.javaClass.simpleName}") }
+        }
         w.appendLine("abis: ${Build.SUPPORTED_ABIS.joinToString()}")
         w.appendLine("page size: ${runCatching { Os.sysconf(OsConstants._SC_PAGESIZE) }.getOrDefault(-1L)}")
         w.appendLine("free app storage: ${context.filesDir.usableSpace}")

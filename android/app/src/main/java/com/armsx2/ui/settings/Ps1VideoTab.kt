@@ -85,6 +85,9 @@ fun Ps1VideoTab() {
         // ONLY from the in-game pause menu, so choosing Vulkan here offered no way to install or
         // pick a driver pack — the same screen, two different answers depending on how you got to
         // it. Same components as the pause menu uses, so the two cannot drift apart.
+        Ps1GpuPerformanceOptions(editor)
+        Ps1FramePacingOptions(editor)
+
         if (s.gpuBackend == Ps1Settings.GPU_VULKAN) {
             com.armsx2.ui.common.DriverManagerSection()
             SettingsDivider()
@@ -270,6 +273,7 @@ fun Ps1VideoTab() {
             onMode = { mode -> editor.update { it.copy(framePresentation = mode) } },
             onMultiplier = { multiple -> editor.update { it.copy(presentationMultiplier = multiple) } },
         )
+        PacingDiagnosticSection()
         SettingsDivider()
 
         // Keep the old preference intact for compatibility, but never present a
@@ -589,8 +593,19 @@ fun Ps1VideoTab() {
                     gpuBackend = d.gpuBackend,
                     hwRasterizer = d.hwRasterizer,
                     internalScale = d.internalScale,
+                    threadedGlSubmission = d.threadedGlSubmission,
+                    threadedHardwareBackend = d.threadedHardwareBackend,
+                    softwareGpuThread = d.softwareGpuThread,
+                    softwareReadbacks = d.softwareReadbacks,
+                    shaderPrecompile = d.shaderPrecompile,
+                    texturePreload = d.texturePreload,
                     displayScale = d.displayScale,
                     vsync = d.vsync,
+                    optimalFramePacing = d.optimalFramePacing,
+                    syncHostRefresh = d.syncHostRefresh,
+                    reduceInputLatency = d.reduceInputLatency,
+                    frameTimeBufferMs = d.frameTimeBufferMs,
+                    maxQueuedFrames = d.maxQueuedFrames,
                     textureScaleMode = d.textureScaleMode,
                     stretchMode = d.stretchMode,
                     displayAspect = d.displayAspect,

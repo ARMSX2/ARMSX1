@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.view.Display
+import android.view.Choreographer
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -29,6 +30,13 @@ class EmulationSurface(context: Context) :
     private var viewHeight = 0
     private var gameActive = false
     private var lastRequestedFrameRate = Float.NaN
+    private val pacingCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!gameActive || !isAttachedToWindow) return
+            runCatching { NativeApp.setDisplayVsyncTimestamp(frameTimeNanos) }
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
     private val displayManager =
         context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private val frameRateMonitor = object : Runnable {
@@ -62,10 +70,13 @@ class EmulationSurface(context: Context) :
         super.onAttachedToWindow()
         hostWindow()?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         displayManager.registerDisplayListener(this, null)
+        if (gameActive) Choreographer.getInstance().postFrameCallback(pacingCallback)
     }
 
     override fun onDetachedFromWindow() {
         removeCallbacks(frameRateMonitor)
+        Choreographer.getInstance().removeFrameCallback(pacingCallback)
+        runCatching { NativeApp.setDisplayVsyncTimestamp(0) }
         clearFrameRatePreference()
         displayManager.unregisterDisplayListener(this)
         hostWindow()?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -141,6 +152,9 @@ class EmulationSurface(context: Context) :
             return
         }
         gameActive = active
+        Choreographer.getInstance().removeFrameCallback(pacingCallback)
+        if (active && isAttachedToWindow) Choreographer.getInstance().postFrameCallback(pacingCallback)
+        if (!active) runCatching { NativeApp.setDisplayVsyncTimestamp(0) }
         removeCallbacks(frameRateMonitor)
         if (active) {
             applyFrameRatePreference()

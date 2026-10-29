@@ -13,6 +13,11 @@ def repoDebugKeystore = file("debug.keystore")
 def hasRepoDebugKeystore = repoDebugKeystore.exists()
 def diagnosticBuild = providers.gradleProperty('armsx.diagnostics').map { it.toBoolean() }.getOrElse(false)
 def frameTimingBuild = providers.gradleProperty('armsx.frameTiming').map { it.toBoolean() }.getOrElse(false)
+def pacingDiagnostics = providers.gradleProperty('armsx.pacingDiagnostics').map { it.toBoolean() }.getOrElse(false)
+def cpuDiagnostics = providers.gradleProperty('armsx.cpuDiagnostics').map { it.toBoolean() }.getOrElse(false)
+def checkedLutFastmem = providers.gradleProperty('armsx.checkedLutFastmem').map { it.toBoolean() }.getOrElse(true)
+def cpuOptimizationMask = providers.gradleProperty('armsx.cpuOptimizationMask').map { it.toInteger() }.getOrElse(7)
+if (cpuOptimizationMask < 0 || cpuOptimizationMask > 7) throw new GradleException('CPU optimization mask must be 0..7')
 def windowsNativeBuild = System.getProperty('os.name').toLowerCase().contains('windows')
 
 // ---- Discord rich presence ----------------------------------------------------------------
@@ -70,11 +75,14 @@ def isDiscordSdkAvailable = file("${project.projectDir}/libs/discord_partner_sdk
 // comparing the release tag against BuildConfig.VERSION_NAME. A published APK still carrying the
 // placeholder 0.1.0 would go on offering the user the very release they just installed, forever.
 def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.3.6').toString()
-def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '92183347').toString() as Integer
+def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '92183360').toString() as Integer
 // Optional isolated builds keep the normal app and its private data untouched.
 def armsxApplicationId = (project.findProperty('armsx.applicationId') ?: 'com.nanodata.armsx').toString()
 def armsxAppLabel = (project.findProperty('armsx.appLabel') ?: '@string/app_name').toString()
 def isIsolatedBuild = armsxApplicationId != 'com.nanodata.armsx'
+if (pacingDiagnostics && !isIsolatedBuild) {
+    throw new GradleException('Pacing diagnostics require a separate applicationId; do not replace the normal app.')
+}
 
 // Keep locally built and CI APKs identifiable in exported diagnostics.
 def armsxSourceCommit = (project.findProperty('armsx.sourceCommit') ?: System.getenv('GITHUB_SHA') ?: '').toString()
@@ -97,6 +105,8 @@ android {
 
     defaultConfig {
         externalNativeBuild.cmake.arguments '-DANDROID_STL=c++_static', "-DARMSX_SOURCE_COMMIT=${armsxSourceCommit}"
+        externalNativeBuild.cmake.arguments "-DARMSX_PACING_DIAGNOSTICS=${pacingDiagnostics ? 'ON' : 'OFF'}"
+        externalNativeBuild.cmake.arguments "-DARMSX_CPU_DIAGNOSTICS=${cpuDiagnostics ? 'ON' : 'OFF'}"
         // Keep the namespace and JNI class names unchanged, even for separate test packages.
         applicationId armsxApplicationId
         minSdk 28
@@ -105,6 +115,7 @@ android {
         versionName armsxVersionName
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         buildConfigField "boolean", "DIAGNOSTIC_BUILD", diagnosticBuild.toString()
+        buildConfigField "boolean", "PACING_DIAGNOSTICS", pacingDiagnostics.toString()
         buildConfigField "boolean", "SWANSTATION_CORE", "true"
         buildConfigField "String", "SOURCE_COMMIT", "\"${armsxSourceCommit}\""
         vectorDrawables.useSupportLibrary = true
@@ -257,9 +268,14 @@ android {
 // This local integration retains the normal dev frontend, whose current licence
 // differs from the historical LGPL test frontend. Do not publish a release until
 // source/asset provenance and feature migration are reviewed (SWANSTATION-DEV.md).
-if (gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') }) {
+// An explicit local build opt-in produces an APK without asserting publication
+// clearance. Default/CI release tasks remain blocked; no upload is performed.
+def allowReleaseBuild = providers.gradleProperty('armsx.allowReleaseBuild').map { it.toBoolean() }.getOrElse(false) &&
+        !('true'.equalsIgnoreCase(System.getenv('CI')) || '1' == System.getenv('CI'))
+if (gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') } && !allowReleaseBuild) {
     throw new GradleException('SwanStation dev release blocked: feature and licence audits are incomplete. See SWANSTATION-DEV.md.')
 }
+if (allowReleaseBuild) logger.warn('Explicit local release build: this does not clear the source/asset/dependency publication audit.')
 
 dependencies {
     implementation 'androidx.browser:browser:1.8.0'
@@ -388,14 +404,19 @@ tasks.register("prepareNativeBinaries", BuildNativeLibraries) {
 }
 
 tasks.register('stageSwanStationCore', Exec) {
-    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-        file('../../Build-SwanCore.ps1').absolutePath
+    def coreCommand = ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        file('../../Build-SwanCore.ps1').absolutePath]
+    coreCommand.add(checkedLutFastmem ? '-CheckedLutFastmem' : '-DisableCheckedLutFastmem')
+    coreCommand.addAll(['-CpuOptimizationMask', cpuOptimizationMask.toString()])
+    commandLine coreCommand
+    inputs.property('checkedLutFastmem', checkedLutFastmem)
+    inputs.property('cpuOptimizationMask', cpuOptimizationMask)
     outputs.upToDateWhen { false }
 }
 tasks.configureEach { t ->
     if (t.name ==~ /merge(?:Github|Play)(?:Debug|Release)(?:JniLibFolders|NativeLibs)/)
         t.dependsOn(tasks.named('stageSwanStationCore'))
-    if (t.name ==~ /(?:assemble|bundle|package)(?:Github|Play)?Release(?:AndroidTest)?/)
+    if (!allowReleaseBuild && t.name ==~ /(?:assemble|bundle|package)(?:Github|Play)?Release(?:AndroidTest)?/)
         t.doFirst { throw new GradleException('SwanStation dev release blocked. See SWANSTATION-DEV.md.') }
 }
 

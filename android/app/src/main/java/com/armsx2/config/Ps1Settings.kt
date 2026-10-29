@@ -14,6 +14,12 @@ import com.armsx2.i18n.I18n
 data class Ps1Settings(
     // [cpu]
     val cpuEngine: String = CPU_CACHED,          // cached | interpreter
+    // SwanStation JIT tuning. Preserve the core's existing defaults on upgrades.
+    val cpuFastmemMode: String = "LUT",
+    val cpuBlockLinking: Boolean = true,
+    val cpuInstructionCache: Boolean = false,
+    val cpuFastmemRewrite: Boolean = false,
+    val cdReadThread: Boolean = true,
     // Skip BIOS. Boots the game's executable directly at the BIOS shell entry, skipping the
     // startup animation. The [cpu] table owns it because it is the CPU's entry state that gets
     // rewritten. Default FALSE: it is a shortcut, not a free speed-up — whatever the BIOS would
@@ -72,6 +78,11 @@ data class Ps1Settings(
     val defaultPsxExe: String = "",
     // [video]
     val vsync: Boolean = true,
+    val optimalFramePacing: Boolean = true,
+    val syncHostRefresh: Boolean = false,
+    val reduceInputLatency: Boolean = false,
+    val frameTimeBufferMs: Int = 2,
+    val maxQueuedFrames: Int = 2,
     // SDL software presentation by default. GPU presentation is opt-in so the deterministic,
     // portable path remains the default on every platform and does not depend on an adopted
     // native window or a particular GLES/Vulkan driver.
@@ -103,6 +114,14 @@ data class Ps1Settings(
     // while hwRasterizer is false. Deliberately NOT clamped against another range on the way in:
     // an over-eager coerceIn is exactly how a new value gets silently eaten here.
     val internalScale: Int = 1,
+    // Experimental driver-command worker, NOT a replacement emulation core.
+    // Only hardware OpenGL/ANGLE; native Vulkan and software presentation ignore it.
+    val threadedGlSubmission: Boolean = false,
+    val threadedHardwareBackend: Boolean = true,
+    val softwareGpuThread: Boolean = true,
+    val softwareReadbacks: Boolean = false,
+    val shaderPrecompile: String = "Lazy",
+    val texturePreload: Boolean = false,
     // GPU accuracy flags. Both change output and default on, matching frontend/config.c.
     // They MUST be mirrored here: Ps1SettingsStore rewrites [video] from an explicit key list,
     // so a native key with no Kotlin field is silently dropped from settings.toml the first
@@ -212,7 +231,8 @@ data class Ps1Settings(
     companion object {
         const val CPU_CACHED = "cached"
         const val CPU_INTERPRETER = "interpreter"
-        val CPU_ENGINES = listOf(CPU_CACHED, CPU_INTERPRETER)
+        const val CPU_CACHED_INTERPRETER = "cached_interpreter"
+        val CPU_ENGINES = listOf(CPU_CACHED, CPU_INTERPRETER, CPU_CACHED_INTERPRETER)
 
         const val REGION_AUTO = "auto"
         val REGIONS = listOf(REGION_AUTO, "ntsc", "pal")

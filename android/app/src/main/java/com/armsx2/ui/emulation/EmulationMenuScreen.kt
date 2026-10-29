@@ -1050,7 +1050,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     MenuOrderItem("Text.item.1") {
         Text(
             "Display mode and Stretch apply to the running game immediately. Upscale, filtering, " +
-                "VSync and the accuracy flags are read when a game starts — change them, then Apply / Restart.",
+                "VSync, frame pacing and accuracy options apply after restarting the game.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1140,6 +1140,26 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     MenuOrderItem("MenuSwitchRow.renderer.vsync.label") {
         MenuSwitchRow(str("renderer.vsync.label"), ps1.vsync) { v -> editPs1 { it.copy(vsync = v) } }
     }
+    MenuOrderItem("FramePacing.optimal") {
+        MenuSwitchRow("Optimal frame pacing", ps1.optimalFramePacing,
+            description = "Evenly scheduled presentation. Applies after restarting the game.") { on -> editRunningGraphics { it.copy(optimalFramePacing = on) } }
+    }
+    MenuOrderItem("FramePacing.refresh") {
+        MenuSwitchRow("Sync to host refresh rate", ps1.syncHostRefresh,
+            description = "Up to 1% speed adjustment with audio resampling; requires VSync. Next game start.") { on -> editRunningGraphics { it.copy(syncHostRefresh = on) } }
+    }
+    MenuOrderItem("FramePacing.latency") {
+        MenuSwitchRow("Reduce input latency", ps1.reduceInputLatency,
+            description = "Starts work closer to presentation with optimal frame pacing. Next game start.") { on -> editRunningGraphics { it.copy(reduceInputLatency = on) } }
+    }
+    MenuOrderItem("FramePacing.buffer") {
+        HorizontalOptions(title = "Frame-time buffer", options = (0..10).map { it to "$it ms" },
+            selected = ps1.frameTimeBufferMs, onSelect = { value -> editRunningGraphics { it.copy(frameTimeBufferMs = value) } })
+    }
+    MenuOrderItem("FramePacing.queue") {
+        HorizontalOptions(title = "Maximum queued frames", options = (1..3).map { it to it.toString() },
+            selected = ps1.maxQueuedFrames, onSelect = { value -> editRunningGraphics { it.copy(maxQueuedFrames = value) } })
+    }
 
     // The PlayStation GPU's own accuracy flags, both real [video] keys and both off by default
     // because both change what is drawn. This slot used to hold PCSX2's four-level Dithering
@@ -1175,9 +1195,8 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         ) { }
     }
 
-    // Shadeboost, Sync To Host Refresh, Anti-Blur, Screen Offsets, Show Overscan and the three
-    // texture-replacement switches were removed. Shadeboost is a PCSX2 post-process shader; Sync
-    // To Host Refresh is its pacing scheme (this core paces through targetFrameRate + VSync); the
+    // Shadeboost, Anti-Blur, Screen Offsets, Show Overscan and the three legacy
+    // texture-replacement switches were removed. Shadeboost is a PCSX2 post-process shader; the
     // PCRTC ones configure the PS2's display compositor, which the PlayStation does not have; and
     // this core has no texture-replacement path at all. Colour/CRT looks are the shader chain's
     // job below.
@@ -1215,6 +1234,11 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
             onMode = { mode -> editPs1 { it.copy(framePresentation = mode) } },
             onMultiplier = { multiple -> editPs1 { it.copy(presentationMultiplier = multiple) } },
         )
+    }
+    if (com.armsx2.BuildConfig.PACING_DIAGNOSTICS) {
+        MenuOrderItem("PacingDiagnosticSection.item") {
+            com.armsx2.ui.settings.PacingDiagnosticSection()
+        }
     }
 }
 

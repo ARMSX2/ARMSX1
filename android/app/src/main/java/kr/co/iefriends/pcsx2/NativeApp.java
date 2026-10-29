@@ -313,6 +313,8 @@ public class NativeApp {
 	/** Read-only, emulation-thread-consistent RAM copy for developer memory research.
 	 *  Returns empty with no running core; never exposes memory or provides a write API. */
 	public static native byte[] getSwanMemorySnapshot();
+	/** Paused diagnostic VM only; requires an explicit test configuration. */
+	public static native String runSwanCpuOptimizationTests();
 	public static native byte[] getSwanCompanionSnapshot();
 	public static native void setSwanCtrHudMoved(boolean enabled);
 	public static native String getSwanCtrHudStatus();
@@ -1161,7 +1163,10 @@ public class NativeApp {
 	public static native void onNativeSurfaceChanged(Surface surface, int w, int h, long ownerToken);
 	public static native void onNativeSurfaceDestroyed(long ownerToken);
 	public static native void setDisplayRefreshRate(float hz);
+	public static native void setDisplayVsyncTimestamp(long frameTimeNanos);
 	public static native void setFramePresentation(int mode, int multiple);
+	/** Diagnostic APK only; normal builds ignore the request. */
+	public static native void setPacingDiagnosticMode(int mode);
 	public static native void configureSwanCardPaths(String first, String second);
 	/** Eight ports, each with 16 libretro joypad bits followed by four signed stick axes. */
 	public static native int[] getControlInputSnapshot();

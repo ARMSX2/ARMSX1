@@ -1,21 +1,42 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <cstdint>
 #include <GLES3/gl3.h>
+#include "present_recovery.h"
 namespace SwanGL {
 #define SWAN_EGL_FUNCTIONS(X) X(eglChooseConfig) X(eglCreateContext) X(eglCreatePbufferSurface) X(eglCreateWindowSurface) X(eglDestroyContext) X(eglDestroySurface) X(eglGetDisplay) X(eglGetProcAddress) X(eglInitialize) X(eglMakeCurrent) X(eglQuerySurface) X(eglSwapBuffers) X(eglSwapInterval)
 #define SWAN_GL_FUNCTIONS(X) X(glActiveTexture) X(glAttachShader) X(glBindFramebuffer) X(glBindRenderbuffer) X(glBindTexture) X(glBindVertexArray) X(glClear) X(glClearColor) X(glColorMask) X(glCompileShader) X(glCreateProgram) X(glCreateShader) X(glDeleteFramebuffers) X(glDeleteProgram) X(glDeleteRenderbuffers) X(glDeleteShader) X(glDeleteTextures) X(glDeleteVertexArrays) X(glDisable) X(glDrawArrays) X(glFramebufferRenderbuffer) X(glFramebufferTexture2D) X(glGenFramebuffers) X(glGenRenderbuffers) X(glGenTextures) X(glGenVertexArrays) X(glGetProgramiv) X(glGetShaderiv) X(glGetUniformLocation) X(glLinkProgram) X(glPixelStorei) X(glReadPixels) X(glRenderbufferStorage) X(glShaderSource) X(glTexImage2D) X(glTexParameteri) X(glUniform1i) X(glUniform1f) X(glUniform2f) X(glUseProgram) X(glViewport)
 struct Api {
+  decltype(&::glFlush) glFlush=nullptr;
+  PFNEGLPRESENTATIONTIMEANDROIDPROC presentationTime=nullptr;
+  PFNEGLGETNEXTFRAMEIDANDROIDPROC nextFrameId=nullptr;
+  PFNEGLGETFRAMETIMESTAMPSANDROIDPROC frameTimestamps=nullptr;
+  PFNEGLGETFRAMETIMESTAMPSUPPORTEDANDROIDPROC timestampSupported=nullptr;
+  PFNEGLGETCOMPOSITORTIMINGANDROIDPROC compositorTiming=nullptr;
+  // Optional diagnostic entry points, resolved from the SAME EGL implementation.
+  decltype(&::eglQueryString) eglQueryString=nullptr;
+  decltype(&::eglSurfaceAttrib) eglSurfaceAttrib=nullptr;
+  decltype(&::eglGetConfigAttrib) eglGetConfigAttrib=nullptr;
   decltype(&::glBlitFramebuffer) glBlitFramebuffer=nullptr;
   decltype(&::glBindSampler) glBindSampler=nullptr;
+  decltype(&::glGetString) glGetString=nullptr;
 #define DECLARE(name) decltype(&::name) name=nullptr;
   SWAN_EGL_FUNCTIONS(DECLARE) SWAN_GL_FUNCTIONS(DECLARE)
 #undef DECLARE
 };
 Api& Functions();
-bool Load(bool angle);
+bool Load(bool angle, bool threaded=false);
 bool IsAngle();
 EGLDisplay Display();
+void ProbePresentationTime(EGLDisplay display);
+bool PresentAt(EGLDisplay display,EGLSurface surface,int64_t timestamp);
+bool PresentationTimeAvailable();
+void PollFrameTiming(EGLDisplay display,EGLSurface surface);
+void BeginTimedFrame(EGLDisplay display,EGLSurface surface,SwanFramePacing::PresentRequest request,int64_t now);
+void ResetFrameTiming();
+float FrameRefreshHz();
 }
 #ifdef SWAN_GL_ROUTE
 #define eglChooseConfig SwanGL::Functions().eglChooseConfig
@@ -53,6 +74,7 @@ EGLDisplay Display();
 #define glDrawArrays SwanGL::Functions().glDrawArrays
 #define glFramebufferRenderbuffer SwanGL::Functions().glFramebufferRenderbuffer
 #define glFramebufferTexture2D SwanGL::Functions().glFramebufferTexture2D
+#define glFlush SwanGL::Functions().glFlush
 #define glGenFramebuffers SwanGL::Functions().glGenFramebuffers
 #define glGenRenderbuffers SwanGL::Functions().glGenRenderbuffers
 #define glGenTextures SwanGL::Functions().glGenTextures
@@ -74,4 +96,5 @@ EGLDisplay Display();
 #define glViewport SwanGL::Functions().glViewport
 #define glBlitFramebuffer SwanGL::Functions().glBlitFramebuffer
 #define glBindSampler SwanGL::Functions().glBindSampler
+#define glGetString SwanGL::Functions().glGetString
 #endif

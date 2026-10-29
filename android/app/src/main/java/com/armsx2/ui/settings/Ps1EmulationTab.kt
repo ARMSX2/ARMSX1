@@ -41,12 +41,14 @@ fun Ps1EmulationTab() {
 
         SegmentedRow(
             label = str("perf.cpuMode.label"),
-            options = listOf(str("perf.cpuMode.cached"), str("perf.cpuMode.interpreter")),
+            options = listOf("Recompiler (JIT)", str("perf.cpuMode.interpreter"), "Cached interpreter"),
             selectedIndex = Ps1Settings.CPU_ENGINES.indexOf(s.cpuEngine).coerceAtLeast(0),
-            description = str("perf.cpuMode.description"),
+            description = "The ARM64 recompiler is normally fastest. Interpreter modes are for compatibility and debugging. Changes apply at the next game start.",
             onChange = { idx -> editor.update { it.copy(cpuEngine = Ps1Settings.CPU_ENGINES[idx]) } },
         )
         SettingsDivider()
+
+        Ps1CpuPerformanceOptions(editor)
 
         SegmentedRow(
             label = str("perf.region.label"),
@@ -184,6 +186,11 @@ fun Ps1EmulationTab() {
             editor.update {
                 it.copy(
                     cpuEngine = d.cpuEngine,
+                    cpuFastmemMode = d.cpuFastmemMode,
+                    cpuBlockLinking = d.cpuBlockLinking,
+                    cpuInstructionCache = d.cpuInstructionCache,
+                    cpuFastmemRewrite = d.cpuFastmemRewrite,
+                    cdReadThread = d.cdReadThread,
                     region = d.region,
                     frameLimit = d.frameLimit,
                     speedPercent = d.speedPercent,

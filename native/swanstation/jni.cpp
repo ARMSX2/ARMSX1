@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Independently authored libretro/Android binding; frontend notices stay separate.
 #include "runtime.h"
+#include "pacing_probe.h"
 #include <jni.h>
 #include <string>
 #include <algorithm>
@@ -42,6 +43,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwa
 extern "C" JNIEXPORT jint JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanGuestFrame(JNIEnv*,jclass) {return SwanHost::GuestFrame();}
 extern "C" JNIEXPORT jint JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanMemoryByte(JNIEnv*,jclass,jint address) {return SwanHost::MemoryByte(address);}
 extern "C" JNIEXPORT jbyteArray JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanMemorySnapshot(JNIEnv* env,jclass) {return Bytes(env,SwanHost::MemorySnapshot());}
+extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_runSwanCpuOptimizationTests(JNIEnv* env,jclass) {return String(env,SwanHost::CpuOptimizationTests());}
 extern "C" JNIEXPORT jbyteArray JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanCompanionSnapshot(JNIEnv* env,jclass) {return Bytes(env,SwanHost::CompanionSnapshot());}
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setSwanCtrHudMoved(JNIEnv*,jclass,jboolean enabled){SwanHost::CtrHudMoved(enabled);}
 extern "C" JNIEXPORT jstring JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getSwanCtrHudStatus(JNIEnv* env,jclass){return String(env,SwanHost::CtrHudStatus());}
@@ -55,7 +57,9 @@ extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setShader
     SwanShaders::Select(enabled,Utf(env,presetPath));
 }
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setDisplayRefreshRate(JNIEnv*,jclass,jfloat hz){SwanHost::DisplayRefresh(hz);}
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setDisplayVsyncTimestamp(JNIEnv*,jclass,jlong ns){SwanHost::DisplayVsync(ns);}
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setFramePresentation(JNIEnv*,jclass,jint mode,jint multiple){SwanHost::FramePresentation(mode,multiple);}
+extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_setPacingDiagnosticMode(JNIEnv*,jclass,jint mode){SwanPacingProbe::Mode(mode);}
 extern "C" JNIEXPORT void JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_configureSwanCardPaths(JNIEnv* env,jclass,jstring first,jstring second){SwanHost::ConfigureCardPaths(Utf(env,first),Utf(env,second));}
 extern "C" JNIEXPORT jintArray JNICALL Java_kr_co_iefriends_pcsx2_NativeApp_getControlInputSnapshot(JNIEnv* env,jclass){
   const auto values=SwanHost::InputSnapshot();auto result=env->NewIntArray(values.size());

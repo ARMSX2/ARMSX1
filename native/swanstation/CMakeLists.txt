@@ -12,8 +12,13 @@ file(GLOB RC_SOURCES ${RC_ROOT}/src/rcheevos/*.c ${RC_ROOT}/src/rapi/*.c)
 add_library(swan_rcheevos STATIC ${RC_SOURCES} ${RC_ROOT}/src/rc_client.c ${RC_ROOT}/src/rc_compat.c ${RC_ROOT}/src/rc_util.c ${RC_ROOT}/src/rc_version.c ${RC_ROOT}/src/rhash/cdreader.c ${RC_ROOT}/src/rhash/hash.c ${RC_ROOT}/src/rhash/hash_disc.c ${RC_ROOT}/src/rhash/md5.c)
 target_include_directories(swan_rcheevos PUBLIC ${RC_ROOT}/include PRIVATE ${RC_ROOT}/src)
 target_compile_definitions(swan_rcheevos PUBLIC RC_NO_THREADS=1 RC_HASH_NO_ENCRYPTED RC_HASH_NO_ROM RC_HASH_NO_ZIP)
-add_library(emucorepsx SHARED runtime.cpp jni.cpp vulkan_host.cpp gl_api.cpp achievements.cpp shader_api.cpp shader_gl.cpp performance.cpp)
+add_library(emucorepsx SHARED runtime.cpp jni.cpp vulkan_host.cpp gl_api.cpp gl_worker.cpp achievements.cpp shader_api.cpp shader_gl.cpp performance.cpp pacing_probe.cpp)
+option(ARMSX_PACING_DIAGNOSTICS "Enable isolated frame-pacing measurement and A/B controls" OFF)
+option(ARMSX_CPU_DIAGNOSTICS "Log CPU thread clocks and effective core settings without changing emulation" OFF)
+target_compile_definitions(emucorepsx PRIVATE ARMSX_PACING_DIAGNOSTICS=$<BOOL:${ARMSX_PACING_DIAGNOSTICS}>)
+target_compile_definitions(emucorepsx PRIVATE ARMSX_CPU_DIAGNOSTICS=$<BOOL:${ARMSX_CPU_DIAGNOSTICS}>)
 target_include_directories(emucorepsx PRIVATE
+  ../../core/swanstation/dep/glad/include
   ../../core/swanstation/dep/libretro-common/include
   ../../core/swanstation/dep/vulkan-loader/include
   ../../core/swanstation/dep/stb/include)
