@@ -1011,45 +1011,14 @@ object ControllerMappings {
         OPEN_CHEATS("pad.opencheats.keycode", "Open Cheats"),
     }
 
-    // ---- PS1 port: which hotkeys the ARMSX (PS1) core can actually serve ----
-    //
-    // The enum above is deliberately left INTACT even though most of it is dead on this
-    // port. MainActivityRuntime.kt contains two exhaustive `when (hotkey)` blocks over
-    // SysHotkey; deleting entries would break a file this port does not own. So the enum
-    // stays complete and the UI narrows instead — [ps1Hotkeys] is the only list any
-    // hotkey screen should iterate.
-    //
-    // Kept, because frontend/main.cpp has the corresponding machinery:
-    //   MENU                 -> pause; ArmsxSession::setPaused() exists and the input
-    //                           router already raises a pause request (Esc / pad chord).
-    //   FAST_FORWARD_TOGGLE  -> ArmsxSession::setFastForwardEnabled() + the
-    //                           deferred_fast_forward_toggle_ pump.
-    //   SCREENSHOT           -> the deferred_screenshot_ pump (writes a PNG).
-    //   RESET_GAME           -> ArmsxSession::reset() -> psx_soft_reset().
-    //   CLOSE_GAME/QUIT_APP  -> purely app-side (finish the SDL activity), so they work
-    //                           regardless of what the core exposes.
-    //
-    // Dropped, because the PS1 core has NO such concept at all:
-    //   SAVE_STATE / LOAD_STATE / CYCLE_SLOT / SAVE_AND_EXIT — there is no save-state
-    //     implementation anywhere in frontend/main.cpp. Not "unwired": absent.
-    //   RES_UP/RES_DOWN— internal resolution is a settings.toml value read at startup;
-    //                    there is no runtime resolution step.
-    //   ACHIEVEMENTS   — no RetroAchievements client.
-    //   SLOW_DOWN      — no slow-motion limiter (only the FF toggle exists).
-    //   TOGGLE_OSD     — the imgui overlays went away with the FSUI cut.
-    //   PRESSURE_MOD   — DualShock2 pressure sensitivity; PS1 pads are digital.
-    //   TOGGLE_KEYBOARD— PS2 USB keyboard passthrough; no PS1 equivalent.
-    //   GYRO_*         — app-side motion that feeds NativeApp's analog path. That path is
-    //                    live now (setPadAnalog is `native` again), so this one is only
-    //                    dropped by choice, not because it would no-op.
-    //
-    // NOTE: this list predates the in-process JNI bridge and is due a re-audit — the core
-    // is no longer reachable through a single launch-argument symbol. The pad itself is
-    // fully wired (setPadButton/setPadAnalog/resetKeyStatus -> psxe_host_pad_*), and so
-    // are save states (saveStateToSlot/loadStateFromSlot are `native`). Before restoring
-    // any entry, grep NativeApp.java and confirm the method is `native`, not a stub.
+    // Shared by the Controls hotkey pages and custom-stick action choices.
+    // Keep SysHotkey ordinals and preference keys intact for existing bindings.
+    // Quick save/load use the runtime's selected slot and guarded JNI state path.
     val ps1Hotkeys: List<SysHotkey> = listOf(
         SysHotkey.MENU,
+        SysHotkey.SAVE_STATE,
+        SysHotkey.LOAD_STATE,
+        SysHotkey.CYCLE_SLOT,
         SysHotkey.OPEN_CHEATS,
         SysHotkey.SWAP_DISC,
         // Real on this port since psx/texrep.c landed: flips [video] texture_dump and
