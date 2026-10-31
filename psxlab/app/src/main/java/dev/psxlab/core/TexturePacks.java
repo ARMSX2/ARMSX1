@@ -23,7 +23,9 @@ final class TexturePacks implements AutoCloseable {
     private volatile int cacheBytes,indexed;
     private volatile long lookups,writes,hits,errors,skipped;
     private volatile String detail="Waiting for VRAM uploads";
-    private volatile boolean closed;
+    private volatile boolean closed,dumpBudgetFull;
+    private volatile OutputStream activeOutput;
+    private volatile long dumpBytes;
     record Image(int width,int height,int[] argb) {}
     TexturePacks(boolean dump,boolean replace,String directory,EngineLog log)throws IOException {
         this.dump=dump;this.replace=replace;this.base=new File(directory).getCanonicalFile();this.log=log;
@@ -80,18 +82,22 @@ final class TexturePacks implements AutoCloseable {
     }
     private void dump(String hash,short[] raw,int width,int height){
         if(dumped.contains(hash))return;
+        if(dumpBudgetFull){skipped++;detail="Dump limit reached (128 MiB per session)";return;}
         if(dumped.size()>=4096){skipped++;detail="Dump limit reached (4096 images per session)";return;}
         File target=new File(new File(base,"dump"),"vram-write-"+hash.toUpperCase(Locale.ROOT)+".png");
         if(target.isFile()){dumped.add(hash);return;}
         dumped.add(hash);
         try{writer.execute(()->{
             if(closed)return;
-            File temporary=new File(target+".tmp");Bitmap bitmap=null;
+            File temporary=new File(target+"."+System.identityHashCode(this)+".tmp");Bitmap bitmap=null;
             try{
                 int[] pixels=new int[raw.length];for(int i=0;i<raw.length;i++){int p=raw[i]&65535,r=p&31,g=(p>>>5)&31,b=(p>>>10)&31;pixels[i]=((p==0?0:(p&32768)!=0?128:255)<<24)|((r<<3|r>>>2)<<16)|((g<<3|g>>>2)<<8)|(b<<3|b>>>2);}
                 bitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);bitmap.setPremultiplied(false);bitmap.setPixels(pixels,0,width,0,0,width,height);
-                try(OutputStream out=new BufferedOutputStream(new FileOutputStream(temporary))){if(!bitmap.compress(Bitmap.CompressFormat.PNG,100,out))throw new IOException("PNG encoding failed");}
-                Files.move(temporary.toPath(),target.toPath(),StandardCopyOption.REPLACE_EXISTING);writes++;detail="Dumped "+target.getName();
+                OutputStream file=new FileOutputStream(temporary);activeOutput=file;
+                try(OutputStream out=new BufferedOutputStream(file)){if(closed)return;if(!bitmap.compress(Bitmap.CompressFormat.PNG,100,out))throw new IOException("PNG encoding failed");}finally{activeOutput=null;}
+                if(closed)return;
+                long bytes=temporary.length();if(dumpBytes+bytes>128L*1024*1024){dumpBudgetFull=true;skipped++;detail="Dump limit reached (128 MiB per session)";return;}
+                Files.move(temporary.toPath(),target.toPath(),StandardCopyOption.REPLACE_EXISTING);dumpBytes+=bytes;writes++;detail="Dumped "+target.getName();
                 event("texture.dump.written",Map.of("file",target.toString(),"width",width,"height",height));
             }catch(IOException|RuntimeException e){dumped.remove(hash);error("Cannot dump "+target+": "+e.getMessage());}
             finally{if(bitmap!=null)bitmap.recycle();try{Files.deleteIfExists(temporary.toPath());}catch(IOException ignored){}}
@@ -103,7 +109,8 @@ final class TexturePacks implements AutoCloseable {
     String status(){return detail+" · "+base;}
     @Override public void close(){
         closed=true;upload=null;cache.clear();cacheBytes=0;files.clear();rejected.clear();
-        if(writer!=null){writer.shutdownNow();boolean interrupted=false;for(;;)try{if(!writer.awaitTermination(5,TimeUnit.SECONDS))error("Texture writer is still finishing its current PNG");else break;}catch(InterruptedException e){interrupted=true;}if(interrupted)Thread.currentThread().interrupt();}
+        if(writer!=null){writer.shutdownNow();OutputStream output=activeOutput;if(output!=null)try{output.close();}catch(IOException ignored){}
+            try{if(!writer.awaitTermination(2,TimeUnit.SECONDS))error("Texture writer is still finishing its current PNG");}catch(InterruptedException e){Thread.currentThread().interrupt();}}
         dumped.clear();
     }
     static native String hashNative(short[] pixels);

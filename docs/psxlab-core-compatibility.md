@@ -214,7 +214,7 @@ packed-index/CLUT interpretation; RGB24 scanout stays native. Replacement detail
 is limited by internal scale.
 
 Limits: 16 MiB decoded cache, 4 megapixels/image, uniform 1x–8x dimensions, 8192
-scanned entries, 4096 dumped images/session and four queued PNG writes. Dumping
+scanned entries, 4096 dumped images/session, 128 MiB of new dumps/session and four queued PNG writes. Dumping
 has an asynchronous worker. First-use decoding runs on the GPU worker and its
 cost is logged. Both switches off bypass hashing/PNG/cache work. Empty replacement
 folders avoid hashing and activating the enhanced replacement path. Disabling
