@@ -226,9 +226,7 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
         DrawerItem("games.overflow.setup", "📂", onAction = { MainActivityRuntime.reopenSetup(); onDismiss() }),
         DrawerItem("tab.controls", "🕹️", AppRoute.ControllerManager),
         DrawerItem("cheats.title", "✦", AppRoute.PatchManager),
-        DrawerItem("tab.customisation", "🎨", AppRoute.Customisation),
         DrawerItem("tab.gameManager", "🗂️", AppRoute.GameManager),
-        DrawerItem("app.hotkeys.title", "⌨️", AppRoute.AppHotkeys),
     )
     // Link-out rows: they reuse the existing onAction path (like Boot BIOS) rather than a
     // destination, so they leave the drawer via startActivity and close it behind them.
@@ -371,8 +369,6 @@ private fun sameDestination(current: AppRoute, target: AppRoute): Boolean = when
         (current is AppRoute.BiosManager && current.game == null)
     AppRoute.ControllerManager -> current is AppRoute.ControllerManager
     AppRoute.PatchManager -> current is AppRoute.PatchManager
-    AppRoute.Customisation -> current is AppRoute.Customisation
-    AppRoute.AppHotkeys -> current is AppRoute.AppHotkeys
     AppRoute.Achievements -> current is AppRoute.Achievements
     AppRoute.Language -> current is AppRoute.Language
     AppRoute.Friends -> current is AppRoute.Friends

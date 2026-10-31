@@ -684,7 +684,8 @@ private fun CategoryContent(
         SettingsCategory.Controls -> ps1 { PadTab(viewModel.settings) }
         SettingsCategory.Hotkeys -> HotkeysTab(viewModel.settings)
         SettingsCategory.OnScreen -> OverlayTab(viewModel.uiState.value.game?.settingsKey, contextGame?.settingsKey)
-        SettingsCategory.Skins -> SkinsTab(viewModel.settings)
+        // Global scope edits the app-wide skin even with a game running behind the menu.
+        SettingsCategory.Skins -> SkinsTab(viewModel.settings, forceGlobal = viewModel.uiState.value.game == null)
         SettingsCategory.Advanced -> ps1 { Ps1AdvancedTab() }
         // Keep game context/settings storage, without generic override UI:
         // cheats are always game-local and identify their target in their header.

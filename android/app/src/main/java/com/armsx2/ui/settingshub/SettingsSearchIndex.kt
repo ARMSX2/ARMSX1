@@ -70,6 +70,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("pad.section.onScreenControls", true, SettingsCategory.Controls),
     SettingsSearchEntry("pad.section.macros", true, SettingsCategory.Controls),
     SettingsSearchEntry("hotkeys.exitToLauncher.label", true, SettingsCategory.Hotkeys),
+    SettingsSearchEntry("hotkeys.backOpensMenu.label", true, SettingsCategory.Hotkeys),
     SettingsSearchEntry("overlay.toggle.fastForwardPopups", true, SettingsCategory.OnScreen),
     SettingsSearchEntry("overlay.uiSize.label", true, SettingsCategory.OnScreen),
     SettingsSearchEntry("overlay.uiFontSize.label", true, SettingsCategory.OnScreen),

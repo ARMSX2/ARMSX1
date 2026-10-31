@@ -287,7 +287,7 @@ val EN: Map<String, String> = mapOf(
     "app.hotkeys.title" to "App Hotkeys",
     "app.hotkeys.library" to "Open Library",
     "app.hotkeys.modifier" to "Active keys: Hold Select or Start",
-    "app.hotkeys.description" to "Tap Start for the main menu; hold Select or Start for an app hotkey. Menu navigation only—gameplay buttons and emulator hotkeys are unchanged.",
+    "app.hotkeys.description" to "Tap Start for the main menu; hold Select or Start for an app hotkey. Menu navigation only: gameplay buttons and emulator hotkeys are unchanged.",
     "app.hotkeys.holdSelect" to "Hold Select or Start first, then press a control. B cancels.",
     "app.hotkeys.pressControl" to "Keep the modifier held, then press a control. B can also be bound.",
     "app.hotkeys.unassigned" to "Not assigned",

@@ -74,16 +74,13 @@ fun AppTab() {
             controllerId = "segmented:${str("games.overflow.setup")}",
         )
         // Appearance: interface style, UI colours, and the library background (waves, RGB
-        // cycling, custom image and the fallbacks). These also live on the sidebar Customisation
-        // page; they are here as well because this is where they have always been and where
-        // people go looking for them. Both entry points read and write the SAME
-        // ThemePreferences / LibraryBackground state, so there is one source of truth, nothing to
-        // migrate, and no way for the two screens to disagree.
+        // cycling, custom image and the fallbacks), as in ARMSX2/ARMSX3. This is their only home:
+        // the sidebar Customisation page that duplicated them is gone, and controller skins have
+        // their own Skins tab.
         CollapsibleSection(str("app.interface.style")) {
             InterfaceStyleSection(showTitle = false)
         }
-        // PS one style ships a fixed palette, so the colour picker would be inert under it --
-        // same guard the Customisation page uses.
+        // PS one style ships a fixed palette, so the colour picker would be inert under it.
         if (!com.armsx2.ui.theme.InterfacePreferences.psOne) {
             CollapsibleSection(str("app.theme")) {
                 ThemeAppearanceSection(showTitle = false)
