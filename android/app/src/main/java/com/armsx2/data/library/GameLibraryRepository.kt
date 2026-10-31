@@ -62,7 +62,7 @@ class GameLibraryRepository(private val context: Context) {
         .sorted()
         // Discovery rules changed: rescan once instead of keeping old duplicate
         // disc rows forever in the warm-start cache. No playlist IO on the UI thread.
-        .joinToString("|", prefix = "m3u-visibility-v1|")
+        .joinToString("|", prefix = "engine-artifacts-hidden-v2|")
 
     fun loadCached(): CachedLibrary {
         val cachedKey = MainActivityRuntime.prefs.getString("gamesCacheKey", null)

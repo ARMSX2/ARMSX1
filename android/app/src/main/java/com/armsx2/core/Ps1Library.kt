@@ -126,6 +126,7 @@ object Ps1Library {
         "bios", "memcards", "savestates", "sstates", "covers", "cache", "resources",
         "patches", "cheats", "snaps", "inputprofiles", "gamesettings", "logs",
         "shaders", "textures", "skins", "saf-launch",
+        "migration-backups", "performance", "fixtures",
     )
 
     private data class SafCandidate(
