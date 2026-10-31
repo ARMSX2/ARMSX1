@@ -142,8 +142,6 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
             // the game instead of fast-forwarding it.
             EmulationMenuTab.Session -> when (SessionActionPolicy.ids(state.value.rewindEnabled).getOrNull(state.value.selectedAction)) {
                 "resume" -> resume()
-                "saveState" -> InGameOverlay.openSaveStatePicker()
-                "loadState" -> InGameOverlay.openLoadStatePicker()
                 "fastForward" -> { MainActivityRuntime.instance?.toggleFastForward(); resume() }
                 "reset" -> MainActivityRuntime.resetGame()
                 "swapDisc" -> MainActivityRuntime.promptSwapDisc()
@@ -154,7 +152,6 @@ class EmulationMenuViewModel(application: Application) : AndroidViewModel(applic
                     com.armsx2.ui.GameOsd.toast("Screenshot saved")
                     resume()
                 }
-                "discord" -> openDiscord()
                 "rewind" -> rewindStepBack()
             }
             // Graphics, Fixes and Performance are registry-driven panes — every control in them

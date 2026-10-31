@@ -432,7 +432,7 @@ private fun MenuPage(
         ) {
             if (compact) CompactMenuTabs(state.tab, viewModel::selectTab)
             MenuMoveControls()
-            MenuHeader(compact, state.hardcore, state.richPresence, state.gameCRC)
+            MenuHeader(compact, state.hardcore, state.richPresence, state.gameCRC, viewModel::openDiscord)
             HorizontalDivider(
                 modifier = Modifier.padding(horizontal = 8.dp),
                 color = MaterialTheme.colorScheme.outline.copy(alpha = 0.34f),
@@ -625,6 +625,7 @@ private fun MenuHeader(
     hardcore: Boolean,
     richPresence: String,
     gameCRC: String,
+    onOpenFriends: () -> Unit,
 ) {
     val game = MainActivityRuntime.currentGame.value
     Row(
@@ -699,21 +700,34 @@ private fun MenuHeader(
         // Clock + battery, same cluster as the library toolbar. Worth having here specifically:
         // this menu is what you open mid-session on a handheld, so it's exactly when you want to
         // know the time and how much charge is left. Not controllerFocusable — it's a readout.
-        // Friends, where ARMSX2/ARMSX3 put it: top-right of the quick-menu header. Checking who
-        // is online is a mid-session thing, so it should not mean backing out to the library
-        // drawer. Opens as an in-game screen, so dismissing it resumes the game like every other
-        // manager screen here.
-        Spacer(Modifier.width(8.dp))
-        com.armsx2.ui.common.RoundAction(
-            "\uD83D\uDC65",
-            str("friends.title"),
-            onClick = { com.armsx2.ui.WindowImpl.openInGameScreen(com.armsx2.ui.InGameScreen.Friends) },
-        )
-
         Spacer(Modifier.width(8.dp))
         com.armsx2.ui.common.LibraryStatusCluster(
             Modifier.align(Alignment.CenterVertically),
         )
+
+        // Friends, in the header where it is always visible, with the online count on it -- the
+        // ARMSX2/ARMSX3 layout. Opens the same compact friends panel the Discord row used to,
+        // inside the quick menu, rather than a full-screen page. Controller-focusable so the pad
+        // reaches it like every other header control.
+        Spacer(Modifier.width(8.dp))
+        Surface(
+            onClick = onOpenFriends,
+            modifier = Modifier.controllerFocusable(
+                "menu.friends",
+                RoundedCornerShape(14.dp),
+                onConfirm = onOpenFriends,
+            ),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+        ) {
+            Box(Modifier.padding(horizontal = 11.dp, vertical = 9.dp)) {
+                com.armsx2.ui.friends.FriendsGlyphWithBadge(
+                    color = MaterialTheme.colorScheme.onSurface,
+                    glyphSize = 19.sp,
+                )
+            }
+        }
 
 
     }
@@ -724,12 +738,9 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
     ActionGrid(
         actions = listOf(
             MenuAction("resume", str("action.resume"), str("action.play"), "▶", Success, viewModel::resume),
-            MenuAction("saveState", str("savestate.title.save"), "Choose a save slot", "↥", null) {
-                InGameOverlay.openSaveStatePicker()
-            },
-            MenuAction("loadState", str("touch.stateAction.load"), "Choose a saved state", "↧", null) {
-                InGameOverlay.openLoadStatePicker()
-            },
+            // No Save State / Load State rows: they stretched this tab well past one screen for two
+            // actions already reachable from the touch controls and hotkeys. SessionActionPolicy
+            // must stay in step with this list -- the pad activates rows by index.
             MenuAction("fastForward",
                 str("action.fastForward"),
                 // Fast-forward speed is configurable now (Ps1Settings.fastForwardSpeed, offered as
@@ -763,7 +774,7 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
                 com.armsx2.ui.GameOsd.toast("Screenshot saved")
                 viewModel.resume()
             },
-            MenuAction("discord", str("about.discord"), "Account, friends and game activity", "👥", SelectionBlue, viewModel::openDiscord),
+            // Discord/friends moved to the header button (MenuHeader), as in ARMSX2/ARMSX3.
             // Rewind, one snapshot per press. The hold-to-rewind hotkey (Settings › Hotkeys)
             // is the real way to use this, but a touch-only player has no button to hold, so
             // there has to be a reachable control — a feature whose only entry point is an

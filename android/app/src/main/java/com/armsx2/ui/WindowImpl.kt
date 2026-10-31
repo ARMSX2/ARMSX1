@@ -26,7 +26,7 @@ import com.armsx2.runtime.MainActivityRuntime
 import kotlinx.coroutines.flow.first
 
 /** A full manager screen shown as an overlay over the paused game (in-game menu). */
-enum class InGameScreen { Settings, Achievements, Memcard, Patches, Controls, Skins, SaveState, LoadState, Friends }
+enum class InGameScreen { Settings, Achievements, Memcard, Patches, Controls, Skins, SaveState, LoadState }
 
 object WindowImpl {
     val toolbarVisible = mutableStateOf(true)
@@ -163,10 +163,6 @@ object WindowImpl {
                             onBack = dismiss,
                         )
                         InGameScreen.Controls -> com.armsx2.ui.controls.ControllerManagerScreen(onBack = dismiss)
-                        // Friends, reachable from the quick menu header the way ARMSX2/ARMSX3
-                        // put it there: seeing who is online is a mid-session thing, so it
-                        // should not need backing all the way out to the library drawer.
-                        InGameScreen.Friends -> com.armsx2.ui.friends.FriendsScreen(onBack = dismiss)
                         // Straight to the Skins tab of the real settings hub rather than a
                         // bespoke screen: it already has the scope plumbing, so opening it
                         // WITH the running game is what surfaces the per-game skin toggle.
