@@ -109,3 +109,25 @@ geometry, actual refresh, presentation eligibility, shader status and audio temp
 Frame records label requested presentation counts separately from API acceptance and
 include paths/timings for BFI and shader subframes. API completion is not a physical
 scanout timestamp or proof that every submitted buffer reached the panel.
+
+# Performance overlay integration (0.3.16)
+
+The original engine now feeds the frontend's 33-slot statistics contract. The
+overlay samples frame completion intervals, CPU-worker emulation wall time,
+scanout/presentation API wall time, actual pacing sleep, guest clock ticks,
+triangle/rectangle/line submissions, active SPU envelopes, MDEC blocks, CD sectors,
+DMA words, native/internal video dimensions and process CPU/RSS plus available RAM.
+CPU/GPU workers overlap: phase durations are not additive and presentation API time
+is not physical GPU execution time. Native instruction counts, GTE operation counts
+and hardware GPU busy percentage remain unavailable and are never invented.
+
+Statistics are opt-in and independent of disk logging. Closing the overlay clears
+the window; queued samples cannot leak into the next enabled window or session.
+Diagnostic-only fields are excluded from save states.
+
+`video.gpu_backend` selects the presentation API, independently of `video.renderer`
+and internal scale. Configs with only the legacy renderer key still work. Vulkan
+with hardware rasterization reports both Vulkan display and OpenGL compute drawing
+because the current hardware rasterizer uses GLES; a requested setting alone is
+never presented as proof of an active API. Changes to the presentation API require
+restarting the game.
