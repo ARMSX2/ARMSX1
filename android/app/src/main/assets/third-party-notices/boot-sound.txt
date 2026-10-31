@@ -1,0 +1,23 @@
+Boot animation sound
+====================
+
+Used as:   the audio track of res/raw/boot_intro.mp4 (the startup animation)
+
+Sound:     "lovelyboot1"
+Author:    pizzaiolo
+Source:    https://freesound.org/s/320664/
+Licence:   CC0 1.0 (public domain dedication)
+
+That sound is a derivative of:
+
+Sound:     "KorgStrings001.aif"
+Author:    humphreyswill
+Source:    https://freesound.org/s/61109/
+Licence:   CC BY 4.0, https://creativecommons.org/licenses/by/4.0/
+
+A CC0 dedication on a derivative cannot waive the attribution required by the
+CC BY 4.0 work it is based on, so humphreyswill is credited here as that licence
+requires.
+
+Changes:   the sound was re-encoded to AAC and muxed in as the boot animation's
+           audio track. The animation's video track is unchanged.
