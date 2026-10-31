@@ -64,11 +64,8 @@ final class CoverArt implements AutoCloseable {
         }
         check();
         if(serial==null){serial=prefs.getString("serial_"+key,null);if(serial==null && !name.toLowerCase(Locale.ROOT).endsWith(".exe")){
-            try(ParcelFileDescriptor fd=context.getContentResolver().openFileDescriptor(uri,"r")){
-                if(fd!=null)try(ByteSource source=name.toLowerCase(Locale.ROOT).endsWith(".chd")?new ChdSource(fd):new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())))){
-                    IsoDisc disc=new IsoDisc(source);disc.bootExecutable();serial=CoverMatcher.serial(disc.bootPath);
-                    if(serial!=null)prefs.edit().putString("serial_"+key,serial).apply();
-                }
+            try(DiscMedia media=DiscMedia.open(context,uri,name)){
+                if(media.disc!=null){serial=CoverMatcher.serial(media.disc.bootPath);if(serial!=null)prefs.edit().putString("serial_"+key,serial).apply();}
             }catch(IOException | RuntimeException ignored){}
         }
         if(serial!=null){check();try{byte[] bytes=fetch(serialUrl(serial));if(bytes!=null)return bytes;}catch(IOException e){onlineFailure=true;}}

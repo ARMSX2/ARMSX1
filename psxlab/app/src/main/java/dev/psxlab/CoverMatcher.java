@@ -10,7 +10,7 @@ final class CoverMatcher {
     CoverMatcher(Collection<String> names){for(String name:names)titles.computeIfAbsent(normalize(name),k->new ArrayList<>()).add(name);}
     static String normalize(String name){
         String s=Normalizer.normalize(name,Normalizer.Form.NFKD).replaceAll("\\p{M}+","").toLowerCase(Locale.ROOT)
-            .replaceFirst("\\.(png|jpg|jpeg|webp|chd|bin|iso|img|exe)$","")
+            .replaceFirst("\\.(png|jpg|jpeg|webp|chd|bin|iso|img|exe|cue)$","")
             .replaceAll("\\([^)]*\\)|\\[[^]]*\\]", " ").replace("&"," and ")
             .replaceAll("['’]", "").replaceAll("[^a-z0-9]+", " ").trim();
         s=s.replaceFirst("^(the|an|a) +", "").replaceFirst(" +(the|an|a)$", "");
@@ -47,7 +47,7 @@ final class CoverMatcher {
         String n=name.toLowerCase(Locale.ROOT);int score=n.contains("(usa)")?30:n.contains("(europe)")?20:0;
         for(String region:new String[]{"usa","europe","japan","world"})if(requested.contains("("+region+")") && n.contains("("+region+")"))score+=100;
         for(String tag:new String[]{"beta","proto","demo","sample"})if(n.contains("("+tag) && !requested.contains(tag))score-=200;
-        if(name.equalsIgnoreCase(requested.replaceFirst("(?i)\\.(chd|iso|bin|img|exe)$", ".png")))score+=1000;
+        if(name.equalsIgnoreCase(requested.replaceFirst("(?i)\\.(chd|iso|bin|img|exe|cue)$", ".png")))score+=1000;
         return score;
     }
     private static int distance(String a,String b){

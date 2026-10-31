@@ -70,7 +70,7 @@ public final class BootActivity extends GamepadActivity {
         display=new Display();display.setOnClickListener(v->{topBar.setVisibility(View.VISIBLE);positionOsd();uiHandler.removeCallbacks(hideBar);uiHandler.postDelayed(hideBar,3000);});root.addView(display,new FrameLayout.LayoutParams(-1,-1));
         touchLayer=new FrameLayout(this);addTouchControls();touchLayer.setVisibility(showTouch?View.VISIBLE:View.GONE);root.addView(touchLayer,new FrameLayout.LayoutParams(-1,-1));
         topBar=new LinearLayout(this);topBar.setGravity(Gravity.CENTER_VERTICAL);topBar.setPadding(Ui.dp(this,16),Ui.dp(this,8),Ui.dp(this,16),Ui.dp(this,8));topBar.setBackgroundColor(0xc90d111a);
-        TextView title=Ui.heading(this,getIntent().getStringExtra("name")==null?"PlayStation":getIntent().getStringExtra("name").replaceFirst("(?i)\\.(chd|iso|bin|img|exe)$",""),15);title.setSingleLine(true);title.setEllipsize(android.text.TextUtils.TruncateAt.END);topBar.addView(title,new LinearLayout.LayoutParams(0,-2,1));
+        TextView title=Ui.heading(this,getIntent().getStringExtra("name")==null?"PlayStation":getIntent().getStringExtra("name").replaceFirst("(?i)\\.(chd|iso|bin|img|exe|cue)$",""),15);title.setSingleLine(true);title.setEllipsize(android.text.TextUtils.TruncateAt.END);topBar.addView(title,new LinearLayout.LayoutParams(0,-2,1));
         Button menu=Ui.button(this,"Ⅱ  Menu",false);menu.setOnClickListener(v->openMenu());topBar.addView(menu,new LinearLayout.LayoutParams(Ui.dp(this,104),Ui.dp(this,40)));root.addView(topBar,new FrameLayout.LayoutParams(-1,Ui.dp(this,56),Gravity.TOP));
         status=Ui.text(this,"Starting game…",11,Ui.TEXT);status.setTypeface(Typeface.MONOSPACE);status.setPadding(Ui.dp(this,12),Ui.dp(this,8),Ui.dp(this,12),Ui.dp(this,8));status.setBackgroundColor(0xb8000000);status.setVisibility(showStats?View.VISIBLE:View.GONE);FrameLayout.LayoutParams stats=new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.RIGHT);stats.topMargin=Ui.dp(this,64);stats.rightMargin=Ui.dp(this,8);root.addView(status,stats);
         inputStatus=new TextView(this);inputStatus.setVisibility(View.GONE);
@@ -168,23 +168,10 @@ public final class BootActivity extends GamepadActivity {
 
         Uri uri=Uri.parse(getIntent().getStringExtra("uri"));String name=getIntent().getStringExtra("name");
 
-        try(ParcelFileDescriptor descriptor=getContentResolver().openFileDescriptor(uri,"r")){
-
-            if(descriptor==null)throw new IOException("Cannot open selected file");
-
-            try(ByteSource source=name.toLowerCase(Locale.ROOT).endsWith(".chd")?new ChdSource(descriptor):new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(descriptor.getFileDescriptor())));Gpu gpu=new Gpu(threaded,DisplayConfig.renderer(getSharedPreferences("MainActivity",0)),DisplayConfig.internalScale(getSharedPreferences("MainActivity",0)))){
-
-                Bus bus=createBus(gpu);byte[] executable;String bootName=name;
-
-                byte[] magic=source.read(0,8);
-
-                if(new String(magic,java.nio.charset.StandardCharsets.US_ASCII).equals("PS-X EXE")){
-
-                    byte[] header=source.read(0,2048);int size=ExeLoader.le(header,28);
-
-                    if(size<4 || size>2*1024*1024)throw new IOException("Invalid executable size");executable=source.read(0,size+2048);
-
-                }else{IsoDisc disc=new IsoDisc(source);executable=disc.bootExecutable();bootName=disc.bootPath;bus.cdrom.insert(disc);}
+        String directory=getIntent().getStringExtra("parent");
+        try(DiscMedia media=DiscMedia.open(this,uri,name,directory==null?null:Uri.parse(directory));Gpu gpu=new Gpu(threaded,DisplayConfig.renderer(getSharedPreferences("MainActivity",0)),DisplayConfig.internalScale(getSharedPreferences("MainActivity",0)))){
+                Bus bus=createBus(gpu);byte[] executable=media.executable;String bootName=media.bootName;
+                if(media.disc!=null)bus.cdrom.insert(media.disc);
 
                 Cpu cpu;boolean initialized=new File(getFilesDir(),"bios.bin").isFile();
 
@@ -200,8 +187,6 @@ public final class BootActivity extends GamepadActivity {
                 }else cpu=ExeLoader.load(executable,bus);
 
                 execute(token,cpu,bus,gpu,bootName,initialized);
-
-            }
 
         }catch(Exception e){showError(token,e);}
         }finally{if(cards!=null){cards.close();cards=null;}}
@@ -245,7 +230,7 @@ public final class BootActivity extends GamepadActivity {
                 if(fastForward!=runningFastForward){runningFastForward=fastForward;bus.spu.flushAudio();bus.spu.setAudioSink(runningFastForward?null:output);output.setPaused(runningFastForward||paused);pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());speedAt=System.nanoTime();speedInstructions=cpu.instructions;speedVblanks=gpu.vblanks;if(audioDiagnosis)output.traceEvent(cpu.instructions,bus.spu.frames,gpu.vblanks,runningFastForward?"FAST_FORWARD_ON_MUTED":"FAST_FORWARD_OFF");}
                 if(token!=generation)break;
 
-                cpu.runToFrame(20000);
+                cpu.runToFrame(100000);
                 if(liveTrace && System.nanoTime()>=traceAt){
                     traceAt=System.nanoTime()+1000000000L;
                     StringBuilder trace=new StringBuilder(String.format(Locale.ROOT,"At %d guest clocks PC=%08X RA=%08X SP=%08X\n",cpu.instructions,cpu.pc,cpu.r[31],cpu.r[29]));

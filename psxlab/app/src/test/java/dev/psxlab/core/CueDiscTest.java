@@ -7,6 +7,12 @@ import static org.junit.Assert.*;
 import static dev.psxlab.core.CdRomTest.*;
 
 public class CueDiscTest {
+    @Test public void libraryReferencesUseTheSameParserAndDoNotOpenTrackFiles()throws Exception{
+        String cue="FILE \"Tracks/Disc One.bin\" BINARY\nTRACK 01 MODE2/2352\nINDEX 01 00:00:00\nFILE AUDIO.BIN BINARY\nTRACK 02 AUDIO\nINDEX 01 00:00:00\n";
+        List<String> names=CueDisc.referencedFiles(cue);assertEquals(Arrays.asList("Tracks/Disc One.bin","AUDIO.BIN"),names);
+        assertThrows(UnsupportedOperationException.class,()->names.add("other.bin"));
+        assertThrows(IOException.class,()->CueDisc.referencedFiles("FILE missing.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00"));
+    }
     private static ByteSource bytes(byte[] data){return new ByteSource(){
         public long length(){return data.length;}
         public byte[] read(long offset,int length)throws IOException{if(offset<0||offset+length>data.length)throw new EOFException();return Arrays.copyOfRange(data,(int)offset,(int)offset+length);}

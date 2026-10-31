@@ -41,6 +41,12 @@ public final class CueDisc implements SectorSource, AutoCloseable {
     public CueDisc(String text,Opener opener)throws IOException{
         try{parse(text);layout(opener);}catch(IOException|RuntimeException e){try{close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
     }
+    private CueDisc(){}
+    /** Parse track references without opening images, for library de-duplication. */
+    public static List<String> referencedFiles(String text)throws IOException{
+        CueDisc metadata=new CueDisc();metadata.parse(text);
+        List<String> names=new ArrayList<>();for(TrackFile file:metadata.files)names.add(file.name);return Collections.unmodifiableList(names);
+    }
     public static boolean isCueName(String name){return name!=null&&name.toLowerCase(Locale.ROOT).endsWith(".cue");}
     /** Reject absolute/parent references; ordinary nested track folders remain supported. */
     public static String relativeName(String name)throws IOException{
