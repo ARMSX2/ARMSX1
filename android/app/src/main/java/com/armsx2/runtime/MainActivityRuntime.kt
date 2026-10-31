@@ -6076,6 +6076,9 @@ open class MainActivityRuntime : ComponentActivity() {
         // before a VM existed) would otherwise leave it running behind the lock screen.
         // setAudioSuspended is idempotent request-parking, so this is a no-op when onPause won.
         suspendEmulatorAudio(true)
+        // Out of sight: the Discord helper drains once a second instead of twenty times and the
+        // snapshot poll waits, rather than both running on behind a locked screen for hours.
+        com.armsx2.DiscordPresence.setForeground(false)
         super.onStop()
     }
 
@@ -6097,6 +6100,9 @@ open class MainActivityRuntime : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         ctrCompanion.resume()
+        // Back in sight: the Discord helper returns to draining at full rate and the friends
+        // snapshot poll resumes. Paired with setForeground(false) in onStop.
+        com.armsx2.DiscordPresence.setForeground(true)
         // Restart the platform audio stream FIRST, before anything below can ask the core for a
         // frame. Un-suspending is what actually undoes onPause/onStop — the VM's own resume still
         // belongs to the pause overlay's Resume button, which is where it has always been — and

@@ -140,6 +140,9 @@ namespace
 		// RetroAchievements rich presence — the game's own "what you are doing" line, which RA
 		// updates as you play ("Wumpa Island, 12/45"). Empty when RA is off or the game has no set.
 		std::string want_ra;
+		// Name the game in the member list ("Playing <game>") rather than the app. On by default;
+		// the Friends screen can turn it off for anyone who would rather not broadcast the title.
+		bool want_show_game = true;
 	};
 
 	State& S()
@@ -201,6 +204,7 @@ namespace
 	{
 		std::shared_ptr<discordpp::Client> client;
 		std::string serial, title, cover, ra;
+		bool show_game = true;
 		{
 			std::lock_guard<std::mutex> lock(S().mutex);
 			client = S().client;
@@ -208,6 +212,7 @@ namespace
 			title = S().want_title;
 			cover = S().want_cover;
 			ra = S().want_ra;
+			show_game = S().want_show_game;
 		}
 		if (!client)
 			return;
@@ -220,6 +225,11 @@ namespace
 		if (!title.empty())
 		{
 			activity.SetDetails(title);
+			// The member list then reads "Playing <game>" instead of "Playing ARMSX". The library keeps
+			// the application name. Contributed by bshar1865 (https://github.com/bshar1865), ported from
+			// their PCSX2 PR #15085 by way of ARMSX3.
+			if (show_game)
+				activity.SetStatusDisplayType(discordpp::StatusDisplayTypes::Details);
 			// Second line of the Discord status. RetroAchievements' own rich presence when there is
 			// one -- that is worth reading; a disc serial is not, and it was needless detail to
 			// publish about someone. Falls back to the serial so this stays the in-a-game marker: a
@@ -563,7 +573,7 @@ Java_com_armsx2_discord_DiscordNative_error(JNIEnv* env, jclass)
 /// Remember and publish what is being played. Empty title = back in the library.
 JNIEXPORT void JNICALL
 Java_com_armsx2_discord_DiscordNative_setPlaying(
-	JNIEnv* env, jclass, jstring serial, jstring title, jstring cover, jstring ra)
+	JNIEnv* env, jclass, jstring serial, jstring title, jstring cover, jstring ra, jboolean showGame)
 {
 	{
 		std::lock_guard<std::mutex> lock(S().mutex);
@@ -571,6 +581,7 @@ Java_com_armsx2_discord_DiscordNative_setPlaying(
 		S().want_title = JStr(env, title);
 		S().want_cover = JStr(env, cover);
 		S().want_ra = JStr(env, ra);
+		S().want_show_game = showGame == JNI_TRUE;
 	}
 	if (S().status.load(std::memory_order_acquire) == static_cast<int>(BridgeStatus::Connected))
 		PushPresence();
@@ -664,7 +675,7 @@ JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_authorize(JNIEnv*, 
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_takeToken(JNIEnv*, jclass) { return nullptr; }
 JNIEXPORT jint JNICALL Java_com_armsx2_discord_DiscordNative_status(JNIEnv*, jclass) { return 0; }
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_error(JNIEnv*, jclass) { return nullptr; }
-JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_setPlaying(JNIEnv*, jclass, jstring, jstring, jstring, jstring) {}
+JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_setPlaying(JNIEnv*, jclass, jstring, jstring, jstring, jstring, jboolean) {}
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_friends(JNIEnv* env, jclass) { return env->NewStringUTF(""); }
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_self(JNIEnv* env, jclass) { return env->NewStringUTF(""); }
 JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_pump(JNIEnv*, jclass) {}
