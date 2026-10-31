@@ -107,7 +107,7 @@ public final class Bus {
         if(a>=0x1f801000 && a<0x1f802000){flushClocks();deadlineDirty=eventScheduling;}
         if(a>=0x1f801080 && a<0x1f801100)return dma.read(a&~3)>>>((a&3)*8)&255;
         if(a>=0x1f801c00 && a<0x1f802000)return spu.read(a&~1)>>>((a&1)*8)&255;
-        if(a>=0x1f801100 && a<0x1f801130)return timers.read(a&~3)>>>((a&3)*8)&255;
+        if(a>=0x1f801100 && a<0x1f801140)return timers.read(a&~3)>>>((a&3)*8)&255;
         if(a>=0x1f801800 && a<0x1f801804)return cdrom.read(a&3);
         if(a>=0x1f801040 && a<0x1f801050)return sio0.read(a-0x1f801040,1);
         if(isControl(a,address))return controlRead(a,address)>>>((a&3)*8)&255;
@@ -120,7 +120,7 @@ public final class Bus {
         if((a&~3)==0x1f801060)return ramSize;
         return (a&~3)==0x1f801070?irqStatus:irqMask;
     }
-    public int read16(int address){if((address&1)!=0)throw new AddressError(address,false);int a=address&0x1fffffff;if(a<0x800000)return memory16(ram,a&0x1fffff,0);if(a>=0x1fc00000 && a<0x1fc80000)return memory16(bios,a-0x1fc00000,BIOS_OFFSET);if(a>=0x1f801000 && a<0x1f802000){flushClocks();deadlineDirty=eventScheduling;}if(a>=0x1f801100 && a<0x1f801130)return (timers.read(a&~3)>>>((a&2)*8))&65535;if(a>=0x1f801c00 && a<0x1f802000)return spu.read(a);if(a>=0x1f801800 && a<0x1f801804)return cdrom.read(a&3)|cdrom.read(a&3)<<8;if(a>=0x1f801040 && a<0x1f801050)return sio0.read(a-0x1f801040,2);return read8(address)|read8(address+1)<<8;}
+    public int read16(int address){if((address&1)!=0)throw new AddressError(address,false);int a=address&0x1fffffff;if(a<0x800000)return memory16(ram,a&0x1fffff,0);if(a>=0x1fc00000 && a<0x1fc80000)return memory16(bios,a-0x1fc00000,BIOS_OFFSET);if(a>=0x1f801000 && a<0x1f802000){flushClocks();deadlineDirty=eventScheduling;}if(a>=0x1f801100 && a<0x1f801140)return (timers.read(a&~3)>>>((a&2)*8))&65535;if(a>=0x1f801c00 && a<0x1f802000)return spu.read(a);if(a>=0x1f801800 && a<0x1f801804)return cdrom.read(a&3)|cdrom.read(a&3)<<8;if(a>=0x1f801040 && a<0x1f801050)return sio0.read(a-0x1f801040,2);return read8(address)|read8(address+1)<<8;}
     /** Hot instruction-word lookup, coherent with RAM writes and physical aliases. */
     public int fetchInstruction(int address){
         int a=address&0x1fffffff;
@@ -139,7 +139,7 @@ public final class Bus {
         if(a<0x800000)return memory32(ram,a&0x1fffff,0);
         if(a>=0x1fc00000 && a<0x1fc80000)return memory32(bios,a-0x1fc00000,BIOS_OFFSET);
         if(a>=0x1f801000 && a<0x1f802000){flushClocks();deadlineDirty=eventScheduling;}
-        if(a>=0x1f801100 && a<0x1f801130)return timers.read(a);
+        if(a>=0x1f801100 && a<0x1f801140)return timers.read(a);
         if(a>=0x1f801800 && a<0x1f801804)return cdrom.read(a&3)|cdrom.read(a&3)<<8|cdrom.read(a&3)<<16|cdrom.read(a&3)<<24;
         if(a>=0x1f801040 && a<0x1f801050)return sio0.read(a-0x1f801040,4);
         if(a==0x1f801810)return gpu.read();if(a==0x1f801814)return gpu.status();
@@ -159,9 +159,10 @@ public final class Bus {
     private void writeMmioByte(int a,int value){
         if(a>=0x1f801080 && a<0x1f801100)dma.write(a&~3,(value&255)<<((a&3)*8),255<<((a&3)*8));
         else if(a>=0x1f801c00 && a<0x1f802000){if((a&1)==0)spu.write(a,value);}
-        else if(a>=0x1f801100 && a<0x1f801130){int shift=(a&3)*8;timers.write(a&~3,(timers.read(a&~3)&~(255<<shift))|((value&255)<<shift));}
+        else if(a>=0x1f801100 && a<0x1f801140){int shift=(a&3)*8;timers.write(a&~3,(timers.read(a&~3)&~(255<<shift))|((value&255)<<shift));}
         else if(a>=0x1f801800 && a<0x1f801804)cdrom.write(a&3,value);
         else if(a>=0x1f801040 && a<0x1f801050)sio0.write(a-0x1f801040,1,value);
+        else if(a>=0x1f801130 && a<0x1f801140){} // Reserved fourth root-counter slot: writes are ignored.
         else if(isControl(a,a)){
             int shift=(a&3)*8,old=controlRead(a,a),word=(old&~(255<<shift))|((value&255)<<shift);
             controlWrite(a&~3,a&~3,word,255<<shift);
@@ -182,7 +183,7 @@ public final class Bus {
         if(a>=0x1f801000 && a<0x1f802000){flushClocks();deadlineDirty=eventScheduling;}
         if(a>=0x1f801080 && a<0x1f801100){dma.write(a&~3,(value&65535)<<((a&2)*8),65535<<((a&2)*8));return;}
         if(a>=0x1f801c00 && a<0x1f802000){spu.write(a,value);return;}
-        if(a>=0x1f801100 && a<0x1f801130){timers.write(a&~3,(a&2)==0?value:0);return;}
+        if(a>=0x1f801100 && a<0x1f801140){timers.write(a&~3,(a&2)==0?value:0);return;}
         if(a>=0x1f801040 && a<0x1f801050){sio0.write(a-0x1f801040,2,value);return;}
         if(isControl(a,address)){int shift=(a&2)*8,mask=65535<<shift;controlWrite(a&~3,address&~3,(controlRead(a,address)&~mask)|((value&65535)<<shift),mask);return;}
         write8(address,value);write8(address+1,value>>>8);
@@ -194,7 +195,7 @@ public final class Bus {
         if(a>=0x1f801000 && a<0x1f802000){flushClocks();deadlineDirty=eventScheduling;}
         if(a>=0x1f801080 && a<0x1f801100){dma.write(a,value,-1);return;}
         if(a>=0x1f801c00 && a<0x1f802000){spu.write(a,value&65535);spu.write(a+2,value>>>16);return;}
-        if(a>=0x1f801100 && a<0x1f801130){timers.write(a,value);return;}
+        if(a>=0x1f801100 && a<0x1f801140){timers.write(a,value);return;}
         if(a>=0x1f801040 && a<0x1f801050){sio0.write(a-0x1f801040,4,value);return;}
         if(a==0x1f801810){gpu.write(value);return;}if(a==0x1f801814){gpu.control(value);return;}
         if(a==0x1f801820){mdec.write(value);return;}if(a==0x1f801824){mdec.control(value);return;}

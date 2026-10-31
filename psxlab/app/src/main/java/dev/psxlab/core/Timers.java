@@ -6,8 +6,8 @@ public final class Timers {
     private final int[] count=new int[3],mode={0x400,0x400,0x400},target=new int[3],prescale=new int[3];
     private final boolean[] fired=new boolean[3],blank=new boolean[3],released=new boolean[3];
     Timers(Bus bus){this.bus=bus;}
-    public int read(int address){int i=(address-0x1f801100)/16,reg=(address&15)/4;return switch(reg){case 0->count[i];case 1->{int m=mode[i];mode[i]&=~0x1800;yield m;}case 2->target[i];default->0;};}
-    public void write(int address,int value){int i=(address-0x1f801100)/16,reg=(address&15)/4;switch(reg){case 0->count[i]=value&65535;case 1->{mode[i]=(value&0x3ff)|0x400;count[i]=prescale[i]=0;fired[i]=released[i]=false;}case 2->target[i]=value&65535;default->{}}}
+    public int read(int address){int i=(address-0x1f801100)/16,reg=(address&15)/4;if(i<0||i>=3)return -1;return switch(reg){case 0->count[i];case 1->{int m=mode[i];mode[i]&=~0x1800;yield m;}case 2->target[i];default->-1;};}
+    public void write(int address,int value){int i=(address-0x1f801100)/16,reg=(address&15)/4;if(i<0||i>=3)return;switch(reg){case 0->count[i]=value&65535;case 1->{mode[i]=(value&0x3ff)|0x400;count[i]=prescale[i]=0;fired[i]=released[i]=false;}case 2->target[i]=value&65535;default->{}}}
     private boolean running(int i){
         if((mode[i]&1)==0)return true;int sync=(mode[i]>>>1)&3;
         if(i==2)return sync==1 || sync==2;

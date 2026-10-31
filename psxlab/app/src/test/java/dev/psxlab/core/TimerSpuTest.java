@@ -2,6 +2,18 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class TimerSpuTest {
+    @Test public void reservedTimerSlotReadsOpenBusAndIgnoresWrites(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.write16(0x1f801120,123);
+            for(int base:new int[]{0x1f801130,0x9f801130,0xbf801130}){
+                for(int offset=0;offset<16;offset++){assertEquals(255,b.read8(base+offset));b.write8(base+offset,0x5a);}
+                for(int offset=0;offset<16;offset+=2){assertEquals(65535,b.read16(base+offset));b.write16(base+offset,0x1234);}
+                for(int offset=0;offset<16;offset+=4){assertEquals(-1,b.read32(base+offset));b.write32(base+offset,0x12345678);}
+            }
+            assertEquals(123,b.read16(0x1f801120));assertEquals(0,b.read32(0x1f801070));
+            assertEquals(-1,b.read32(0x1f80110c));b.write32(0x1f80110c,0);assertEquals(-1,b.read32(0x1f80110c));
+        }
+    }
     @Test public void timerTargetResetsAndRaisesRepeatIrqs(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);b.write16(0x1f801074,16);b.write16(0x1f801108,3);b.write16(0x1f801104,0x58);b.timers.cpuCycles(3);
