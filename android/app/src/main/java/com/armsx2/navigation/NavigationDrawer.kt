@@ -225,7 +225,7 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
         // under Game Manager below rather than being repeated here.
         DrawerItem("games.overflow.setup", "📂", onAction = { MainActivityRuntime.reopenSetup(); onDismiss() }),
         DrawerItem("tab.controls", "🕹️", AppRoute.ControllerManager),
-        DrawerItem("cheats.title", "✦", AppRoute.PatchManager),
+        DrawerItem("cheats.title", "🪄", AppRoute.PatchManager),
         DrawerItem("tab.gameManager", "🗂️", AppRoute.GameManager),
     )
     // Link-out rows: they reuse the existing onAction path (like Boot BIOS) rather than a

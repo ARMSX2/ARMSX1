@@ -983,7 +983,7 @@ fun HomeScreen(
                 // disc, so the game's own menu is where people look for it — and it is the
                 // reason this is here as well as on the settings hub's Cheats tab: a feature
                 // reachable only from an in-game menu is a feature users report as missing.
-                GameMenuAction("✦", str("cheats.title")) {
+                GameMenuAction("🪄", str("cheats.title")) {
                     menuGame = null
                     com.armsx2.navigation.UiNavigator.navigate(
                         com.armsx2.navigation.AppRoute.Settings(
