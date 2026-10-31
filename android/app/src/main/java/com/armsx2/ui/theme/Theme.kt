@@ -139,27 +139,27 @@ object ToolbarPositionPreferences {
     }
 }
 
-/** Visibility of optional library-home sections. Both default to visible so
- * existing users keep the current layout until they explicitly opt out. */
+/** Visibility of optional library-home sections. Search and Collections start hidden, as the
+ * user asked: both are a toggle away in Settings > App (Collections also in the overflow menu).
+ * Recently Played starts visible. */
 object LibraryChromePreferences {
     private const val SearchKey = "ui.library.showSearch"
     private const val RecentsKey = "ui.library.showRecents"
     private const val CollectionsKey = "ui.library.showCollections"
     private const val OpacityKey = "ui.library.opacity"
 
-    val showSearch = mutableStateOf(true)
+    val showSearch = mutableStateOf(false)
     val showRecents = mutableStateOf(true)
-    // The Collections row at the top of the library. Default on, so nothing changes until the
-    // user turns it off from the library's overflow menu.
-    val showCollections = mutableStateOf(true)
+    // The Collections row at the top of the library.
+    val showCollections = mutableStateOf(false)
     // Card/list translucency over the wallpaper, as a percent (20–100). 100 = the old
     // fully-opaque look; lower lets the library background show through the game rows.
     val libraryOpacity = mutableStateOf(100)
 
     fun load() {
-        showSearch.value = MainActivityRuntime.prefs.getBoolean(SearchKey, true)
+        showSearch.value = MainActivityRuntime.prefs.getBoolean(SearchKey, false)
         showRecents.value = MainActivityRuntime.prefs.getBoolean(RecentsKey, true)
-        showCollections.value = MainActivityRuntime.prefs.getBoolean(CollectionsKey, true)
+        showCollections.value = MainActivityRuntime.prefs.getBoolean(CollectionsKey, false)
         libraryOpacity.value = MainActivityRuntime.prefs.getInt(OpacityKey, 100).coerceIn(20, 100)
     }
 

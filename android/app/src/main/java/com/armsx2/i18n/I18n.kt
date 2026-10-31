@@ -333,6 +333,8 @@ val EN: Map<String, String> = mapOf(
     "app.library.search.desc" to "Show the game search field on the library home screen.",
     "app.library.recents" to "Recently played games",
     "app.library.recents.desc" to "Show the Recently Played section on the library home screen.",
+    "app.library.collections" to "Collections",
+    "app.library.collections.desc" to "Show the Collections row on the library home screen.",
     "app.library.gridNames.desc" to "Show each game's name under its cover in grid view.",
     "app.library.opacity" to "Library opacity",
     "ra.website.open" to "Create an account or browse sets on retroachievements.org \u2197",

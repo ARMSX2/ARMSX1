@@ -379,6 +379,13 @@ fun AppTab() {
             onChange = LibraryChromePreferences::setShowRecents,
         )
 
+        ToggleRow(
+            label = str("app.library.collections"),
+            value = LibraryChromePreferences.showCollections.value,
+            description = str("app.library.collections.desc"),
+            onChange = LibraryChromePreferences::setShowCollections,
+        )
+
         // Moved off the library overflow menu, where it was the odd one out: every other
         // library-appearance preference already lives here beside cover size and opacity.
         ToggleRow(

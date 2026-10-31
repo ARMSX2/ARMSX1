@@ -23,6 +23,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("app.bootLogo", true, SettingsCategory.General),
     SettingsSearchEntry("app.library.search", true, SettingsCategory.General),
     SettingsSearchEntry("app.library.recents", true, SettingsCategory.General),
+    SettingsSearchEntry("app.library.collections", true, SettingsCategory.General),
     SettingsSearchEntry("app.library.coverSize", true, SettingsCategory.General),
     SettingsSearchEntry("games.overflow.gridNames", true, SettingsCategory.General),
     SettingsSearchEntry("app.backup.export", true, SettingsCategory.General),
