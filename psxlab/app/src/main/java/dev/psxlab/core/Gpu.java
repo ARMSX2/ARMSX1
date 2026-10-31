@@ -15,6 +15,11 @@ public final class Gpu implements AutoCloseable {
     private final SoftwareRasterizer raster=new SoftwareRasterizer(vram);
     private final boolean hardwareDrawing;
     private final int internalScale,presentationMode;
+    private final boolean baseVulkanOutput;
+    private volatile boolean shaderPresenterFailed;
+    private boolean displayStretch,displayInteger;
+    private String baseRenderer;
+    private volatile String shaderPresenterError="";
     private volatile HardwareRasterizer hardware;
     private record HighRefresh(int mode,int multiple,float hz,boolean allowed){}
     private volatile HighRefresh highRefresh=new HighRefresh(0,2,0,true);
@@ -86,6 +91,7 @@ public final class Gpu implements AutoCloseable {
     private Gpu(boolean threaded,boolean hardwareDrawing,boolean texturePresentation,boolean vulkanOutput,int scale,int presentationMode) {
         if(scale<1||scale>5)throw new IllegalArgumentException("Invalid internal resolution");
         this.internalScale=scale;this.presentationMode=presentationMode;
+        this.baseVulkanOutput=vulkanOutput;
         if(scale>1&&!NativeRasterizer.AVAILABLE)throw new IllegalStateException("HD rendering requires the native GPU module");
         this.hardwareDrawing=hardwareDrawing;
         Arrays.fill(vram, 0);
@@ -106,11 +112,34 @@ public final class Gpu implements AutoCloseable {
         });
         if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer=scale>1?scale+"× HD drawing / Vulkan display":"Vulkan display / native software";}catch(RuntimeException e){renderer=scale>1?scale+"× HD drawing / OpenGL display (Vulkan unavailable)":"Software (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
     }
-    public String shaderStatus(){return ShaderChain.status();}
-    public void prepareShaders(){if(ShaderChain.requested()&&presentationMode==2){submit(ShaderChain::prepare);sync();}}
+    private void reconcileShaderPresentation(){
+        if(baseVulkanOutput)return;
+        if(ShaderChain.requested()){
+            if(vulkan==null&&!shaderPresenterFailed){
+                try{
+                    VulkanPresenter output=new VulkanPresenter(internalScale);
+                    try{if(hardware!=null)hardware.detachPresentation();output.configureDisplay(shaderAspect,displayStretch,displayInteger);}
+                    catch(RuntimeException error){output.close();throw error;}
+                    vulkan=output;baseRenderer=renderer;renderer=baseRenderer+" / Vulkan shader presentation";ShaderChain.backend(2);
+                }catch(RuntimeException error){shaderPresenterFailed=true;shaderPresenterError=error.getMessage();if(journal!=null)journal.error("gpu.shader.presenter",error);android.util.Log.w("PSXGpu","Shader presentation unavailable; retaining selected renderer",error);}
+            }
+        }else{
+            shaderPresenterFailed=false;shaderPresenterError="";
+            if(vulkan!=null){vulkan.close();vulkan=null;if(hardware!=null)hardware.detachPresentation();renderer=baseRenderer;ShaderChain.backend(presentationMode);}
+        }
+    }
+    public String shaderStatus(){return shaderPresenterFailed?"Shader presentation unavailable: "+shaderPresenterError:ShaderChain.status();}
+    private void shaderPresentationFailed(RuntimeException error){
+        if(journal!=null)journal.error("gpu.shader.presenter",error);
+        if(vulkan!=null){vulkan.close();vulkan=null;}
+        if(hardware!=null)hardware.detachPresentation();
+        shaderPresenterError=error.toString();shaderPresenterFailed=true;renderer=baseRenderer+" (shader unavailable)";
+    }
+    public void prepareShaders(){if(ShaderChain.requested()){submit(()->{reconcileShaderPresentation();if(vulkan!=null)ShaderChain.prepare();});sync();}}
     /** All native display state stays owned by the GPU worker. */
     public void configureDisplay(float aspect,boolean stretch,boolean integerScale){submit(()->{
         shaderAspect=aspect;
+        displayStretch=stretch;displayInteger=integerScale;
         if(hardware!=null)hardware.configureDisplay(aspect,stretch,integerScale);
         if(vulkan!=null)vulkan.configureDisplay(aspect,stretch,integerScale);
     });}
@@ -275,12 +304,21 @@ public final class Gpu implements AutoCloseable {
     private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
         flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,filter?1:0};
         submit(()->{
+            reconcileShaderPresentation();
             if(timing!=null)timing.gpuBegin(renderer,state);
             int decision=presentationDecision(state,extras);
             ShaderChain.phase(decision==PresentationPolicy.SHADER?highRefresh.multiple:1,1,presentationRate,shaderAspect);
             if(timing!=null)timing.presentationSequence(decision==PresentationPolicy.BFI?"bfi":decision==PresentationPolicy.SHADER?"shader_subframes":"normal",decision==PresentationPolicy.BFI||decision==PresentationPolicy.SHADER?highRefresh.multiple:1);
             try{
-                if(internalScale>1){if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage(presentationMode==2?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){if(presentationMode==2&&vulkan!=null){boolean accepted=hardware.presentResolved(surface,state,vulkan.nativeHandle());if(timing!=null)timing.presentation(accepted);}else{boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}}presentExtra(surface,decision,timing);receiver.accept(null);return;}
+                if(internalScale>1||(hardwareDrawing&&hardware!=null&&vulkan!=null)){
+                    if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage(vulkan!=null?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){
+                        boolean accepted;
+                        try{accepted=vulkan!=null?hardware.presentResolved(surface,state,vulkan.nativeHandle()):hardware.present(surface,state);}
+                        catch(RuntimeException error){if(baseVulkanOutput||vulkan==null)throw error;shaderPresentationFailed(error);accepted=hardware.present(surface,state);}
+                        if(timing!=null)timing.presentation(accepted);
+                    }
+                    presentExtra(surface,decision,timing);receiver.accept(null);return;
+                }
                 if(vulkan!=null){
                     try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.convert")){
                         if(vulkanFrames.matches(softwareVramRevision,state))vulkanFrames.reused();

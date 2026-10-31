@@ -26,7 +26,7 @@ internal fun FramePresentationSettings(s: Ps1Settings, onMode: (String) -> Unit,
             "100 Hz for PAL. Inactive at incompatible refresh rates, during fast-forward or rewind. " +
             "Black frame insertion causes flicker and reduces brightness; avoid it if sensitive " +
             "to flashing images. Shader subframes require an enabled, subframe-aware shader " +
-            "and increase GPU load. Neither changes game speed.",
+            "and increase GPU load. Shaders use shared Vulkan presentation with any game renderer. Neither changes game speed.",
         onChange = { i -> onMode(modes[i]) },
     )
     Text(status,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
