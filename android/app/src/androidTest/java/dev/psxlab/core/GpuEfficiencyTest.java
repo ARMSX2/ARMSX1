@@ -5,6 +5,7 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.os.SystemClock;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
+import androidx.test.platform.app.InstrumentationRegistry;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import org.junit.Test;
@@ -14,6 +15,29 @@ import static org.junit.Assert.*;
 /** Private output buffers: validates allocation policy and real posted pixels. */
 @RunWith(AndroidJUnit4.class)
 public class GpuEfficiencyTest {
+    @Test public void drawBatchesCombineWithoutChangingTransferOrder(){
+        for(int scale:new int[]{1,3})try(HardwareRasterizer hardware=new HardwareRasterizer(scale)){
+            int[] expected=new int[1024*512],actual=new int[expected.length],environment={0,0,0,0,1023|(511<<10),0,0};
+            SoftwareRasterizer reference=new SoftwareRasterizer(expected,false);hardware.setVram(expected);
+            for(int batch=0;batch<8;batch++){
+                int[] words=new int[4*11];int at=0;
+                for(int i=0;i<4;i++){
+                    int n=batch*4+i;int[] packet={0x60000000|((n+1)*7),16<<16,16|(16<<16)};
+                    reference.draw(packet,environment);words[at++]=packet.length;System.arraycopy(packet,0,words,at,packet.length);at+=packet.length;System.arraycopy(environment,0,words,at,7);at+=7;
+                }
+                hardware.drawBatch(words);
+            }
+            // A VRAM transfer must flush the pending draw batch before reading it.
+            hardware.copy(16<<16,128|(128<<16),16|(16<<16),0);
+            for(int y=0;y<16;y++)for(int x=0;x<16;x++)expected[(128+y)*1024+128+x]=expected[(16+y)*1024+x];
+            // Upload following the draw/copy must win at the destination pixels.
+            hardware.upload(new int[]{0x7c00001f},0,0,16,2,2,0);expected[16*1024]=0x001f;expected[16*1024+1]=0x7c00;
+            hardware.readVram(actual);assertArrayEquals(expected,actual);
+            String stats=hardware.statistics();
+            if(!"false".equals(InstrumentationRegistry.getArguments().getString("gpuOptimized")))assertTrue(stats,stats.contains(" passes=1 "));
+            android.util.Log.i("GpuEfficiencyTest","32 draws across 8 JNI batches, scale="+scale+" "+stats);
+        }
+    }
     private static int pixel(ImageReader reader)throws Exception{
         long end=SystemClock.uptimeMillis()+5000;
         while(SystemClock.uptimeMillis()<end){
