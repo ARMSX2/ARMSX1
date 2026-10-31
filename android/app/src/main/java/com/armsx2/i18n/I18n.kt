@@ -659,6 +659,7 @@ val EN: Map<String, String> = mapOf(
     "games.recent.clearAll.message" to "This empties the Recently Played shelf. Your games, saves and settings are not touched — titles come back as you play them again.",
     "games.overflow.openNavigation" to "Open navigation",
     "games.overflow.setup" to "Setup / Change Folders",
+    "action.launchGame" to "Launch Game",
     "app.setup.description" to "Game folders, BIOS and user-data location.",
     "games.overflow.sortRecent" to "Sort by recently played",
     "games.overflow.sortTitle" to "Sort by title",

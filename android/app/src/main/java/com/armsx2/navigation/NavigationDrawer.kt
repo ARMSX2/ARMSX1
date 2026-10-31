@@ -208,6 +208,9 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
     // (the old box-drawing characters like ▦ ◉ ⌁ ✦ were unclear per tester feedback).
     val primary = listOf(
         DrawerItem("games.section.library", "🎮", AppRoute.Home),
+        // Boot any file without adding it to the library: a disc image, a playlist or an EBOOT.
+        // Same entry ARMSX2/ARMSX3 have here.
+        DrawerItem("action.launchGame", "📂", onAction = { MainActivityRuntime.promptLaunchGame(); onDismiss() }),
         // Boot straight into the PlayStation system BIOS with no disc — distinct from "BIOS
         // Location" in Game Manager, which manages the emulator's BIOS files.
         DrawerItem("bios.boot.title", "▶️", onAction = { MainActivityRuntime.startBios(); onDismiss() }),
@@ -216,6 +219,11 @@ private fun DrawerContent(selected: AppRoute, onNavigate: (AppRoute) -> Unit, on
         DrawerItem("action.settings", "⚙️", AppRoute.Settings()),
     )
     val managers = listOf(
+        // Re-enter the setup wizard (BIOS and game folders). It lived only at the top of
+        // Settings > App, so it was hard to find; ARMSX2/ARMSX3 put it here, first in the managers,
+        // because it answers "where are my files". BIOS, saves and memory cards stay grouped
+        // under Game Manager below rather than being repeated here.
+        DrawerItem("games.overflow.setup", "📂", onAction = { MainActivityRuntime.reopenSetup(); onDismiss() }),
         DrawerItem("tab.controls", "🕹️", AppRoute.ControllerManager),
         DrawerItem("cheats.title", "✦", AppRoute.PatchManager),
         DrawerItem("tab.customisation", "🎨", AppRoute.Customisation),

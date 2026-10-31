@@ -2287,6 +2287,22 @@ open class MainActivityRuntime : ComponentActivity() {
             setupEditorVisible.value = true
         }
 
+        /**
+         * Open a file picker and boot whatever is chosen, without adding it to the library: the
+         * drawer's Launch Game, as in ARMSX2/ARMSX3. [bootDiscAction], the result handler, was
+         * already here and fully working -- it just had nothing left to open it, so the feature
+         * existed with no way in.
+         */
+        fun promptLaunchGame() {
+            val activity = instance ?: return
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { activity.bootDiscAction.launch(intent) }
+        }
+
         /** The data root that NativeApp.initialize() was actually handed
          *  (captured in kickoffEmucoreInit). EmuFolders::DataRoot is pinned
          *  ONCE per process, so the setup wizard compares against this to know
