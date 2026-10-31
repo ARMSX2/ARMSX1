@@ -27,7 +27,17 @@ std::mutex eglMutex;EGLDisplay sharedDisplay=EGL_NO_DISPLAY;int displayUsers=0;
 EGLDisplay acquireDisplay(){std::lock_guard<std::mutex> lock(eglMutex);if(displayUsers==0){sharedDisplay=eglGetDisplay(EGL_DEFAULT_DISPLAY);if(sharedDisplay==EGL_NO_DISPLAY||!eglInitialize(sharedDisplay,nullptr,nullptr))throw std::runtime_error("EGL display initialization failed");}displayUsers++;return sharedDisplay;}
 void releaseDisplay(){std::lock_guard<std::mutex> lock(eglMutex);if(--displayUsers==0){eglTerminate(sharedDisplay);sharedDisplay=EGL_NO_DISPLAY;}}
 GLuint shader(GLenum type,const char* source){GLuint s=glCreateShader(type);glShaderSource(s,1,&source,nullptr);glCompileShader(s);GLint ok;glGetShaderiv(s,GL_COMPILE_STATUS,&ok);if(!ok){char text[4096]{};glGetShaderInfoLog(s,sizeof(text),nullptr,text);glDeleteShader(s);throw std::runtime_error(std::string("GPU shader: ")+text);}return s;}
-GLuint program(const char* compute,const char* vertex=nullptr,const char* fragment=nullptr){GLuint p=glCreateProgram(),a=shader(compute?GL_COMPUTE_SHADER:GL_VERTEX_SHADER,compute?compute:vertex),b=0;glAttachShader(p,a);if(!compute){b=shader(GL_FRAGMENT_SHADER,fragment);glAttachShader(p,b);}glLinkProgram(p);glDeleteShader(a);if(b)glDeleteShader(b);GLint ok;glGetProgramiv(p,GL_LINK_STATUS,&ok);if(!ok){char text[4096]{};glGetProgramInfoLog(p,sizeof(text),nullptr,text);glDeleteProgram(p);throw std::runtime_error(std::string("GPU program: ")+text);}return p;}
+GLuint program(const char* compute,const char* vertex=nullptr,const char* fragment=nullptr){
+    GLuint p=glCreateProgram(),a=0,b=0;
+    try{
+        a=shader(compute?GL_COMPUTE_SHADER:GL_VERTEX_SHADER,compute?compute:vertex);glAttachShader(p,a);
+        if(!compute){b=shader(GL_FRAGMENT_SHADER,fragment);glAttachShader(p,b);}
+        glLinkProgram(p);glDeleteShader(a);a=0;if(b){glDeleteShader(b);b=0;}
+        GLint ok=0;glGetProgramiv(p,GL_LINK_STATUS,&ok);
+        if(!ok){char text[4096]{};glGetProgramInfoLog(p,sizeof(text),nullptr,text);throw std::runtime_error(std::string("GPU program: ")+text);}
+        return p;
+    }catch(...){if(a)glDeleteShader(a);if(b)glDeleteShader(b);glDeleteProgram(p);throw;}
+}
 std::string scaledShader(const char* source,int scale){std::string text(source),uniform="uniform int scale;";size_t at=text.find(uniform);if(at==std::string::npos)throw std::runtime_error("HD scale declaration missing");text.replace(at,uniform.size(),"const int scale="+std::to_string(scale)+";");return text;}
 void glCheck(){GLenum error=glGetError();if(error!=GL_NO_ERROR)throw std::runtime_error("OpenGL ES error "+std::to_string(error));}
 struct Rect {int x0,y0,x1,y1;bool valid()const{return x0<=x1&&y0<=y1;}bool intersects(const Rect& b)const{return valid()&&b.valid()&&x0<=b.x1&&x1>=b.x0&&y0<=b.y1&&y1>=b.y0;}};
