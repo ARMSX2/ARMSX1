@@ -164,7 +164,7 @@ class XmbGlView(context: Context) : TextureView(context), TextureView.SurfaceTex
             GLES30.glUniform1f(u("flowSpeed"), FLOW_SPEED)
             GLES30.glUniform1f(u("tension"), TENSION)
             GLES30.glUniform1f(u("damping"), DAMPING)
-            GLES30.glUniform1f(u("waveLength"), LENGTH)
+            GLES30.glUniform1f(u("waveLength"), WAVE_LENGTH)
             GLES30.glUniform1f(u("spacing"), SPACING)
             GLES30.glUniform1f(u("perturbation"), PERTURBATION)
             GLES30.glUniform1f(u("perturbationScale"), PERTURBATION_SCALE)
@@ -204,7 +204,7 @@ class XmbGlView(context: Context) : TextureView(context), TextureView.SurfaceTex
                     val legacy = sin((x * PIf * 1.3f + z * 0.8f) - flow * TRAVEL_SPEED1) * TRAVEL_AMP1 * TENSION +
                         sin((x * PIf * 2.8f - z * 1.2f) + flow * TRAVEL_SPEED2) * TRAVEL_AMP2 +
                         PERTURBATION * PERTURBATION_SCALE *
-                        sin((x * (4f + LENGTH * 2f) + z * 4f - flow * 0.6f) * (SPACING * 0.01f))
+                        sin((x * (4f + WAVE_LENGTH * 2f) + z * 4f - flow * 0.6f) * (SPACING * 0.01f))
                     cp[i] = reCore * RE_BLEND + legacy * (1f - RE_BLEND)
                 }
                 for (xi in 0 until STEX_W) splineData[rowBase + xi] = evalSpline(cp, xi.toFloat() / (STEX_W - 1))
@@ -388,7 +388,9 @@ class XmbGlView(context: Context) : TextureView(context), TextureView.SurfaceTex
         private const val FLOW_SPEED = 0.18f
         private const val TENSION = 0.12f
         private const val DAMPING = 0.0001f
-        private const val LENGTH = 0.306001f
+        // Not "length": as a shader uniform that name shadows GLSL's built-in length(), which Mali's
+        // compiler rejects, so the wave never started there. Fix contributed by ygordreyer (ARMSX2 PR #879).
+        private const val WAVE_LENGTH = 0.306001f
         private const val SPACING = 407.658f
         private const val TIME_STEP = 1.0f
         private const val BAND_AMP = 0.200f
