@@ -111,6 +111,7 @@ public final class EngineLog implements AutoCloseable {
         String text=value.toString();out.append('"');for(int i=0;i<Math.min(text.length(),8192);i++){char c=text.charAt(i);switch(c){case '"'->out.append("\\\"");case '\\'->out.append("\\\\");case '\n'->out.append("\\n");case '\r'->out.append("\\r");case '\t'->out.append("\\t");default->{if(c<32)out.append(String.format(Locale.ROOT,"\\u%04x",(int)c));else out.append(c);}}}out.append('"');
     }
     public static String source(String path){
+        if(path.startsWith("texture."))return "psxlab/app/src/main/java/dev/psxlab/core/TexturePacks.java#upload/decode/dump";
         if(path.equals("cpu.compile"))return "psxlab/app/src/main/cpp/cpu_arm64.cpp#compileArm64";
         if(path.equals("cpu.cache.check"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::revalidate";
         if(path.equals("cpu.cache.clear"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::clearCache";

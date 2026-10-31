@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
+import kotlinx.coroutines.delay
+import kr.co.iefriends.pcsx2.NativeApp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -215,6 +217,11 @@ fun Ps1VideoTab() {
         // is on, and resolved through the same helper the push uses, so the path on screen is
         // the path the core was actually handed — including the per-game serial folder.
         if (s.textureDump || s.textureReplacements) {
+            val runtimeStatus by produceState(initialValue = NativeApp.getPs1TextureStatus()) {
+                while (true) { value = NativeApp.getPs1TextureStatus(); delay(1000) }
+            }
+            Text(runtimeStatus, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             Ps1InfoRow(
                 label = str("renderer.textureFolder.label"),
                 value = Ps1Textures.resolveDir(context, s),

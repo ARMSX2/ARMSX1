@@ -65,6 +65,36 @@ public final class Gpu implements AutoCloseable {
         int height=Math.max(1,Math.min(512,(state[6]-state[5])*((state[0]&0x480000)==0x480000?2:1)));
         performance=new Performance(System.nanoTime()-start,width,height,internalScale);
     }
+    private volatile TexturePacks textures;
+    private record TextureConfiguration(boolean dump,boolean replace,String directory){}
+    private volatile TextureConfiguration textureConfiguration;
+    private volatile String textureStatus="Texture dumping and replacements are off";
+    private volatile long[] textureMetrics=new long[9];
+    public String textureStatus(){TexturePacks active=textures;return active==null?textureStatus:(textureConfiguration.replace&&!hardwareDrawing?"Replacements require hardware drawing. ":"")+active.status();}
+    public long[] textureMetrics(){TexturePacks active=textures;return active==null?textureMetrics.clone():active.metrics();}
+    public void configureTextures(boolean dump,boolean replace,String directory){submit(()->{
+        TextureConfiguration next=new TextureConfiguration(dump,replace,directory);
+        if(next.equals(textureConfiguration))return;
+        if(textures!=null){textures.close();textures=null;}
+        if(hardware!=null&&hardwareDrawing)hardware.textures(false);
+        textureConfiguration=next;textureMetrics=new long[9];textureStatus="Texture dumping and replacements are off";
+        if(dump||replace)try{
+            boolean supported=hardware!=null&&hardwareDrawing;
+            if(replace&&!supported&&!dump){textureStatus="Replacements require hardware drawing";return;}
+            textures=new TexturePacks(dump,replace&&supported,directory,journal);
+            if(supported&&replace&&textures.metrics()[8]>0)hardware.textures(true);
+            textureStatus=(replace&&!supported?"Replacements require hardware drawing; dumping is available. ":"")+textures.status();textureMetrics=textures.metrics();
+        }catch(java.io.IOException|RuntimeException error){
+            textureStatus="Texture setup failed: "+error.getMessage();if(journal!=null)journal.error("texture.configure",error);
+            if(textures!=null){textures.close();textures=null;}if(hardware!=null&&hardwareDrawing)hardware.textures(false);
+        }
+    });}
+    private void textureUpload(int[] words,int start,int x,int y,int width,int total,int mask){
+        if(textures==null)return;
+        TexturePacks.Image image=textures.upload(words,start,width,total,mask);
+        if(image!=null&&hardware!=null&&hardwareDrawing)hardware.replacement(image,x,y,width,total/width,mask);
+        textureStatus=textures.status();textureMetrics=textures.metrics();
+    }
     private volatile EngineLog journal;
     private long nextNativeSnapshot;
     private volatile java.util.Map<String,Object> lastNativeTiming=java.util.Map.of();
@@ -232,7 +262,7 @@ public final class Gpu implements AutoCloseable {
     private void flushUpload(){
         if(uploadWords==0)return;
         int[] words=Arrays.copyOf(uploadBuffer,uploadWords);int start=uploadStart,x=uploadX,y=uploadY,w=uploadW,total=uploadW*uploadH,mask=environment[6];uploadWords=0;
-        submit(()->{if(hardware!=null && hardwareDrawing){hardware.upload(words,start,x,y,w,total,mask);hardwareDirty=true;}else{for(int i=0;i<words.length*2 && start+i<total;i++)store(((y+(start+i)/w)&511)*1024+((x+(start+i)%w)&1023),(words[i/2]>>>((i&1)*16))&65535,mask);softwareVramRevision++;}});
+        submit(()->{if(hardware!=null && hardwareDrawing){hardware.upload(words,start,x,y,w,total,mask);hardwareDirty=true;}else{for(int i=0;i<words.length*2 && start+i<total;i++)store(((y+(start+i)/w)&511)*1024+((x+(start+i)%w)&1023),(words[i/2]>>>((i&1)*16))&65535,mask);softwareVramRevision++;}textureUpload(words,start,x,y,w,total,mask);});
     }
     public int read(){
         check();if(readPixels>=readW*readH)return gpuRead;
@@ -307,14 +337,14 @@ public final class Gpu implements AutoCloseable {
     public record Frame(int width,int height,int[] pixels){}
     /** Selected display buffer, including packed 24-bit video frames. */
     public Frame displayFrame(){
-        if(internalScale>1){flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,0};FutureTask<Frame> task=new FutureTask<>(()->hardware.capture(state));submit(task::run);try{return task.get();}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}catch(ExecutionException e){throw new IllegalStateException(e.getCause());}}
+        if(internalScale>1||textureMetrics()[1]!=0){flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,0};FutureTask<Frame> task=new FutureTask<>(()->hardware.capture(state));submit(task::run);try{return task.get();}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}catch(ExecutionException e){throw new IllegalStateException(e.getCause());}}
         sync(true);return captureFrame(gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd);
     }
     /** Ordered scanout without making the CPU wait for rasterization or the pixel copy. */
     public void requestDisplayFrame(java.util.function.Consumer<Frame> receiver){
         flushUpload();
         int status=gpuStatus,x=displayX,y=displayY,hs=horizontalStart,he=horizontalEnd,vs=verticalStart,ve=verticalEnd;
-        submit(()->{long before=diagnosticsEnabled?System.nanoTime():0;Frame frame;if(internalScale>1)frame=hardware.capture(new int[]{status,x,y,hs,he,vs,ve,0});else{readHardware();frame=captureFrame(status,x,y,hs,he,vs,ve);}if(diagnosticsEnabled)diagnosticScanout+=System.nanoTime()-before;receiver.accept(frame);});
+        submit(()->{long before=diagnosticsEnabled?System.nanoTime():0;Frame frame;if(internalScale>1||textureMetrics()[1]!=0)frame=hardware.capture(new int[]{status,x,y,hs,he,vs,ve,0});else{readHardware();frame=captureFrame(status,x,y,hs,he,vs,ve);}if(diagnosticsEnabled)diagnosticScanout+=System.nanoTime()-before;receiver.accept(frame);});
     }
     /** GPU scanout into a persistent texture and an Android window surface; null means no host pixel copy. */
     public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver){requestSurfaceFrame(surface,filter,receiver,null);}
@@ -419,7 +449,7 @@ public final class Gpu implements AutoCloseable {
         return out;
     }
     @Override public void close() {try{sync();}finally{
-        Runnable cleanup=()->{if(vulkan!=null){vulkan.close();vulkan=null;}if(hardware!=null){hardware.close();hardware=null;}};
+        Runnable cleanup=()->{if(textures!=null){textures.close();textures=null;}if(vulkan!=null){vulkan.close();vulkan=null;}if(hardware!=null){hardware.close();hardware=null;}};
         if(worker!=null){FutureTask<Void> close=new FutureTask<>(cleanup,null);try{worker.execute(close);close.get();}catch(InterruptedException e){Thread.currentThread().interrupt();}catch(ExecutionException e){throw new IllegalStateException(e);}finally{worker.shutdown();}}
         else cleanup.run();
     }}

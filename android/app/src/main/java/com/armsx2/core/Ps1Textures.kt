@@ -51,7 +51,7 @@ object Ps1Textures {
     /** Push an in-memory snapshot, for callers that already hold one. */
     fun push(context: Context, s: Ps1Settings) {
         val dir = resolveDir(context, s)
-        runCatching { NativeApp.setPs1TextureOptions(s.textureDump, s.textureReplacements, dir) }
+        runCatching { NativeApp.setPs1TextureOptions(s.textureDump, s.textureReplacements, dir, s.textureDir.isBlank()) }
     }
 
     /**

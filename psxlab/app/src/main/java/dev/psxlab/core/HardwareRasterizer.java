@@ -23,6 +23,10 @@ public final class HardwareRasterizer implements AutoCloseable {
     void fill(int color,int xy,int wh){fillNative(handle,color,xy,wh);}
     void copy(int from,int to,int wh,int mask){copyNative(handle,from,to,wh,mask);}
     void upload(int[] words,int start,int x,int y,int width,int total,int mask){uploadNative(handle,words,start,x,y,width,total,mask);}
+    void textures(boolean enabled){texturesNative(handle,enabled);}
+    void replacement(TexturePacks.Image image,int x,int y,int w,int h,int mask){replacementNative(handle,image.argb(),image.width(),image.height(),x,y,w,h,mask);}
+    private static native void texturesNative(long handle,boolean enabled);
+    private static native void replacementNative(long handle,int[] pixels,int iw,int ih,int x,int y,int w,int h,int mask);
     boolean present(Surface surface,int[] state){return presentNative(handle,surface,state);}
     boolean presentResolved(Surface surface,int[] state,long vulkan){return presentResolvedNative(handle,surface,state,vulkan);}
     Gpu.Frame capture(int[] state){int status=state[0],divider=(status&0x10000)!=0?7:switch((status>>>17)&3){case 0->10;case 1->8;case 2->5;default->4;};int w=Math.max(1,Math.min(1024,(state[4]-state[3])/divider))*scale,h=Math.max(1,Math.min(512,(state[6]-state[5])*((status&0x480000)==0x480000?2:1)))*scale;return new Gpu.Frame(w,h,captureNative(handle,state));}

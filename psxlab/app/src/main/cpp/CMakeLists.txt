@@ -19,7 +19,7 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
 endif()
 target_compile_options(psxtempo PRIVATE -O3 -ffast-math)
 
-add_library(psxgpu SHARED raster_jni.cpp hardware_gpu.cpp vulkan_output.cpp shader_chain.cpp shader_jni.cpp)
+add_library(psxgpu SHARED raster_jni.cpp texture_hash.cpp hardware_gpu.cpp vulkan_output.cpp shader_chain.cpp shader_jni.cpp)
 target_link_libraries(psxgpu PRIVATE EGL GLESv3 android vulkan log dl)
 target_compile_features(psxgpu PRIVATE cxx_std_17)
 target_compile_options(psxgpu PRIVATE -O3 -fwrapv -Wall -Wextra)

@@ -70,7 +70,7 @@ Some historical Java method names contain “Swan” for source compatibility wi
 the UI. They do not load another engine. Available diagnostics/state/card paths
 delegate to PSX Lab. Unimplemented features return explicit empty/error results:
 PGXP, achievements, shader chains, custom drivers, multitap, cheats, rewind,
-runahead, embedded-PBP disc switching and advanced texture controls are not
+runahead and embedded-PBP disc switching are not
 implemented by this backend. Their presence in the existing UI is not a
 compatibility claim. Native resolution and the existing shared GLES HD path are
 supported; Vulkan is a presentation backend, not a separate polygon core.
@@ -91,3 +91,6 @@ branch. The updated Compose host has also passed 170 JVM checks. Build/JVM check
 Full lifecycle/controller reconnection, completed levels/movies, CD-DA and real
 multidisc handoffs still require broader testing. Existing source-publication
 permission records do not imply release/asset clearance.
+
+Texture dumping and raw VRAM-write replacements use the own-engine host service.
+See `docs/psxlab-core-compatibility.md` for format, limits and rendering restrictions.

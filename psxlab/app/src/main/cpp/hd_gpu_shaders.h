@@ -22,31 +22,34 @@ uniform int count;
 uniform int countPixels;
 uniform int serialMode;
 uniform int scale;
+uniform int replacementTextures;
 uint readHd(int at){return imageLoad(hdImage,ivec2(at%(1024*scale),at/(1024*scale))).r;}
 void writeHd(int at,uint value){imageStore(hdImage,ivec2(at%(1024*scale),at/(1024*scale)),uvec4(value,0,0,0));}
 int e(int at,int n){return q[at+8+n];}
 int floorDiv(int a,int b){return a/b-((a%b)<0?1:0);}
 int blend(int back,int front,int mode){if(mode==0)return(back>>1)+(front>>1);if(mode==1)return min(31,back+front);if(mode==2)return max(0,back-front);return min(31,back+(front>>2));}
-int texturePixel(int at,int u,int v,int clut){int window=e(at,2),mx=(window&31)*8,my=((window>>5)&31)*8;
+int texturePixel(int at,int u,int v,int clut,ivec2 fraction){int window=e(at,2),mx=(window&31)*8,my=((window>>5)&31)*8;
  u=((u&255)&~mx)|(((window>>10)&31)*8&mx);v=((v&255)&~my)|(((window>>15)&31)*8&my);
  int page=e(at,1),x=(page&15)*64,y=((page>>4)&1)*256+v,depth=(page>>7)&3;
- if(depth>=2)return int(ram[(y&511)*1024+((x+u)&1023)]);
- int packed=int(ram[(y&511)*1024+((x+(u>>(depth==0?2:1)))&1023)]);
+ if(depth>=2){ivec2 p=ivec2((x+u)&1023,y&511);return replacementTextures!=0?int(imageLoad(hdImage,p*scale+(fraction*scale)/65536).r):int(ram[p.y*1024+p.x]);}
+ ivec2 packedAt=ivec2((x+(u>>(depth==0?2:1)))&1023,y&511);
+ int packed=replacementTextures!=0?int(imageLoad(hdImage,packedAt*scale).r):int(ram[packedAt.y*1024+packedAt.x]);
  int index=depth==0?(packed>>((u&3)*4))&15:(packed>>((u&1)*8))&255;
- return int(ram[((clut>>6)&511)*1024+(((clut&63)*16+index)&1023)]);
+ ivec2 clutAt=ivec2(((clut&63)*16+index)&1023,(clut>>6)&511);
+ return replacementTextures!=0?int(imageLoad(hdImage,clutAt*scale).r):int(ram[clutAt.y*1024+clutAt.x]);
 }
 void drawAt(int x,int y,uint liveMask){
  while(liveMask!=0u){int n=findLSB(liveMask);liveMask&=liveMask-1u;int at=n*64;if(x<q[at+4]*scale||y<q[at+5]*scale||x>=(q[at+6]+1)*scale||y>=(q[at+7]+1)*scale)continue;
-  int dx=x/scale-q[at+4],dy=y/scale-q[at+5],sx=x%scale,sy=y%scale,type=q[at],op=q[at+1];ivec3 color;ivec2 uv=ivec2(0);
+  int dx=x/scale-q[at+4],dy=y/scale-q[at+5],sx=x%scale,sy=y%scale,type=q[at],op=q[at+1];ivec3 color;ivec2 uv=ivec2(0),fraction=ivec2(0);
   if(type==0){bool inside=true;for(int edge=0;edge<3;edge++){int p=at+16+edge*4;int w=(q[p]+q[p+1]*dx+q[p+2]*dy)*scale+q[p+1]*sx+q[p+2]*sy;if(w<0||(w==0&&q[p+3]==0))inside=false;}if(!inside)continue;}
-  if(type<2){int values[5];for(int i=0;i<5;i++)values[i]=int(uint(q[at+28+i])+uint(q[at+33+i])*uint(dx)+uint(q[at+38+i])*uint(dy)+uint((q[at+33+i]/scale)*sx+(q[at+33+i]%scale)*sx/scale+(q[at+38+i]/scale)*sy+(q[at+38+i]%scale)*sy/scale))>>16;color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);}
+  if(type<2){int values[5];for(int i=0;i<5;i++){int fixedValue=int(uint(q[at+28+i])+uint(q[at+33+i])*uint(dx)+uint(q[at+38+i])*uint(dy)+uint((q[at+33+i]/scale)*sx+(q[at+33+i]%scale)*sx/scale+(q[at+38+i]/scale)*sy+(q[at+38+i]%scale)*sy/scale));values[i]=fixedValue>>16;if(i>=3)fraction[i-3]=fixedValue&65535;}color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);}
   else{int ax=q[at+16],ay=q[at+17],lx=q[at+18],ly=q[at+19],steps=q[at+20];int i=abs(lx)>=abs(ly)?(x/scale-ax)*(lx<0?-1:1):(y/scale-ay)*(ly<0?-1:1);if(i<0||i>steps)continue;
    int px=steps==0?ax:ax+floorDiv(lx*i+steps/2,steps),py=steps==0?ay:ay+floorDiv(ly*i+steps/2,steps);if(px!=x/scale||py!=y/scale)continue;
    for(int k=0;k<3;k++)color[k]=q[at+28+k]+(steps==0?0:q[at+33+k]*i/steps);
   }
   int address=y*(1024*scale)+x,back=int(readHd(address));if((e(at,6)&2)!=0&&(back&32768)!=0)continue;
   bool textured=(op&4)!=0,semi=(op&2)!=0;int mask=0;
-  if(textured){int texel=texturePixel(at,uv.x,uv.y,q[at+2]);if(texel==0)continue;mask=texel&32768;semi=semi&&mask!=0;ivec3 tex=ivec3(texel&31,(texel>>5)&31,(texel>>10)&31);color=(op&1)!=0?tex*8:(tex*color)>>4;}
+  if(textured){int texel=texturePixel(at,uv.x,uv.y,q[at+2],fraction);if(texel==0)continue;mask=texel&32768;semi=semi&&mask!=0;ivec3 tex=ivec3(texel&31,(texel>>5)&31,(texel>>10)&31);color=(op&1)!=0?tex*8:(tex*color)>>4;}
   const int dither[16]=int[16](-4,0,-3,1,2,-2,3,-1,-3,1,-4,0,3,-1,2,-2);int delta=q[at+3]!=0?dither[((y/scale)&3)*4+((x/scale)&3)]:0;color=clamp((color+delta)>>3,ivec3(0),ivec3(31));
   if(semi){int mode=(e(at,1)>>5)&3;for(int k=0;k<3;k++)color[k]=blend((back>>(k*5))&31,color[k],mode);}
   writeHd(address,uint(color.r|(color.g<<5)|(color.b<<10)|mask|((e(at,6)&1)<<15)));if(countPixels!=0)atomicAdd(pixels,1u);

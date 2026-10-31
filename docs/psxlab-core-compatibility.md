@@ -194,3 +194,35 @@ RAM aliases, delay-slot replacement and DMA writes. CPU interpreter/recompiler,
 event scheduling and state/PCM continuation are checked separately. The Samsung
 A52s report identifies CPU pressure; these checks do not establish a universal
 performance gain on that phone or on a Snapdragon 865 without device retesting.
+
+
+## Texture dumping and replacements (own engine)
+
+Both texture switches now connect to the PSX Lab GPU worker. Disc boot identifiers
+provide the automatic `textures/SERIAL/` folder; custom folders remain supported.
+Each complete GP0 upload uses XXH3-128 over little-endian words, high half followed
+by low half in `vram-write-<32 hex digits>.png`. PNG alpha 0/255/128 preserves
+transparency and STP. This is the raw VRAM-write format, not a conversion of
+arbitrary decoded-texture or older psxe/FNV packs.
+
+Dumping works with software/hardware drawing. Replacements require hardware
+drawing and use a separate enhanced image, including hardware 1x. OpenGL and
+Vulkan presentation both see it; CPU/DMA readback and save-state VRAM retain the
+original pixels. Protected-mask uploads and self-feedback retain native rendering
+rather than applying a conflicting replacement. Indexed uploads retain their
+packed-index/CLUT interpretation; RGB24 scanout stays native. Replacement detail
+is limited by internal scale.
+
+Limits: 16 MiB decoded cache, 4 megapixels/image, uniform 1x–8x dimensions, 8192
+scanned entries, 4096 dumped images/session and four queued PNG writes. Dumping
+has an asynchronous worker. First-use decoding runs on the GPU worker and its
+cost is logged. Both switches off bypass hashing/PNG/cache work. Empty replacement
+folders avoid hashing and activating the enhanced replacement path. Disabling
+packs clears caches and frees the extra hardware-1x resources; teardown joins
+the writer. Toggle replacements off/on to rescan files added during a session.
+
+Settings status and diagnostic reports expose index size, lookup/hit/write counts,
+cache bytes, errors and skips. Generated-image Android tests verify all 65536
+VRAM values round-trip through PNG, real OpenGL/Vulkan output changes at 1x/3x,
+guest VRAM remains unchanged, repeated toggles restore original output, invalid
+dimensions are reported and the writer leaves no session thread behind.

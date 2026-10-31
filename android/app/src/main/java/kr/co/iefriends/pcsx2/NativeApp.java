@@ -306,9 +306,10 @@ public class NativeApp {
 			return title + "|" + serial + "|" + serial;
 		} catch (Throwable t) { return null; }
 	}
-	public static String getGameSerial() { unsupported("getGameSerial"); return ""; }
+	public static String getGameSerial() { return lab==null?"":lab.gameSerial(); }
 	/** Actual texture hook counters: dump enabled, replacement hook enabled, lookups, PNG writes, hits. */
-	public static long[] getSwanTextureMetrics() { unsupported("getSwanTextureMetrics"); return new long[0]; }
+	public static long[] getSwanTextureMetrics() { return lab==null?new long[9]:lab.textureMetrics(); }
+    public static String getPs1TextureStatus(){return lab==null?"Start a game to activate texture options":lab.textureStatus();}
 	public static String getGameCRC() { return ""; }
 	/** Emulated frames per second, averaged over the core's last half-second window. 0 while no
 	 *  game is stepping (stopped or paused). Non-blocking — it reads an atomic the emulation loop
@@ -576,7 +577,8 @@ public class NativeApp {
 	 *  Both flags false tears the subsystem down; nothing is allocated in that state.
 	 *  Boot-time values come from settings.toml ({@code [video] texture_dump},
 	 *  {@code texture_replacements}, {@code texture_dir}). */
-	public static void setPs1TextureOptions(boolean dump, boolean replace, String dir) { unsupported("setPs1TextureOptions"); }
+	public static void setPs1TextureOptions(boolean dump, boolean replace, String dir) { setPs1TextureOptions(dump,replace,dir,false); }
+    public static void setPs1TextureOptions(boolean dump,boolean replace,String dir,boolean automatic){if(lab!=null)lab.textureOptions(dump,replace,dir,automatic);}
 
 	public static void setPadVibration(boolean isonoff) {  }
 	/** Implemented natively. [index] is this front-end's pad code space (Android KEYCODE_*
