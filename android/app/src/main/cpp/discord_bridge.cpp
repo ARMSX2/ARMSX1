@@ -198,6 +198,29 @@ namespace
 		DLOGI("status -> %s", StatusName(s));
 	}
 
+	// Discord rejects an ENTIRE UpdateRichPresence when any one text field is outside 2..128
+	// characters -- "Field \"state\": String length is out of range. Must be between 2 and 128" --
+	// and then NOTHING shows: not the game, not the cover. So every text field goes through here.
+	// Too long is cut at a UTF-8 character boundary (titles and RA lines can be Japanese) with an
+	// ellipsis; too short takes [fallback]. Byte length bounds character length, so <= 128 bytes is
+	// always <= 128 characters.
+	std::string DiscordField(const std::string& value, const char* fallback)
+	{
+		constexpr size_t kMax = 128;
+		std::string out = value;
+		if (out.size() > kMax)
+		{
+			size_t cut = kMax - 3;
+			while (cut > 0 && (static_cast<unsigned char>(out[cut]) & 0xC0) == 0x80)
+				--cut; // never split a multi-byte character
+			out.resize(cut);
+			out += "...";
+		}
+		if (out.size() < 2)
+			out = fallback;
+		return out;
+	}
+
 	// Push the remembered game to Discord. Caller must NOT hold the mutex: UpdateRichPresence can
 	// invoke its callback inline.
 	void PushPresence()
@@ -224,7 +247,7 @@ namespace
 		activity.SetType(discordpp::ActivityTypes::Playing);
 		if (!title.empty())
 		{
-			activity.SetDetails(title);
+			activity.SetDetails(DiscordField(title, "PlayStation game"));
 			// The member list then reads "Playing <game>" instead of "Playing ARMSX". The library keeps
 			// the application name. Contributed by bshar1865 (https://github.com/bshar1865), ported from
 			// their PCSX2 PR #15085 by way of ARMSX3.
@@ -235,7 +258,11 @@ namespace
 			// publish about someone. Falls back to the serial so this stays the in-a-game marker: a
 			// friend's client decides "library or game" purely from whether State is set, so a game
 			// with no serial AND no RA still has to set something.
-			activity.SetState(!ra.empty() ? ra : (serial.empty() ? std::string("-") : serial));
+			// The fallback used to be "-": ONE character, below Discord's minimum of two, so a game
+			// with no RA line and no readable serial had its whole presence rejected and showed
+			// nothing at all. "PlayStation" is a real second line, and it is still non-empty, which
+			// is what keeps the in-a-game marker above working.
+			activity.SetState(DiscordField(!ra.empty() ? ra : serial, "PlayStation"));
 		}
 		else
 		{
@@ -261,7 +288,7 @@ namespace
 		// LargeText carries the SERIAL, because State no longer can -- a friend's client reads this
 		// to look up cover art. Nothing else may be appended: it is parsed, not just shown. (Hover
 		// text on the cover is a reasonable home for a serial anyway.)
-		assets.SetLargeText(serial.empty() ? (title.empty() ? std::string("ARMSX") : title) : serial);
+		assets.SetLargeText(DiscordField(serial.empty() ? (title.empty() ? std::string("ARMSX") : title) : serial, "ARMSX"));
 		if (!cover.empty() && use_key)
 		{
 			// Small badge in the corner keeps ARMSX identifiable when the big image is a cover.
