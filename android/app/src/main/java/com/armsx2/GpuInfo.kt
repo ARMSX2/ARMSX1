@@ -71,11 +71,20 @@ object GpuInfo {
         val r = renderer ?: return null
         if (!r.contains("Adreno", ignoreCase = true)) return null
         val model = Regex("""(\d{3,4})""").find(r.substringAfter("Adreno", ""))?.value?.toIntOrNull()
+        // Labels are the EXACT source names in CustomDriver's download list. They used to be
+        // short nicknames ("GameHub 8Elite", "Mr Purple", "KIMCHI") that matched none of those
+        // entries, so the recommendation named something the user could not find in the list it
+        // sat above. Matches ARMSX3's table.
         return when {
-            model != null && model >= 800 -> Recommendation("GameHub 8Elite", "Turnip tuned for Snapdragon 8 Elite / Adreno 8xx")
-            model != null && model >= 700 -> Recommendation("Mr Purple", "purple-turnip builds for Adreno 7xx")
-            model != null && model in 600..699 -> Recommendation("KIMCHI", "AdrenoTools Turnip for Adreno 6xx")
-            else -> Recommendation("KIMCHI", "AdrenoTools Turnip (Adreno)")
+            // Adreno 8xx (Snapdragon 8 Elite / 830 and up): StevenMXZ's gen8 Turnip builds.
+            // Deliberately names the SOURCE, not a version: ARMSX3 once warned off one build on
+            // the 830 on the strength of a single game, which was later traced to that emulator's
+            // own command stream rather than the driver. Recommend the source; let the user pick.
+            model != null && model >= 800 -> Recommendation("StevenMXZ · Adreno-Tools",
+                "Turnip gen8 builds for Snapdragon 8 Elite / Adreno 8xx.")
+            model != null && model >= 700 -> Recommendation("MrPurple · purple-turnip", "purple-turnip builds for Adreno 7xx")
+            model != null && model in 600..699 -> Recommendation("AdrenoToolsDrivers", "AdrenoTools Turnip for Adreno 6xx")
+            else -> Recommendation("AdrenoToolsDrivers", "AdrenoTools Turnip (Adreno)")
         }
     }
 }
