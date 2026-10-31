@@ -24,6 +24,13 @@ public final class Bus {
         if(nativeMemory==null){for(int i=0;i<bytes;i++)ram[offset+i]=(byte)(value>>>(i*8));}
         else{if(bytes==4)nativeMemory.putInt(offset,value);else if(bytes==2)nativeMemory.putShort(offset,(short)value);else nativeMemory.put(offset,(byte)value);if((nativeMemory.get(CODE_MASK_OFFSET+(offset>>>5))&(1<<((offset>>>2)&7)))!=0){int at=GEN_OFFSET+(offset>>>12)*8;nativeMemory.putLong(at,nativeMemory.getLong(at)+1);}}
     }
+    // Physical RAM patches bypass guest cache isolation, retain code-cache invalidation,
+    // and skip unchanged values. Unaligned 16-bit cheat writes cross words safely.
+    void patchRam(int address,int value,int width){
+        if((width!=1&&width!=2)||address<0||address>ram.length-width)throw new IllegalArgumentException("Invalid cheat RAM patch");
+        if(width==2&&(address&1)==0){if(memory16(ram,address,0)!=(value&65535))storeRam(address,value,2);}
+        else for(int i=0;i<width;i++){int next=(value>>>(i*8))&255;if(memory8(ram,address+i,0)!=next)storeRam(address+i,next,1);}
+    }
     public final byte[] ram=new byte[2*1024*1024];
     private final int[] instructionWords=new int[512*1024];
     private final boolean[] instructionValid=new boolean[512*1024];

@@ -226,3 +226,22 @@ cache bytes, errors and skips. Generated-image Android tests verify all 65536
 VRAM values round-trip through PNG, real OpenGL/Vulkan output changes at 1x/3x,
 guest VRAM remains unchanged, repeated toggles restore original output, invalid
 dimensions are reported and the writer leaves no session thread behind.
+
+
+## GameShark cheats
+
+NativeApp's catalogue load/list, selection and armed-count calls now delegate to
+a per-backend own-engine cheat service. Startup reads the selected game's
+`[cheats]` settings; edits during play publish an immutable selection. Applied
+once per emulated frame: 30/80 writes, 50 slides, D0-D3 16-bit and E0-E3 8-bit
+conditions. Group boundaries reset condition/slide state. Unsupported code types
+remain visible in the list and do not execute. Only physical 2 MiB RAM is patched;
+invalid addresses cannot alias another area or touch device registers. Unaligned
+halfword writes are handled as two bytes. Unchanged values bypass stores and
+cache invalidations; changed code uses the same native RAM and instruction-cache
+invalidation as normal Bus writes. The disabled per-frame path returns immediately.
+Catalogue memory is bounded by 4 MiB text, 4096 groups and 65536 lines. Names with
+commas/escaped quotes survive settings parsing. Each game's boot loads a fresh
+catalogue; master-off disarms it. Diagnostics expose armed groups and missing
+selection names. This does not implement encrypted codes or arbitrary GameShark
+extensions beyond the listed types.

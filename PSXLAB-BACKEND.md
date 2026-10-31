@@ -69,7 +69,7 @@ The adapter verifies a save backup before first initialization.
 Some historical Java method names contain “Swan” for source compatibility with
 the UI. They do not load another engine. Available diagnostics/state/card paths
 delegate to PSX Lab. Unimplemented features return explicit empty/error results:
-PGXP, achievements, shader chains, custom drivers, multitap, cheats, rewind,
+PGXP, achievements, shader chains, custom drivers, multitap, rewind,
 runahead and embedded-PBP disc switching are not
 implemented by this backend. Their presence in the existing UI is not a
 compatibility claim. Native resolution and the existing shared GLES HD path are
@@ -94,3 +94,6 @@ permission records do not imply release/asset clearance.
 
 Texture dumping and raw VRAM-write replacements use the own-engine host service.
 See `docs/psxlab-core-compatibility.md` for format, limits and rendering restrictions.
+
+GameShark write8/write16, slide and D0-D3/E0-E3 conditionals use the own-engine
+cheat service; unsupported types are flagged in the catalogue.

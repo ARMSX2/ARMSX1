@@ -1454,23 +1454,23 @@ public class NativeApp {
 	/** Parse `path` as the current cheat catalogue, replacing whatever was loaded.
 	 *  Returns the number of entries, or -1 when the file cannot be read. "" clears —
 	 *  which is how "this game has no cheat file" is expressed. Arms nothing on its own. */
-	public static int cheatsLoad(String path) { unsupported("cheatsLoad"); return -1; }
+	public static int cheatsLoad(String path) { return lab==null?-1:lab.cheatsLoad(path); }
 
 	/** The catalogue as the CORE parsed it, so the app's own reader can be checked against it
 	 *  instead of assumed equal. Records separated by U+001E; fields by U+001F:
 	 *  name, code-line count, "1"/"0" for "uses a code type this build does not implement",
 	 *  description. NEVER null — an empty catalogue is "". */
-	public static String cheatsList() { unsupported("cheatsList"); return ""; }
+	public static String cheatsList() { return lab==null?"":lab.cheatsList(); }
 
 	/** Arm exactly `enabledNames` from the loaded catalogue and apply from the next frame.
 	 *  `master` false disarms everything regardless of the list. Returns the number armed, or
 	 *  -1 when RetroAchievements hardcore is active — in which case nothing is armed and the
 	 *  caller should say so rather than showing switches that do nothing. */
-	public static int cheatsApply(boolean master, String[] enabledNames) { unsupported("cheatsApply"); return -1; }
+	public static int cheatsApply(boolean master, String[] enabledNames) { return lab==null?-1:lab.cheatsApply(master,enabledNames); }
 
 	/** How many entries the running machine has armed right now. Shown in the UI instead of a
 	 *  count of ticked boxes, so "you ticked five" and "five are running" cannot disagree. */
-	public static int cheatsArmedCount() { unsupported("cheatsArmedCount"); return 0; }
+	public static int cheatsArmedCount() { return lab==null?0:lab.cheatsArmedCount(); }
 
 	// Discord lives in the :discord process now, not in emucore — see
 	// com.armsx2.discord.DiscordNative. ARMSX2 is GPL-3.0+ and the Social SDK is proprietary, so
