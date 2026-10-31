@@ -18,7 +18,7 @@ import javax.net.ssl.HttpsURLConnection
 
 /** Immutable pack versions, staged installs and no changes to user-managed texture folders. */
 object TexturePackRepository {
-    const val CATALOGUE_URL = "https://raw.githubusercontent.com/ARMSX2/ARMSX1/android-compose/texture-packs/catalogue.tsv"
+    const val CATALOGUE_URL = "https://raw.githubusercontent.com/ARMSX2/ARMSX1/main/texture-packs/catalogue.tsv"
     private val installLock = Mutex()
     private val catalogueLock = Mutex()
     private fun root(context: Context) = File(context.filesDir, "texture-packs").apply { check(isDirectory || mkdirs()) }

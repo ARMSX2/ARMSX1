@@ -12,7 +12,7 @@ import javax.net.ssl.HttpsURLConnection
 
 object Ps1CheatDownloader {
     // Public data only. No account, token or APK download required.
-    const val UPDATE_URL = "https://raw.githubusercontent.com/ARMSX2/ARMSX1/android-compose/cheats/ps1-cheats-update.zip"
+    const val UPDATE_URL = "https://raw.githubusercontent.com/ARMSX2/ARMSX1/main/cheats/ps1-cheats-update.zip"
     private val downloadLock = Mutex()
 
     suspend fun download(context: Context): Boolean = downloadLock.withLock {

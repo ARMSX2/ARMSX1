@@ -2,7 +2,7 @@ name: Android original engine checks
 
 on:
   push:
-    branches: [android-compose]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
