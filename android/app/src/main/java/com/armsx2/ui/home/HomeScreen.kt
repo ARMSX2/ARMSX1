@@ -292,6 +292,7 @@ fun HomeScreen(
     LaunchedEffect(directories, nativeReady) { viewModel.load(directories, nativeReady) }
     DisposableEffect(viewModel, onOpenMenu) {
         HomeInputController.bind(viewModel, onOpenMenu)
+        HomeInputController.setGameMenu { menuGame = it }
         onDispose { HomeInputController.unbind(viewModel) }
     }
 
@@ -438,6 +439,7 @@ fun HomeScreen(
                 HomeInputController.setRecents(shownRecents.size) { i ->
                     shownRecents.getOrNull(i)?.let(viewModel::launch)
                 }
+                HomeInputController.setRecentGame { i -> shownRecents.getOrNull(i) }
             }
             // Camera-follow: while browsing with a controller (Grid zone), keep the
             // selected cover on screen. The grid has leading full-span items (toolbar,
@@ -1598,6 +1600,9 @@ object HomeInputController {
     private var recentCount = 0
     private var clearRecentsAction: (() -> Unit)? = null
     private var recentLauncher: ((Int) -> Unit)? = null
+    // Triangle's targets: the long-press menu, and the game behind a Recently Played slot.
+    private var gameMenu: ((GameInfo) -> Unit)? = null
+    private var recentGame: ((Int) -> GameInfo?)? = null
     private var searchAvailable = false
     private var searchConfirm: (() -> Unit)? = null
     private var toolbarAtBottom = false
@@ -1623,6 +1628,8 @@ object HomeInputController {
             confirmPress.reset()
             owner = null
             openMenu = null
+            gameMenu = null
+            recentGame = null
             clearRecentsAction = null
             collectionActions = emptyList()
             collectionEditActions = emptyList()
@@ -1719,6 +1726,12 @@ object HomeInputController {
     }
 
     fun setClearRecentsAction(action: () -> Unit) { clearRecentsAction = action }
+
+    /** HomeScreen registers how to open a game's long-press menu, for Triangle. */
+    fun setGameMenu(open: (GameInfo) -> Unit) { gameMenu = open }
+
+    /** HomeScreen registers how to look up the game in a Recently Played slot. */
+    fun setRecentGame(lookup: (Int) -> GameInfo?) { recentGame = lookup }
 
     /** HomeScreen registers the currently-shown Recently-Played games (0 when the
      *  shelf is hidden, e.g. while searching). */
@@ -1856,6 +1869,23 @@ object HomeInputController {
                 viewModel.launch(game)
             }
         }
+        return true
+    }
+
+    /**
+     * Triangle: the highlighted game's long-press menu (play, settings, cheats, add to home screen,
+     * ...), which a controller otherwise had no way to open. The game is the one highlighted in
+     * the grid, or in the Recently Played row when that has the selector. Ported from ARMSX3.
+     */
+    fun openSelectedMenu(): Boolean {
+        finishTileMove()
+        val viewModel = owner ?: return false
+        val game = when (zone.value) {
+            HomeZone.Grid -> viewModel.selectedGame()
+            HomeZone.Recents -> recentGame?.invoke(recentIndex.intValue)
+            else -> null
+        } ?: return false
+        gameMenu?.invoke(game) ?: return false
         return true
     }
 

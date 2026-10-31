@@ -4067,10 +4067,15 @@ open class MainActivityRuntime : ComponentActivity() {
                         com.armsx2.ui.home.HomeInputController.openSelectedSettings()
                     return true
                 }
-                // #267: Y (Triangle) opens the library SEARCH — the requested
-                // single-button access. While the panel is open Y is swallowed
-                // (the panel owns nav; B closes it).
-                if (kc == KeyEvent.KEYCODE_BUTTON_Y) return true
+                // Y (Triangle) opens the highlighted game's long-press menu, the controller
+                // equivalent of long-press (play, settings, cheats, add to home screen...). It used
+                // to be swallowed here and do nothing: the library search it once opened (#267) is
+                // reached from the Search row instead. Matches ARMSX2/ARMSX3.
+                if (kc == KeyEvent.KEYCODE_BUTTON_Y) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
+                        com.armsx2.ui.home.HomeInputController.openSelectedMenu()
+                    return true
+                }
                 // Shoulder buttons drive the touch-only toolbar toggles so the
                 // whole library is controller-reachable: R1 cycles the view mode
                 // (Grid → List → Shelf — "all 3 modes"), L1 cycles the sort order.
