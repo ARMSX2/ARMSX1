@@ -7,9 +7,8 @@ import java.io.File
 import java.io.IOException
 
 /**
- * SwanStation's raw 128 KiB cards under <dataRoot>/swanstation/cards.
- * Slot 1 is per-game (the actual mounted path is recorded after a completed run); Slot 2 is
- * shared. Old-core slot1.mcd/slot2.mcd files are not implicitly migrated or overwritten.
+ * PSX Lab's raw 128 KiB shared cards under <dataRoot>/psxlab/cards.
+ * Both slots are shared between games. Old-core slot1.mcd/slot2.mcd files are not implicitly migrated or overwritten.
  *
  * The VM keeps card images in memory, so file edits must happen between sessions under
  * [sessionLock]. Imports replace one explicitly selected destination, retain a backup, and
@@ -41,12 +40,8 @@ object Ps1MemoryCards {
     /** Resolve this game's actual mounted card, or the last mount when no game was selected. */
     fun cardFile(context: Context, slot: Int, gameSource: String? = null): File {
         require(slot in SLOTS)
-        if (gameSource == null) return Ps1Config.memoryCardFile(context, slot)
-        val root = cardDirectory(context)
-        return Ps1CardBindings.imported(root, gameSource, slot)
-            ?: Ps1CardBindings.resolve(root, gameSource, slot)
-            ?: if (slot == 2) File(root, "duckstation_shared_card_2.mcd")
-            else throw IOException("Start and close this game once to identify its Slot 1 card. No other game's card was selected.")
+        // PSX Lab currently uses two persistent shared cards, matching its core.
+        return File(cardDirectory(context), "card$slot.mcd")
     }
 
     /** Called after a completed run, while the session lock still protects both cards. */
@@ -70,7 +65,7 @@ object Ps1MemoryCards {
 
     /** The native SwanStation save directory, independent of the currently selected game. */
     fun cardDirectory(context: Context): File = File(
-        com.armsx2.runtime.MainActivityRuntime.assetCopyRoot(context), "swanstation/cards",
+        com.armsx2.runtime.MainActivityRuntime.assetCopyRoot(context), "psxlab/cards",
     )
 
     /** True when [slot] currently has a card file on disk. */

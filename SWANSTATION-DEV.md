@@ -1,3 +1,5 @@
+> Historical backend notes: Android now uses the original PSX Lab engine. See [PSXLAB-BACKEND.md](PSXLAB-BACKEND.md). The SwanStation Android backend and submodule have been removed.
+
 # SwanStation in the normal dev Compose frontend
 
 Integration on `android-compose`, 2026-10-12. The normal Compose library,

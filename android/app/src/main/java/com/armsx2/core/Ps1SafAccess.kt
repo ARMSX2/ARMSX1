@@ -46,6 +46,10 @@ object Ps1SafAccess {
         if (!pathOrUri.startsWith("content://")) return Session(pathOrUri)
 
         val uri = Uri.parse(pathOrUri)
+        if (com.armsx2.BuildConfig.PSXLAB_BACKEND &&
+            Ps1SafText.extension(displayName(context, uri)) in setOf("chd", "bin", "iso", "img", "exe")) {
+            return Session(pathOrUri)
+        }
         val root = File(
             context.cacheDir,
             "saf-launch/${android.os.SystemClock.elapsedRealtimeNanos()}-${sessionIds.incrementAndGet()}",

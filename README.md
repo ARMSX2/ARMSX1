@@ -1,4 +1,9 @@
 # ARMSX
+
+Android now uses the original PSX Lab backend with the existing Compose UI.
+See [PSXLAB-BACKEND.md](PSXLAB-BACKEND.md) for build instructions, validation,
+save compatibility and current limitations. Historical platform documentation
+below also describes earlier engines and does not override those Android notes.
 ARMSX is a fork of `psxe`, rebuilt around a native FSUI donor shell and SDL2-hosted frontends for desktop, Android, iOS, UWP, web, and PSVita.
 
 ## Local SwanStation dev integration

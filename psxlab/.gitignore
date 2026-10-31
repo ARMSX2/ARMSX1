@@ -1,0 +1,11 @@
+**/build/
+.gradle/
+**/.cxx/
+local.properties
+*.apk
+*.aab
+*.mcd
+*.mcr
+*.chd
+*.iso
+*.psxlabstate

@@ -74,8 +74,8 @@ def isDiscordSdkAvailable = file("${project.projectDir}/libs/discord_partner_sdk
 // This matters to the in-app updater (src/github): it decides whether a GitHub release is newer by
 // comparing the release tag against BuildConfig.VERSION_NAME. A published APK still carrying the
 // placeholder 0.1.0 would go on offering the user the very release they just installed, forever.
-def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.3.6').toString()
-def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '92183360').toString() as Integer
+def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.3.7-psxlab').toString()
+def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '92183361').toString() as Integer
 // Optional isolated builds keep the normal app and its private data untouched.
 def armsxApplicationId = (project.findProperty('armsx.applicationId') ?: 'com.nanodata.armsx').toString()
 def armsxAppLabel = (project.findProperty('armsx.appLabel') ?: '@string/app_name').toString()
@@ -99,14 +99,13 @@ if (!(armsxSourceCommit ==~ /[0-9a-fA-F]{40,64}/)) armsxSourceCommit = 'unknown'
 android {
     // Dev Compose UI stays in place; only the Android engine changes.
     ndkVersion '29.0.14206865'
-    externalNativeBuild { cmake { path file('../../native/swanstation/CMakeLists.txt'); version '3.30.5' } }
     namespace 'com.armsx2'
     compileSdk rootProject.ext.compileSdkVersion
 
     defaultConfig {
-        externalNativeBuild.cmake.arguments '-DANDROID_STL=c++_static', "-DARMSX_SOURCE_COMMIT=${armsxSourceCommit}"
-        externalNativeBuild.cmake.arguments "-DARMSX_PACING_DIAGNOSTICS=${pacingDiagnostics ? 'ON' : 'OFF'}"
-        externalNativeBuild.cmake.arguments "-DARMSX_CPU_DIAGNOSTICS=${cpuDiagnostics ? 'ON' : 'OFF'}"
+
+
+
         // Keep the namespace and JNI class names unchanged, even for separate test packages.
         applicationId armsxApplicationId
         minSdk 28
@@ -116,7 +115,7 @@ android {
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         buildConfigField "boolean", "DIAGNOSTIC_BUILD", diagnosticBuild.toString()
         buildConfigField "boolean", "PACING_DIAGNOSTICS", pacingDiagnostics.toString()
-        buildConfigField "boolean", "SWANSTATION_CORE", "true"
+        buildConfigField "boolean", "PSXLAB_BACKEND", "true"
         buildConfigField "String", "SOURCE_COMMIT", "\"${armsxSourceCommit}\""
         vectorDrawables.useSupportLibrary = true
         // STORAGE_ALL_FILES is declared per flavor below. Game libraries never need it: they use
@@ -191,6 +190,7 @@ android {
 
     buildTypes {
         debug {
+            if (project.hasProperty('psxlabRuntimeTest')) { debuggable false; jniDebuggable false }
             matchingFallbacks = ['release']
             if (hasRepoDebugKeystore) {
                 signingConfig signingConfigs.debug
@@ -259,7 +259,7 @@ android {
             java.srcDirs += ['../../third_party/SDL/android-project/app/src/main/java']
             assets.srcDirs += ['src/main/assets']
             // Never package stale old-core/SDL/ANGLE binaries from src/main/jniLibs.
-            jniLibs.srcDirs = [layout.buildDirectory.dir('generated/swan-jni').get().asFile]
+            jniLibs.srcDirs = []
             assets.exclude 'discord_creds.env'
         }
     }
@@ -273,11 +273,12 @@ android {
 def allowReleaseBuild = providers.gradleProperty('armsx.allowReleaseBuild').map { it.toBoolean() }.getOrElse(false) &&
         !('true'.equalsIgnoreCase(System.getenv('CI')) || '1' == System.getenv('CI'))
 if (gradle.startParameter.taskNames.any { it.toLowerCase().contains('release') } && !allowReleaseBuild) {
-    throw new GradleException('SwanStation dev release blocked: feature and licence audits are incomplete. See SWANSTATION-DEV.md.')
+    throw new GradleException('Original-engine dev release blocked: feature and licence audits are incomplete. See PSXLAB-BACKEND.md.')
 }
 if (allowReleaseBuild) logger.warn('Explicit local release build: this does not clear the source/asset/dependency publication audit.')
 
 dependencies {
+    implementation project(':psxlabBackend')
     implementation 'androidx.browser:browser:1.8.0'
     // Last stable lines built against the installed API 36 platform. Core 1.19 and
     // Lifecycle 2.11 require API 37 even though the app does not use their new APIs.
@@ -332,92 +333,9 @@ dependencies {
     }
 }
 
-def repoRootDir = rootProject.projectDir.parentFile
-def nativeOutput = file("$projectDir/src/main/jniLibs/arm64-v8a/libarmsx.so")
-def skipNativePrepare = System.getenv("ARMSX_SKIP_NATIVE_PREPARE") == "1"
-
-// build.sh shells out to cmake, which is not on a normal PATH — it ships inside the Android SDK.
-// Without this the task fails with a bare "cmake: command not found" partway through, AFTER
-// build.sh has already reported its NDK banner, which reads like a working build.
-def androidSdkDir = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?:
-    new File(System.getProperty("user.home"), "Library/Android/sdk").absolutePath
-def sdkCmakeBinDirs = new File(androidSdkDir, "cmake").listFiles()
-    ?.findAll { it.isDirectory() && new File(it, "bin/cmake").exists() }
-    ?.sort { it.name }
-    ?.collect { new File(it, "bin").absolutePath } ?: []
-
-// Gradle 9 removed Project.exec() from task actions; ExecOperations is the supported
-// replacement and has to be injected, which means a real task class rather than a closure.
-abstract class BuildNativeLibraries extends DefaultTask {
-    @Input abstract Property<Boolean> getDiagnosticBuild()
-    @InputFile abstract RegularFileProperty getBuildScript()
-    @InputFiles
-    @PathSensitive(PathSensitivity.RELATIVE)
-    abstract ConfigurableFileCollection getNativeSources()
-    @OutputFile abstract RegularFileProperty getNativeLibrary()
-    @Internal abstract DirectoryProperty getRepoRoot()
-    @Internal abstract ListProperty<String> getExtraPathEntries()
-
-    @Inject abstract ExecOperations getExecOperations()
-
-    @TaskAction
-    void build() {
-        def extra = extraPathEntries.get()
-        execOperations.exec { spec ->
-            spec.workingDir = repoRoot.get().asFile
-            spec.commandLine "./build.sh", "android"
-            spec.environment "ARMSX_DIAGNOSTIC_BUILD", getDiagnosticBuild().get() ? "1" : "0"
-            if (!extra.isEmpty()) {
-                spec.environment "PATH", (extra + [System.getenv("PATH") ?: ""]).join(File.pathSeparator)
-            }
-        }
-    }
-}
-
-tasks.register("prepareNativeBinaries", BuildNativeLibraries) {
-    group = "native"
-    description = "Build SDL2/libarmsx via build.sh android."
-    buildScript.set(new File(repoRootDir, "build.sh"))
-    getDiagnosticBuild().set(project.providers.gradleProperty('armsx.diagnostics').map { it.toBoolean() }.orElse(false))
-    // The native task used to declare only build.sh as an input. Gradle therefore reused a
-    // stale libarmsx.so after C/C++ edits and could package an APK that did not contain the
-    // source being tested. Track the native source/configuration surface while excluding build
-    // products and submodule metadata.
-    nativeSources.from(fileTree(repoRootDir) {
-        include "Makefile"
-        include "frontend/**"
-        include "psx/**"
-        include "third_party/**"
-        exclude "**/.git/**"
-        exclude "**/build/**"
-        exclude "**/*.o"
-        exclude "**/*.a"
-    })
-    nativeLibrary.set(nativeOutput)
-    repoRoot.set(repoRootDir)
-    extraPathEntries.set(sdkCmakeBinDirs)
-    // Set ARMSX_SKIP_NATIVE_PREPARE=1 when you are driving ./build.sh android yourself. Two
-    // concurrent native builds share bin/obj and clobber each other, so gradle must not start
-    // one behind your back.
-    // Preserved for source history, but not reachable by the SwanStation app.
-    onlyIf { false }
-}
-
-tasks.register('stageSwanStationCore', Exec) {
-    def coreCommand = ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-        file('../../Build-SwanCore.ps1').absolutePath]
-    coreCommand.add(checkedLutFastmem ? '-CheckedLutFastmem' : '-DisableCheckedLutFastmem')
-    coreCommand.addAll(['-CpuOptimizationMask', cpuOptimizationMask.toString()])
-    commandLine coreCommand
-    inputs.property('checkedLutFastmem', checkedLutFastmem)
-    inputs.property('cpuOptimizationMask', cpuOptimizationMask)
-    outputs.upToDateWhen { false }
-}
 tasks.configureEach { t ->
-    if (t.name ==~ /merge(?:Github|Play)(?:Debug|Release)(?:JniLibFolders|NativeLibs)/)
-        t.dependsOn(tasks.named('stageSwanStationCore'))
     if (!allowReleaseBuild && t.name ==~ /(?:assemble|bundle|package)(?:Github|Play)?Release(?:AndroidTest)?/)
-        t.doFirst { throw new GradleException('SwanStation dev release blocked. See SWANSTATION-DEV.md.') }
+        t.doFirst { throw new GradleException('Original-engine dev release blocked. See PSXLAB-BACKEND.md.') }
 }
 
 // ---- Fail-closed guard: the in-app updater must never reach a play artifact ---------------------

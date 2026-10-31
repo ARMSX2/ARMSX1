@@ -463,10 +463,9 @@ private fun validateUpdateArchive(context: Context, apk: File) {
     fun certificates(info: android.content.pm.PackageInfo) = info.signingInfo?.apkContentsSigners
         ?.map { signature -> MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
             .joinToString("") { "%02x".format(it.toInt() and 255) } }?.toSet().orEmpty()
-    // The historical main-branch nightlies used a different engine. Do not silently replace
-    // SwanStation with one of those APKs even if its timestamp code and certificate match.
-    val compatibleEngine = !BuildConfig.SWANSTATION_CORE || ZipFile(apk).use { zip ->
-        listOf("lib/arm64-v8a/libemucorepsx.so", "lib/arm64-v8a/libswanstation.so").all { zip.getEntry(it) != null }
+    // A newer version number must not replace the original engine with an old-core APK.
+    val compatibleEngine = !BuildConfig.PSXLAB_BACKEND || ZipFile(apk).use { zip ->
+        listOf("psxcore", "psxgpu", "psxdisc", "psxtempo").all { zip.getEntry("lib/arm64-v8a/lib$it.so") != null }
     }
     UpdatePolicy.archiveError(
         UpdatePolicy.Archive(context.packageName, current.longVersionCode, certificates(current)),

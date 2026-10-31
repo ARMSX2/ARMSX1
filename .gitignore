@@ -25,3 +25,15 @@ build-shaders/
 test-fixtures/
 android/local.properties
 discord_creds.env
+.deps/
+**/.cxx/
+**/.gradle/
+**/local.properties
+**/migration-backups/
+*.psxlabstate
+*.mcd
+*.mcr
+*.chd
+*.iso
+*.pcm
+*.perfetto-trace

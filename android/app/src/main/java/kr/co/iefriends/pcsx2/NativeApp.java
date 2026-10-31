@@ -27,11 +27,26 @@ import java.lang.ref.WeakReference;
 // ARMSX SDL runtime over time (see com.armsx2.core.Ps1Native / settings.toml). Original =
 // ARMSX2's kr.co.iefriends.pcsx2.NativeApp.
 public class NativeApp {
+    // Original PSX Lab engine; no second emulator is loaded.
+    private static dev.psxlab.ArmSxBackend lab;
+    private static volatile Surface labSurface;
+    private static final Object surfaceLock = new Object();
+    private static long surfaceOwner;
+    private static long nextRunToken, preparedRunToken;
+    private static final java.util.Set<String> unavailable = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    public static dev.psxlab.ArmSxBackend psxLabBackend() { return lab; }
+    private static void unsupported(String feature) {
+        if (unavailable.add(feature)) android.util.Log.w("PSXLabBackend", feature + " is not supported by this backend");
+    }
+
 	static {
 		String libraryName = selectNativeLibraryName();
 		try {
-			// The SwanStation host owns EGL/AAudio; it must not load the old SDL core.
+			// Load only the original engine modules; the Compose host owns the Surface.
 			System.loadLibrary(libraryName);
+            System.loadLibrary("psxgpu");
+            System.loadLibrary("psxdisc");
+            System.loadLibrary("psxtempo");
 			hasNoNativeBinary = false;
 			System.out.println("PCSX2_LOAD " + libraryName + " pageSize=" + getRuntimePageSize());
 		} catch (UnsatisfiedLinkError e) {
@@ -52,7 +67,7 @@ public class NativeApp {
 	}
 
 	private static String selectNativeLibraryName() {
-		return "emucorepsx";
+		return "psxcore";
 	}
 
 
@@ -118,13 +133,15 @@ public class NativeApp {
 	}
 
 	public static void initialize(String path, String biosFolder, int apiVer) {
-		Context context = getContext();
-		if (context == null || !initializeSwanBackend(path, biosFolder,
-				new File(context.getFilesDir(), "settings.toml").getAbsolutePath()))
-			throw new IllegalStateException("Cannot initialize SwanStation backend");
-	}
-	private static native boolean initializeSwanBackend(String root, String bios, String config);
-	public static native long getAudioNonZeroSampleCount();
+        Context context = getContext();
+        if (context == null) throw new IllegalStateException("Backend context is unavailable");
+        String config = new File(context.getFilesDir(), "settings.toml").getAbsolutePath();
+        if (lab == null) lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice);
+        if (!lab.initialize(path, biosFolder, config)) throw new IllegalStateException(lab.lastError());
+        if (labSurface != null) lab.surface(labSurface);
+    }
+
+	public static long getAudioNonZeroSampleCount() { if (lab == null) { return 0L; } return lab.audioNonzero();  }
 	public static void backendNotice(String message) {
 		Context context = getContext();
 		if (context != null) new Handler(Looper.getMainLooper()).post(() ->
@@ -145,7 +162,7 @@ public class NativeApp {
 	 *  Needs the Vulkan present backend — librashader has no GLES runtime. On any other
 	 *  backend this is a no-op that says so once in the log rather than silently doing
 	 *  nothing. A preset that fails to compile degrades to plain presentation, logged. */
-	public static native void setShaderChain(boolean enabled, String presetPath);
+	public static void setShaderChain(boolean enabled, String presetPath) { unsupported("setShaderChain"); }
 
 	/** The tweakable parameters a .slangp preset declares, as a JSON ARRAY, in declaration
 	 *  order. Pure file parsing — no renderer or running game needed, so it is safe to call
@@ -156,7 +173,7 @@ public class NativeApp {
 	 *
 	 *  NEVER null and never "" — every failure path (no librashader, unreadable preset)
 	 *  returns "[]", which JSONArray parses cleanly to an empty list. */
-	public static native String shaderPresetParams(String presetPath);
+	public static String shaderPresetParams(String presetPath) { unsupported("shaderPresetParams"); return ""; }
 
 	/** Queues parameter values for the running shader chain; the GS thread applies them on
 	 *  its next frame. Safe to call from any thread, and safe with no VM or renderer up —
@@ -166,7 +183,7 @@ public class NativeApp {
 	 *  a parameter left out keeps what the chain has, so resetting one means sending its
 	 *  initial value rather than omitting it. [presetPath] must be the preset the values
 	 *  were read off, so a stale set can't land on a chain that has moved on. */
-	public static native void setShaderChainParams(String presetPath, String[] names, float[] values);
+	public static void setShaderChainParams(String presetPath, String[] names, float[] values) { unsupported("setShaderChainParams"); }
 
 	// Save a GS dump (.gs of GPU commands) to the snaps folder for diagnosing
 	// rendering bugs. frames <= 0 captures a single frame.
@@ -174,7 +191,7 @@ public class NativeApp {
 	/** Screenshot of the emulated framebuffer. No-op with no VM.
 	 *  Implemented natively (frontend/android_jni.cpp). Queued on the emulation thread;
 	 *  the payload is written by SDL_SaveBMP, so the bytes are BMP whatever the extension. */
-	public static native void saveScreenshot(String pngPath);
+	public static void saveScreenshot(String pngPath) { if (lab == null) { return; } lab.screenshot(pngPath); return; }
 
 	/** ADPF (PerformanceHintManager): tell the OS how long the emulation thread spent WORKING
 	 *  each frame against the frame deadline, so the DVFS governor clocks for that instead of
@@ -185,7 +202,7 @@ public class NativeApp {
 	 *  it can cost power for nothing on a device whose governor is already aggressive.
 	 *  Silent no-op below Android 13 (the API is dlsym'd, never linked).
 	 *  Implemented natively in frontend/perf_hint.c; persisted app-side (pref "ui.adpf"). */
-	public static native void setAdpfEnabled(boolean enabled);
+	public static void setAdpfEnabled(boolean enabled) { unsupported("setAdpfEnabled"); }
 
 	/**
 	 * Push one EmuCore setting into the base settings layer. Mirrors
@@ -196,7 +213,7 @@ public class NativeApp {
 	 * Setting writes here are NOT live until commitSettings() is called.
 	 * Batch the writes, then commit once so the VM applies them atomically.
 	 */
-	public static void setSetting(String section, String key, String type, String value) {  }
+	public static void setSetting(String section, String key, String type, String value) { if (lab != null && section.equals("Filenames") && key.equals("BIOS")) lab.selectBios(value); }
 
 	/**
 	 * Apply queued settings to a running VM (and the GS thread). Calls
@@ -280,44 +297,44 @@ public class NativeApp {
 			return title + "|" + serial + "|" + serial;
 		} catch (Throwable t) { return null; }
 	}
-	public static native String getGameSerial();
+	public static String getGameSerial() { unsupported("getGameSerial"); return ""; }
 	/** Actual texture hook counters: dump enabled, replacement hook enabled, lookups, PNG writes, hits. */
-	public static native long[] getSwanTextureMetrics();
+	public static long[] getSwanTextureMetrics() { unsupported("getSwanTextureMetrics"); return new long[0]; }
 	public static String getGameCRC() { return ""; }
 	/** Emulated frames per second, averaged over the core's last half-second window. 0 while no
 	 *  game is stepping (stopped or paused). Non-blocking — it reads an atomic the emulation loop
 	 *  publishes once per frame, so the Compose OSD can poll it from the UI thread. */
-	public static native float getFPS();
+	public static float getFPS() { if (lab == null) { return 0f; } return lab.fps();  }
 	/** Current game's nominal emulated refresh (~59.94 NTSC / 50 PAL), or 0 without a VM. */
-	public static native float getNominalFrameRate();
+	public static float getNominalFrameRate() { if (lab == null) { return 0f; } return lab.nominalFps();  }
 
 	/** Arm the detailed performance overlay (per-subsystem work counters + host frame-phase
 	 *  timing). This switches the SwanStation adapter's opt-in work counters on, so it
 	 *  MUST be cleared when the Statistics block is hidden, or every counter site in the core
 	 *  stays live feeding a panel nobody is reading. Off at boot. */
-	public static native void setStatisticsEnabled(boolean enabled);
+	public static void setStatisticsEnabled(boolean enabled) { unsupported("setStatisticsEnabled"); }
 
 	/** Refill [out] with the latest snapshot and return how many entries were written; 0 until
 	 *  the core's first half-second window closes, or while statistics are disabled. Indices are
 	 *  com.armsx2.ui.GameOsd.Stat / native/swanstation/statistics.h. Negative means unavailable.
 	 *  Guest clock ticks are not CPU instructions; host phases are CPU wall durations. Pass a reused
 	 *  array — this deliberately does not allocate. */
-	public static native int getStatistics(double[] out);
+	public static int getStatistics(double[] out) { unsupported("getStatistics"); return 0; }
 
 	/** Stable original URI/key, rather than a disposable SAF cache path. Call before boot. */
-	public static native void configureSwanSession(String identity, String originalPath);
-	public static native String getSwanStatePath(int slot);
-	public static native String getSwanCardPath(int slot);
-	public static native int getSwanGuestFrame();
-	public static native int getSwanMemoryByte(int address);
+	public static void configureSwanSession(String identity, String originalPath) { unsupported("configureSwanSession"); }
+	public static String getSwanStatePath(int slot) { return lab == null ? "" : lab.stateFile(slot).getAbsolutePath(); }
+	public static String getSwanCardPath(int slot) { return lab == null ? "" : lab.cardPath(slot - 1); }
+	public static int getSwanGuestFrame() { return lab == null ? 0 : (int)lab.frames(); }
+	public static int getSwanMemoryByte(int address) { unsupported("getSwanMemoryByte"); return 0; }
 	/** Read-only, emulation-thread-consistent RAM copy for developer memory research.
 	 *  Returns empty with no running core; never exposes memory or provides a write API. */
-	public static native byte[] getSwanMemorySnapshot();
+	public static byte[] getSwanMemorySnapshot() { unsupported("getSwanMemorySnapshot"); return new byte[0]; }
 	/** Paused diagnostic VM only; requires an explicit test configuration. */
-	public static native String runSwanCpuOptimizationTests();
-	public static native byte[] getSwanCompanionSnapshot();
-	public static native void setSwanCtrHudMoved(boolean enabled);
-	public static native String getSwanCtrHudStatus();
+	public static String runSwanCpuOptimizationTests() { unsupported("runSwanCpuOptimizationTests"); return ""; }
+	public static byte[] getSwanCompanionSnapshot() { unsupported("getSwanCompanionSnapshot"); return new byte[0]; }
+	public static void setSwanCtrHudMoved(boolean enabled) { unsupported("setSwanCtrHudMoved"); }
+	public static String getSwanCtrHudStatus() { unsupported("getSwanCtrHudStatus"); return ""; }
 
 	/** Build version string from BuildVersion::GitRev — formatted as
 	 *  "GitTagHi.GitTagMid.GitTagLo.ARMSX2Build-SNAPSHOT". Used by the
@@ -342,62 +359,62 @@ public class NativeApp {
 	 *  in-game overlay's right-side panel. See armsx_ach_get_json() for the schema — it is the
 	 *  same one ARMSX2 emits. Returns the empty-state payload (active=false, items=[]) when no
 	 *  game is loaded or nobody is signed in, never null. */
-	public static native String getAchievementsJSON();
+	public static String getAchievementsJSON() { unsupported("getAchievementsJSON"); return "{}"; }
 
 	/** RetroAchievements hash for a disc image, computed without booting it — the key used to look
 	 *  a game up in RA's game list so the library can show progress for games never played. This
 	 *  is the PS1 disc hash (RC_CONSOLE_PLAYSTATION), NOT the local save-state fingerprint.
 	 *  Empty string if the image is unreadable or has no PS1 executable. Reads the disc: call
 	 *  off the UI thread. */
-	public static native String getAchievementsHashForPath(String imagePath);
+	public static String getAchievementsHashForPath(String imagePath) { unsupported("getAchievementsHashForPath"); return ""; }
 
 	/** Live RetroAchievements rich-presence string, recomputed on the native side from the
 	 *  game's RAM. Empty when no game, no client, or RP not supported by the loaded set. */
-	public static native String getRichPresence();
+	public static String getRichPresence() { unsupported("getRichPresence"); return ""; }
 
 	/** RetroAchievements password login. Returns an empty string on success or a
 	 *  human-readable error. Synchronous — runs the HTTP login request to completion, may take
 	 *  a few seconds. Callers MUST dispatch off the Main thread (Dispatchers.IO from Compose).
 	 *  After success the next getAchievementsJSON poll reflects loggedIn=true, and a running
 	 *  game is identified against RA on its next frame; no separate callback wiring needed. */
-	public static native String loginAchievements(String username, String password);
+	public static String loginAchievements(String username, String password) { unsupported("loginAchievements"); return "RetroAchievements is not connected to this backend."; }
 
 	/** RetroAchievements logout. Idempotent. Drops the saved token. */
-	public static native void logoutAchievements();
+	public static void logoutAchievements() { unsupported("logoutAchievements"); }
 
 	/** Accepted and ignored. ARMSX RetroAchievements support is softcore only until the
 	 *  emulator has had a lot more testing, so there is no hardcore path to enable; passing
 	 *  true logs a warning natively and changes nothing. */
-	public static native void setHardcoreMode(boolean enabled);
+	public static void setHardcoreMode(boolean enabled) { unsupported("setHardcoreMode"); }
 
 	/** Always false — see {@link #setHardcoreMode}. */
-	public static native boolean isHardcoreMode();
+	public static boolean isHardcoreMode() { unsupported("isHardcoreMode"); return false; }
 
 	/** Always false — see {@link #setHardcoreMode}. */
-	public static native boolean isHardcorePersisted();
+	public static boolean isHardcorePersisted() { unsupported("isHardcorePersisted"); return false; }
 
 	/** Toggle a RetroAchievements presentation option. {@code key} is one of
 	 *  "notifications", "leaderboardNotifications", "overlays", "lbOverlays", "soundEffects",
 	 *  "encoreMode", "spectatorMode", "unofficialTestMode". Persisted natively and reported
 	 *  back in {@link #getAchievementsJSON}. "hardcore" is deliberately not a valid key. */
-	public static native void setAchievementsOption(String key, boolean enabled);
+	public static void setAchievementsOption(String key, boolean enabled) { unsupported("setAchievementsOption"); }
 
 	/** Integer-valued options: "notificationsDuration", "leaderboardsDuration",
 	 *  "notificationPosition", "overlayPosition". Clamped natively. */
-	public static native void setAchievementsOptionInt(String key, int value);
+	public static void setAchievementsOptionInt(String key, int value) { unsupported("setAchievementsOptionInt"); }
 
 	// Custom achievement-unlock sound. `path` is an app-private absolute file the MediaPlayer
 	// can read; an empty string clears it. ARMSX bundles no RA sounds of its own, so unlocks
 	// are silent until the user imports one.
-	public static native void setAchievementsUnlockSound(String path);
+	public static void setAchievementsUnlockSound(String path) { unsupported("setAchievementsUnlockSound"); }
 
 	/** Repoint the RetroAchievements client at a loopback proxy. Persisted and applied live, so
 	 *  a running session picks up the new host. */
-	public static native void setAchievementsHostOverride(String host);
+	public static void setAchievementsHostOverride(String host) { unsupported("setAchievementsHostOverride"); }
 
 	/** Drop the host override set by {@link #setAchievementsHostOverride}, restoring
 	 *  retroachievements.org. */
-	public static native void clearAchievementsHostOverride();
+	public static void clearAchievementsHostOverride() { unsupported("clearAchievementsHostOverride"); }
 
 	/** True iff the GS is currently in a HW renderer (OGL/VK), false for
 	 *  SW. Mirrors GSIsHardwareRenderer() from the GS thread. Polled by
@@ -462,11 +479,11 @@ public class NativeApp {
 	 *  redirectDir:  /data/.../files/drivers/&lt;id&gt;/cache/ — Turnip shader cache target
 	 *  hookLibDir:   ApplicationInfo.nativeLibraryDir — where the adrenotools
 	 *                hook .so's (main_hook etc.) were extracted. */
-	public static native void setCustomVulkanDriver(
+	public static void setCustomVulkanDriver(
 		String driverDir, String driverName,
-		String redirectDir, String hookLibDir);
+		String redirectDir, String hookLibDir) { unsupported("setCustomVulkanDriver"); }
 	/** Validated literal Mesa variables, queued before opening a custom ICD. */
-	public static native boolean setDriverDebugVariables(String variables);
+	public static boolean setDriverDebugVariables(String variables) { unsupported("setDriverDebugVariables"); return false; }
 
 	/** Which GLES implementation the OpenGL presentation backend binds to:
 	 *  {@code "system"} or {@code "angle"} (ANGLE = Google's GLES-on-Vulkan
@@ -478,12 +495,12 @@ public class NativeApp {
 	 *
 	 *  ANGLE is an implementation of the OpenGL backend, NOT a peer of Vulkan;
 	 *  selecting it does not change {@code gpu_backend}. */
-	public static native void setGlDriver(String driver);
+	public static void setGlDriver(String driver) { unsupported("setGlDriver"); }
 
 	/** The GLES implementation currently selected ("system" / "angle"). This is
 	 *  the REQUEST; use {@link #getActiveRenderer()} to see what actually loaded. */
-	public static native String getGlDriver();
-	public static native void setGpuHostHint(String hint);
+	public static String getGlDriver() { unsupported("getGlDriver"); return "system"; }
+	public static void setGpuHostHint(String hint) { unsupported("setGpuHostHint"); }
 
 	/** Human-readable name of the presentation backend that is genuinely running —
 	 *  the one that survived the fallback ladder, not the one that was asked for.
@@ -500,10 +517,10 @@ public class NativeApp {
 	 *    <li>{@code "SDL accelerated (opengles2)"}
 	 *    <li>{@code "Software"}
 	 *  </ul> */
-	public static native String getActiveRenderer();
+	public static String getActiveRenderer() { if (lab == null) { return ""; } return lab.renderer();  }
 	/** Bounded, synchronized snapshot of the latest SwanStation session in this process.
 	 * Empty before a session; never combines prior games, builds or legacy PSXE logs. */
-	public static native String getSwanDiagnostics();
+	public static String getSwanDiagnostics() { return lab == null ? "PSX Lab not initialized" : lab.diagnosticReport(); }
 
 	/** Live display aspect: 0 = classic 4:3, 1 = square 1:1, 2 = wide 16:9.
 	 *  Anything negative reverts to settings.toml's {@code [video] display_aspect}.
@@ -511,42 +528,42 @@ public class NativeApp {
 	 *  Applies on the NEXT PRESENTED FRAME — no game restart. Aspect is a pure
 	 *  presentation property, so the in-game menu can change it live; persist it
 	 *  through Ps1SettingsStore as well so it survives a relaunch. */
-	public static native void setDisplayAspect(int mode);
+	public static void setDisplayAspect(int mode) { unsupported("setDisplayAspect"); }
 
 	/** Live custom width/height ratio, applied while the aspect mode is CUSTOM. <= 0 clears
 	 *  the override and falls back to settings.toml. Next presented frame; no VM restart. */
-	public static native void setDisplayAspectCustom(float ratio);
+	public static void setDisplayAspectCustom(float ratio) { unsupported("setDisplayAspectCustom"); }
 
 	/** Snap the presented image to a whole multiple of the emulated resolution, so every source
 	 *  pixel becomes an exact NxN block. Applies on the next presented frame. */
-	public static native void setIntegerScaling(boolean enabled);
+	public static void setIntegerScaling(boolean enabled) { unsupported("setIntegerScaling"); }
 
 	/** Live stretch-to-window: true fills the surface and ignores the aspect,
 	 *  false letterboxes/pillarboxes to it. Same immediacy as
 	 *  {@link #setDisplayAspect(int)}. */
-	public static native void setStretchMode(boolean enabled);
+	public static void setStretchMode(boolean enabled) { unsupported("setStretchMode"); }
 
 	/** Widescreen hack: scales the GTE's X projection so 3D geometry fills a 16:9
 	 *  display instead of being stretched into it (psx/cpu.c). Real native, safe to
 	 *  flip while a game runs. 2D and UI are not projected through the GTE, so they
 	 *  still stretch. Boot-time value comes from settings.toml
 	 *  ({@code [video] widescreen_hack}); persist UI changes there too. */
-	public static native void setWidescreenHack(boolean enabled);
+	public static void setWidescreenHack(boolean enabled) { unsupported("setWidescreenHack"); }
 
 	/** Deinterlacing for 480-line modes: 0 = weave (default, what always shipped),
 	 *  1 = bob, 2 = adaptive. Negative clears the override back to settings.toml
 	 *  ({@code [video] deinterlace}). Presentation only — next presented frame. */
-	public static native void setDeinterlaceMode(int mode);
+	public static void setDeinterlaceMode(int mode) { unsupported("setDeinterlaceMode"); }
 
 	/** Overscan crop: 0 = none (default), 1 = small, 2 = full. Trims the blanking
 	 *  border and zooms the kept region to the same rect. Negative clears back to
 	 *  settings.toml ({@code [video] overscan_crop}). Next presented frame. */
-	public static native void setOverscanCrop(int mode);
+	public static void setOverscanCrop(int mode) { unsupported("setOverscanCrop"); }
 
 	/** Display rotation in DEGREES clockwise: 0 / 90 / 180 / 270. Anything else clears
 	 *  the override back to settings.toml ({@code [video] display_rotation}). Applied by
 	 *  the present backend; the Vulkan backend cannot rotate and stays upright. */
-	public static native void setDisplayRotation(int degrees);
+	public static void setDisplayRotation(int degrees) { unsupported("setDisplayRotation"); }
 
 	/** The three GLES-rasterizer video options, pushed together because the backend
 	 *  stores them together (frontend/gpu_hw_gl.c).
@@ -556,7 +573,7 @@ public class NativeApp {
 	 *  lineDetect is retained for ABI compatibility and is not implemented by this core.
 	 *  Boot-time values come from settings.toml ({@code [video] texture_filter},
 	 *  {@code downsample}, {@code line_detect}). */
-	public static native void setGlVideoOptions(int textureFilter, int downsample, int lineDetect);
+	public static void setGlVideoOptions(int textureFilter, int downsample, int lineDetect) { unsupported("setGlVideoOptions"); }
 	/** PS1 texture dumping and replacement (psx/texrep.h). REAL native
 	 *  (Java_kr_co_iefriends_pcsx2_NativeApp_setPs1TextureOptions ->
 	 *  psxe_host_set_texture_options), parked and applied on the emulation thread.
@@ -567,24 +584,24 @@ public class NativeApp {
 	 *  Both flags false tears the subsystem down; nothing is allocated in that state.
 	 *  Boot-time values come from settings.toml ({@code [video] texture_dump},
 	 *  {@code texture_replacements}, {@code texture_dir}). */
-	public static native void setPs1TextureOptions(boolean dump, boolean replace, String dir);
+	public static void setPs1TextureOptions(boolean dump, boolean replace, String dir) { unsupported("setPs1TextureOptions"); }
 
 	public static void setPadVibration(boolean isonoff) {  }
 	/** Implemented natively. [index] is this front-end's pad code space (Android KEYCODE_*
 	 *  for the pad, 200 = analog-mode button, 110-113 / 120-123 = left/right stick
 	 *  directions); [range] is the 0..32767 magnitude for a stick direction and is ignored
 	 *  (full press) for digital buttons. Thread-safe: parked and applied on the next frame. */
-	public static native void setPadButton(int index, int range, boolean iskeypressed);
+	public static void setPadButton(int index, int range, boolean iskeypressed) { if (lab == null) { return; } lab.button(0, index, range, iskeypressed); return; }
 	/** Implemented natively. Absolute stick position: [stick] 0 = left, 1 = right; [x]/[y]
 	 *  are 0x00..0xFF centred on 0x80, matching the PS1 pad's ADC. */
-	public static native void setPadAnalog(int stick, int x, int y);
+	public static void setPadAnalog(int stick, int x, int y) { if (lab == null) { return; } lab.analog(0, stick, x, y); return; }
 	/** {@link #setPadButton} addressed to one of the four players behind a port-1 Multitap
 	 *  ([player] 0..3 = slots A..D). Player 0 is the port itself. Real native
 	 *  (psxe_host_pad_button_player -> psx_pad_button_press_player); with no tap attached
 	 *  the core drops players 1..3. */
-	public static native void setPadButtonForPlayer(int player, int index, int range, boolean iskeypressed);
+	public static void setPadButtonForPlayer(int player, int index, int range, boolean iskeypressed) { if (lab == null) { return; } lab.button(player, index, range, iskeypressed); return; }
 	/** {@link #setPadAnalog} addressed to one of the four Multitap players. */
-	public static native void setPadAnalogForPlayer(int player, int stick, int x, int y);
+	public static void setPadAnalogForPlayer(int player, int stick, int x, int y) { if (lab == null) { return; } lab.analog(player, stick, x, y); return; }
 
 	/** Multitap in controller port 1: four players share the port
 	 *  (psx/input/multitap.c). Real native, and LIVE — the core swaps the device in the
@@ -596,10 +613,10 @@ public class NativeApp {
 	 *  (80h), so a game that does not understand multitaps reports NO controller at all.
 	 *  Real hardware behaves identically — that is why an SCPH-1070 has a physical
 	 *  1-player/multitap switch. */
-	public static native void setMultitapEnabled(boolean enabled);
+	public static void setMultitapEnabled(boolean enabled) { unsupported("setMultitapEnabled"); }
 	/** Port bits: 0 = standard, 1 = port 1, 2 = port 2, 3 = both. */
-	public static native void setMultiplayerMode(int mode);
-	public static native void setControllerTypes(int controller1, int controller2);
+	public static void setMultiplayerMode(int mode) { unsupported("setMultiplayerMode"); }
+	public static void setControllerTypes(int controller1, int controller2) { unsupported("setControllerTypes"); }
 
 	/** Rewind: keep a ring of save states and step backwards through it
 	 *  (psx/rewind.h). [seconds] 1..60, [frequency] 1..8 snapshots per second.
@@ -607,29 +624,29 @@ public class NativeApp {
 	 *  seconds x frequency is a MEMORY figure, not just a duration — one snapshot is
 	 *  ~3.5 MB, so 10 s at 2/s is ~70 MB. Nothing is allocated while it is off. Use
 	 *  {@link #rewindSnapshotBytes()} to show the real cost next to the control. */
-	public static native void setRewind(boolean enabled, int seconds, int frequency);
+	public static void setRewind(boolean enabled, int seconds, int frequency) { unsupported("setRewind"); }
 
 	/** Runahead: re-simulate [frames] frames every frame so the picture reacts sooner,
 	 *  0..5, 0 = off (the default). Costs a state save + a state load + [frames] extra
 	 *  emulated frames EVERY frame — on a device already at 100% speed this does not hide
 	 *  latency, it cuts the frame rate. */
-	public static native void setRunahead(int frames);
+	public static void setRunahead(int frames) { unsupported("setRunahead"); }
 
 	/** Hold-to-rewind: true while the bound button is down. Each frame the emulator then
 	 *  steps one snapshot BACK instead of advancing; at the end of the buffer it holds
 	 *  still rather than resuming forward play. Needs {@link #setRewind} on first. */
-	public static native void setRewindActive(boolean active);
+	public static void setRewindActive(boolean active) { unsupported("setRewindActive"); }
 
 	/** One-shot step back, for a menu row or a tap. Additive with the hold above. */
-	public static native void rewindStepBack();
+	public static void rewindStepBack() { unsupported("rewindStepBack"); }
 
 	/** Bytes ONE rewind snapshot costs. Measured from the running machine once a state has
 	 *  been captured, an estimate before that — so a settings row can show a real figure
 	 *  with no game loaded. Multiply by seconds x frequency for the buffer's size. */
-	public static native long rewindSnapshotBytes();
+	public static long rewindSnapshotBytes() { unsupported("rewindSnapshotBytes"); return 0L; }
 
 	/** Bytes the rewind ring is holding right now. 0 while rewind is off. */
-	public static native long rewindBytesHeld();
+	public static long rewindBytesHeld() { unsupported("rewindBytesHeld"); return 0L; }
 	/**
 	 * Physical-controller entry point (every KeyEvent / MotionEvent write in
 	 * MainActivityRuntime funnels here). Was a no-op stub, which is exactly why
@@ -763,7 +780,7 @@ public class NativeApp {
 	 *  it OFF the UI thread. */
 	public static void setMultitap(int port, boolean enabled) {  }
 	/** Implemented natively: drops every pad bit the host is holding down. */
-	public static native void resetKeyStatus();
+	public static void resetKeyStatus() { if (lab == null) { return; } if (lab != null) lab.resetButtons(); return; }
 
 	// ---- USB keyboard (#254: EQOA / Konami-keyboard games) ----
 	/** Attach ({@code true}) or detach ({@code false}) an emulated USB HID
@@ -1082,12 +1099,12 @@ public class NativeApp {
 	public static void setFrameSkip(int skip) {  }
 
 	/** GitHub #375: top-align the render in portrait (true) vs vertical-center (false). */
-	public static native void setPortraitRenderTop(boolean top);
+	public static void setPortraitRenderTop(boolean top) { unsupported("setPortraitRenderTop"); }
 
 	/** Pixels to keep clear at the top of a PORTRAIT render for a punch-hole/notch camera. Taken
 	 *  from the window's display cutout; 0 on devices without one. Only affects portrait
 	 *  top-aligned output. */
-	public static native void setPortraitRenderTopInset(int pixels);
+	public static void setPortraitRenderTopInset(int pixels) { unsupported("setPortraitRenderTopInset"); }
 	/** SPU2 output volume, percent (0..200). Applies live + persists. */
 	public static void setAudioVolume(int volume) {  }
 	/** Mute/unmute SPU2 output. Applies live + persists. */
@@ -1122,7 +1139,7 @@ public class NativeApp {
 	 *  EXPERIMENTAL. Android's EAS scheduler usually beats hand-pinning, so off stays the
 	 *  recommendation. Applies live and also honoured at boot — safe to set before
 	 *  runVMThread. Implemented natively in frontend/perf_hint.c. */
-	public static native void setAffinityMode(int mode);
+	public static void setAffinityMode(int mode) { unsupported("setAffinityMode"); }
 	public static void renderPreloading(int value) {  }
 
 	// toggleTextureDumping() lived here and was an empty stub returning false, wired to a
@@ -1159,27 +1176,52 @@ public class NativeApp {
 	// into it from this same process, so the touch overlay / pause overlay / hotkeys /
 	// RetroAchievements / Discord presence all work. Call onNativeSurfaceChanged BEFORE
 	// runVMThread.
-	public static native void onNativeSurfaceCreated(long ownerToken);
-	public static native void onNativeSurfaceChanged(Surface surface, int w, int h, long ownerToken);
-	public static native void onNativeSurfaceDestroyed(long ownerToken);
-	public static native void setDisplayRefreshRate(float hz);
-	public static native void setDisplayVsyncTimestamp(long frameTimeNanos);
-	public static native void setFramePresentation(int mode, int multiple);
+	public static void onNativeSurfaceCreated(long ownerToken) {
+        synchronized (surfaceLock) { if (ownerToken > surfaceOwner) surfaceOwner = ownerToken; }
+    }
+	public static void onNativeSurfaceChanged(Surface surface, int w, int h, long ownerToken) {
+        synchronized (surfaceLock) {
+            if (ownerToken < surfaceOwner) return;
+            surfaceOwner = ownerToken; labSurface = surface;
+            if (lab != null) lab.surface(surface);
+        }
+    }
+	public static void onNativeSurfaceDestroyed(long ownerToken) {
+        synchronized (surfaceLock) {
+            if (ownerToken != surfaceOwner) return;
+            labSurface = null;
+            if (lab != null) lab.surface(null);
+        }
+    }
+	public static void setDisplayRefreshRate(float hz) { unsupported("setDisplayRefreshRate"); }
+	public static void setDisplayVsyncTimestamp(long frameTimeNanos) { unsupported("setDisplayVsyncTimestamp"); }
+	public static void setFramePresentation(int mode, int multiple) { unsupported("setFramePresentation"); }
 	/** Diagnostic APK only; normal builds ignore the request. */
-	public static native void setPacingDiagnosticMode(int mode);
-	public static native void configureSwanCardPaths(String first, String second);
+	public static void setPacingDiagnosticMode(int mode) { unsupported("setPacingDiagnosticMode"); }
+	public static void configureSwanCardPaths(String first, String second) { if (lab == null) return; String[] paths = {first, second}; for (int i = 0; i < paths.length; i++) if (paths[i] != null && !paths[i].isBlank() && !paths[i].equals(lab.cardPath(i))) { if (!lab.importCard(i, new File(paths[i]))) throw new IllegalStateException(lab.lastError()); } }
 	/** Eight ports, each with 16 libretro joypad bits followed by four signed stick axes. */
-	public static native int[] getControlInputSnapshot();
+	public static int[] getControlInputSnapshot() {
+        int[] result = new int[8 * 20];
+        if (lab == null) return result;
+        int[] psxBits = {14, 15, 0, 3, 4, 6, 7, 5, 13, 12, 10, 11, 8, 9, 1, 2};
+        for (int port = 0; port < 2; port++) {
+            dev.psxlab.core.PadState.State pad = lab.pad(port);
+            for (int key = 0; key < psxBits.length; key++) result[port * 20 + key] = (pad.pressed() >>> psxBits[key]) & 1;
+            int[] axes = {pad.leftX(), pad.leftY(), pad.rightX(), pad.rightY()};
+            for (int axis = 0; axis < axes.length; axis++) result[port * 20 + 16 + axis] = Math.max(-32768, Math.min(32767, (axes[axis] - 128) * 257));
+        }
+        return result;
+    }
 
 	/** Implemented natively. BLOCKING: boots [path] and runs the emulation loop until
 	 *  shutdown(). Call on a dedicated thread, after onNativeSurfaceChanged. */
-	public static native boolean runVMThread(String path);
-	public static native long prepareVMRun();
-	public static native boolean runVMThreadForSession(String path, long token);
-	public static native void releaseVMRun(long token);
-	public static native void shutdownVMRun(long token);
-	public static native void pause();
-	public static native void resume();
+	public static boolean runVMThread(String path) { if (lab == null) { return false; } return lab.run(path);  }
+	public static long prepareVMRun() { if (lab == null) return 0L; synchronized (lab) { if (preparedRunToken != 0 || lab.active()) return 0L; return preparedRunToken = ++nextRunToken; } }
+	public static boolean runVMThreadForSession(String path, long token) { if (lab == null) return false; return lab.run(path, () -> token != 0 && token == preparedRunToken); }
+	public static void releaseVMRun(long token) { if (lab != null) synchronized (lab) { if (preparedRunToken == token) preparedRunToken = 0; } }
+	public static void shutdownVMRun(long token) { if (lab != null) synchronized (lab) { if (preparedRunToken == token && token != 0) { preparedRunToken = 0; lab.stop(); } } }
+	public static void pause() { if (lab == null) { return; } lab.pause(true); return; }
+	public static void resume() { if (lab == null) { return; } lab.pause(false); return; }
 	/** Implemented natively: park (or restart) the PLATFORM audio stream because the Activity
 	 *  went off-screen / came back.
 	 *
@@ -1193,17 +1235,17 @@ public class NativeApp {
 	 *  (ArmsxSession::setAudioSuspended), and reopens it on the way back.
 	 *
 	 *  Ignored by the core when settings.toml's [audio] background_playback is true. */
-	public static native void setAudioSuspended(boolean suspended);
+	public static void setAudioSuspended(boolean suspended) { if (lab == null) { return; } lab.suspendAudio(suspended); return; }
 
 	/** App off-screen: stop drawing and posting frames. Distinct from pausing the VM —
 	 *  the pause menu is on-screen and must keep presenting — and from suspending audio,
 	 *  which [audio] background_playback may legitimately keep alive. */
-	public static native void setPresentationSuspended(boolean suspended);
+	public static void setPresentationSuspended(boolean suspended) { if (lab == null) { return; } lab.suspendPresentation(suspended); return; }
 	/** Implemented natively: hard reset of the running game. */
-	public static native void resetGame();
+	public static void resetGame() { if (lab == null) { return; } lab.reset(); return; }
 	/** Implemented natively: absolute fast-forward on/off. The speed it runs at comes from
 	 *  {@link #setSpeedLimits}. */
-	public static native void setFastForward(boolean enabled);
+	public static void setFastForward(boolean enabled) { if (lab == null) { return; } lab.fastForward(enabled); return; }
 	/** Implemented natively: the whole frame-pacing policy, applied live.
 	 *  frameLimit false runs unthrottled; speedPercent is 10..1000 % of the game's own rate;
 	 *  fpsLimit is an extra absolute cap in fps (0 = off); fastForwardSpeed is the multiplier
@@ -1213,16 +1255,18 @@ public class NativeApp {
 	 *  -1 adaptive (drop one only when the frame pacer reports the device fell behind). It rides
 	 *  this call because the same panel edits it and the whole policy is pushed at once.
 	 *  Persisted in settings.toml's [runtime] table, which the core reads at boot. */
-	public static native void setSpeedLimits(boolean frameLimit, int speedPercent, int fpsLimit, float fastForwardSpeed, int frameSkip);
+	public static void setSpeedLimits(boolean frameLimit, int speedPercent, int fpsLimit, float fastForwardSpeed, int frameSkip) { if (lab == null) { return; } if (!frameLimit || speedPercent != 100) backendNotice("PSX Lab migration testing currently uses normal speed and fast forward."); return; }
 	/** Implemented natively: queue a game path/URI for the running loop to boot, so a disc
 	 *  swap does not need the process torn down. */
-	public static native void enqueueLaunchArgument(String argument);
+	public static void enqueueLaunchArgument(String argument) { unsupported("enqueueLaunchArgument"); }
 	// Keep the audio device alive across a menu/overlay pause (no reclaim, no
 	// resume rebuild). Set true right before pauseForOverlay's pause(); resume()
 	// clears it. See native setOutputPauseSuppressed / SPU2::SetOutputPauseSuppressed.
 	public static void setOutputPauseSuppressed(boolean suppressed) {  }
-	public static native void shutdown();
-	public static native boolean hasActiveVM();
+	public static void shutdown() {
+        if (lab != null) synchronized (lab) { preparedRunToken = 0; lab.stop(); }
+    }
+	public static boolean hasActiveVM() { if (lab == null) { return false; } return lab != null && lab.active();  }
 
 	/** Persist the Vulkan pipeline cache to disk so cold restarts don't have
 	 *  to recompile every TFX pipeline. No-op for OpenGL (its cache flushes
@@ -1296,7 +1340,7 @@ public class NativeApp {
 	 * [path] is an absolute POSIX path; a {@code content://} URI cannot be opened here. Blocking
 	 * IO (a CHD hunk is decompressed to reach the volume descriptor) — call it off the UI thread.
 	 */
-	public static native String getDiscSerialForPath(String path);
+	public static String getDiscSerialForPath(String path) { unsupported("getDiscSerialForPath"); return ""; }
 
 	/**
 	 * PCSX2 game-database compatibility lookup. Returns the raw 0-6
@@ -1324,7 +1368,7 @@ public class NativeApp {
 	 *  BLOCKS: the request is parked and run by the emulation thread from psx_update(), so this
 	 *  waits up to two seconds for a frame boundary. Call it off the main thread. Returns false
 	 *  (and logs the reason under ARMSX-JNI) if no VM is running or the write failed. */
-	public static native boolean saveStateToSlot(int slot);
+	public static boolean saveStateToSlot(int slot) { if (lab == null) { return false; } return lab.save(slot);  }
 	/** True while the emulated memory card is mid-write, when a state save is refused to protect
 	 *  the card. The counter only ticks down while the VM runs, so it does NOT clear while paused. */
 	public static boolean isMemcardBusy() { return false; }
@@ -1335,7 +1379,7 @@ public class NativeApp {
 	 *  cannot carry the difference between "broken" and "are you sure". Use
 	 *  {@link #loadStateFromSlotChecked(int, boolean)} through
 	 *  {@code com.armsx2.ui.saves.SaveStateGuard} for anything the user drives. */
-	public static native boolean loadStateFromSlot(int slot);
+	public static boolean loadStateFromSlot(int slot) { if (lab == null) { return false; } return lab.load(slot, true);  }
 	/** Restore slot [slot], returning the raw core result code instead of a boolean.
 	 *
 	 *  0 is success. {@link #STATE_ERR_CARD_NEWER} and {@link #STATE_ERR_CARD_DIVERGED} are
@@ -1344,7 +1388,7 @@ public class NativeApp {
 	 *  ignoreCardDivergence = true. Any other negative value is a real failure.
 	 *
 	 *  Same blocking contract as {@link #saveStateToSlot(int)}. */
-	public static native int loadStateFromSlotChecked(int slot, boolean ignoreCardDivergence);
+	public static int loadStateFromSlotChecked(int slot, boolean ignoreCardDivergence) { if (lab == null) { return -1; } return !ignoreCardDivergence ? -16 : lab.load(slot, true) ? 0 : -1;  }
 
 	/** psx/state.h PSX_STATE_OK. */
 	public static final int STATE_OK = 0;
@@ -1357,12 +1401,12 @@ public class NativeApp {
 	 *  The save/load picker uses non-empty here to mean "occupied", and disables the tile for
 	 *  LOADING when it is empty — so while this was a stub returning "", every slot looked empty
 	 *  and Load was permanently greyed out even though states were being written. */
-	public static native String getGamePathSlot(int slot);
+	public static String getGamePathSlot(int slot) { if (lab == null) { return ""; } return lab.stateGame(slot);  }
 	/** PNG preview for [slot], or an empty array when that state has none (states written
 	 *  before previews existed simply have no THUMB section — not an error). Never null. */
-	public static native byte[] getImageSlot(int slot);
+	public static byte[] getImageSlot(int slot) { if (lab == null) { return new byte[0]; } return lab.preview(slot);  }
 	/** PNG preview read straight from a state file. Empty array when it has none. Never null. */
-	public static native byte[] getSaveStateImage(String path);
+	public static byte[] getSaveStateImage(String path) { if (lab == null) { return new byte[0]; } try { return path.endsWith(".psxlabstate") ? java.nio.file.Files.readAllBytes(new File(path + ".png").toPath()) : new byte[0]; } catch (java.io.IOException e) { return new byte[0]; }  }
 
 	// Hot-swap the CDVD disc on the running VM (keeps the session alive, cycles
 	// the tray so the game detects the new disc). Returns false if there's no
@@ -1372,26 +1416,26 @@ public class NativeApp {
 	// parks the CPU thread and blocks until the swap completes.
 	/** Swap the running game's disc. Accepted asynchronously: the swap is applied on the
 	 *  emulation thread at the next instruction boundary, so true means "queued", not "done". */
-	public static native boolean changeDisc(String path);
+	public static boolean changeDisc(String path) { if (lab == null) { return false; } return lab.changeDisc(path);  }
 	/** Mounted PBP subimages for this run token. Blocking: call off the UI thread. */
-	public static native String getSwanEmbeddedDiscs(long session);
+	public static String getSwanEmbeddedDiscs(long session) { return "[]"; }
 	/** Select an embedded PBP disc without replacing or re-copying its container. */
-	public static native boolean changeSwanEmbeddedDisc(int index, long session);
+	public static boolean changeSwanEmbeddedDisc(int index, long session) { unsupported("changeSwanEmbeddedDisc"); return false; }
 
 	// Matches PSX_STATE_SLOT_AUTOSAVE in psx/state.h. Uses a per-game
 	// .autosave.pss file through the same emulation-thread queue as numbered
 	// saves. Call the blocking save/load methods off the Android main thread.
 	public static final int AUTOSAVE_SLOT = -1;
-	public static boolean saveAutosaveState() { return saveStateToSlot(AUTOSAVE_SLOT); }
-	public static boolean loadAutosaveState() { return loadStateFromSlot(AUTOSAVE_SLOT); }
-	public static boolean hasAutosaveState() { return !getAutosaveGamePath().isEmpty(); }
-	public static byte[] getAutosaveImage() { return getImageSlot(AUTOSAVE_SLOT); }
-	public static String getAutosaveGamePath() { return getGamePathSlot(AUTOSAVE_SLOT); }
+	public static boolean saveAutosaveState() { return lab != null && lab.save(-1); }
+	public static boolean loadAutosaveState() { return lab != null && lab.load(-1, true); }
+	public static boolean hasAutosaveState() { return lab != null && !lab.stateGame(-1).isEmpty(); }
+	public static byte[] getAutosaveImage() { return lab != null ? lab.preview(-1) : new byte[0]; }
+	public static String getAutosaveGamePath() { return lab != null ? lab.stateGame(-1) : ""; }
 	// Frames the GS has presented since it opened (host-side, not saved in the state). The
 	// auto-load-on-boot path waits until this is advancing before restoring, so the load happens
 	// once the renderer is actually presenting — otherwise the restored frame never reaches the
 	// surface and the screen stays black.
-	public static native int getPresentedFrameCount();
+	public static int getPresentedFrameCount() { if (lab == null) { return 0; } return (int)lab.frames();  }
 
 	// ---- cheats (PS1) ---------------------------------------------------------
 	//
@@ -1408,23 +1452,23 @@ public class NativeApp {
 	/** Parse `path` as the current cheat catalogue, replacing whatever was loaded.
 	 *  Returns the number of entries, or -1 when the file cannot be read. "" clears —
 	 *  which is how "this game has no cheat file" is expressed. Arms nothing on its own. */
-	public static native int cheatsLoad(String path);
+	public static int cheatsLoad(String path) { unsupported("cheatsLoad"); return -1; }
 
 	/** The catalogue as the CORE parsed it, so the app's own reader can be checked against it
 	 *  instead of assumed equal. Records separated by U+001E; fields by U+001F:
 	 *  name, code-line count, "1"/"0" for "uses a code type this build does not implement",
 	 *  description. NEVER null — an empty catalogue is "". */
-	public static native String cheatsList();
+	public static String cheatsList() { unsupported("cheatsList"); return ""; }
 
 	/** Arm exactly `enabledNames` from the loaded catalogue and apply from the next frame.
 	 *  `master` false disarms everything regardless of the list. Returns the number armed, or
 	 *  -1 when RetroAchievements hardcore is active — in which case nothing is armed and the
 	 *  caller should say so rather than showing switches that do nothing. */
-	public static native int cheatsApply(boolean master, String[] enabledNames);
+	public static int cheatsApply(boolean master, String[] enabledNames) { unsupported("cheatsApply"); return -1; }
 
 	/** How many entries the running machine has armed right now. Shown in the UI instead of a
 	 *  count of ticked boxes, so "you ticked five" and "five are running" cannot disagree. */
-	public static native int cheatsArmedCount();
+	public static int cheatsArmedCount() { unsupported("cheatsArmedCount"); return 0; }
 
 	// Discord lives in the :discord process now, not in emucore — see
 	// com.armsx2.discord.DiscordNative. ARMSX2 is GPL-3.0+ and the Social SDK is proprietary, so
