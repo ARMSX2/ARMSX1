@@ -52,4 +52,24 @@ public class PresentationEffectsTest {
             finally{cpu.closeNative();}
         }
     }
+    @Test public void shaderChangesPixelsParametersSubframesAndFallsBack()throws Exception{
+        EngineAuditActivity activity=screen();File directory=new File(inst.getTargetContext().getCacheDir(),"psxlab-effects-test");assertTrue(directory.mkdirs()||directory.isDirectory());
+        for(String name:new String[]{"psxlab-phases.slangp","psxlab-phases.slang"})try(InputStream input=inst.getContext().getAssets().open(name)){Files.copy(input,new File(directory,name).toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);}
+        String preset=new File(directory,"psxlab-phases.slangp").getAbsolutePath();
+        try{for(int scale:new int[]{1,3})try(Gpu gpu=new Gpu(false,2,scale)){
+            ShaderChain.backend(2);fill(gpu);ShaderChain.request(false,"");show(gpu,activity);int plain=pixel(activity);assertTrue(Integer.toHexString(plain),((plain>>8)&255)>150);
+            assertTrue(ShaderChain.parameters(preset),ShaderChain.parameters(preset).contains("Tint"));
+            ShaderChain.request(true,preset);gpu.prepareShaders();assertTrue(ShaderChain.status(),ShaderChain.active());
+            show(gpu,activity);int tinted=pixel(activity);assertTrue(Integer.toHexString(tinted),((tinted>>8)&255)<((tinted>>16)&255)-20);
+            ShaderChain.parameters(preset,new String[]{"Tint"},new float[]{0});show(gpu,activity);int red=pixel(activity);assertTrue(Integer.toHexString(red),(red&65535)<256&&((red>>16)&255)>150);
+            ShaderChain.request(false,"");show(gpu,activity);assertEquals("Disable shader restores the plain static image",plain,pixel(activity));
+            ShaderChain.request(true,preset);gpu.prepareShaders();show(gpu,activity);assertTrue(ShaderChain.status(),ShaderChain.active());
+            VulkanPresenter output=vulkan(gpu);assertNotNull(output);
+            ShaderChain.phase(2,1,60,4f/3);assertTrue(output.presentSubframe(activity.gameSurface()));SystemClock.sleep(50);red=pixel(activity);assertTrue(Integer.toHexString(red),((red>>16)&255)>150&&((red>>8)&255)<3);
+            ShaderChain.phase(2,2,60,4f/3);assertTrue(output.presentSubframe(activity.gameSurface()));SystemClock.sleep(50);int green=pixel(activity);assertTrue(Integer.toHexString(green),((green>>8)&255)>150&&((green>>16)&255)<3);
+            ShaderChain.request(true,new File(directory,"missing.slangp").getAbsolutePath());gpu.prepareShaders();show(gpu,activity);assertFalse(ShaderChain.active());assertEquals(plain,pixel(activity));
+            ShaderChain.request(false,"");show(gpu,activity);assertEquals(plain,pixel(activity));
+            android.util.Log.i("PSXEffectsAudit","PASS shader scale="+scale+" "+gpu.renderStatistics());
+        }}finally{ShaderChain.request(false,"");inst.runOnMainSync(activity::finish);for(File file:directory.listFiles())assertTrue(file.delete());assertTrue(directory.delete());}
+    }
 }

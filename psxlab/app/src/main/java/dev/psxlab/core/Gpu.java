@@ -80,6 +80,8 @@ public final class Gpu implements AutoCloseable {
         if(hardware!=null)hardware.configureDisplay(aspect,stretch,integerScale);
         if(vulkan!=null)vulkan.configureDisplay(aspect,stretch,integerScale);
     });}
+    public String shaderStatus(){return ShaderChain.status();}
+    public void prepareShaders(){if(ShaderChain.requested()&&presentationMode==2){submit(ShaderChain::prepare);sync();}}
     private void submit(Runnable r) {flushDrawBatch();submitDirect(r);}
     private void submitDirect(Runnable r) {
         check();
@@ -240,6 +242,7 @@ public final class Gpu implements AutoCloseable {
         flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,filter?1:0};
         submit(()->{
             if(timing!=null)timing.gpuBegin(renderer,state);
+            ShaderChain.phase(1,1,(state[0]&0x100000)!=0?50:60,shaderAspect);
             try{
                 if(internalScale>1){if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage(presentationMode==2?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){if(presentationMode==2&&vulkan!=null){boolean accepted=hardware.presentResolved(surface,state,vulkan.nativeHandle());if(timing!=null)timing.presentation(accepted);}else{boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}}receiver.accept(null);return;}
                 if(vulkan!=null){
@@ -315,7 +318,7 @@ public final class Gpu implements AutoCloseable {
         return out;
     }
     @Override public void close() {try{sync();}finally{
-        Runnable cleanup=()->{if(hardware!=null){hardware.close();hardware=null;}if(vulkan!=null){vulkan.close();vulkan=null;}};
+        Runnable cleanup=()->{if(vulkan!=null){vulkan.close();vulkan=null;}if(hardware!=null){hardware.close();hardware=null;}};
         if(worker!=null){FutureTask<Void> close=new FutureTask<>(cleanup,null);try{worker.execute(close);close.get();}catch(InterruptedException e){Thread.currentThread().interrupt();}catch(ExecutionException e){throw new IllegalStateException(e);}finally{worker.shutdown();}}
         else cleanup.run();
     }}

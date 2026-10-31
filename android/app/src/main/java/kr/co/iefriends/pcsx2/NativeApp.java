@@ -171,7 +171,7 @@ public class NativeApp {
 	 *  Needs the Vulkan present backend — librashader has no GLES runtime. On any other
 	 *  backend this is a no-op that says so once in the log rather than silently doing
 	 *  nothing. A preset that fails to compile degrades to plain presentation, logged. */
-	public static void setShaderChain(boolean enabled, String presetPath) { unsupported("setShaderChain"); }
+	public static void setShaderChain(boolean enabled, String presetPath) { dev.psxlab.core.ShaderChain.request(enabled,presetPath); if(lab!=null)lab.shadersChanged(); }
 
 	/** The tweakable parameters a .slangp preset declares, as a JSON ARRAY, in declaration
 	 *  order. Pure file parsing — no renderer or running game needed, so it is safe to call
@@ -182,7 +182,7 @@ public class NativeApp {
 	 *
 	 *  NEVER null and never "" — every failure path (no librashader, unreadable preset)
 	 *  returns "[]", which JSONArray parses cleanly to an empty list. */
-	public static String shaderPresetParams(String presetPath) { unsupported("shaderPresetParams"); return ""; }
+	public static String shaderPresetParams(String presetPath) { return dev.psxlab.core.ShaderChain.parameters(presetPath); }
 
 	/** Queues parameter values for the running shader chain; the GS thread applies them on
 	 *  its next frame. Safe to call from any thread, and safe with no VM or renderer up —
@@ -192,7 +192,7 @@ public class NativeApp {
 	 *  a parameter left out keeps what the chain has, so resetting one means sending its
 	 *  initial value rather than omitting it. [presetPath] must be the preset the values
 	 *  were read off, so a stale set can't land on a chain that has moved on. */
-	public static void setShaderChainParams(String presetPath, String[] names, float[] values) { unsupported("setShaderChainParams"); }
+	public static void setShaderChainParams(String presetPath, String[] names, float[] values) { dev.psxlab.core.ShaderChain.parameters(presetPath,names,values); }
 
 	// Save a GS dump (.gs of GPU commands) to the snaps folder for diagnosing
 	// rendering bugs. frames <= 0 captures a single frame.

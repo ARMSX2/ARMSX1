@@ -21,6 +21,12 @@ public final class HardwareRasterizer implements AutoCloseable {
     Gpu.Frame capture(int[] state){int status=state[0],divider=(status&0x10000)!=0?7:switch((status>>>17)&3){case 0->10;case 1->8;case 2->5;default->4;};int w=Math.max(1,Math.min(1024,(state[4]-state[3])/divider))*scale,h=Math.max(1,Math.min(512,(state[6]-state[5])*((status&0x480000)==0x480000?2:1)))*scale;return new Gpu.Frame(w,h,captureNative(handle,state));}
     String statistics(){long[] s=new long[12];statsNative(handle,s);return "GPU draws="+s[0]+" feedback="+s[1]+" readbacks="+s[2]+" passes="+s[3]+" presented="+s[4]+" nativeCopies="+s[5]+" sharedFrames="+s[6]+" asyncFrames="+s[7]+" uploadBytes="+s[8]+" scanouts="+s[9]+" reused="+s[10];}
     private void draw(int[] packet,int[] state){int[] commands=new int[1+packet.length+7];commands[0]=packet.length;System.arraycopy(packet,0,commands,1,packet.length);System.arraycopy(state,0,commands,packet.length+1,7);drawBatch(commands);}
+    void setVsync(boolean enabled){setVsyncNative(handle,enabled);}
+    void detachPresentation(){detachPresentationNative(handle);}
+    private static native void detachPresentationNative(long handle);
+    boolean presentBlack(Surface surface){return presentBlackNative(handle,surface);}
+    private static native void setVsyncNative(long handle,boolean enabled);
+    private static native boolean presentBlackNative(long handle,Surface surface);
     void configureDisplay(float aspect,boolean stretch,boolean integerScale){configureDisplayNative(handle,aspect,stretch,integerScale);}
     private static native void configureDisplayNative(long handle,float aspect,boolean stretch,boolean integerScale);
     @Override public void close(){if(handle!=0){destroy(handle);handle=0;}}

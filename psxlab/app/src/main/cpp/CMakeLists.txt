@@ -19,11 +19,19 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
 endif()
 target_compile_options(psxtempo PRIVATE -O3 -ffast-math)
 
-add_library(psxgpu SHARED raster_jni.cpp hardware_gpu.cpp vulkan_output.cpp)
-target_link_libraries(psxgpu PRIVATE EGL GLESv3 android vulkan)
+add_library(psxgpu SHARED raster_jni.cpp hardware_gpu.cpp vulkan_output.cpp shader_chain.cpp shader_jni.cpp)
+target_link_libraries(psxgpu PRIVATE EGL GLESv3 android vulkan log dl)
 target_compile_features(psxgpu PRIVATE cxx_std_17)
 target_compile_options(psxgpu PRIVATE -O3 -fwrapv -Wall -Wextra)
 
 add_library(psxcore SHARED gte_jni.cpp spu_jni.cpp cpu_jni.cpp cpu_arm64.cpp)
 target_compile_features(psxcore PRIVATE cxx_std_17)
 target_compile_options(psxcore PRIVATE -O3 -fwrapv -Wall -Wextra)
+
+# Optional MPL-2.0 postprocessing runtime. Standalone builds without it retain plain rendering.
+target_compile_definitions(psxgpu PRIVATE ARMSX_ENABLE_VULKAN)
+set(PSXLAB_LIBRA_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../third_party/librashader/include")
+if(EXISTS "${PSXLAB_LIBRA_INCLUDE}/librashader_min.h")
+    target_include_directories(psxgpu PRIVATE "${PSXLAB_LIBRA_INCLUDE}")
+    target_compile_definitions(psxgpu PRIVATE ARMSX_ENABLE_SHADERS)
+endif()
