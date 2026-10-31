@@ -513,22 +513,33 @@ private fun customScheme(argb: Int): ColorScheme {
 private const val RgbCycleMillis = 14_000
 private const val RgbHueStep = 4f
 
+/**
+ * [forceDark] resolves the three light-capable modes (System, Material You, Light) to their dark
+ * counterparts while leaving the chosen palette alone -- Material You still derives from the
+ * wallpaper, it just takes the dark variant.
+ *
+ * The in-game overlay passes true. A pause menu is drawn ON TOP OF the running game, and on a
+ * phone in light mode the light scheme put a white panel with grey-on-white body text over
+ * gameplay: hard to read and nothing like ARMSX2/ARMSX3, whose quick menus are dark whatever the
+ * system is doing. The library and settings keep following the system as before, so this does not
+ * take the light theme away from anyone who picked it.
+ */
 @Composable
-fun Armsx2Theme(content: @Composable () -> Unit) {
+fun Armsx2Theme(forceDark: Boolean = false, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val psOne = InterfacePreferences.psOne
     val scheme = if (psOne) PsOneScheme else when (ThemePreferences.mode.value) {
-        ThemeMode.System -> if (isSystemInDarkTheme()) NightScheme else DayScheme
+        ThemeMode.System -> if (forceDark || isSystemInDarkTheme()) NightScheme else DayScheme
         // Wallpaper-derived palette. Falls back rather than crashing if the preference somehow
         // arrives on a pre-Android-12 device (restored backup, sideloaded prefs) — the picker
         // hides the option there, so this is belt-and-braces.
         ThemeMode.MaterialYou -> when {
             Build.VERSION.SDK_INT < Build.VERSION_CODES.S -> NightScheme
-            isSystemInDarkTheme() -> dynamicDarkColorScheme(context)
+            forceDark || isSystemInDarkTheme() -> dynamicDarkColorScheme(context)
             else -> dynamicLightColorScheme(context)
         }
         ThemeMode.Blue -> NightScheme
-        ThemeMode.Light -> DayScheme
+        ThemeMode.Light -> if (forceDark) NightScheme else DayScheme
         ThemeMode.Black -> BlackScheme
         ThemeMode.Oled -> OledScheme
         ThemeMode.Purple -> PurpleScheme
