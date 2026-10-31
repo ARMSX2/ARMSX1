@@ -141,6 +141,10 @@ private object SettingsTabOrder {
  *  useful in long lists like Fixes) instead of snapping to the top every time. */
 private object SettingsScrollMemory {
     var lastOffset = 0
+    /** The row the pad had highlighted, so a controller comes back on that row rather than on the
+     *  tab strip (whose first Down would scroll the page back to the top of the tab). */
+    var lastControl: String? = null
+    var lastControlCategory: SettingsCategory? = null
 }
 
 @Composable
@@ -180,14 +184,29 @@ fun SettingsScreen(
     }
     val screenScroll = rememberScrollState(initial = SettingsScrollMemory.lastOffset)
     androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { SettingsScrollMemory.lastOffset = screenScroll.value }
+        onDispose {
+            SettingsScrollMemory.lastOffset = screenScroll.value
+            SettingsScrollMemory.lastControl = com.armsx2.ui.settings.SettingsControllerNav.currentSelectedId()
+                ?.takeUnless { it.startsWith("settings.chip.") || it.startsWith("settings.action.") }
+            SettingsScrollMemory.lastControlCategory = viewModel.uiState.value.category
+        }
     }
     LaunchedEffect(initialCategory, game?.uri) { viewModel.load(initialCategory, game) }
     // When the controller focus returns to the category-chip row (the top-most
     // navigable element), snap the whole page back to the top so the title bar +
     // chips are fully visible — per-row bringIntoView otherwise leaves the header
     // scrolled off after diving deep into a tab and coming back up.
+    // Skip the FIRST run. A LaunchedEffect also fires on initial composition, and on open the
+    // selected item IS the chip row, so this snapped straight back to the top and threw away the
+    // offset SettingsScrollMemory had just restored: "settings do not remember where I was". Only
+    // an actual selection CHANGE, once the screen is up, should pull the header back into view.
+    // Same fix as ARMSX3's.
+    val chipSnapArmed = remember { mutableStateOf(false) }
     LaunchedEffect(com.armsx2.ui.settings.SettingsControllerNav.selectedIndex.intValue) {
+        if (!chipSnapArmed.value) {
+            chipSnapArmed.value = true
+            return@LaunchedEffect
+        }
         if (com.armsx2.ui.settings.SettingsControllerNav.currentSelectedId()?.startsWith("settings.chip.") == true) {
             screenScroll.animateScrollTo(0)
         }
@@ -210,6 +229,23 @@ fun SettingsScreen(
     val ui = viewModel.uiState.value
     val contentReady = ui.game?.uri?.toString() == scopeGame?.uri?.toString()
     val displayedCategory = visibleSettingsCategory(ui.category, scopeGame != null)
+    // A per-game page composes its tab only once the scope has loaded, and the offset restored
+    // above is clamped to the little that was on screen before that. Put the page back where it
+    // was once the tab is up (unless it has already moved), and the pad back on its row.
+    val restoreOffset = remember { SettingsScrollMemory.lastOffset }
+    val restoreControl = remember { SettingsScrollMemory.lastControl }
+    LaunchedEffect(contentReady) {
+        if (!contentReady) return@LaunchedEffect
+        if (restoreOffset > 0 && screenScroll.value == 0) {
+            androidx.compose.runtime.withFrameNanos { }
+            if (screenScroll.value == 0) screenScroll.scrollTo(restoreOffset)
+        }
+        // Only on the tab it was on: opened for another tab, that row is not on screen to go back to.
+        restoreControl?.takeIf { viewModel.uiState.value.category == SettingsScrollMemory.lastControlCategory }?.let { id ->
+            val nav = com.armsx2.ui.settings.SettingsControllerNav
+            if (nav.currentSelectedId() == null && !nav.selectById(id)) nav.focusWhenRegistered(null, id)
+        }
+    }
 
     // L1/R1 tab cycling — registered only while this screen is composed. The visible-tab
     // filter has to match SettingsCategoryBar's, or the shoulders would land on a tab the
