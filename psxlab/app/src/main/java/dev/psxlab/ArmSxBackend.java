@@ -47,7 +47,7 @@ public final class ArmSxBackend {
     private Restore restart;
     private final ArrayDeque<String> events=new ArrayDeque<>();
     private volatile Map<String,String> options=Map.of();
-    private volatile int aspectOverride=-1,volumeOverride=-1;
+    private volatile int aspectOverride=-1,volumeOverride=-1,presentationModeOverride=-1,presentationMultipleOverride=2;
     private volatile float customAspectOverride,fastSpeedOverride=-1,outputAspect=4f/3f;
     private volatile Boolean stretchOverride,integerOverride,mutedOverride,wideOverride;
     private volatile boolean outputStretch,outputInteger;
@@ -66,6 +66,13 @@ public final class ArmSxBackend {
     }
     public void widescreenHack(boolean enabled){wideOverride=enabled;commands.add(()->{if(cpu!=null)cpu.gte.setWidescreen(enabled);});wake();}
     private boolean widescreenEnabled(){return wideOverride!=null?wideOverride:Boolean.parseBoolean(options.getOrDefault("video.widescreen_hack","false"));}
+    public void framePresentation(int mode,int multiple){presentationModeOverride=mode;presentationMultipleOverride=Math.max(2,Math.min(4,multiple));updatePresentation();}
+    public String framePresentationStatus(){Gpu target=gpu;return target==null?"Inactive: no game is running":target.presentationStatus();}
+    private void updatePresentation(){
+        int mode=presentationModeOverride>=0?presentationModeOverride:switch(options.getOrDefault("video.frame_presentation","off")){case "bfi"->1;case "shader_subframes"->2;default->0;};
+        int multiple=presentationModeOverride>=0?presentationMultipleOverride:(int)decimal(options.get("video.presentation_multiplier"),2);
+        Gpu target=gpu;if(target!=null)target.configurePresentation(mode,multiple,displayRefreshHz,!fast&&!blocked());
+    }
     public void shadersChanged(){if(active&&blocked()){commands.add(()->{if(gpu!=null)gpu.prepareShaders();});wake();}}
     public void audioVolume(int volume){volumeOverride=volume;updateAudio();}
     public void audioMuted(boolean muted){mutedOverride=muted;updateAudio();}
@@ -102,7 +109,7 @@ public final class ArmSxBackend {
     public synchronized void configureLogging(boolean enabled,int level){runtimeLogging=enabled;runtimeLogLevel=level;applyLogger();}
     public synchronized void captureDiagnostics(boolean enabled){captureLogging=enabled;applyLogger();}
     private void applyLogger(){journal.configure(runtimeLogging||captureLogging,captureLogging?Math.min(runtimeLogLevel,EngineLog.INFO):runtimeLogLevel);}
-    public void displayMetadata(int width,int height,float hz){if(width>0){surfaceWidth=width;surfaceHeight=height;}if(hz>0)displayRefreshHz=hz;journal.event(EngineLog.INFO,"presentation.display",Map.of("width",surfaceWidth,"height",surfaceHeight,"refresh_hz",displayRefreshHz));}
+    public void displayMetadata(int width,int height,float hz){if(width>0){surfaceWidth=width;surfaceHeight=height;}if(hz>0)displayRefreshHz=hz;updatePresentation();journal.event(EngineLog.INFO,"presentation.display",Map.of("width",surfaceWidth,"height",surfaceHeight,"refresh_hz",displayRefreshHz));}
     public boolean flushDiagnosticLog(long timeout){return journal.flush(timeout);}
     public String diagnosticDirectory(){return journal.directory().getAbsolutePath();}
     private void configureLogging(Map<String,String> settings){
@@ -191,7 +198,7 @@ public final class ArmSxBackend {
                 // Keep one graphics API attached to a retained Android Surface. Software
                 // still rasterizes on the CPU; its finished pixels use the texture presenter.
                 try(Gpu graphics=mode==0&&scale==1?new Gpu(true,false):new Gpu(true,mode,scale)){
-                    gpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();clearSurface();gpu.prepareShaders();bus=new Bus(gpu,pads[0]);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
+                    gpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();bus=new Bus(gpu,pads[0]);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
                         String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
@@ -220,6 +227,7 @@ public final class ArmSxBackend {
         while(!stop&&restart==null){
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
             if(blocked()){
+                if(!wasBlocked&&surface!=null&&surface.isValid()&&gpu.presentationNeedsRestore()){Surface target=surface;gpu.restorePresentation(target,true,frame->{if(frame!=null)draw(target,frame);});}
                 output.setPaused(true);wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
             }
             if(wasBlocked){output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
@@ -247,12 +255,12 @@ public final class ArmSxBackend {
         if(surface!=target||!target.isValid())return;Bitmap bitmap=Bitmap.createBitmap(frame.pixels(),frame.width(),frame.height(),Bitmap.Config.ARGB_8888);
         try{Canvas canvas=target.lockCanvas(null);try{canvas.drawColor(Color.BLACK);float width=outputStretch?canvas.getWidth():Math.min(canvas.getWidth(),canvas.getHeight()*outputAspect),height=outputStretch?canvas.getHeight():width/outputAspect;if(outputInteger&&!outputStretch){int k=(int)Math.min(width/frame.width(),height/frame.height());if(k>=1){width=frame.width()*k;height=frame.height()*k;}}float x=(canvas.getWidth()-width)/2,y=(canvas.getHeight()-height)/2;canvas.drawBitmap(bitmap,null,new RectF(x,y,x+width,y+height),new Paint(Paint.FILTER_BITMAP_FLAG));}finally{target.unlockCanvasAndPost(canvas);}}catch(IllegalArgumentException|IllegalStateException ignored){}finally{bitmap.recycle();}
     }
-    public void surface(Surface value){surface=value;if(value==null)resetButtons();event(value==null?"surface-lost":"surface-attached");wake();}
-    public void pause(boolean value){paused=value;if(value)resetButtons();AudioOutput out=audio;if(out!=null)out.setPaused(blocked()||muteFast());pauseCallback.accept(value);event(value?"pause":"resume");wake();}
-    public void suspendAudio(boolean value){audioSuspended=value;event("audio-suspended="+value);wake();}
-    public void suspendPresentation(boolean value){presentationSuspended=value;event("presentation-suspended="+value);wake();}
+    public void surface(Surface value){surface=value;updatePresentation();if(value==null)resetButtons();event(value==null?"surface-lost":"surface-attached");wake();}
+    public void pause(boolean value){paused=value;updatePresentation();if(value)resetButtons();AudioOutput out=audio;if(out!=null)out.setPaused(blocked()||muteFast());pauseCallback.accept(value);event(value?"pause":"resume");wake();}
+    public void suspendAudio(boolean value){audioSuspended=value;updatePresentation();event("audio-suspended="+value);wake();}
+    public void suspendPresentation(boolean value){presentationSuspended=value;updatePresentation();event("presentation-suspended="+value);wake();}
     public void stop(){stop=true;resetButtons();AudioOutput out=audio;if(out!=null)out.close();wake();}
-    public void fastForward(boolean value){fast=value;updateAudio();wake();}
+    public void fastForward(boolean value){fast=value;updateAudio();updatePresentation();wake();}
     private void wake(){synchronized(gate){gate.notifyAll();}}
     private <T> T call(Callable<T> action,T failed){
         if(!active)return failed;CompletableFuture<T> result=new CompletableFuture<>();commands.add(()->{if(result.isCancelled())return;try{result.complete(!stop&&bus!=null?action.call():failed);}catch(Exception e){error(e);result.complete(failed);}});wake();
@@ -298,7 +306,7 @@ public final class ArmSxBackend {
     private synchronized void event(String value){if(events.size()==128)events.removeFirst();events.addLast(android.os.SystemClock.elapsedRealtime()+" "+value);android.util.Log.i("PSXLabBackend",value);journal.event(EngineLog.INFO,"runtime.event",Map.of("message",value));}
     /** No BIOS/RAM/game data or authentication settings are included in a report. */
     public synchronized String diagnosticReport(){
-        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8)));json.put("renderer",renderer);org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("events",new org.json.JSONArray(events));json.put("logging",new org.json.JSONObject(journal.summary()));json.put("shader",ShaderChain.requested()?(gpu!=null?gpu.shaderStatus():ShaderChain.status()):"Off");json.put("display",new org.json.JSONObject(Map.of("width",surfaceWidth,"height",surfaceHeight,"refreshHz",displayRefreshHz,"aspect",outputAspect,"stretch",outputStretch,"integerScaling",outputInteger,"timingDomain","host/API; physical present timestamps unavailable")));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
+        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8)));json.put("renderer",renderer);org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("events",new org.json.JSONArray(events));json.put("logging",new org.json.JSONObject(journal.summary()));json.put("highRefresh",framePresentationStatus());json.put("shader",ShaderChain.requested()?(gpu!=null?gpu.shaderStatus():ShaderChain.status()):"Off");json.put("display",new org.json.JSONObject(Map.of("width",surfaceWidth,"height",surfaceHeight,"refreshHz",displayRefreshHz,"aspect",outputAspect,"stretch",outputStretch,"integerScaling",outputInteger,"timingDomain","host/API; physical present timestamps unavailable")));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
     }
     private void writeReport(){try{if(root!=null){byte[] report=diagnosticReport().getBytes(StandardCharsets.UTF_8);atomic(new File(root,"last-session.json"),report);atomic(new File(journal.directory(),"last-session.json"),report);}}catch(IOException e){android.util.Log.e("PSXLabBackend","Cannot write diagnostic report",e);}}
     private void error(Exception e){lastError=e.toString();journal.error(EngineLog.FATAL,"runtime.error",e);event("error: "+e.getClass().getSimpleName());android.util.Log.e("PSXLabBackend",lastError,e);writeReport();notice.accept(lastError);}

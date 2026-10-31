@@ -1191,8 +1191,8 @@ public class NativeApp {
 	public static void onNativeSurfaceChanged(Surface surface, int w, int h, long ownerToken) {
         synchronized (surfaceLock) {
             if (ownerToken < surfaceOwner) return;
-            surfaceOwner = ownerToken; labSurface = surface;
-            if (lab != null) lab.surface(surface);
+            surfaceOwner = ownerToken; labSurface = surface; displayWidth=w; displayHeight=h;
+              if (lab != null) { lab.surface(surface);lab.displayMetadata(w,h,displayHz); }
         }
     }
 	public static void onNativeSurfaceDestroyed(long ownerToken) {
@@ -1204,7 +1204,8 @@ public class NativeApp {
     }
 	public static void setDisplayRefreshRate(float hz) { displayHz=hz; if(lab!=null)lab.displayMetadata(displayWidth,displayHeight,hz); }
 	public static void setDisplayVsyncTimestamp(long frameTimeNanos) { unsupported("setDisplayVsyncTimestamp"); }
-	public static void setFramePresentation(int mode, int multiple) { unsupported("setFramePresentation"); }
+	public static void setFramePresentation(int mode, int multiple) { if(lab!=null)lab.framePresentation(mode,multiple); }
+    public static String framePresentationStatus(){return lab==null?"Start a game to see presentation status":lab.framePresentationStatus();}
 	/** Diagnostic APK only; normal builds ignore the request. */
 	public static void setPacingDiagnosticMode(int mode) { unsupported("setPacingDiagnosticMode"); }
 	public static void configureSwanCardPaths(String first, String second) { if (lab == null) return; String[] paths = {first, second}; for (int i = 0; i < paths.length; i++) if (paths[i] != null && !paths[i].isBlank() && !paths[i].equals(lab.cardPath(i))) { if (!lab.importCard(i, new File(paths[i]))) throw new IllegalStateException(lab.lastError()); } }

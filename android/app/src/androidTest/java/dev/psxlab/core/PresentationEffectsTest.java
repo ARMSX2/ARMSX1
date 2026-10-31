@@ -72,4 +72,24 @@ public class PresentationEffectsTest {
             android.util.Log.i("PSXEffectsAudit","PASS shader scale="+scale+" "+gpu.renderStatistics());
         }}finally{ShaderChain.request(false,"");inst.runOnMainSync(activity::finish);for(File file:directory.listFiles())assertTrue(file.delete());assertTrue(directory.delete());}
     }
+    @Test public void blackFramesArePostedAndSuspendWhenUnsupported()throws Exception{
+        EngineAuditActivity activity=screen();
+        try{
+            Display.Mode mode=Arrays.stream(activity.getDisplay().getSupportedModes()).filter(value->Math.abs(value.getRefreshRate()-120)<1).findFirst().orElseThrow(()->new AssertionError("120 Hz test display required"));
+            inst.runOnMainSync(()->{WindowManager.LayoutParams attributes=activity.getWindow().getAttributes();attributes.preferredDisplayModeId=mode.getModeId();activity.getWindow().setAttributes(attributes);activity.gameSurface().setFrameRate(120,Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);});
+            long deadline=SystemClock.uptimeMillis()+5000;while(Math.abs(activity.getDisplay().getRefreshRate()-120)>1&&SystemClock.uptimeMillis()<deadline)SystemClock.sleep(25);
+            float hz=activity.getDisplay().getRefreshRate();assertEquals(120,hz,1);
+            ShaderChain.request(false,"");
+            for(int renderer:new int[]{0,1,2})for(int scale:new int[]{1,3})try(Gpu gpu=renderer==0&&scale==1?new Gpu(false,false):new Gpu(false,renderer,scale)){
+                fill(gpu);show(gpu,activity);assertTrue(pixel(activity)!=0);
+                gpu.configurePresentation(1,2,hz,true);show(gpu,activity);assertEquals(gpu.renderStatistics(),1,gpu.blackFramesPresented());assertEquals("Real black buffer",0,pixel(activity));
+                gpu.restorePresentation(activity.gameSurface(),false,value->{});gpu.sync();SystemClock.sleep(50);assertTrue("Pause restores bright image",pixel(activity)!=0);
+                gpu.configurePresentation(1,2,60,true);show(gpu,activity);assertEquals(1,gpu.blackFramesPresented());assertTrue(pixel(activity)!=0);
+                gpu.configurePresentation(1,2,hz,false);show(gpu,activity);assertEquals(1,gpu.blackFramesPresented());assertTrue(pixel(activity)!=0);
+                gpu.configurePresentation(1,2,hz,true);show(gpu,activity);assertEquals(2,gpu.blackFramesPresented());assertEquals(0,pixel(activity));
+                gpu.configurePresentation(0,2,hz,true);show(gpu,activity);assertTrue(pixel(activity)!=0);
+                android.util.Log.i("PSXEffectsAudit","PASS BFI renderer="+renderer+" scale="+scale+" hz="+hz);
+            }
+        }finally{inst.runOnMainSync(activity::finish);}
+    }
 }

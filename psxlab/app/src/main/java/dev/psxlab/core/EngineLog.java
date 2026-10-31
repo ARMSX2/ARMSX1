@@ -72,6 +72,8 @@ public final class EngineLog implements AutoCloseable {
         public void queued(){queued=clock.wall();}
         public void gpuBegin(String renderer,int[] state){gpuStart=clock.wall();gpuCpuStart=clock.cpu();enterFrame(id);values.put("gpu_thread",Thread.currentThread().getName());values.put("gpu_tid",clock.tid());threads.put(Thread.currentThread().getName(),Map.of("tid",clock.tid(),"java_thread_id",Thread.currentThread().getId()));values.put("renderer",renderer);values.put("gpu_status",Integer.toHexString(state[0]));values.put("display",state.clone());budget=(state[0]&0x100000)!=0?20_000_000L:16_715_113L;}
         public Span stage(String path){return enabled?new Span(path,INFO,0,this):null;}
+        public void presentationSequence(String mode,int count){values.put("presentation_mode",mode);values.put("requested_presentations_per_field",count);}
+        public void extraPresentation(int phase,boolean accepted){values.put("last_extra_phase",phase);values.put("last_extra_api_accepted",accepted);}
         public void presentation(boolean accepted){values.put("presentation_api_accepted",accepted);values.put("presentation_timing_domain","host/API completion, not physical scanout");}
         public void complete(){if(complete)return;complete=true;long end=clock.wall(),queueWait=Math.max(0,gpuStart-queued),gpuWall=Math.max(0,end-gpuStart);long previous=previousCompletion.getAndSet(end);values.put("completion_interval_ns",previous==0?0:Math.max(0,end-previous));values.put("completed_ns",end);values.put("gpu_queue_ns",queueWait);values.put("gpu_wall_ns",gpuWall);values.put("gpu_active_ns",Math.max(0,clock.cpu()-gpuCpuStart));values.put("stages",stages);values.put("budget_ns",budget);
             String largest="cpu.emulate";long largestTime=cpuWall;if(queueWait>largestTime){largest="gpu.queue";largestTime=queueWait;}
@@ -109,6 +111,8 @@ public final class EngineLog implements AutoCloseable {
         String text=value.toString();out.append('"');for(int i=0;i<Math.min(text.length(),8192);i++){char c=text.charAt(i);switch(c){case '"'->out.append("\\\"");case '\\'->out.append("\\\\");case '\n'->out.append("\\n");case '\r'->out.append("\\r");case '\t'->out.append("\\t");default->{if(c<32)out.append(String.format(Locale.ROOT,"\\u%04x",(int)c));else out.append(c);}}}out.append('"');
     }
     public static String source(String path){
+        if(path.equals("gpu.present.bfi"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::presentStored or hardware_gpu.cpp#HardwareGpu::presentBlack";
+        if(path.equals("presentation.mode"))return "psxlab/app/src/main/java/dev/psxlab/core/PresentationPolicy.java#evaluate";
         if(path.startsWith("gpu.raster"))return "psxlab/app/src/main/java/dev/psxlab/core/Gpu.java#flushDrawBatch";
         if(path.startsWith("gpu.present.vulkan"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::presentOnce/presentSharedOnce";
         if(path.startsWith("gpu.present.gles"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::present";

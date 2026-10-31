@@ -15,15 +15,46 @@ public final class Gpu implements AutoCloseable {
     private final SoftwareRasterizer raster=new SoftwareRasterizer(vram);
     private final boolean hardwareDrawing;
     private final int internalScale,presentationMode;
-    private volatile float shaderAspect=4f/3f;
     private volatile HardwareRasterizer hardware;
+    private record HighRefresh(int mode,int multiple,float hz,boolean allowed){}
+    private volatile HighRefresh highRefresh=new HighRefresh(0,2,0,true);
+    private volatile int presentationDecision;
+    private volatile float presentationRate=60,shaderAspect=4f/3f;
+    private volatile long blackPresented,shaderSubframes;
+    private boolean displayVsync;
+    public void configurePresentation(int mode,int multiple,float hz,boolean allowed){highRefresh=new HighRefresh(Math.max(0,Math.min(2,mode)),Math.max(2,Math.min(4,multiple)),hz,allowed);}
+    public boolean presentationNeedsRestore(){return presentationDecision==PresentationPolicy.BFI;}
+    public String presentationStatus(){HighRefresh setting=highRefresh;int decision=PresentationPolicy.evaluate(setting.mode,setting.multiple,setting.hz,presentationRate,setting.allowed,hardware!=null||vulkan!=null,vulkan!=null,setting.mode==2&&ShaderChain.active());return PresentationPolicy.describe(decision,setting.multiple,setting.hz,presentationRate);}
+    public long blackFramesPresented(){return blackPresented;}
+    public long shaderSubframesPresented(){return shaderSubframes;}
+    private int presentationDecision(int[] state,boolean allowed){
+        HighRefresh setting=highRefresh;presentationRate=(state[0]&0x100000)!=0?50:60;
+        int decision=PresentationPolicy.evaluate(setting.mode,setting.multiple,setting.hz,presentationRate,setting.allowed&&allowed,hardware!=null||vulkan!=null,vulkan!=null,setting.mode==2&&ShaderChain.active());
+        if(decision!=presentationDecision&&journal!=null)journal.event(EngineLog.INFO,"presentation.mode",java.util.Map.of("decision",decision,"mode",setting.mode,"multiplier",setting.multiple,"display_hz",setting.hz,"game_hz",presentationRate,"status",PresentationPolicy.describe(decision,setting.multiple,setting.hz,presentationRate)));
+        presentationDecision=decision;boolean sync=decision==PresentationPolicy.BFI;
+        if(hardware!=null&&sync!=displayVsync){hardware.setVsync(sync);displayVsync=sync;}
+        return decision;
+    }
+    private void presentExtra(android.view.Surface surface,int decision,EngineLog.Frame timing){
+        if(surface==null||!surface.isValid()||(decision!=PresentationPolicy.BFI&&decision!=PresentationPolicy.SHADER))return;
+        int multiple=highRefresh.multiple;
+        for(int phase=2;phase<=multiple;phase++){
+            try(EngineLog.Span span=timing==null?null:timing.stage(decision==PresentationPolicy.BFI?"gpu.present.bfi":"gpu.present.shader_subframe")){
+                boolean accepted;
+                if(decision==PresentationPolicy.BFI){accepted=vulkan!=null?vulkan.presentBlack(surface):hardware!=null&&hardware.presentBlack(surface);if(accepted)blackPresented++;}
+                else break;
+                if(timing!=null)timing.extraPresentation(phase,accepted);
+                if(!accepted)break;
+            }
+        }
+    }
     private volatile EngineLog journal;
     public void setJournal(EngineLog value){journal=value;}
     private volatile VulkanPresenter vulkan;
     private boolean hardwareDirty;
     private volatile String renderer=NativeRasterizer.AVAILABLE?"Native software":"Java software";
     public String renderer(){return renderer;}
-    public String renderStatistics(){HardwareRasterizer active=hardware;VulkanPresenter output=vulkan;return "GPU queue="+queuedCommands()+" "+(active==null?renderer:active.statistics())+(output==null?"":" "+vulkanFrames.statistics()+" "+output.statistics());}
+    public String renderStatistics(){HardwareRasterizer active=hardware;VulkanPresenter output=vulkan;return "GPU queue="+queuedCommands()+" "+(active==null?renderer:active.statistics())+(output==null?"":" "+vulkanFrames.statistics()+" "+output.statistics())+" · "+presentationStatus()+" black="+blackPresented+" shader_subframes="+shaderSubframes;}
     private boolean polyline,polyShaded,polyHalf;
     private int polyCommand,polyXy,polyColor,pendingPolyColor,displayX,displayY;
     private int count,expected,gpuStatus=0x14802000,gpuRead;
@@ -75,13 +106,14 @@ public final class Gpu implements AutoCloseable {
         });
         if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer=scale>1?scale+"× HD drawing / Vulkan display":"Vulkan display / native software";}catch(RuntimeException e){renderer=scale>1?scale+"× HD drawing / OpenGL display (Vulkan unavailable)":"Software (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
     }
+    public String shaderStatus(){return ShaderChain.status();}
+    public void prepareShaders(){if(ShaderChain.requested()&&presentationMode==2){submit(ShaderChain::prepare);sync();}}
+    /** All native display state stays owned by the GPU worker. */
     public void configureDisplay(float aspect,boolean stretch,boolean integerScale){submit(()->{
         shaderAspect=aspect;
         if(hardware!=null)hardware.configureDisplay(aspect,stretch,integerScale);
         if(vulkan!=null)vulkan.configureDisplay(aspect,stretch,integerScale);
     });}
-    public String shaderStatus(){return ShaderChain.status();}
-    public void prepareShaders(){if(ShaderChain.requested()&&presentationMode==2){submit(ShaderChain::prepare);sync();}}
     private void submit(Runnable r) {flushDrawBatch();submitDirect(r);}
     private void submitDirect(Runnable r) {
         check();
@@ -238,23 +270,27 @@ public final class Gpu implements AutoCloseable {
     }
     /** GPU scanout into a persistent texture and an Android window surface; null means no host pixel copy. */
     public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver){requestSurfaceFrame(surface,filter,receiver,null);}
-    public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing){
+    public void restorePresentation(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver){requestSurfaceFrame(surface,filter,receiver,null,false);}
+    public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing){requestSurfaceFrame(surface,filter,receiver,timing,true);}
+    private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
         flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,filter?1:0};
         submit(()->{
             if(timing!=null)timing.gpuBegin(renderer,state);
-            ShaderChain.phase(1,1,(state[0]&0x100000)!=0?50:60,shaderAspect);
+            int decision=presentationDecision(state,extras);
+            ShaderChain.phase(decision==PresentationPolicy.SHADER?highRefresh.multiple:1,1,presentationRate,shaderAspect);
+            if(timing!=null)timing.presentationSequence(decision==PresentationPolicy.BFI?"bfi":decision==PresentationPolicy.SHADER?"shader_subframes":"normal",decision==PresentationPolicy.BFI||decision==PresentationPolicy.SHADER?highRefresh.multiple:1);
             try{
-                if(internalScale>1){if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage(presentationMode==2?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){if(presentationMode==2&&vulkan!=null){boolean accepted=hardware.presentResolved(surface,state,vulkan.nativeHandle());if(timing!=null)timing.presentation(accepted);}else{boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}}receiver.accept(null);return;}
+                if(internalScale>1){if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage(presentationMode==2?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){if(presentationMode==2&&vulkan!=null){boolean accepted=hardware.presentResolved(surface,state,vulkan.nativeHandle());if(timing!=null)timing.presentation(accepted);}else{boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}}presentExtra(surface,decision,timing);receiver.accept(null);return;}
                 if(vulkan!=null){
                     try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.convert")){
                         if(vulkanFrames.matches(softwareVramRevision,state))vulkanFrames.reused();
                         else{Frame previous=vulkanFrames.frame();vulkanFrames.update(softwareVramRevision,state,captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6],previous==null?null:previous.pixels()));}
                     }
-                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){boolean accepted=vulkan.present(surface,frame,filter,vulkanFrames.token());if(timing!=null)timing.presentation(accepted);}receiver.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";receiver.accept(frame);}
+                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){boolean accepted=vulkan.present(surface,frame,filter,vulkanFrames.token());if(timing!=null)timing.presentation(accepted);}presentExtra(surface,decision,timing);receiver.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";receiver.accept(frame);}
                 }else if(hardware!=null){if(surface!=null&&surface.isValid()){
                     if(!hardwareDrawing)try(EngineLog.Span span=timing==null?null:timing.stage("gpu.upload.gles")){hardware.setDisplayVram(vram,state,softwareVramRevision);}
                     try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.gles")){boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}
-                }receiver.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){receiver.accept(captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]));}
+                }presentExtra(surface,decision,timing);receiver.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){receiver.accept(captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]));}
             }finally{if(timing!=null)timing.complete();}
         });
     }

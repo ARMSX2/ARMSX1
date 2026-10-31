@@ -1,6 +1,11 @@
 package com.armsx2.ui.settings
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
@@ -8,6 +13,9 @@ import com.armsx2.config.Ps1Settings
 
 @Composable
 internal fun FramePresentationSettings(s: Ps1Settings, onMode: (String) -> Unit, onMultiplier: (Int) -> Unit) {
+    val status by produceState(initialValue="Checking presentation status") {
+        while(true){value=runCatching { kr.co.iefriends.pcsx2.NativeApp.framePresentationStatus() }.getOrDefault("Presentation status unavailable");delay(500)}
+    }
     val modes = listOf("off", "bfi", "shader_subframes")
     Column(Modifier.fillMaxWidth()) {
     SegmentedRow(
@@ -21,6 +29,7 @@ internal fun FramePresentationSettings(s: Ps1Settings, onMode: (String) -> Unit,
             "and increase GPU load. Neither changes game speed.",
         onChange = { i -> onMode(modes[i]) },
     )
+    Text(status,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
     if (s.framePresentation != "off") {
         SegmentedRow(
             label = "Presentation multiplier",
