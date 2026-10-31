@@ -45,14 +45,13 @@ enum class ThemeMode { System, MaterialYou, Rgb, Custom, Light, Blue, Purple, Pi
 object ThemePreferences {
     private const val PreferenceKey = "ui.theme.mode"
 
-    /** First-run default. Material You (wallpaper-derived colour) wherever the platform has
-     *  it, which is Android 12+; below that the API does not exist and System is the closest
-     *  equivalent. `System` only follows light/dark — its palette is Material 3's BASELINE,
-     *  which is blue — so defaulting to it made every fresh install look blue regardless of
-     *  the user's wallpaper. */
+    /** First-run default: Orange, the ARMSX3 look. A fixed dark theme, so a fresh install reads
+     *  the same on every device and on every Android version -- no dependence on the wallpaper,
+     *  and no light variant. The previous defaults both followed the system light/dark setting,
+     *  which on a phone in light mode produced a white UI with low-contrast grey text. Anyone
+     *  who wants Material You or System still picks it; only the out-of-the-box choice moved. */
     private val firstRunDefault: ThemeMode
-        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) ThemeMode.MaterialYou
-                else ThemeMode.System
+        get() = ThemeMode.Orange
 
     val mode = mutableStateOf(ThemeMode.System)
 
