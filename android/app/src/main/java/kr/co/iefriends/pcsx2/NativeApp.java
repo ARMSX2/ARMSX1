@@ -1236,6 +1236,9 @@ public class NativeApp {
 	public static void setPresentationSuspended(boolean suspended) { if (lab == null) { return; } lab.suspendPresentation(suspended); return; }
 	/** Implemented natively: hard reset of the running game. */
 	public static void resetGame() { if (lab == null) { return; } lab.reset(); return; }
+	/** Rebuild the running game's video at the current internal resolution and rasterizer, carrying on from the
+	 *  same moment. Blocking (the engine snapshots and restores the machine): call off the UI thread. */
+	public static boolean reloadVideo() { return lab != null && lab.reloadVideo(); }
 	/** Implemented natively: absolute fast-forward on/off. The speed it runs at comes from
 	 *  {@link #setSpeedLimits}. */
 	public static void setFastForward(boolean enabled) { if (lab == null) { return; } lab.fastForward(enabled); return; }

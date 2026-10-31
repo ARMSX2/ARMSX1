@@ -1087,7 +1087,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     // NativeApp.setSetting / commitSettings / render*, which are empty PCSX2 stubs in this port.
     MenuOrderItem("Text.item.1") {
         Text(
-            "Display mode and Stretch apply to the running game immediately. Upscale, filtering, " +
+            "Display mode, Stretch and Upscale apply to the running game immediately. Filtering, " +
                 "VSync, frame pacing and accuracy options apply after restarting the game.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1102,18 +1102,20 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
     // rasterises at the console's own resolution, `hardware` is the scale-aware rasteriser that
     // can render above it. Native therefore means "software rasteriser": at 1x the hardware one is
     // pixel-identical and still costs roughly twice the CPU, so there is no reason to select it.
-    // Both keys are read when a SESSION STARTS (ArmsxSession → armsx_hw_gl_create), which is why
-    // the Apply / Restart action sits directly above rather than below.
+    // Both keys are fixed when the game's video starts, so the change is applied by rebuilding the
+    // video in place from a state of the running machine (Ps1VideoReload): the game carries on at
+    // the new scale instead of waiting for Apply / Restart. Capped at 5x, the most PSX Lab renders.
     MenuOrderItem("HorizontalOptions.renderer.upscale.label") {
         HorizontalOptions(
             title = str("renderer.upscale.label"),
-            options = listOf(1 to "Native") + (2..8).map { it to "${it}x" },
-            selected = if (ps1.hwRasterizer) ps1.internalScale.coerceIn(1, 8) else 1,
+            options = listOf(1 to "Native") + (2..5).map { it to "${it}x" },
+            selected = if (ps1.hwRasterizer) ps1.internalScale.coerceIn(1, 5) else 1,
             notDefault = ps1.hwRasterizer != Ps1Stock.hwRasterizer || ps1.internalScale != Ps1Stock.internalScale,
             onSelect = { scale ->
                 editRunningGraphics {
                     it.copy(hwRasterizer = scale > 1, internalScale = scale)
                 }
+                com.armsx2.core.Ps1VideoReload.request()
             },
         )
     }

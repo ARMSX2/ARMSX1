@@ -339,9 +339,10 @@ fun Ps1VideoTab() {
             }
         IntSliderRow(
             label = str("renderer.internalRes.label"),
-            value = if (s.hwRasterizer) s.internalScale.coerceIn(1, 8) else 1,
+            // 5x is the most PSX Lab renders; 6x-8x were accepted and drawn at 5x.
+            value = if (s.hwRasterizer) s.internalScale.coerceIn(1, 5) else 1,
             min = 1,
-            max = 8,
+            max = 5,
             description = str("renderer.internalRes.description"),
             valueFormatter = { if (it == 1) "Native" else "${it}x" },
             onReset = resetScaleInternal,

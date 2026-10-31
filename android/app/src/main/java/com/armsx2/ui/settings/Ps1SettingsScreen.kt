@@ -66,6 +66,7 @@ internal class Ps1SettingsEditor(
      * day it was first opened.
      */
     fun update(transform: (Ps1Settings) -> Ps1Settings) {
+        val before = state.value
         val next = runCatching { Ps1SettingsStore.update(context, gameKey, transform) }
             .getOrElse { transform(state.value) }
         state.value = next
@@ -93,6 +94,11 @@ internal class Ps1SettingsEditor(
         // index on the emulation thread, so a pack dropped in while a game runs is picked up
         // without a restart. push(context) re-resolves the active scope, same reason as above.
         com.armsx2.core.Ps1Textures.push(context)
+        // Internal resolution and the rasterizer are fixed when a game's video starts; rebuild it in
+        // place so a running game shows the change now rather than at the next launch.
+        if (next.internalScale != before.internalScale || next.hwRasterizer != before.hwRasterizer) {
+            com.armsx2.core.Ps1VideoReload.request()
+        }
     }
 
     /** Re-read from disk — used after something outside the tab touched the file. */

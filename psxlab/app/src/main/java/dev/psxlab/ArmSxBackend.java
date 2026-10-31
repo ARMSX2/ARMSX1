@@ -302,6 +302,18 @@ public final class ArmSxBackend {
         if(!accepted)return false;try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
     }
     public void reset(){call(()->{restart=new Restore(null,discPath,new CompletableFuture<>());return true;},false);}
+    /** Apply internal resolution and rasterizer changes to the running game. Both are fixed when a session's Gpu is
+     *  created, so an in-game change used to wait for a restart. This snapshots the machine and goes round the same
+     *  restart path a state load uses, with the settings read again; the state format skips those Gpu fields, so the
+     *  restore keeps the new ones. The graphics API stays the one the session started with. Blocking, like load. */
+    public boolean reloadVideo(){
+        CompletableFuture<Boolean> ready=new CompletableFuture<>();
+        boolean accepted=call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before changing the resolution");
+            byte[] state=SaveState.capture(cpu,bus,gpu,gamePath);Map<String,String> next=readConfig();String api=options.get("video.gpu_backend");
+            if(api==null)next.remove("video.gpu_backend");else next.put("video.gpu_backend",api);options=next;
+            restart=new Restore(state,discPath,ready);event("reload-video");return true;},false);
+        if(!accepted)return false;try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
+    }
     private String stateIdentity(int slot){if(!gamePath.isEmpty()||slot!=-1||root==null)return gamePath;File index=new File(root,"autosave-game.txt");try{return index.length()<=65536?new String(Files.readAllBytes(index.toPath()),StandardCharsets.UTF_8):"";}catch(IOException e){return "";}}
     public File stateFile(int slot){return BackendStateStore.file(root,stateIdentity(slot),slot);}
     public String stateGame(int slot){try{return stateFile(slot).isFile()?stateIdentity(slot):"";}catch(IllegalArgumentException e){return "";}}
