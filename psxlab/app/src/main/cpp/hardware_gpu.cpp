@@ -62,7 +62,7 @@ class HardwareGpu {
     std::atomic<i64> draws{0},feedbackDraws{0},readbacks{0},passes{0},presented{0},nativeCopies{0},sharedFrames{0},asyncFrames{0};
     bool serialDispatch=false,windowSwapConfigured=false;
     double outputAspect=4.0/3.0;bool outputStretch=false,outputInteger=false,outputVsync=false;
-    std::atomic<i64> uploadBytes{0},scanouts{0},reusedFrames{0};
+    std::atomic<i64> uploadBytes{0},scanouts{0},reusedFrames{0},nativeMovies{0};
     bool softwareUploadKnown=false;jlong softwareRevision=0;std::array<int,8> softwareState{};
     const int scale;GLuint hdTexture=0,hdDrawProgram=0,hdTransferProgram=0,hdScanoutProgram=0,hdRasterProgram=0,hdFramebuffer=0,hdCommandBuffer=0,hdPresentProgram=0,resolveFramebuffer=0,hdNativeResolveProgram=0;
     int frameWidth=0,frameHeight=0;std::vector<uint32_t> resolved;ANativeWindow* softwareWindow=nullptr;SharedOutput sharedOutput,sharedOutputNext;SharedOutput* activeShared=&sharedOutput;bool sharedFlip=false;int sharedReadyFd=-1;
@@ -213,25 +213,26 @@ public:
         contentRevision++;displayChanged=true;softwareRevision=revision;std::copy_n(state,8,softwareState.begin());softwareUploadKnown=true;
     }
     void releaseSurface(JNIEnv* env){if(presentedSurface)env->DeleteWeakGlobalRef(presentedSurface);presentedSurface=nullptr;}
-    void stats(jlong* out)const{out[0]=draws.load();out[1]=feedbackDraws.load();out[2]=readbacks.load();out[3]=passes.load();out[4]=presented.load();out[5]=nativeCopies.load();out[6]=sharedFrames.load();out[7]=asyncFrames.load();out[8]=uploadBytes.load();out[9]=scanouts.load();out[10]=reusedFrames.load();out[11]=0;}
+    void stats(jlong* out)const{out[0]=draws.load();out[1]=feedbackDraws.load();out[2]=readbacks.load();out[3]=passes.load();out[4]=presented.load();out[5]=nativeCopies.load();out[6]=sharedFrames.load();out[7]=asyncFrames.load();out[8]=uploadBytes.load();out[9]=scanouts.load();out[10]=reusedFrames.load();out[11]=nativeMovies.load();}
     void verifyComputePath(){current();flush();resolveNative();fastHd=false;}
     void fill(int color,int xy,int wh){current();flush();int x=xy&0x3f0,y=(uint32_t(xy)>>16)&511,w=((wh&1023)+15)&~15,h=(uint32_t(wh)>>16)&511;if(!w||!h)return;int value=((color&255)>>3)|(((color>>8)&255)>>3<<5)|(((color>>16)&255)>>3<<10);transfer(0,x,y,w,h,value,0,0,0);}
     void upload(const int* words,int n,int start,int x,int y,int w,int total,int mask){current();flush();int count=std::min(n*2,total-start);if(count<=0)return;dirtyDisplayRegion(x,y,w,(total+w-1)/w);glBindBuffer(GL_SHADER_STORAGE_BUFFER,commandBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,n*4,words);transfer(1,x,y,w,(count+w-1)/w,0,mask,start,count);}
     void copy(int from,int to,int wh,int mask){current();flush();int x=to&1023,y=(uint32_t(to)>>16)&511,sx=from&1023,sy=(uint32_t(from)>>16)&511,w=((wh-1)&1023)+1,h=(((uint32_t(wh)>>16)-1)&511)+1;RectList source,dest;split(source,sx,sy,w,h);split(dest,x,y,w,h);bool overlap=false;for(const auto& a:source)for(const auto& b:dest)overlap|=a.intersects(b);if(overlap&&(sx==x||sy==y)){transfer(3,x,y,w,h,sx,sy,mask,0);}else if(overlap){download();for(int row=0;row<h;row++)for(int col=0;col<w;col++){int at=((y+row)&511)*1024+((x+col)&1023);if(!(mask&2)||!(cpu[at]&32768))cpu[at]=cpu[((sy+row)&511)*1024+((sx+col)&1023)]|((mask&1)<<15);}uploadCpu(false);transferHd(4,x,y,w,h,0,0,0,0);}else transfer(2,x,y,w,h,sx,sy,mask,0);}
     void setCounting(bool on){current();flush();resolveNative();countEnabled=on;fallbackPixels=0;uint32_t zero=0;glBindBuffer(GL_SHADER_STORAGE_BUFFER,counterBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,4,&zero);}
     i64 pixels(){current();flush();barrier();glBindBuffer(GL_SHADER_STORAGE_BUFFER,counterBuffer);auto* p=static_cast<uint32_t*>(glMapBufferRange(GL_SHADER_STORAGE_BUFFER,0,4,GL_MAP_READ_BIT));if(!p)throw std::runtime_error("Counter readback failed");uint32_t v=*p;glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);return fallbackPixels+v;}
-    std::pair<int,int> scanout(const int* state){
+    std::pair<int,int> scanout(const int* state,bool nativeMovie=false){
         scanouts++;
         flushHd();if(scale>1&&(state[0]&0x200000))resolveNative();int status=state[0],divider=(status&0x10000)?7:((status>>17)&3)==0?10:((status>>17)&3)==1?8:((status>>17)&3)==2?5:4,width=std::clamp((state[4]-state[3])/divider,1,1024),height=std::clamp((state[6]-state[5])*((status&0x480000)==0x480000?2:1),1,512);
-        width*=scale;height*=scale;GLuint scan=enhanced()?hdScanoutProgram:scanoutProgram;bindBuffers();glUseProgram(scan);glBindImageTexture(0,frameTexture,0,GL_FALSE,0,GL_WRITE_ONLY,GL_RGBA8);glUniform4i((enhanced()?hdScanoutProgramUniforms:scanoutProgramUniforms).display,state[1],state[2],width,height);glUniform1i((enhanced()?hdScanoutProgramUniforms:scanoutProgramUniforms).status,status);glDispatchCompute((width+7)/8,(height+7)/8,1);glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_FRAMEBUFFER_BARRIER_BIT);
+        const int sampleScale=nativeMovie?1:scale;const bool enhancedScan=enhanced()&&!nativeMovie;width*=sampleScale;height*=sampleScale;GLuint scan=enhancedScan?hdScanoutProgram:scanoutProgram;bindBuffers();glUseProgram(scan);glBindImageTexture(0,frameTexture,0,GL_FALSE,0,GL_WRITE_ONLY,GL_RGBA8);glUniform4i((enhancedScan?hdScanoutProgramUniforms:scanoutProgramUniforms).display,state[1],state[2],width,height);glUniform1i((enhancedScan?hdScanoutProgramUniforms:scanoutProgramUniforms).status,status);glDispatchCompute((width+7)/8,(height+7)/8,1);glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_FRAMEBUFFER_BARRIER_BIT);
         return{width,height};
     }
     std::pair<int,int> enhancedDimensions(const int* state){int status=state[0],divider=(status&0x10000)?7:((status>>17)&3)==0?10:((status>>17)&3)==1?8:((status>>17)&3)==2?5:4;return{std::clamp((state[4]-state[3])/divider,1,1024)*scale,std::clamp((state[6]-state[5])*((status&0x480000)==0x480000?2:1),1,512)*scale};}
     void drawEnhanced(const int* state,bool flip){if(state[0]&0x200000)resolveNative();auto [w,h]=enhancedDimensions(state);bindBuffers();glUseProgram(hdPresentProgram);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,hdTexture);glUniform1i(hdPresentProgramUniforms.enhanced,0);glUniform4i(hdPresentProgramUniforms.display,state[1],state[2],w,h);glUniform1i(hdPresentProgramUniforms.status,state[0]);glUniform1i(hdPresentProgramUniforms.smoothImage,state[7]);glUniform1i(hdPresentProgramUniforms.flip,flip);glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);}
     void resolve(const int* state,int w,int h){
         current();flush();flushHd();
-        if(scale==1){
-            auto native=scanout(state);if(native.first!=w||native.second!=h)throw std::runtime_error("Native shader input dimensions changed");
+        auto nativeSize=enhancedDimensions(state);bool nativeMovie=(state[0]&0x200000)!=0;
+        if(scale==1||(nativeMovie&&w==nativeSize.first/scale&&h==nativeSize.second/scale)){
+            auto native=scanout(state,nativeMovie);if(native.first!=w||native.second!=h)throw std::runtime_error("Native shader input dimensions changed");
             if(!resolveFramebuffer)glGenFramebuffers(1,&resolveFramebuffer);glBindFramebuffer(GL_FRAMEBUFFER,resolveFramebuffer);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,frameTexture,0);
             if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("Native shader input framebuffer unavailable");
             resolved.resize(size_t(w)*h);glReadPixels(0,0,w,h,GL_RGBA,GL_UNSIGNED_BYTE,resolved.data());glBindFramebuffer(GL_FRAMEBUFFER,0);glCheck();return;
@@ -241,8 +242,8 @@ public:
     }
     bool renderShared(const int* state,int w,int h,bool cpu,bool asynchronous){NativeTiming::Scope measured(timing,NativeTiming::GPU_SCANOUT);
         current();flush();flushHd();if(!activeShared->ensure(display,w,h,cpu))return false;
-        if(scale==1){
-            auto native=scanout(state);
+        if(scale==1||(state[0]&0x200000)!=0){
+            auto native=scanout(state,(state[0]&0x200000)!=0);
             if(!resolveFramebuffer)glGenFramebuffers(1,&resolveFramebuffer);glBindFramebuffer(GL_READ_FRAMEBUFFER,resolveFramebuffer);glFramebufferTexture2D(GL_READ_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,frameTexture,0);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER,activeShared->framebuffer);glBlitFramebuffer(0,0,native.first,native.second,0,0,w,h,GL_COLOR_BUFFER_BIT,state[7]?GL_LINEAR:GL_NEAREST);glBindFramebuffer(GL_FRAMEBUFFER,0);
         }else{glBindFramebuffer(GL_FRAMEBUFFER,activeShared->framebuffer);glViewport(0,0,w,h);drawEnhanced(state,false);glBindFramebuffer(GL_FRAMEBUFFER,0);}
@@ -252,11 +253,11 @@ public:
         if(sharedReadyFd<0){NativeTiming::Scope measured(timing,NativeTiming::GL_PRODUCER);glFinish();}return true;
     }
     bool presentResolved(JNIEnv* env,jobject surface,const int* state,jlong vulkan){
-        ANativeWindow* target=ANativeWindow_fromSurface(env,surface);if(!target)return false;int sw=ANativeWindow_getWidth(target),sh=ANativeWindow_getHeight(target);auto dimensions=enhancedDimensions(state);auto rect=psxDisplayRect(sw,sh,dimensions.first,dimensions.second,outputAspect,outputStretch,outputInteger);int w=scale==1&&vulkan?dimensions.first:rect.w,h=scale==1&&vulkan?dimensions.second:rect.h;if(w<1||h<1){ANativeWindow_release(target);throw std::runtime_error("HD target surface has no dimensions");}
+        ANativeWindow* target=ANativeWindow_fromSurface(env,surface);if(!target)return false;int sw=ANativeWindow_getWidth(target),sh=ANativeWindow_getHeight(target);auto dimensions=enhancedDimensions(state);auto rect=psxDisplayRect(sw,sh,dimensions.first,dimensions.second,outputAspect,outputStretch,outputInteger);bool nativeMovie=(state[0]&0x200000)!=0;int w=(scale==1||nativeMovie)&&vulkan?dimensions.first/scale:rect.w,h=(scale==1||nativeMovie)&&vulkan?dimensions.second/scale:rect.h;if(w<1||h<1){ANativeWindow_release(target);throw std::runtime_error("HD target surface has no dimensions");}
         if(unchanged(env,surface,target,state,sw,sh)&&(!vulkan||!psxVulkanNeedsPresent(vulkan))){reusedFrames++;ANativeWindow_release(target);return true;}
         ANativeWindow* identity=target;
         sharedFlip=!sharedFlip;activeShared=sharedFlip?&sharedOutput:&sharedOutputNext;bool shared=(!vulkan||psxVulkanSharedSupported(vulkan))&&renderShared(state,w,h,!vulkan,vulkan&&psxVulkanSharedAsyncSupported(vulkan));
-        if(vulkan){auto native=enhancedDimensions(state);psxVulkanNativeDimensions(vulkan,native.first/scale,native.second/scale);ANativeWindow_release(target);bool shown;if(shared)shown=psxVulkanPresentShared(env,vulkan,surface,activeShared->buffer,w,h,state[7],sharedReadyFd);else{resolve(state,w,h);shown=psxVulkanPresentRgba(env,vulkan,surface,resolved.data(),w,h,state[7]);}if(shown){remember(env,surface,identity,state,sw,sh);presented++;if(shared){sharedFrames++;if(sharedReadyFd>=0)asyncFrames++;}}return shown;}
+        if(vulkan){auto native=enhancedDimensions(state);psxVulkanNativeDimensions(vulkan,native.first/scale,native.second/scale);ANativeWindow_release(target);bool shown;if(shared)shown=psxVulkanPresentShared(env,vulkan,surface,activeShared->buffer,w,h,state[7],sharedReadyFd);else{resolve(state,w,h);shown=psxVulkanPresentRgba(env,vulkan,surface,resolved.data(),w,h,state[7]);}if(shown){remember(env,surface,identity,state,sw,sh);presented++;if(nativeMovie)nativeMovies++;if(shared){sharedFrames++;if(sharedReadyFd>=0)asyncFrames++;}}return shown;}
         SharedOutputRead read(shared?activeShared->buffer:nullptr);const uint32_t* pixels=read.pixels;int stride=activeShared->stride;
         if(!pixels){resolve(state,w,h);pixels=resolved.data();stride=w;shared=false;}
         if(target!=softwareWindow){if(softwareWindow)ANativeWindow_release(softwareWindow);softwareWindow=target;ANativeWindow_setBuffersGeometry(softwareWindow,0,0,WINDOW_FORMAT_RGBA_8888);}else ANativeWindow_release(target);
@@ -273,8 +274,8 @@ return true;}
     bool presentBlack(JNIEnv* env,jobject surface){if(!beginWindow(env,surface))return false;EGLint w=0,h=0;eglQuerySurface(display,windowSurface,EGL_WIDTH,&w);eglQuerySurface(display,windowSurface,EGL_HEIGHT,&h);glDisable(GL_SCISSOR_TEST);glViewport(0,0,w,h);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);if(!eglSwapBuffers(display,windowSurface)){detachWindow();return false;}displayChanged=true;presented++;return true;}
     bool present(JNIEnv* env,jobject surface,const int* state){NativeTiming::Scope measured(timing,NativeTiming::GLES_PRESENT);if(!beginWindow(env,surface))return false;
         EGLint sw=0,sh=0;eglQuerySurface(display,windowSurface,EGL_WIDTH,&sw);eglQuerySurface(display,windowSurface,EGL_HEIGHT,&sh);if(unchanged(env,surface,window,state,sw,sh)){reusedFrames++;return true;}
-        std::pair<int,int> size;if(enhanced()){flushHd();size=enhancedDimensions(state);}else size=scanout(state);auto [width,height]=size;
-        auto rect=psxDisplayRect(sw,sh,width,height,outputAspect,outputStretch,outputInteger);int dw=rect.w,dh=rect.h;glViewport(0,0,sw,sh);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);glViewport((sw-dw)/2,(sh-dh)/2,dw,dh);if(enhanced())drawEnhanced(state,true);else{glUseProgram(presentProgram);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,frameTexture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glUniform1i(presentProgramUniforms.frameTexture,0);glUniform2f(presentProgramUniforms.dimensions,float(width),float(height));glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);}glCheck();if(!eglSwapBuffers(display,windowSurface)){detachWindow();return false;}remember(env,surface,window,state,sw,sh);presented++;return true;
+        bool nativeMovie=(state[0]&0x200000)!=0;std::pair<int,int> size;if(enhanced()&&!nativeMovie){flushHd();size=enhancedDimensions(state);}else size=scanout(state,nativeMovie);auto [width,height]=size;
+        auto rect=psxDisplayRect(sw,sh,width,height,outputAspect,outputStretch,outputInteger);int dw=rect.w,dh=rect.h;glViewport(0,0,sw,sh);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);glViewport((sw-dw)/2,(sh-dh)/2,dw,dh);if(enhanced()&&!nativeMovie)drawEnhanced(state,true);else{glUseProgram(presentProgram);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,frameTexture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glUniform1i(presentProgramUniforms.frameTexture,0);glUniform2f(presentProgramUniforms.dimensions,float(width),float(height));glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);}glCheck();if(!eglSwapBuffers(display,windowSurface)){detachWindow();return false;}remember(env,surface,window,state,sw,sh);presented++;if(nativeMovie)nativeMovies++;return true;
     }
 };
 void failure(JNIEnv* env,const std::exception& e){env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),e.what());}

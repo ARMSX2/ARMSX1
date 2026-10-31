@@ -368,7 +368,7 @@ public final class Gpu implements AutoCloseable {
             if(timing!=null)timing.presentationSequence(decision==PresentationPolicy.BFI?"bfi":decision==PresentationPolicy.SHADER?"shader_subframes":"normal",decision==PresentationPolicy.BFI||decision==PresentationPolicy.SHADER?highRefresh.multiple:1);
             try{
                 if(internalScale>1||(hardwareDrawing&&hardware!=null&&vulkan!=null)){
-                    if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage(vulkan!=null?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){
+                    if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage((state[0]&0x200000)!=0?(vulkan!=null?"gpu.present.vulkan.movie24":"gpu.present.gles.movie24"):vulkan!=null?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){
                         boolean accepted;
                         try{accepted=vulkan!=null?hardware.presentResolved(surface,state,vulkan.nativeHandle()):hardware.present(surface,state);}
                         catch(RuntimeException error){if(baseVulkanOutput||vulkan==null)throw error;shaderPresentationFailed(error);accepted=hardware.present(surface,state);}
