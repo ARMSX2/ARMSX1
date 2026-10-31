@@ -19,6 +19,8 @@ def checkedLutFastmem = providers.gradleProperty('armsx.checkedLutFastmem').map 
 def cpuOptimizationMask = providers.gradleProperty('armsx.cpuOptimizationMask').map { it.toInteger() }.getOrElse(7)
 if (cpuOptimizationMask < 0 || cpuOptimizationMask > 7) throw new GradleException('CPU optimization mask must be 0..7')
 def windowsNativeBuild = System.getProperty('os.name').toLowerCase().contains('windows')
+// Retain an unshrunk, non-debuggable comparison build without changing engine settings.
+def compactRuntime = providers.gradleProperty('armsx.compactRuntime').map { it.toBoolean() }.getOrElse(true)
 
 // ---- Discord rich presence ----------------------------------------------------------------
 //
@@ -74,8 +76,8 @@ def isDiscordSdkAvailable = file("${project.projectDir}/libs/discord_partner_sdk
 // This matters to the in-app updater (src/github): it decides whether a GitHub release is newer by
 // comparing the release tag against BuildConfig.VERSION_NAME. A published APK still carrying the
 // placeholder 0.1.0 would go on offering the user the very release they just installed, forever.
-def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.3.16-performance-overlay').toString()
-def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '92183372').toString() as Integer
+def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.3.17-compact').toString()
+def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '92183373').toString() as Integer
 // Optional isolated builds keep the normal app and its private data untouched.
 def armsxApplicationId = (project.findProperty('armsx.applicationId') ?: 'com.nanodata.armsx').toString()
 def armsxAppLabel = (project.findProperty('armsx.appLabel') ?: '@string/app_name').toString()
@@ -195,8 +197,8 @@ android {
                 // dependency code/resources. Ordinary developer debug builds stay unshrunk.
                 debuggable false
                 jniDebuggable false
-                minifyEnabled true
-                shrinkResources true
+                minifyEnabled compactRuntime
+                shrinkResources compactRuntime
                 proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             }
             matchingFallbacks = ['release']

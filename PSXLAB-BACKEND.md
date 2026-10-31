@@ -23,8 +23,20 @@ cd android
 ./gradlew -PpsxlabRuntimeTest :app:assembleGithubDebug :app:testGithubDebugUnitTest
 ```
 
-The runtime flag disables Android debug/CheckJNI overhead. It does not change
-guest clocks or audio processing. Use `-Parmsx.applicationId=...` for an isolated
+The runtime flag disables Android debug/CheckJNI overhead and enables R8 code
+and resource shrinking for the installable runtime APK. Ordinary debug builds
+without this flag remain unshrunk for development. Engine/JNI classes and the
+versioned save-state field names remain protected by the backend consumer rules;
+the frontend keeps its existing reflection rules. Native debug symbols remain
+packaged for diagnosis. This does not change guest clocks or audio processing.
+For a controlled comparison or fallback, add `-Parmsx.compactRuntime=false` to
+produce an unshrunk runtime APK with the same Android debug/CheckJNI flags and
+engine settings. Keep the package ID and signer unchanged when testing updates.
+
+The compact package removes the unreferenced duplicate `library_theme.mp3`
+(byte-identical to the retained `library_music.m4a`) and the retired library GIF.
+The active library/pause music, procedural background, shaders, fonts, bundled
+databases and emulator features remain included. Use `-Parmsx.applicationId=...` for an isolated
 test app. Public release tasks remain gated by the existing frontend/asset audit;
 the CI workflow builds and uploads an isolated development artifact, not a release.
 
