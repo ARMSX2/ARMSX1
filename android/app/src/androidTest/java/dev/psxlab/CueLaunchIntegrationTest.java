@@ -22,6 +22,12 @@ public class CueLaunchIntegrationTest {
         byte[] b=new byte[32*2048];int p=16*2048;b[p]=1;System.arraycopy("CD001".getBytes(StandardCharsets.US_ASCII),0,b,p+1,5);b[p+6]=1;record(b,p+156,"\0",20,2048,2);
         String cnf="BOOT = cdrom:\\SLUS_999.99;1\r\n";p=20*2048;p+=record(b,p,"SYSTEM.CNF;1",21,cnf.length(),0);record(b,p,"SLUS_999.99;1",22,4096,0);System.arraycopy(cnf.getBytes(StandardCharsets.US_ASCII),0,b,21*2048,cnf.length());System.arraycopy(exe(),0,b,22*2048,4096);return b;
     }
+    private static byte[] pbp(byte[] raw)throws Exception{
+        byte[][] parts=new byte[2][];int total=0;for(int i=0;i<2;i++){java.util.zip.Deflater d=new java.util.zip.Deflater(6,true);try{d.setInput(raw,i*37632,37632);d.finish();byte[] out=new byte[40000];int n=d.deflate(out);assertTrue(d.finished());parts[i]=java.util.Arrays.copyOf(out,n);total+=n;}finally{d.end();}}
+        int base=0x100;byte[] result=new byte[base+0x100000+total];result[1]='P';result[2]='B';result[3]='P';word(result,36,base);System.arraycopy("PSISOIMG0000".getBytes(StandardCharsets.US_ASCII),0,result,base,12);word(result,base+0xbfc,0x100000);
+        int toc=base+0x800;result[toc+2]=(byte)0xa0;result[toc+7]=1;result[toc+12]=(byte)0xa1;result[toc+17]=1;result[toc+22]=(byte)0xa2;result[toc+28]=2;result[toc+29]=0x32;result[toc+30]=0x41;result[toc+32]=1;result[toc+38]=2;
+        int cursor=0;for(int i=0;i<2;i++){word(result,base+0x4000+i*32,cursor);result[base+0x4000+i*32+4]=(byte)parts[i].length;result[base+0x4000+i*32+5]=(byte)(parts[i].length>>>8);System.arraycopy(parts[i],0,result,base+0x100000+cursor,parts[i].length);cursor+=parts[i].length;}return result;
+    }
     private static IsoDisc disc(Object media)throws Exception{Field field=media.getClass().getDeclaredField("disc");field.setAccessible(true);return (IsoDisc)field.get(media);}
     @Test public void stagedCueFollowsBinsBootsExecutableAndClosesEveryTrack()throws Exception{
         assertEquals("true",InstrumentationRegistry.getArguments().getString("cueAudit"));
@@ -43,6 +49,8 @@ public class CueLaunchIntegrationTest {
             InvocationTargetException error=assertThrows(InvocationTargetException.class,()->mount.invoke(backend,cue.getAbsolutePath()));assertTrue(error.getCause() instanceof FileNotFoundException);assertTrue(error.getCause().getMessage().contains("track-01.bin"));
             // Other mount types continue through their original raw-data path.
             try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,bin.getAbsolutePath())){assertEquals(1,disc(media).lastTrack());assertArrayEquals(exe(),disc(media).bootExecutable());}
+            File eboot=new File(dir,"EBOOT.PBP");Files.write(eboot.toPath(),pbp(raw));
+            try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,eboot.getAbsolutePath())){assertArrayEquals(exe(),disc(media).bootExecutable());assertEquals(1,disc(media).lastTrack());}
             File invalid=new File(dir,"bad.cue");Files.write(invalid.toPath(),"FILE missing.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00".getBytes(StandardCharsets.UTF_8));
             InvocationTargetException unsupported=assertThrows(InvocationTargetException.class,()->mount.invoke(backend,invalid.getAbsolutePath()));assertTrue(unsupported.getCause().getMessage().contains("Unsupported CUE file type"));assertTrue(invalid.delete());
         }finally{for(File f:dir.listFiles())if(f.isFile())assertTrue(f.delete());assertTrue(dir.delete());}

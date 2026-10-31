@@ -55,7 +55,7 @@ public final class ArmSxBackend {
             if(new String(source.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
                 disc=null;byte[] header=source.read(0,2048);int size=ExeLoader.le(header,28);
                 if(size<4||size>2*1024*1024)throw new IOException("Invalid executable size");executable=source.read(0,size+2048);
-            }else{disc=new IsoDisc(source);executable=disc.bootExecutable();}
+            }else{disc=source instanceof PbpDisc?new IsoDisc((SectorSource)source):new IsoDisc(source);executable=disc.bootExecutable();}
         }
         Media(CueDisc cue)throws IOException{this.source=null;this.cue=cue;disc=new IsoDisc((SectorSource)cue);executable=disc.bootExecutable();}
         public void close()throws IOException{if(cue!=null)cue.close();else source.close();}
@@ -121,7 +121,9 @@ public final class ArmSxBackend {
         try(ParcelFileDescriptor fd=descriptor(path)){
             // Recognize CHD by its header, including content URIs with no extension.
             try(FileSource probe=new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal)){
-                if(new String(probe.read(0,8),StandardCharsets.US_ASCII).equals("MComprHD"))return new ChdSource(fd,journal);
+                byte[] magic=probe.read(0,8);
+                if(new String(magic,StandardCharsets.US_ASCII).equals("MComprHD"))return new ChdSource(fd,journal);
+                if(PbpDisc.hasMagic(magic))return new PbpDisc(new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal));
             }
             return new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal);
         }
@@ -140,7 +142,7 @@ public final class ArmSxBackend {
             try{Media result=new Media(cue);journal.event(EngineLog.INFO,"cd.cue.mounted",Map.of("tracks",cue.lastTrack(),"sectors",cue.sectorCount()));return result;}
             catch(Exception e){try{cue.close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
         }
-        ByteSource source=source(path);try{return new Media(source);}catch(Exception e){source.close();throw e;}
+        ByteSource source=source(path);try{Media result=new Media(source);if(source instanceof PbpDisc pbp)journal.event(EngineLog.INFO,"cd.pbp.mounted",Map.of("tracks",pbp.lastTrack(),"sectors",pbp.sectorCount(),"discs",pbp.discCount()));return result;}catch(Exception e){source.close();throw e;}
     }
     /** Blocking, as ArmSX1's existing runVMThread contract requires. */
     public boolean run(String path){return run(path, () -> true);}
