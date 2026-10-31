@@ -257,16 +257,24 @@ data class Ps1Settings(
          *  in-game pause menu → Display). Same set, same order, same labels in both — they
          *  used to disagree, and the in-game one was a lifted PCSX2 control that never
          *  reached this core at all. */
-        val GPU_BACKENDS = listOf(GPU_SOFTWARE, GPU_ACCELERATED, GPU_OPENGL, GPU_ANGLE, GPU_VULKAN)
+        //
+        // Fastest first, matching ARMSX2/ARMSX3: Vulkan (the default), then OpenGL, then SDL, then
+        // software. Vulkan used to sit LAST, so in the quick menu's horizontal chip row the active
+        // default was scrolled off the right-hand edge -- "Active: Vulkan" with no Vulkan chip in
+        // sight. Selection and storage are by token, never index, so the order is free to change.
+        //
+        // ★ GPU_BACKENDS and GPU_BACKEND_LABELS are matched BY POSITION (the quick menu zips them,
+        // the settings tab indexes both). Reorder them together or a chip selects the wrong backend.
+        val GPU_BACKENDS = listOf(GPU_VULKAN, GPU_OPENGL, GPU_ANGLE, GPU_ACCELERATED, GPU_SOFTWARE)
         /** Localized. A `get()` rather than a stored list so a live language switch re-reads it —
          *  a `val` would freeze whatever language was current when this class first loaded. */
         val GPU_BACKEND_LABELS: List<String>
             get() = listOf(
-                I18n.get("renderer.gpuBackend.software"),
-                I18n.get("renderer.gpuBackend.sdlAccel"),
+                I18n.get("renderer.gpuBackend.vulkan"),
                 I18n.get("renderer.gpuBackend.systemGl"),
                 I18n.get("renderer.gpuBackend.angle"),
-                I18n.get("renderer.gpuBackend.vulkan"),
+                I18n.get("renderer.gpuBackend.sdlAccel"),
+                I18n.get("renderer.gpuBackend.software"),
             )
 
         const val ASPECT_CLASSIC = "classic"
