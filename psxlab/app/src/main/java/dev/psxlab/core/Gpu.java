@@ -86,6 +86,7 @@ public final class Gpu implements AutoCloseable {
     public Gpu(boolean threaded,boolean hardwareDrawing){this(threaded,hardwareDrawing,true);}
     public Gpu(boolean threaded,int renderer){this(threaded,renderer==1,renderer==1,renderer==2);}
     public Gpu(boolean threaded,int renderer,int scale){this(threaded,renderer==1||scale>1,renderer==1||scale>1,renderer==2,scale,renderer);}
+    public Gpu(boolean threaded,int output,int scale,boolean hardwareRasterizer){this(threaded,hardwareRasterizer||scale>1,hardwareRasterizer||scale>1||output!=2,output==2,scale,output);}
     private Gpu(boolean threaded,boolean hardwareDrawing,boolean texturePresentation){this(threaded,hardwareDrawing,texturePresentation,false);}
     private Gpu(boolean threaded,boolean hardwareDrawing,boolean texturePresentation,boolean vulkanOutput){this(threaded,hardwareDrawing,texturePresentation,vulkanOutput,1,vulkanOutput?2:texturePresentation?1:0);}
     private Gpu(boolean threaded,boolean hardwareDrawing,boolean texturePresentation,boolean vulkanOutput,int scale,int presentationMode) {
@@ -107,10 +108,10 @@ public final class Gpu implements AutoCloseable {
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RejectedExecutionException(e); }
             }) : null;
         if(texturePresentation && NativeRasterizer.AVAILABLE)submitDirect(()->{
-            try{hardware=new HardwareRasterizer(scale);renderer=scale>1?scale+"× HD drawing / "+(presentationMode==2?"Vulkan":"OpenGL")+" display":hardwareDrawing?"OpenGL ES compute":"Native software + texture display";}
+            try{hardware=new HardwareRasterizer(scale);renderer=scale>1?scale+"× HD drawing / "+(presentationMode==2?"Vulkan":"OpenGL")+" display":hardwareDrawing?"OpenGL ES compute":"Native software + OpenGL display";}
             catch(RuntimeException e){if(scale>1)throw e;android.util.Log.w("PSXGpu","GLES unavailable; using the software display",e);}
         });
-        if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer=scale>1?scale+"× HD drawing / Vulkan display":"Vulkan display / native software";}catch(RuntimeException e){renderer=scale>1?scale+"× HD drawing / OpenGL display (Vulkan unavailable)":"Software (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
+        if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer="Vulkan display / "+(scale>1?scale+"× OpenGL compute rasterizer":hardwareDrawing?"OpenGL compute rasterizer":"native software rasterizer");}catch(RuntimeException e){renderer=hardware!=null?"OpenGL display (Vulkan unavailable)":"Software (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
     }
     private void reconcileShaderPresentation(){
         if(baseVulkanOutput)return;
