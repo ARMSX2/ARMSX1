@@ -30,7 +30,7 @@ public class EngineLoggingIntegrationTest {
                 assertTrue(nativeTiming.toString(),nativeTiming.getJSONObject("cpu").getJSONObject("timing").getBoolean("available"));assertTrue(nativeTiming.toString(),nativeTiming.getJSONObject("gpu").getJSONObject("hardware").getBoolean("available"));
                 assertTrue(report.getJSONObject("memory").getDouble("processRssMb")>0);assertTrue(report.getString("audio").length()>0);assertEquals(1,report.getJSONObject("cheats").getInt("armed_entries"));
                 assertTrue(backend.flushDiagnosticLog(5000));String text=new String(Files.readAllBytes(new File(logs,"engine-current.jsonl").toPath()),StandardCharsets.UTF_8);
-                for(String expected:new String[]{"engine.snapshot","cpu.compile","hardware_gpu.cpp","gpu.vulkan","PSX-GPU","PSX-Logger-Test-CPU","sleep_overshoot_ns","audio_buffered_frames","native_heap_allocated_bytes"})assertTrue(expected+" absent from log",text.contains(expected));
+                for(String expected:new String[]{"engine.snapshot","audio.guest.snapshot","latched_channel","cd_input_nonzero_frames","cpu.compile","hardware_gpu.cpp","gpu.vulkan","PSX-GPU","PSX-Logger-Test-CPU","sleep_overshoot_ns","audio_buffered_frames","native_heap_allocated_bytes"})assertTrue(expected+" absent from log",text.contains(expected));
                 assertEquals("",report.getJSONObject("logging").getString("writer_error"));assertEquals(0,report.getJSONObject("logging").getLong("dropped_records"));
                 backend.cheatsApply(false,null);assertEquals(0,backend.cheatsArmedCount());
             }finally{backend.stop();vm.join(15000);assertFalse(vm.isAlive());backend.configureLogging(false,EngineLog.INFO);}

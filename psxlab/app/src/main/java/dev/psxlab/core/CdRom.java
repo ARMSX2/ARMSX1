@@ -65,6 +65,15 @@ public final class CdRom {
     private java.util.function.Consumer<String> traceSink;
     /** Optional bounded capture is owned by the diagnostic caller, never enabled by normal play. */
     public void setTraceSink(java.util.function.Consumer<String> sink){traceSink=sink;}
+    /** Current routing state, not evidence that a particular voice or song was audible. */
+    public Map<String,Object> loggingSnapshot(){
+        Map<String,Object> state=new LinkedHashMap<>();
+        state.put("reading",reading);state.put("playing",playing);state.put("seeking",seekTicks>0);state.put("lba",readLocation);state.put("mode",mode);
+        state.put("muted",muted);state.put("xa_muted",xaMuted);state.put("volume_matrix",List.of(volume[0],volume[1],volume[2],volume[3]));
+        state.put("filter_file",file);state.put("filter_channel",channel);state.put("latched_file",xaFile);state.put("latched_channel",xaChannel);
+        state.put("buffered_frames",audioBufferedFrames());state.put("xa_sectors",xaSectors);state.put("xa_frames",xaFrames);state.put("dropped_frames",xaDroppedFrames);state.put("cdda_sectors",cddaSectors);
+        state.put("last_media_error",lastMediaError);return state;
+    }
     private static final class Event {
         int ticks;final int irq;final int[] bytes;
         Event(int ticks,int irq,int[] bytes){this.ticks=ticks;this.irq=irq;this.bytes=bytes;}
@@ -130,7 +139,11 @@ public final class CdRom {
             if(bank==2){if(port==1)audioRegisters[0]=value;else pendingVolume[port-2]=value;}
             else if(port==1)pendingVolume[2]=value;
             else if(port==2)pendingVolume[3]=value;
-            else{xaMuted=(value&1)!=0;if((value&32)!=0)System.arraycopy(pendingVolume,0,volume,0,4);}
+            else{
+                boolean wasMuted=xaMuted;xaMuted=(value&1)!=0;
+                if((value&32)!=0)System.arraycopy(pendingVolume,0,volume,0,4);
+                if(traceSink!=null && (wasMuted!=xaMuted || (value&32)!=0))traceSink.accept("CD_AUDIO_ROUTING xa_muted="+xaMuted+" matrix="+Arrays.toString(volume));
+            }
         }
     }
     private final int[] audioRegisters=new int[6];
@@ -178,9 +191,11 @@ public final class CdRom {
                                 int f=lastSector[16]&255,c=lastSector[17]&255;
                                 if(xaFile<0){xaFile=f;xaChannel=c;}
                                 if(f==xaFile && c==xaChannel){int before=audioBufferedFrames(),decoded=xa.decode(lastSector,xaSink);xaSectors++;if(traceSink!=null)traceSink.accept("XA_ENQUEUE lba="+(readLocation-1)+" file="+f+" channel="+c+" coding="+(lastSector[19]&255)+" frames="+decoded+" queued="+before+"->"+audioBufferedFrames()+" dropped="+xaDroppedFrames);if((submode&128)!=0){xaFile=xaChannel=-1;}}
-                            }
-                        }else if(!(realtimeAudio && filtered)){
-                            lastDataSector=lastSector;sectorPending=true;if(request)loadData();
+                                else if(traceSink!=null)traceSink.accept("XA_SKIP reason=latched_stream lba="+(readLocation-1)+" file="+f+" channel="+c+" expected="+xaFile+"/"+xaChannel);
+                            }else if(traceSink!=null)traceSink.accept("XA_SKIP reason="+(filtered&&!matches?"filter":"channel_range")+" lba="+(readLocation-1)+" file="+(lastSector[16]&255)+" channel="+(lastSector[17]&255));
+                        }else{
+                            if(realtimeAudio && traceSink!=null)traceSink.accept("XA_SKIP reason=decoder_disabled lba="+(readLocation-1)+" file="+(lastSector[16]&255)+" channel="+(lastSector[17]&255));
+                            if(!(realtimeAudio && filtered)){lastDataSector=lastSector;sectorPending=true;if(request)loadData();}
                         }
                     }
                 }catch(IOException e){reading=false;lastMediaError=e.getMessage();error(0x80);}

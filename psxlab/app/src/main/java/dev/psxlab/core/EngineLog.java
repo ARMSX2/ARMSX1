@@ -28,6 +28,7 @@ public final class EngineLog implements AutoCloseable {
     public EngineLog(File directory,Clock clock){this(directory,clock,4*1024*1024);}
     public EngineLog(File directory,Clock clock,int limit){if(limit<16384)throw new IllegalArgumentException("Log limit");this.directory=directory;this.clock=clock;this.limit=limit;}
     public boolean enabled(){return enabled;}
+    public boolean accepts(int severity){return enabled&&severity>=level;}
     public void startSession(String gameId){session=UUID.randomUUID().toString();previousCompletion.set(0);latestFrame=Map.of();event(INFO,"session.launch",Map.of("game_id",gameId));}
     public File directory(){return directory;}
     public synchronized void configure(boolean value,int severity){
@@ -111,6 +112,9 @@ public final class EngineLog implements AutoCloseable {
         String text=value.toString();out.append('"');for(int i=0;i<Math.min(text.length(),8192);i++){char c=text.charAt(i);switch(c){case '"'->out.append("\\\"");case '\\'->out.append("\\\\");case '\n'->out.append("\\n");case '\r'->out.append("\\r");case '\t'->out.append("\\t");default->{if(c<32)out.append(String.format(Locale.ROOT,"\\u%04x",(int)c));else out.append(c);}}}out.append('"');
     }
     public static String source(String path){
+        if(path.equals("audio.guest.snapshot"))return "psxlab/app/src/main/java/dev/psxlab/ArmSxBackend.java#guestAudioSnapshot";
+        if(path.startsWith("audio.guest.spu"))return "psxlab/app/src/main/java/dev/psxlab/core/Spu.java#write/loggingSnapshot";
+        if(path.startsWith("audio.guest.cd"))return "psxlab/app/src/main/java/dev/psxlab/core/CdRom.java#process/tick/audioFrame";
         if(path.startsWith("cheats."))return "psxlab/app/src/main/java/dev/psxlab/core/Cheats.java#load/arm/apply";
         if(path.startsWith("texture."))return "psxlab/app/src/main/java/dev/psxlab/core/TexturePacks.java#upload/decode/dump";
         if(path.equals("cpu.compile"))return "psxlab/app/src/main/cpp/cpu_arm64.cpp#compileArm64";

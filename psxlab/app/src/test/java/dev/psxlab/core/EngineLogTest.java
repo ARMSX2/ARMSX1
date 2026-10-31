@@ -33,6 +33,7 @@ public class EngineLogTest {
     }
     @Test public void filteringEscapingAndToggleKeepCompleteRecords()throws Exception{
         File dir=temp.newFolder();try(EngineLog log=new EngineLog(dir,new Clock())){
+            assertFalse(log.accepts(EngineLog.INFO));log.configure(true,EngineLog.WARN);assertFalse(log.accepts(EngineLog.INFO));assertTrue(log.accepts(EngineLog.ERROR));
             log.configure(true,2);log.event(1,"hidden",Map.of());log.event(2,"audio.test",Map.of("message","quote\"\\\n\t","invalid",Double.NaN));assertTrue(log.flush(2000));
             String json=new String(Files.readAllBytes(new File(dir,"engine-current.jsonl").toPath()),java.nio.charset.StandardCharsets.UTF_8);assertFalse(json.contains("hidden"));assertTrue(json.contains("quote\\\"\\\\\\n\\t"));assertTrue(json.contains("\"invalid\":null"));assertTrue(json.contains("\"tid\":123"));assertTrue(json.contains("AudioOutput.java"));
             log.configure(false,2);assertTrue(log.flush(2000));long length=new File(dir,"engine-current.jsonl").length();log.event(5,"off",Map.of());assertTrue(log.flush(2000));assertEquals(length,new File(dir,"engine-current.jsonl").length());

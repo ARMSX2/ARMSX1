@@ -18,6 +18,7 @@ public final class ArmSxBackend {
     private final Context context;
     private final EngineLog journal;
     private boolean runtimeLogging,captureLogging;private int runtimeLogLevel=2;
+    private boolean guestAudioTracing;
     private volatile float displayRefreshHz;private volatile int surfaceWidth,surfaceHeight;
     private final Consumer<Boolean> pauseCallback;
     private final Consumer<String> notice;
@@ -162,6 +163,25 @@ public final class ArmSxBackend {
     public synchronized void configureLogging(boolean enabled,int level){runtimeLogging=enabled;runtimeLogLevel=level;applyLogger();}
     public synchronized void captureDiagnostics(boolean enabled){captureLogging=enabled;applyLogger();}
     private void applyLogger(){journal.configure(runtimeLogging||captureLogging,captureLogging?Math.min(runtimeLogLevel,EngineLog.INFO):runtimeLogLevel);}
+    /** Attach only on the VM thread: the core must never format guest events with logging off. */
+    private void updateGuestAudioTracing(){
+        boolean enabled=journal.accepts(EngineLog.INFO);if(bus==null||enabled==guestAudioTracing)return;guestAudioTracing=enabled;
+        Bus target=bus;
+        target.cdrom.setTraceSink(enabled?event->guestAudioEvent("audio.guest.cd.event",target,event):null);
+        target.spu.setTraceSink(enabled?event->guestAudioEvent("audio.guest.spu.event",target,event):null);
+        if(enabled)guestAudioSnapshot();
+    }
+    private void guestAudioEvent(String path,Bus target,String event){
+        if(!journal.accepts(EngineLog.INFO))return;Cpu current=cpu;
+        journal.event(EngineLog.INFO,path,Map.of("event",event,"cpu_boundary_clocks",current==null?0:current.instructions,
+                "cpu_boundary_pc",Integer.toHexString(current==null?0:current.pc),"spu_frames",target.spu.frames,
+                "context_note","CPU context is the last Java/native boundary, not the precise MMIO instruction; SPU frames are sampled at the event."));
+    }
+    private void guestAudioSnapshot(){
+        if(bus==null||!journal.accepts(EngineLog.INFO))return;Cpu current=cpu;
+        journal.event(EngineLog.INFO,"audio.guest.snapshot",Map.of("guest_clocks",current==null?0:current.instructions,
+                "pc",Integer.toHexString(current==null?0:current.pc),"cd",bus.cdrom.loggingSnapshot(),"spu",bus.spu.loggingSnapshot()));
+    }
     public void displayMetadata(int width,int height,float hz){if(width>0){surfaceWidth=width;surfaceHeight=height;}if(hz>0)displayRefreshHz=hz;updatePresentation();journal.event(EngineLog.INFO,"presentation.display",Map.of("width",surfaceWidth,"height",surfaceHeight,"refresh_hz",displayRefreshHz));}
     public boolean flushDiagnosticLog(long timeout){return journal.flush(timeout);}
     public String diagnosticDirectory(){return journal.directory().getAbsolutePath();}
@@ -255,7 +275,7 @@ public final class ArmSxBackend {
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
                         String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
-                            cpu=new Cpu(bus);cpu.reset();
+                            cpu=new Cpu(bus);cpu.reset();guestAudioTracing=false;updateGuestAudioTracing();
                             if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,gamePath);
                             else if(media!=null&&(media.disc==null||Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
                             cpu.gte.setWidescreen(widescreenEnabled());cpu.enableNative(true,true,true);
@@ -264,7 +284,7 @@ public final class ArmSxBackend {
                                 renderer="PSX Lab / "+gpu.renderer();booted=true;
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
                                 try{loop(output);}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}}
-                            }finally{audio=null;bus.spu.setAudioSink(null);cpu.closeNative();}
+                            }finally{audio=null;bus.cdrom.setTraceSink(null);bus.spu.setTraceSink(null);guestAudioTracing=false;bus.spu.setAudioSink(null);cpu.closeNative();}
                         }finally{if(media!=null){media.close();media=null;}if(pendingMedia!=null){pendingMedia.close();pendingMedia=null;}}
                     }finally{clearSurface();}
                 }finally{displayGpu=null;gpu=null;bus=null;cpu=null;}
@@ -279,6 +299,7 @@ public final class ArmSxBackend {
         FrameRateMeter frameRate=new FrameRateMeter();AudioAwareFramePacer pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());long last=gpu.vblanks,measured=System.nanoTime();boolean wasBlocked=false,wasFast=false;EngineLog.Frame diagnosticFrame=null;long perfCpu=0,perfEpoch=0;
         while(!stop&&restart==null){
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
+            updateGuestAudioTracing();
             if(blocked()){
                 if(!wasBlocked&&surface!=null&&surface.isValid()&&gpu.presentationNeedsRestore()){Surface target=surface;gpu.restorePresentation(target,true,frame->{if(frame!=null)draw(target,frame);});}
                 output.setPaused(true);wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
@@ -315,7 +336,7 @@ public final class ArmSxBackend {
                     frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);},submitted);
             }
             journal.leaveFrame();
-            long now=System.nanoTime();if(now-measured>=500000000L){if(performance.enabled()||journal.enabled())sampleHostUsage(now);nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled()){lastCpuTiming=cpu.nativeTimings();lastGpuTiming=gpu.nativeTimings();journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics(),"native_cpu",lastCpuTiming,"native_gpu",lastGpuTiming,"memory",Map.of("process_rss_mb",hostRssMb,"system_available_mb",hostAvailableMb,"java_heap_used_bytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"java_heap_limit_bytes",Runtime.getRuntime().maxMemory(),"native_heap_allocated_bytes",android.os.Debug.getNativeHeapAllocatedSize())));}measured=now;}
+            long now=System.nanoTime();if(now-measured>=500000000L){if(performance.enabled()||journal.enabled())sampleHostUsage(now);nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled()){guestAudioSnapshot();lastCpuTiming=cpu.nativeTimings();lastGpuTiming=gpu.nativeTimings();journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics(),"native_cpu",lastCpuTiming,"native_gpu",lastGpuTiming,"memory",Map.of("process_rss_mb",hostRssMb,"system_available_mb",hostAvailableMb,"java_heap_used_bytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"java_heap_limit_bytes",Runtime.getRuntime().maxMemory(),"native_heap_allocated_bytes",android.os.Debug.getNativeHeapAllocatedSize())));}measured=now;}
         }
     }
     private void clearSurface(){Surface target=surface;if(target==null||!target.isValid()||gpu==null)return;gpu.control(0x03000001);gpu.requestSurfaceFrame(target,false,frame->{if(frame!=null)draw(target,frame);});gpu.sync();}

@@ -4,6 +4,19 @@ import static org.junit.Assert.*;
 import java.util.*;
 
 public class XaControllerTest {
+    @Test public void audioTraceExplainsRejectedStreamAndSnapshotsDoNotDrainPcm(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=ready(g,0x48,3,1,XaDecoderTest.sector(1,3,2));List<String> events=new ArrayList<>();b.cdrom.setTraceSink(events::add);
+            b.cdrom.tick(CdRomTest.SECTOR);
+            assertTrue(events.toString(),events.stream().anyMatch(e->e.contains("XA_SKIP reason=filter")&&e.contains("channel=2")));
+            assertEquals(0,b.cdrom.loggingSnapshot().get("buffered_frames"));
+            CdRomTest.command(b,0x0d,3,2);CdRomTest.ack(b);b.cdrom.tick(CdRomTest.SECTOR);
+            assertTrue(events.toString(),events.stream().anyMatch(e->e.contains("XA_ENQUEUE")&&e.contains("channel=2")));
+            int before=b.cdrom.audioBufferedFrames();Map<String,Object> state=b.cdrom.loggingSnapshot();
+            assertEquals(before,state.get("buffered_frames"));assertEquals(before,b.cdrom.audioBufferedFrames());assertEquals(2,state.get("latched_channel"));
+            CdRomTest.command(b,0x0b);assertEquals(true,b.cdrom.loggingSnapshot().get("muted"));
+        }
+    }
     @Test public void repeatedReadKeepsAlreadyDecodedSpeech(){try(Gpu g=new Gpu(false)){Bus b=ready(g,0x48,3,1,XaDecoderTest.sector(1,3,1));int buffered=b.cdrom.audioBufferedFrames();assertTrue(buffered>0);CdRomTest.command(b,6);assertEquals(buffered,b.cdrom.audioBufferedFrames());assertEquals(1,b.cdrom.xaSectors);}}
     private static Bus ready(Gpu gpu,int mode,int file,int channel,byte[] sector){Bus b=new Bus(gpu);b.cdrom.insert(new SectorSource(){public byte[] readSector(int at){return sector;}public int sectorCount(){return 1000;}});CdRomTest.command(b,0x0e,mode);CdRomTest.ack(b);CdRomTest.command(b,0x0d,file,channel);CdRomTest.ack(b);CdRomTest.command(b,6);CdRomTest.ack(b);CdRomTest.firstSector(b);return b;}
     @Test public void matchingXaIsDecodedWithoutDataIrqOrDma(){try(Gpu g=new Gpu(false)){Bus b=ready(g,0x48,3,1,XaDecoderTest.sector(1,3,1));assertEquals(1,b.cdrom.xaSectors);assertEquals(2352,b.cdrom.audioBufferedFrames());assertEquals(0,CdRomTest.irq(b));b.cdrom.write(3,128);assertEquals(0,b.cdrom.availableBytes());}}

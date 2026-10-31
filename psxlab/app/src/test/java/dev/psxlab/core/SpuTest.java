@@ -5,6 +5,23 @@ import static org.junit.Assert.*;
 import java.util.*;
 
 public class SpuTest {
+    @Test public void audioSnapshotsDistinguishMutedRoutingWithoutChangingPcm(){
+        try(Gpu g=new Gpu(false)){
+            Bus a=new Bus(g,new PadState(),false),b=new Bus(g,new PadState(),false);
+            List<Integer> expected=collect(a.spu),actual=collect(b.spu);
+            voice(a,0,7);voice(b,0,7);
+            for(int i=0;i<100;i++){
+                frames(a.spu,1);frames(b.spu,1);
+                Map<String,Object> snapshot=b.spu.loggingSnapshot();
+                assertEquals((long)i+1,snapshot.get("frames"));
+                assertEquals(List.of(0,0),snapshot.get("cd_volume"));
+                assertEquals(24,((List<?>)snapshot.get("voices")).size());
+            }
+            a.spu.flushAudio();b.spu.flushAudio();assertEquals(expected,actual);
+            b.spu.write(0x1f801db0,0x8000);b.spu.write(0x1f801db2,0x7fff);
+            assertEquals(List.of(-32768,32767),b.spu.loggingSnapshot().get("cd_volume"));
+        }
+    }
     @Test public void tracingBothVoiceBanksPreservesGeneratedAudio(){
         try(Gpu g=new Gpu(false)){
             Bus a=new Bus(g,new PadState(),false),b=new Bus(g,new PadState(),false);

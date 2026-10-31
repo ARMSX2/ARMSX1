@@ -29,6 +29,23 @@ public final class Spu {
     public void setAudioSink(AudioSink sink){this.sink=sink;outputCount=0;}
     public void flushAudio(){nativeCounters();if(outputCount>0 && sink!=null)sink.samples(output,outputCount);outputCount=0;}
     public String diagnostic(){nativeCounters();return "SPU: "+frames+" frames, "+nonzeroFrames+" nonzero, "+decodedBlocks+" ADPCM blocks, "+keyOns+" key-ons, "+manualLoopWrites+" loop writes, "+protectedLoopStarts+" protected loop starts, "+cdMixedFrames+" CD mixed frames";}
+    /** Read-only observation, called on the emulation thread only while diagnostic logging is on.
+     * An active envelope is not proof of audible dialogue; identify actual PCM activity separately. */
+    public java.util.Map<String,Object> loggingSnapshot(){
+        nativeCounters();java.util.List<java.util.Map<String,Object>> states=new java.util.ArrayList<>(24);
+        for(int v=0;v<24;v++){
+            int base=0x1f801c00+v*16,envelope=read(base+12),left=read(0x1f801e00+v*4),right=read(0x1f801e02+v*4);
+            states.add(java.util.Map.of("voice",v,"envelope",envelope,"volume_left",(int)(short)left,"volume_right",(int)(short)right,
+                    "pitch",read(base+4),"start_address",read(base+6)*8,"repeat_address",read(base+14)*8,
+                    "adsr",java.util.List.of(read(base+8),read(base+10))));
+        }
+        java.util.Map<String,Object> result=new java.util.LinkedHashMap<>();
+        result.put("frames",frames);result.put("nonzero_output_frames",nonzeroFrames);result.put("cd_input_nonzero_frames",cdNonzeroFrames);result.put("cd_mixed_nonzero_frames",cdMixedFrames);
+        result.put("control",read(0x1f801daa));result.put("status",read(0x1f801dae));result.put("irq_address",read(0x1f801da4)*8);
+        result.put("main_volume",java.util.List.of((int)(short)read(0x1f801db8),(int)(short)read(0x1f801dba)));
+        result.put("cd_volume",java.util.List.of((int)(short)read(0x1f801db0),(int)(short)read(0x1f801db2)));
+        result.put("voices",states);result.put("interpretation","Counters are cumulative; use deltas between snapshots. Voice envelopes/volumes do not identify speech or music.");return result;
+    }
     public int read(int address){
         if(nativeCore!=null)return nativeCore.op(0,address,0);
         int index=(address-0x1f801c00)/2;
@@ -44,9 +61,11 @@ public final class Spu {
     public void write(int address,int value){
         if(traceSink!=null && address>=0x1f801d88 && address<=0x1f801d8e && (value&65535)!=0){
             boolean on=address<0x1f801d8c;int mask=(value&65535)<<((address&2)==0?0:16);StringBuilder event=new StringBuilder(on?"SPU_KEYON":"SPU_KEYOFF");event.append(String.format(java.util.Locale.ROOT," mask=%06X",mask&0xffffff));
-            if(on)for(int v=0;v<24;v++)if((mask&(1<<v))!=0){int base=0x1f801c00+v*16;event.append(String.format(java.util.Locale.ROOT," v%d(start=%05X pitch=%04X adsr=%04X/%04X)",v,read(base+6)*8,read(base+4),read(base+8),read(base+10)));}
+            if(on)for(int v=0;v<24;v++)if((mask&(1<<v))!=0){int base=0x1f801c00+v*16;event.append(String.format(java.util.Locale.ROOT," v%d(start=%05X pitch=%04X adsr=%04X/%04X volume=%04X/%04X)",v,read(base+6)*8,read(base+4),read(base+8),read(base+10),read(base),read(base+2)));}
             traceSink.accept(event.toString());
         }
+        if(traceSink!=null && (address==0x1f801d80 || address==0x1f801d82 || address==0x1f801da4 || address==0x1f801daa || address==0x1f801db0 || address==0x1f801db2) && read(address)!=(value&65535))
+            traceSink.accept(String.format(java.util.Locale.ROOT,"SPU_REGISTER address=%08X previous=%04X value=%04X",address,read(address),value&65535));
         if(nativeCore!=null){nativeCore.op(1,address,value);manualLoopWrites=nativeCore.counter(4);return;}
         value&=65535;int index=(address-0x1f801c00)/2;
         if(index>=256)return;
