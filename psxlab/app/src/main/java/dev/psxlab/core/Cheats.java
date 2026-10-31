@@ -18,7 +18,7 @@ public final class Cheats {
     public synchronized int load(String path)throws IOException {
         catalogue=armed=List.of();missing=0;source="";
         if(path==null||path.isBlank())return 0;
-        Path file=Path.of(path);if(Files.size(file)>4*1024*1024)throw new IOException("Cheat catalogue exceeds 4 MiB");
+        Path file=new File(path).toPath();if(Files.size(file)>4*1024*1024)throw new IOException("Cheat catalogue exceeds 4 MiB");
         StringBuilder text=new StringBuilder();try(Reader input=Files.newBufferedReader(file,StandardCharsets.UTF_8)){char[] buffer=new char[8192];int n;while((n=input.read(buffer))!=-1){if(text.length()+n>4*1024*1024)throw new IOException("Cheat catalogue exceeds 4 MiB");text.append(buffer,0,n);}}
         List<Entry> entries=parse(text.toString());catalogue=entries;source=path;return entries.size();
     }
@@ -33,7 +33,7 @@ public final class Cheats {
                 String line=raw.trim();if(line.startsWith("\ufeff"))line=line.substring(1).trim();
                 if(line.isBlank()||line.startsWith("#")||line.startsWith(";")||line.startsWith("//"))continue;
                 if(line.startsWith("[")){
-                    if(name!=null)result.add(new Entry(name,description,List.copyOf(codes),unsupported));
+                    if(name!=null)result.add(new Entry(name,description,Collections.unmodifiableList(new ArrayList<>(codes)),unsupported));
                     if(result.size()>=MAX_GROUPS)throw new IOException("Too many cheat groups");
                     int end=line.lastIndexOf(']');name=clean(line.substring(1,end>0?end:line.length()),192);if(name.isEmpty())name="(unnamed)";
                     codes.clear();description="";unsupported=false;continue;
@@ -46,13 +46,13 @@ public final class Cheats {
                 codes.add(new Code(type,code&0xffffff,value));unsupported|=!supported(type);
             }
         }
-        if(name!=null)result.add(new Entry(name,description,List.copyOf(codes),unsupported));return List.copyOf(result);
+        if(name!=null)result.add(new Entry(name,description,Collections.unmodifiableList(new ArrayList<>(codes)),unsupported));return Collections.unmodifiableList(result);
     }
     public synchronized int arm(boolean master,String[] names){
         HashSet<String> selected=new HashSet<>();if(master&&names!=null)for(String name:names)if(name!=null)selected.add(name.trim().toLowerCase(Locale.ROOT));
         ArrayList<Entry> next=new ArrayList<>();HashSet<String> found=new HashSet<>();
         for(Entry entry:catalogue)if(selected.contains(entry.name.toLowerCase(Locale.ROOT))){next.add(entry);found.add(entry.name.toLowerCase(Locale.ROOT));}
-        missing=selected.size()-found.size();armed=List.copyOf(next);return next.size();
+        missing=selected.size()-found.size();armed=Collections.unmodifiableList(next);return next.size();
     }
     public int armedCount(){return armed.size();}
     public Map<String,Object> diagnostic(){return Map.of("file",source,"catalogue_entries",catalogue.size(),"armed_entries",armed.size(),"missing_names",missing,"source","psxlab/app/src/main/java/dev/psxlab/core/Cheats.java#apply");}

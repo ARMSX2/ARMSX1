@@ -89,7 +89,7 @@ public final class ArmSxBackend {
         Gpu target=gpu;if(target!=null)target.configurePresentation(mode,multiple,displayRefreshHz,!fast&&!blocked());
     }
     private final Cheats cheats=new Cheats();
-    public int cheatsLoad(String path){try{return cheats.load(path);}catch(IOException error){journal.error("cheats.load",error);notice.accept("Cannot load cheats: "+error.getMessage());return -1;}}
+    public int cheatsLoad(String path){try{return cheats.load(path);}catch(IOException|RuntimeException error){journal.error("cheats.load",error);notice.accept("Cannot load cheats: "+error.getMessage());return -1;}}
     public String cheatsList(){return cheats.describe();}
     public int cheatsApply(boolean enabled,String[] names){int count=cheats.arm(enabled,names);journal.event(EngineLog.INFO,"cheats.selection",cheats.diagnostic());return count;}
     public int cheatsArmedCount(){return cheats.armedCount();}
