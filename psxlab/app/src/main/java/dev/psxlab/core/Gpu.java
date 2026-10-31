@@ -71,6 +71,8 @@ public final class Gpu implements AutoCloseable {
     private boolean hardwareDirty;
     private volatile String renderer=NativeRasterizer.AVAILABLE?"Native software":"Java software";
     public String renderer(){return renderer;}
+    /** Active presentation objects, independent of the rasterizer or requested settings. */
+    public String displayRenderer(){return vulkan!=null?"Vulkan":hardware!=null?"OpenGL":"Software";}
     public String renderStatistics(){HardwareRasterizer active=hardware;VulkanPresenter output=vulkan;return "GPU queue="+queuedCommands()+" "+(active==null?renderer:active.statistics())+(output==null?"":" "+vulkanFrames.statistics()+" "+output.statistics())+" · "+presentationStatus()+" black="+blackPresented+" shader_subframes="+shaderSubframes;}
     private boolean polyline,polyShaded,polyHalf;
     private int polyCommand,polyXy,polyColor,pendingPolyColor,displayX,displayY;

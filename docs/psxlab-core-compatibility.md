@@ -131,3 +131,9 @@ with hardware rasterization reports both Vulkan display and OpenGL compute drawi
 because the current hardware rasterizer uses GLES; a requested setting alone is
 never presented as proof of an active API. Changes to the presentation API require
 restarting the game.
+
+The compact build labels the OSD `Display: Vulkan`, `Display: OpenGL` or
+`Display: Software` from the active presenter objects. It keeps the complete
+rasterizer/presentation description in diagnostics, including the separate
+`displayRenderer` field. Shader presentation and real API fallbacks update this
+label; it never substitutes the requested setting for a running backend.

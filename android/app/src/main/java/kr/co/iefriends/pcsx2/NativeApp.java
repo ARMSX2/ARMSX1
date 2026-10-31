@@ -508,22 +508,8 @@ public class NativeApp {
 	public static String getGlDriver() { unsupported("getGlDriver"); return "system"; }
 	public static void setGpuHostHint(String hint) { unsupported("setGpuHostHint"); }
 
-	/** Human-readable name of the presentation backend that is genuinely running —
-	 *  the one that survived the fallback ladder, not the one that was asked for.
-	 *  Returns "" (never null) when no renderer is up.
-	 *
-	 *  Possible shapes:
-	 *  <ul>
-	 *    <li>{@code "Vulkan (Adreno (TM) 740)"}
-	 *    <li>{@code "Vulkan (Adreno (TM) 740, custom driver)"} — and the
-	 *        ", custom driver" suffix appears ONLY when a user-supplied driver
-	 *        really loaded, so a driver that silently failed is distinguishable
-	 *    <li>{@code "OpenGL ES (ANGLE)"}
-	 *    <li>{@code "OpenGL ES (system)"}
-	 *    <li>{@code "SDL accelerated (opengles2)"}
-	 *    <li>{@code "Software"}
-	 *  </ul> */
-	public static String getActiveRenderer() { if (lab == null) { return ""; } return lab.renderer();  }
+	/** Active display API only; the full drawing/presentation path remains in engine diagnostics. */
+	public static String getActiveRenderer() { if (lab == null) { return ""; } return lab.displayRenderer();  }
 	/** Bounded, synchronized snapshot of the latest SwanStation session in this process.
 	 * Empty before a session; never combines prior games, builds or legacy PSXE logs. */
 	public static String getSwanDiagnostics() { return getEngineDiagnostics(); }

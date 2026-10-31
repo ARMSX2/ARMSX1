@@ -37,7 +37,7 @@ public class EngineOverlayTest {
                     for(int index:new int[]{0,1,2,3,4,6,8,9,10,13,15,16,17,23,24,25,26,27,28,30,31,32})assertTrue("slot "+index+"="+stats[index],Double.isFinite(stats[index])&&stats[index]>=0);
                     assertTrue(stats[6]>0);assertTrue(stats[23]>0);assertTrue(stats[24]>0);assertEquals(scale,stats[30],0);
                     assertEquals(-1,stats[5],0);assertEquals(-1,stats[29],0);
-                    String active=NativeApp.getActiveRenderer();if(output.equals("vulkan"))assertTrue(active,active.contains("Vulkan display"));else assertFalse(active,active.contains("Vulkan"));
+                    String active=NativeApp.getActiveRenderer();assertEquals(output.equals("vulkan")?"Vulkan":"OpenGL",active);
                     assertFalse(new org.json.JSONObject(backend.diagnosticReport()).getJSONObject("logging").getBoolean("enabled"));
                     NativeApp.setStatisticsEnabled(false);assertEquals(0,NativeApp.getStatistics(stats));
                     android.util.Log.i("EngineOverlayTest","PASS "+output+"/"+raster+" renderer="+active+" scale="+scale+" stats="+java.util.Arrays.toString(stats));

@@ -547,7 +547,7 @@ fun GameOsdOverlay() {
         }
         if (showRenderer) {
             val name = GameOsd.renderer.value
-            if (name.isNotEmpty()) add("GFX $name")
+            if (name.isNotEmpty()) add("Display: $name")
         }
     }
 
