@@ -1,3 +1,4 @@
+#include "display_layout.h"
 // Original OpenGL ES compute backend for PSX Lab's integer raster rules.
 #include "raster_core.h"
 #include "gpu_shaders.h"
@@ -29,6 +30,8 @@ void glCheck(){GLenum error=glGetError();if(error!=GL_NO_ERROR)throw std::runtim
 struct Rect {int x0,y0,x1,y1;bool valid()const{return x0<=x1&&y0<=y1;}bool intersects(const Rect& b)const{return valid()&&b.valid()&&x0<=b.x1&&x1>=b.x0&&y0<=b.y1&&y1>=b.y0;}};
 struct Primitive {int q[64]{};Rect bounds()const{return{q[4],q[5],q[6],q[7]};}};
 class HardwareGpu {
+    double outputAspect=4.0/3.0;bool outputStretch=false,outputInteger=false,outputVsync=false;
+
     // Uniform locations belong to a linked program and remain valid for its lifetime.
     struct Uniforms { GLint dirtyRows=-1,bounds=-1,count=-1,countPixels=-1,data=-1,dimensions=-1,display=-1,enhanced=-1,flip=-1,frameTexture=-1,operation=-1,serialMode=-1,shape=-1,smoothImage=-1,status=-1; };
     Uniforms transferProgramUniforms,hdNativeResolveProgramUniforms,hdTransferProgramUniforms,hdDrawProgramUniforms,drawProgramUniforms,hdPresentProgramUniforms,presentProgramUniforms,scanoutProgramUniforms,hdScanoutProgramUniforms;
@@ -98,6 +101,11 @@ class HardwareGpu {
     void transferHd(int op,int x,int y,int w,int h,int a,int b,int c,int d){if(scale==1)return;flushHd();glUseProgram(hdTransferProgram);bindBuffers();glUniform4i(hdTransferProgramUniforms.shape,x,y,w,h);glUniform4i(hdTransferProgramUniforms.data,a,b,c,d);glUniform1i(hdTransferProgramUniforms.operation,op);glDispatchCompute(op==3?(std::max(w,h)*scale+7)/8:(w*scale+7)/8,op==3?1:(h*scale+7)/8,1);barrier();}
     void detachWindow(){windowSwapConfigured=false;if(windowSurface!=EGL_NO_SURFACE){eglMakeCurrent(display,pbuffer,pbuffer,context);eglDestroySurface(display,windowSurface);windowSurface=EGL_NO_SURFACE;}if(window){ANativeWindow_release(window);window=nullptr;}}
 public:
+    void configureDisplay(float aspect,bool stretch,bool integerScale){
+        double next=std::isfinite(aspect)&&aspect>=0.1f&&aspect<=10.f?aspect:4.0/3.0;
+        if(outputAspect==next&&outputStretch==stretch&&outputInteger==integerScale)return;
+        outputAspect=next;outputStretch=stretch;outputInteger=integerScale;displayChanged=true;
+    }
     HardwareGpu(int requestedScale=1):scale(requestedScale){if(scale<1||scale>5)throw std::runtime_error("Invalid internal resolution scale");reads.reserve(128);writes.reserve(32);try{display=acquireDisplay();const EGLint attrs[]={EGL_SURFACE_TYPE,EGL_PBUFFER_BIT|EGL_WINDOW_BIT,EGL_RENDERABLE_TYPE,EGL_OPENGL_ES3_BIT_KHR,EGL_RED_SIZE,8,EGL_GREEN_SIZE,8,EGL_BLUE_SIZE,8,EGL_ALPHA_SIZE,8,EGL_NONE};EGLint count=0;if(!eglChooseConfig(display,attrs,&config,1,&count)||!count)throw std::runtime_error("No GLES3 EGL config");const EGLint contextAttrs[]={EGL_CONTEXT_CLIENT_VERSION,3,EGL_NONE};context=eglCreateContext(display,config,EGL_NO_CONTEXT,contextAttrs);if(context==EGL_NO_CONTEXT)throw std::runtime_error("GLES3 context unavailable");const EGLint surfaceAttrs[]={EGL_WIDTH,1,EGL_HEIGHT,1,EGL_NONE};pbuffer=eglCreatePbufferSurface(display,config,surfaceAttrs);current();GLint major=0,minor=0;glGetIntegerv(GL_MAJOR_VERSION,&major);glGetIntegerv(GL_MINOR_VERSION,&minor);if(major<3||(major==3&&minor<1))throw std::runtime_error("OpenGL ES 3.1 is required");
         drawProgram=program(DRAW_SHADER);drawProgramUniforms.bounds=glGetUniformLocation(drawProgram,"bounds");drawProgramUniforms.count=glGetUniformLocation(drawProgram,"count");drawProgramUniforms.countPixels=glGetUniformLocation(drawProgram,"countPixels");drawProgramUniforms.serialMode=glGetUniformLocation(drawProgram,"serialMode");transferProgram=program(TRANSFER_SHADER);transferProgramUniforms.data=glGetUniformLocation(transferProgram,"data");transferProgramUniforms.operation=glGetUniformLocation(transferProgram,"operation");transferProgramUniforms.shape=glGetUniformLocation(transferProgram,"shape");scanoutProgram=program(SCANOUT_SHADER);scanoutProgramUniforms.display=glGetUniformLocation(scanoutProgram,"display");scanoutProgramUniforms.status=glGetUniformLocation(scanoutProgram,"status");presentProgram=program(nullptr,PRESENT_VERTEX,PRESENT_FRAGMENT);presentProgramUniforms.dimensions=glGetUniformLocation(presentProgram,"dimensions");presentProgramUniforms.frameTexture=glGetUniformLocation(presentProgram,"frameTexture");
         glGenBuffers(1,&ramBuffer);glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);glBufferData(GL_SHADER_STORAGE_BUFFER,sizeof(cpu),cpu.data(),GL_DYNAMIC_COPY);glGenBuffers(1,&commandBuffer);glBindBuffer(GL_SHADER_STORAGE_BUFFER,commandBuffer);glBufferData(GL_SHADER_STORAGE_BUFFER,sizeof(pending),nullptr,GL_DYNAMIC_DRAW);glGenBuffers(1,&counterBuffer);glBindBuffer(GL_SHADER_STORAGE_BUFFER,counterBuffer);uint32_t zero=0;glBufferData(GL_SHADER_STORAGE_BUFFER,4,&zero,GL_DYNAMIC_READ);
@@ -173,7 +181,7 @@ public:
         if(sharedReadyFd<0)glFinish();return true;
     }
     bool presentResolved(JNIEnv* env,jobject surface,const int* state,jlong vulkan){
-        ANativeWindow* target=ANativeWindow_fromSurface(env,surface);if(!target)return false;int sw=ANativeWindow_getWidth(target),sh=ANativeWindow_getHeight(target),w=std::min(sw,sh*4/3),h=w*3/4;if(w<1||h<1){ANativeWindow_release(target);throw std::runtime_error("HD target surface has no dimensions");}
+        ANativeWindow* target=ANativeWindow_fromSurface(env,surface);if(!target)return false;int sw=ANativeWindow_getWidth(target),sh=ANativeWindow_getHeight(target);auto dimensions=enhancedDimensions(state);auto rect=psxDisplayRect(sw,sh,dimensions.first,dimensions.second,outputAspect,outputStretch,outputInteger);int w=rect.w,h=rect.h;if(w<1||h<1){ANativeWindow_release(target);throw std::runtime_error("HD target surface has no dimensions");}
         if(unchanged(env,surface,target,state,sw,sh)){reusedFrames++;ANativeWindow_release(target);return true;}
         ANativeWindow* identity=target;
         sharedFlip=!sharedFlip;activeShared=sharedFlip?&sharedOutput:&sharedOutputNext;bool shared=(!vulkan||psxVulkanSharedSupported(vulkan))&&renderShared(state,w,h,!vulkan,vulkan&&psxVulkanSharedAsyncSupported(vulkan));
@@ -190,7 +198,7 @@ public:
         if(!eglMakeCurrent(display,windowSurface,windowSurface,context)){detachWindow();return false;}if(!windowSwapConfigured){eglSwapInterval(display,0);windowSwapConfigured=true;}
         EGLint sw=0,sh=0;eglQuerySurface(display,windowSurface,EGL_WIDTH,&sw);eglQuerySurface(display,windowSurface,EGL_HEIGHT,&sh);if(unchanged(env,surface,window,state,sw,sh)){reusedFrames++;return true;}
         std::pair<int,int> size;if(scale>1){flushHd();size=enhancedDimensions(state);}else size=scanout(state);auto [width,height]=size;
-        int dw=std::min(sw,sh*4/3),dh=dw*3/4;glViewport(0,0,sw,sh);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);glViewport((sw-dw)/2,(sh-dh)/2,dw,dh);if(scale>1)drawEnhanced(state,true);else{glUseProgram(presentProgram);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,frameTexture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glUniform1i(presentProgramUniforms.frameTexture,0);glUniform2f(presentProgramUniforms.dimensions,float(width),float(height));glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);}glCheck();if(!eglSwapBuffers(display,windowSurface)){detachWindow();return false;}remember(env,surface,window,state,sw,sh);presented++;return true;
+        auto rect=psxDisplayRect(sw,sh,width,height,outputAspect,outputStretch,outputInteger);int dw=rect.w,dh=rect.h;glViewport(0,0,sw,sh);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);glViewport((sw-dw)/2,(sh-dh)/2,dw,dh);if(scale>1)drawEnhanced(state,true);else{glUseProgram(presentProgram);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,frameTexture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glUniform1i(presentProgramUniforms.frameTexture,0);glUniform2f(presentProgramUniforms.dimensions,float(width),float(height));glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);}glCheck();if(!eglSwapBuffers(display,windowSurface)){detachWindow();return false;}remember(env,surface,window,state,sw,sh);presented++;return true;
     }
 };
 void failure(JNIEnv* env,const std::exception& e){env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),e.what());}
@@ -213,3 +221,5 @@ extern "C" JNIEXPORT jintArray JNICALL Java_dev_psxlab_core_HardwareRasterizer_c
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_statsNative(JNIEnv* env,jclass,jlong h,jlongArray out){int n=env->GetArrayLength(out);if(n!=8&&n!=12){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid GPU statistics");return;}jlong values[12];gpu(h)->stats(values);env->SetLongArrayRegion(out,0,n,values);}
 
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_HardwareRasterizer_presentResolvedNative(JNIEnv* env,jclass,jlong h,jobject surface,jintArray state,jlong vk){try{if(env->GetArrayLength(state)!=8)throw std::runtime_error("Invalid HD display state");int values[8];env->GetIntArrayRegion(state,0,8,values);return !env->ExceptionCheck()&&gpu(h)->presentResolved(env,surface,values,vk);}catch(const std::exception& e){failure(env,e);return false;}}
+
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_configureDisplayNative(JNIEnv*,jclass,jlong h,jfloat aspect,jboolean stretch,jboolean integerScale){gpu(h)->configureDisplay(aspect,stretch,integerScale);}

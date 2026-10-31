@@ -10,6 +10,8 @@ public final class VulkanPresenter implements AutoCloseable {
     synchronized long[] counters(){long[] out=new long[6];if(handle!=0)statisticsNative(handle,out);return out;}
     synchronized String statistics(){long[] s=counters();return "Vulkan presented="+s[0]+" reusedSurface="+s[1]+" uploadBytes="+s[2]+" swapchains="+s[3]+" suboptimal="+s[4]+" outdated="+s[5];}
     long nativeHandle(){return handle;}
+    void configureDisplay(float aspect,boolean stretch,boolean integerScale){configureDisplayNative(handle,aspect,stretch,integerScale);}
+    private static native void configureDisplayNative(long handle,float aspect,boolean stretch,boolean integerScale);
     @Override public synchronized void close(){if(handle!=0){destroy(handle);handle=0;}}
     public static String verify(){if(!NativeRasterizer.AVAILABLE)throw new IllegalStateException("Native display unavailable");return verifyNative();}
     private static native long create(int maxPixels);

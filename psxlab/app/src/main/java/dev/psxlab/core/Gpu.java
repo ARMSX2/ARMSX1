@@ -15,6 +15,7 @@ public final class Gpu implements AutoCloseable {
     private final SoftwareRasterizer raster=new SoftwareRasterizer(vram);
     private final boolean hardwareDrawing;
     private final int internalScale,presentationMode;
+    private volatile float shaderAspect=4f/3f;
     private volatile HardwareRasterizer hardware;
     private volatile EngineLog journal;
     public void setJournal(EngineLog value){journal=value;}
@@ -74,6 +75,11 @@ public final class Gpu implements AutoCloseable {
         });
         if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer=scale>1?scale+"× HD drawing / Vulkan display":"Vulkan display / native software";}catch(RuntimeException e){renderer=scale>1?scale+"× HD drawing / OpenGL display (Vulkan unavailable)":"Software (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
     }
+    public void configureDisplay(float aspect,boolean stretch,boolean integerScale){submit(()->{
+        shaderAspect=aspect;
+        if(hardware!=null)hardware.configureDisplay(aspect,stretch,integerScale);
+        if(vulkan!=null)vulkan.configureDisplay(aspect,stretch,integerScale);
+    });}
     private void submit(Runnable r) {flushDrawBatch();submitDirect(r);}
     private void submitDirect(Runnable r) {
         check();

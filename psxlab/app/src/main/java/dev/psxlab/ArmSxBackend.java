@@ -47,10 +47,23 @@ public final class ArmSxBackend {
     private Restore restart;
     private final ArrayDeque<String> events=new ArrayDeque<>();
     private volatile Map<String,String> options=Map.of();
-    private volatile int volumeOverride=-1;
-    private volatile float fastSpeedOverride=-1;
-    private volatile Boolean mutedOverride;
+    private volatile int aspectOverride=-1,volumeOverride=-1;
+    private volatile float customAspectOverride,fastSpeedOverride=-1,outputAspect=4f/3f;
+    private volatile Boolean stretchOverride,integerOverride,mutedOverride;
+    private volatile boolean outputStretch,outputInteger;
     private static float decimal(String value,float fallback){try{float result=Float.parseFloat(value);return Float.isFinite(result)?result:fallback;}catch(Exception e){return fallback;}}
+    public void displayAspect(int mode){aspectOverride=mode;updateDisplay();}
+    public void displayAspectCustom(float value){customAspectOverride=value;updateDisplay();}
+    public void stretchDisplay(boolean enabled){stretchOverride=enabled;updateDisplay();}
+    public void integerDisplay(boolean enabled){integerOverride=enabled;updateDisplay();}
+    private void updateDisplay(){
+        String configured=options.getOrDefault("video.display_aspect","classic");int mode=aspectOverride>=0?aspectOverride:switch(configured){case "square"->1;case "wide16x9","16:9"->2;case "custom"->3;default->0;};
+        float custom=customAspectOverride>0?customAspectOverride:decimal(options.get("video.display_aspect_custom"),4f/3f);
+        outputAspect=switch(mode){case 1->1;case 2->16f/9f;case 3->Math.max(0.1f,Math.min(10,custom));default->4f/3f;};
+        outputStretch=stretchOverride!=null?stretchOverride:Boolean.parseBoolean(options.getOrDefault("video.stretch_mode","false"));
+        outputInteger=integerOverride!=null?integerOverride:Boolean.parseBoolean(options.getOrDefault("video.integer_scaling","false"));
+        Gpu target=gpu;if(target!=null)target.configureDisplay(outputAspect,outputStretch,outputInteger);
+    }
     public void audioVolume(int volume){volumeOverride=volume;updateAudio();}
     public void audioMuted(boolean muted){mutedOverride=muted;updateAudio();}
     public void fastForwardSpeed(float speed){fastSpeedOverride=Float.isFinite(speed)?speed:2;updateAudio();}
@@ -175,7 +188,7 @@ public final class ArmSxBackend {
                 // Keep one graphics API attached to a retained Android Surface. Software
                 // still rasterizes on the CPU; its finished pixels use the texture presenter.
                 try(Gpu graphics=mode==0&&scale==1?new Gpu(true,false):new Gpu(true,mode,scale)){
-                    gpu=graphics;gpu.setJournal(journal);clearSurface();bus=new Bus(gpu,pads[0]);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
+                    gpu=graphics;gpu.setJournal(journal);updateDisplay();clearSurface();bus=new Bus(gpu,pads[0]);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
                         String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
@@ -229,7 +242,7 @@ public final class ArmSxBackend {
     private void clearSurface(){Surface target=surface;if(target==null||!target.isValid()||gpu==null)return;gpu.control(0x03000001);gpu.requestSurfaceFrame(target,false,frame->{if(frame!=null)draw(target,frame);});gpu.sync();}
     private void draw(Surface target,Gpu.Frame frame){
         if(surface!=target||!target.isValid())return;Bitmap bitmap=Bitmap.createBitmap(frame.pixels(),frame.width(),frame.height(),Bitmap.Config.ARGB_8888);
-        try{Canvas canvas=target.lockCanvas(null);try{canvas.drawColor(Color.BLACK);float width=Math.min(canvas.getWidth(),canvas.getHeight()*4f/3),height=width*3/4;float x=(canvas.getWidth()-width)/2,y=(canvas.getHeight()-height)/2;canvas.drawBitmap(bitmap,null,new RectF(x,y,x+width,y+height),new Paint(Paint.FILTER_BITMAP_FLAG));}finally{target.unlockCanvasAndPost(canvas);}}catch(IllegalArgumentException|IllegalStateException ignored){}finally{bitmap.recycle();}
+        try{Canvas canvas=target.lockCanvas(null);try{canvas.drawColor(Color.BLACK);float width=outputStretch?canvas.getWidth():Math.min(canvas.getWidth(),canvas.getHeight()*outputAspect),height=outputStretch?canvas.getHeight():width/outputAspect;if(outputInteger&&!outputStretch){int k=(int)Math.min(width/frame.width(),height/frame.height());if(k>=1){width=frame.width()*k;height=frame.height()*k;}}float x=(canvas.getWidth()-width)/2,y=(canvas.getHeight()-height)/2;canvas.drawBitmap(bitmap,null,new RectF(x,y,x+width,y+height),new Paint(Paint.FILTER_BITMAP_FLAG));}finally{target.unlockCanvasAndPost(canvas);}}catch(IllegalArgumentException|IllegalStateException ignored){}finally{bitmap.recycle();}
     }
     public void surface(Surface value){surface=value;if(value==null)resetButtons();event(value==null?"surface-lost":"surface-attached");wake();}
     public void pause(boolean value){paused=value;if(value)resetButtons();AudioOutput out=audio;if(out!=null)out.setPaused(blocked()||muteFast());pauseCallback.accept(value);event(value?"pause":"resume");wake();}
@@ -282,7 +295,7 @@ public final class ArmSxBackend {
     private synchronized void event(String value){if(events.size()==128)events.removeFirst();events.addLast(android.os.SystemClock.elapsedRealtime()+" "+value);android.util.Log.i("PSXLabBackend",value);journal.event(EngineLog.INFO,"runtime.event",Map.of("message",value));}
     /** No BIOS/RAM/game data or authentication settings are included in a report. */
     public synchronized String diagnosticReport(){
-        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8)));json.put("renderer",renderer);org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("events",new org.json.JSONArray(events));json.put("logging",new org.json.JSONObject(journal.summary()));json.put("display",new org.json.JSONObject(Map.of("width",surfaceWidth,"height",surfaceHeight,"refreshHz",displayRefreshHz,"timingDomain","host/API; physical present timestamps unavailable")));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
+        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8)));json.put("renderer",renderer);org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("events",new org.json.JSONArray(events));json.put("logging",new org.json.JSONObject(journal.summary()));json.put("display",new org.json.JSONObject(Map.of("width",surfaceWidth,"height",surfaceHeight,"refreshHz",displayRefreshHz,"aspect",outputAspect,"stretch",outputStretch,"integerScaling",outputInteger,"timingDomain","host/API; physical present timestamps unavailable")));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
     }
     private void writeReport(){try{if(root!=null){byte[] report=diagnosticReport().getBytes(StandardCharsets.UTF_8);atomic(new File(root,"last-session.json"),report);atomic(new File(journal.directory(),"last-session.json"),report);}}catch(IOException e){android.util.Log.e("PSXLabBackend","Cannot write diagnostic report",e);}}
     private void error(Exception e){lastError=e.toString();journal.error(EngineLog.FATAL,"runtime.error",e);event("error: "+e.getClass().getSimpleName());android.util.Log.e("PSXLabBackend",lastError,e);writeReport();notice.accept(lastError);}

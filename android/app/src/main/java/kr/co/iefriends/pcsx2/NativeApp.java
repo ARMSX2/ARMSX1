@@ -537,20 +537,20 @@ public class NativeApp {
 	 *  Applies on the NEXT PRESENTED FRAME — no game restart. Aspect is a pure
 	 *  presentation property, so the in-game menu can change it live; persist it
 	 *  through Ps1SettingsStore as well so it survives a relaunch. */
-	public static void setDisplayAspect(int mode) { unsupported("setDisplayAspect"); }
+	public static void setDisplayAspect(int mode) { if(lab!=null)lab.displayAspect(mode); }
 
 	/** Live custom width/height ratio, applied while the aspect mode is CUSTOM. <= 0 clears
 	 *  the override and falls back to settings.toml. Next presented frame; no VM restart. */
-	public static void setDisplayAspectCustom(float ratio) { unsupported("setDisplayAspectCustom"); }
+	public static void setDisplayAspectCustom(float ratio) { if(lab!=null)lab.displayAspectCustom(ratio); }
 
 	/** Snap the presented image to a whole multiple of the emulated resolution, so every source
 	 *  pixel becomes an exact NxN block. Applies on the next presented frame. */
-	public static void setIntegerScaling(boolean enabled) { unsupported("setIntegerScaling"); }
+	public static void setIntegerScaling(boolean enabled) { if(lab!=null)lab.integerDisplay(enabled); }
 
 	/** Live stretch-to-window: true fills the surface and ignores the aspect,
 	 *  false letterboxes/pillarboxes to it. Same immediacy as
 	 *  {@link #setDisplayAspect(int)}. */
-	public static void setStretchMode(boolean enabled) { unsupported("setStretchMode"); }
+	public static void setStretchMode(boolean enabled) { if(lab!=null)lab.stretchDisplay(enabled); }
 
 	/** Widescreen hack: scales the GTE's X projection so 3D geometry fills a 16:9
 	 *  display instead of being stretched into it (psx/cpu.c). Real native, safe to
