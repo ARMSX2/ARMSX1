@@ -29,6 +29,19 @@ public final class ArmSxBackend {
     private volatile boolean active,stop,paused,audioSuspended,presentationSuspended,fast;
     private volatile Surface surface;
     private volatile AudioOutput audio;
+    private final PerformanceStatistics performance=new PerformanceStatistics();
+    private volatile double hostCpuPercent=-1,hostRssMb=-1,hostAvailableMb=-1;
+    private long hostSampleTime,hostSampleCpu;
+    public void statisticsEnabled(boolean enabled){performance.enabled(enabled);}
+    public int statistics(double[] out){return active&&!blocked()?performance.copy(out,hostCpuPercent,Runtime.getRuntime().availableProcessors(),hostRssMb,hostAvailableMb):0;}
+    private void sampleHostUsage(long now){
+        long elapsed=android.os.SystemClock.elapsedRealtime(),process=android.os.Process.getElapsedCpuTime();
+        if(hostSampleTime>0&&elapsed>hostSampleTime)hostCpuPercent=Math.max(0,Math.min(100,100.0*(process-hostSampleCpu)/(elapsed-hostSampleTime)/Runtime.getRuntime().availableProcessors()));
+        hostSampleTime=elapsed;hostSampleCpu=process;
+        try(java.io.BufferedReader reader=new java.io.BufferedReader(new FileReader("/proc/self/status"))){String line;while((line=reader.readLine())!=null)if(line.startsWith("VmRSS:")){hostRssMb=Long.parseLong(line.substring(6).trim().split("\\s+")[0])/1024.0;break;}}catch(Exception ignored){hostRssMb=-1;}
+        android.app.ActivityManager manager=(android.app.ActivityManager)context.getSystemService(Context.ACTIVITY_SERVICE);
+        if(manager!=null){android.app.ActivityManager.MemoryInfo memory=new android.app.ActivityManager.MemoryInfo();manager.getMemoryInfo(memory);hostAvailableMb=memory.availMem/(1024.0*1024);}
+    }
     private volatile float fps;
     private volatile float nominalFps=60;
     private volatile long frames,nonzero,guestClocks;
@@ -188,11 +201,11 @@ public final class ArmSxBackend {
     /** The host's session cancellation and this active/stop transition share this monitor. */
     public boolean run(String path,java.util.function.BooleanSupplier allowed){
         synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=discPath=path;lastError="";lastPc=0;lastAudio=lastCore="Not started";fps=0;}
-        boolean booted=false;Restore restore=null;startupTiming.reset();event("launch");
+        boolean booted=false;Restore restore=null;startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=0;hostCpuPercent=hostRssMb=hostAvailableMb=-1;event("launch");
         try{
             options=readConfig();configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();
             do{
-                restart=null;
+                restart=null;performance.reset();
                 int scale=Math.max(1,Math.min(5,Integer.parseInt(options.getOrDefault("video.internal_scale","1"))));
                 RendererSelection selected=RendererSelection.from(options);int mode=selected.presentation();
                 // Keep one graphics API attached to a retained Android Surface. Software
@@ -218,36 +231,50 @@ public final class ArmSxBackend {
                 restore=restart;
             }while(!stop&&restore!=null);
         }catch(Exception e){booted=false;error(e);if(restore!=null)restore.ready().complete(false);if(restart!=null)restart.ready().complete(false);}
-        finally{resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();gamePath=discPath="";}
+        finally{performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();gamePath=discPath="";}
         return booted;
     }
     private boolean blocked(){Surface target=surface;return paused||audioSuspended||presentationSuspended||target==null||!target.isValid();}
     private void loop(AudioOutput output)throws Exception{
-        FrameRateMeter frameRate=new FrameRateMeter();AudioAwareFramePacer pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());long last=gpu.vblanks,measured=System.nanoTime();boolean wasBlocked=false,wasFast=false;EngineLog.Frame diagnosticFrame=null;
+        FrameRateMeter frameRate=new FrameRateMeter();AudioAwareFramePacer pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());long last=gpu.vblanks,measured=System.nanoTime();boolean wasBlocked=false,wasFast=false;EngineLog.Frame diagnosticFrame=null;long perfCpu=0,perfEpoch=0;
         while(!stop&&restart==null){
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
             if(blocked()){
                 if(!wasBlocked&&surface!=null&&surface.isValid()&&gpu.presentationNeedsRestore()){Surface target=surface;gpu.restorePresentation(target,true,frame->{if(frame!=null)draw(target,frame);});}
                 output.setPaused(true);wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
             }
-            if(wasBlocked){output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
+            if(wasBlocked){performance.reset();perfCpu=perfEpoch=0;output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
             if(fast!=wasFast){bus.spu.flushAudio();bus.spu.setAudioSink(muteFast()?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});updateAudio();output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
             if(pendingMedia!=null&&cpu.instructions>=insertAt){bus.cdrom.insert(pendingMedia.disc);if(media!=null)media.close();media=pendingMedia;pendingMedia=null;}
+            long ticket=performance.ticket();
+            if(ticket!=perfEpoch){perfCpu=0;perfEpoch=ticket;}
+            gpu.performanceEnabled=ticket!=0;bus.dma.performanceEnabled=ticket!=0;
+            long perfStarted=ticket!=0?System.nanoTime():0;
             if(diagnosticFrame==null)diagnosticFrame=journal.frame(cpu.instructions,cpu.pc);
-            try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}guestClocks=cpu.instructions;lastPc=cpu.pc;
+            try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}guestClocks=cpu.instructions;lastPc=cpu.pc;if(perfStarted!=0)perfCpu+=System.nanoTime()-perfStarted;
             if(gpu.vblanks==last)continue;last=gpu.vblanks;if(diagnosticFrame!=null)diagnosticFrame.cpuDone(cpu.instructions,cpu.pc);
+            long flushStarted=ticket!=0?System.nanoTime():0;
             try(EngineLog.Span span=journal.begin("cpu.flush_devices",EngineLog.DEBUG)){bus.flushClocks();bus.spu.flushAudio();}
-            long paceStarted=diagnosticFrame==null?0:System.nanoTime(),buffered=output.bufferedFrames();
+            if(flushStarted!=0)perfCpu+=System.nanoTime()-flushStarted;
+            long paceStarted=diagnosticFrame==null&&ticket==0?0:System.nanoTime(),buffered=output.bufferedFrames();
             long wait=fast?0:pacer.waitNanos(cpu.instructions,System.nanoTime(),buffered);if(wait>0)TimeUnit.NANOSECONDS.sleep(wait);
             if(diagnosticFrame!=null)diagnosticFrame.pacing(wait,System.nanoTime()-paceStarted,buffered);
+            long measuredIdle=ticket==0?0:System.nanoTime()-paceStarted,measuredCpu=perfCpu;perfCpu=0;
+            int voices=0;if(ticket!=0)for(int voice=0;voice<24;voice++)if((bus.spu.read(0x1f801c0c+voice*16)&0x7fff)!=0)voices++;
+            final int activeVoices=voices;
+            final long clocks=cpu.instructions,triangles=gpu.performanceTriangles,rectangles=gpu.performanceRectangles,lines=gpu.performanceLines,mdec=bus.mdec.decodedBlocks,sectors=bus.cdrom.sectorsRead;
+            final long[] dma=ticket==0?null:bus.dma.performanceWords.clone();
+            Gpu graphics=gpu;
             EngineLog.Frame submitted=diagnosticFrame;diagnosticFrame=null;if(submitted!=null)submitted.queued();
             Surface target=surface;
             if(target!=null&&target.isValid()){
                 boolean trace=traceStartup;long requested=trace?System.nanoTime():0,clock=cpu.instructions;
-                gpu.requestSurfaceFrame(target,true,frame->{if(frame!=null)draw(target,frame);long completed=System.nanoTime();frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);},submitted);
+                gpu.requestSurfaceFrame(target,true,frame->{long drawing=ticket==0?0:System.nanoTime();if(frame!=null)draw(target,frame);long completed=System.nanoTime();
+                    if(ticket!=0){Gpu.Performance p=graphics.performance();performance.completed(ticket,completed,measuredCpu,measuredIdle,p.presentNanos()+(frame==null?0:completed-drawing),new PerformanceStatistics.Sample(clocks,triangles,rectangles,lines,mdec,sectors,dma,activeVoices,p.width(),p.height(),p.scale()));}
+                    frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);},submitted);
             }
             journal.leaveFrame();
-            long now=System.nanoTime();if(now-measured>=500000000L){nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled())journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics()));measured=now;}
+            long now=System.nanoTime();if(now-measured>=500000000L){if(performance.enabled())sampleHostUsage(now);nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled())journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics()));measured=now;}
         }
     }
     private void clearSurface(){Surface target=surface;if(target==null||!target.isValid()||gpu==null)return;gpu.control(0x03000001);gpu.requestSurfaceFrame(target,false,frame->{if(frame!=null)draw(target,frame);});gpu.sync();}

@@ -10,7 +10,8 @@ final class StateCodec {
     static {
         skip(Cpu.class,"nativeCpu","bus","gte");
         skip(Bus.class,"nativeMemory","instructionWords","instructionValid","gpu","dma","mdec","spu","timers","cdrom","sio0","nativeCores","bios");
-        skip(Gpu.class,"journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","highRefresh","presentationDecision","presentationRate","shaderAspect","blackPresented","shaderSubframes","displayVsync","baseVulkanOutput","shaderPresenterFailed","displayStretch","displayInteger","baseRenderer","shaderPresenterError");
+        skip(Gpu.class,"performanceEnabled","performanceTriangles","performanceRectangles","performanceLines","performance","journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","highRefresh","presentationDecision","presentationRate","shaderAspect","blackPresented","shaderSubframes","displayVsync","baseVulkanOutput","shaderPresenterFailed","displayStretch","displayInteger","baseRenderer","shaderPresenterError");
+        skip(Dma.class,"performanceEnabled","performanceWords");
         skip(Spu.class,"nativeCore","sink","output");
         skip(Gte.class,"nativeCore","widescreen");
         skip(NativeGte.class,"widescreen");

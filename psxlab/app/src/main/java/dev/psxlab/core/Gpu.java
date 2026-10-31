@@ -53,6 +53,18 @@ public final class Gpu implements AutoCloseable {
             }
         }
     }
+    public volatile boolean performanceEnabled;
+    public long performanceTriangles,performanceRectangles,performanceLines;
+    public record Performance(long presentNanos,int width,int height,int scale) {}
+    private volatile Performance performance=new Performance(0,0,0,1);
+    public Performance performance(){return performance;}
+    private void measurePresentation(long start,int[] state){
+        if(start==0)return;
+        int divider=(state[0]&0x10000)!=0?7:switch((state[0]>>>17)&3){case 0->10;case 1->8;case 2->5;default->4;};
+        int width=Math.max(1,Math.min(1024,(state[4]-state[3])/divider));
+        int height=Math.max(1,Math.min(512,(state[6]-state[5])*((state[0]&0x480000)==0x480000?2:1)));
+        performance=new Performance(System.nanoTime()-start,width,height,internalScale);
+    }
     private volatile EngineLog journal;
     public void setJournal(EngineLog value){journal=value;}
     private volatile VulkanPresenter vulkan;
@@ -156,6 +168,7 @@ public final class Gpu implements AutoCloseable {
     private void draw(int[] p){draw(p,p.length);}
     private void draw(int[] p,int length){
         int op=p[0]>>>24;
+        if(performanceEnabled){if(op<0x40)performanceTriangles+=(op&8)!=0?2:1;else if(op<0x60)performanceLines++;else performanceRectangles++;}
         if(op<0x40 && (op&4)!=0){int page=p[(op&16)!=0?5:4]>>>16;environment[1]=(environment[1]&~0x9ff)|(page&0x9ff);gpuStatus=(gpuStatus&~0x81ff)|(page&511)|((page&0x800)<<4);}
         if(drawBatchWords+length+8>drawBatch.length)flushDrawBatch();
         drawBatch[drawBatchWords++]=length;System.arraycopy(p,0,drawBatch,drawBatchWords,length);drawBatchWords+=length;
@@ -305,6 +318,8 @@ public final class Gpu implements AutoCloseable {
     private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
         flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,filter?1:0};
         submit(()->{
+            long perfStart=performanceEnabled?System.nanoTime():0;
+            java.util.function.Consumer<Frame> completed=perfStart==0?receiver:frame->{measurePresentation(perfStart,state);receiver.accept(frame);};
             reconcileShaderPresentation();
             if(timing!=null)timing.gpuBegin(renderer,state);
             int decision=presentationDecision(state,extras);
@@ -318,18 +333,18 @@ public final class Gpu implements AutoCloseable {
                         catch(RuntimeException error){if(baseVulkanOutput||vulkan==null)throw error;shaderPresentationFailed(error);accepted=hardware.present(surface,state);}
                         if(timing!=null)timing.presentation(accepted);
                     }
-                    presentExtra(surface,decision,timing);receiver.accept(null);return;
+                    presentExtra(surface,decision,timing);completed.accept(null);return;
                 }
                 if(vulkan!=null){
                     try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.convert")){
                         if(vulkanFrames.matches(softwareVramRevision,state))vulkanFrames.reused();
                         else{Frame previous=vulkanFrames.frame();vulkanFrames.update(softwareVramRevision,state,captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6],previous==null?null:previous.pixels()));}
                     }
-                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){boolean accepted=vulkan.present(surface,frame,filter,vulkanFrames.token());if(timing!=null)timing.presentation(accepted);}presentExtra(surface,decision,timing);receiver.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";receiver.accept(frame);}
+                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){boolean accepted=vulkan.present(surface,frame,filter,vulkanFrames.token());if(timing!=null)timing.presentation(accepted);}presentExtra(surface,decision,timing);completed.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";completed.accept(frame);}
                 }else if(hardware!=null){if(surface!=null&&surface.isValid()){
                     if(!hardwareDrawing)try(EngineLog.Span span=timing==null?null:timing.stage("gpu.upload.gles")){hardware.setDisplayVram(vram,state,softwareVramRevision);}
                     try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.gles")){boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}
-                }presentExtra(surface,decision,timing);receiver.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){receiver.accept(captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]));}
+                }presentExtra(surface,decision,timing);completed.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){completed.accept(captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]));}
             }finally{if(timing!=null)timing.complete();}
         });
     }

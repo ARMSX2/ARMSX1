@@ -12,6 +12,8 @@ public final class Dma {
     private OutputTransfer mdecOutput;
     private int priority=0x07654321,interrupt;
     public long choppedTransfers,choppedWindows;
+    public boolean performanceEnabled;
+    public final long[] performanceWords=new long[7];
     private static final class OutputTransfer {
         final int address,words,control;
         int delay;
@@ -65,6 +67,7 @@ public final class Dma {
             while(true){
                 if(!visited.add(address) || visited.size()>524288)throw new IllegalStateException("Cyclic DMA linked list");
                 int header=bus.read32(address),words=header>>>24;
+                if(performanceEnabled)performanceWords[2]+=words;
                 for(int i=0;i<words;i++){address=(address+4)&0x1ffffc;bus.gpu.write(bus.read32(address));}
                 if((header&0x800000)!=0)break;address=header&0x1ffffc;
             }
@@ -110,6 +113,7 @@ public final class Dma {
         complete(ch);
     }
     private void transferWord(int ch,int address,int control,boolean last){
+        if(performanceEnabled)performanceWords[ch]++;
         if(ch==0)bus.mdec.write(bus.read32(address));
         else if(ch==1){int destination=(address+bus.mdec.dmaAddressOffset())&0x1ffffc;bus.write32(destination,bus.mdec.read());}
         else if(ch==6)bus.write32(address,last?0xffffff:(address-4)&0x1fffff);

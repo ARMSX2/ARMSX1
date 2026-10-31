@@ -2,6 +2,16 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class SaveStateTest {
+    @Test public void overlayMeasurementsDoNotChangeSaveStateSchemaOrGuestState()throws Exception{
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);
+            byte[] before=SaveState.capture(cpu,bus,gpu,"osd");
+            gpu.performanceEnabled=true;gpu.performanceTriangles=123;gpu.performanceRectangles=45;gpu.performanceLines=6;
+            bus.dma.performanceEnabled=true;bus.dma.performanceWords[2]=789;
+            assertArrayEquals(before,SaveState.capture(cpu,bus,gpu,"osd"));
+            SaveState.restore(before,cpu,bus,gpu,"osd");assertEquals(123,gpu.performanceTriangles);assertEquals(789,bus.dma.performanceWords[2]);
+        }
+    }
     private void program(Bus bus){int[] code={0x3c088001,0x8d090200,0,0x25290001,0xad090200,0x08004000,0};for(int i=0;i<code.length;i++)bus.write32(0x10000+i*4,code[i]);}
     @Test public void resumeMatchesUninterruptedCpuRamDevicesAndPendingGpuPacket()throws Exception{
         try(Gpu ga=new Gpu(false);Gpu gb=new Gpu(false)){

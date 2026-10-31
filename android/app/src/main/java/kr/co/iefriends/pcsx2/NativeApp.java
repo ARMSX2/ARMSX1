@@ -317,18 +317,15 @@ public class NativeApp {
 	/** Current game's nominal emulated refresh (~59.94 NTSC / 50 PAL), or 0 without a VM. */
 	public static float getNominalFrameRate() { if (lab == null) { return 0f; } return lab.nominalFps();  }
 
-	/** Arm the detailed performance overlay (per-subsystem work counters + host frame-phase
-	 *  timing). This switches the SwanStation adapter's opt-in work counters on, so it
-	 *  MUST be cleared when the Statistics block is hidden, or every counter site in the core
-	 *  stays live feeding a panel nobody is reading. Off at boot. */
-	public static void setStatisticsEnabled(boolean enabled) { unsupported("setStatisticsEnabled"); }
+	/** Opt-in PSX Lab work counters and host/API timings. Independent of the disk logger. */
+	public static void setStatisticsEnabled(boolean enabled) { if(lab!=null)lab.statisticsEnabled(enabled); }
 
 	/** Refill [out] with the latest snapshot and return how many entries were written; 0 until
 	 *  the core's first half-second window closes, or while statistics are disabled. Indices are
 	 *  com.armsx2.ui.GameOsd.Stat / native/swanstation/statistics.h. Negative means unavailable.
 	 *  Guest clock ticks are not CPU instructions; host phases are CPU wall durations. Pass a reused
 	 *  array — this deliberately does not allocate. */
-	public static int getStatistics(double[] out) { unsupported("getStatistics"); return 0; }
+	public static int getStatistics(double[] out) { return lab==null?0:lab.statistics(out); }
 
 	/** Stable original URI/key, rather than a disposable SAF cache path. Call before boot. */
 	public static void configureSwanSession(String identity, String originalPath) { unsupported("configureSwanSession"); }

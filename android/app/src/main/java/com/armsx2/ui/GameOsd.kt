@@ -156,9 +156,7 @@ object GameOsd {
      *  rather than a screenful of zeroes. */
     val statsReady = mutableStateOf(false)
 
-    /** The presentation backend that actually survived the fallback ladder — NOT the one the
-     *  settings asked for. Read once when the VM comes up (it cannot change within a session)
-     *  rather than polled. Empty when the core does not export it. */
+    /** Live presentation/rasterizer path, including real fallback and shader changes. */
     val renderer = mutableStateOf("")
 
     data class Note(val id: Long, val text: String, val expiresAt: Long, val position: Int = 2)
@@ -500,9 +498,8 @@ fun GameOsdOverlay() {
             add(
                 if (!ready) "SPU --"
                 else if (s[GameOsd.Stat.SPU_VOICES] < 0) "SPU voices n/a"
-                else String.format(Locale.US, "SPU %.1f voices", s[GameOsd.Stat.SPU_VOICES]) +
-                    "  MDEC ${compact(s[GameOsd.Stat.MDEC_MACROBLOCKS])} mb / " +
-                    "${compact(s[GameOsd.Stat.MDEC_BLOCKS])} blk" +
+                else String.format(Locale.US, "SPU %.0f active voices", s[GameOsd.Stat.SPU_VOICES]) +
+                    "  MDEC ${compact(s[GameOsd.Stat.MDEC_BLOCKS])} blk/frame" +
                     "  CD ${compact(s[GameOsd.Stat.CDROM_SECTORS])} sec",
             )
             add(
@@ -521,9 +518,9 @@ fun GameOsdOverlay() {
                 if (!ready) "FRAME --"
                 else String.format(
                     Locale.US,
-                    // emu = the whole guest frame (R3000A + rasteriser + devices, which this core
-                    // interleaves and cannot separate by time); present = upload + swap; idle =
-                    // what the frame limiter slept. idle at 0 with emu high is CPU-bound.
+                    // Host/API durations: emu includes device dispatch on the CPU worker;
+                    // present is scanout/upload/swap wall time, not physical GPU execution.
+                    // CPU and GPU workers overlap, so these are not additive frame phases.
                     "FRAME %.1fms  emu %.1f  present %.1f  idle %.1f  worst %.1f",
                     s[GameOsd.Stat.FRAME_MS],
                     s[GameOsd.Stat.EMU_MS],
