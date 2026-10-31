@@ -1115,9 +1115,9 @@ public class NativeApp {
 	 *  top-aligned output. */
 	public static void setPortraitRenderTopInset(int pixels) { unsupported("setPortraitRenderTopInset"); }
 	/** SPU2 output volume, percent (0..200). Applies live + persists. */
-	public static void setAudioVolume(int volume) {  }
+	public static void setAudioVolume(int volume) { if(lab!=null)lab.audioVolume(volume); }
 	/** Mute/unmute SPU2 output. Applies live + persists. */
-	public static void setAudioMuted(boolean muted) {  }
+	public static void setAudioMuted(boolean muted) { if(lab!=null)lab.audioMuted(muted); }
 	/** Swap final stereo output channels L&lt;-&gt;R (flipped-speaker devices). Applies live + persists. */
 	public static void setAudioSwapChannels(boolean swap) {  }
 	public static void speedhackEecyclerate(int value) {  }
@@ -1264,7 +1264,7 @@ public class NativeApp {
 	 *  -1 adaptive (drop one only when the frame pacer reports the device fell behind). It rides
 	 *  this call because the same panel edits it and the whole policy is pushed at once.
 	 *  Persisted in settings.toml's [runtime] table, which the core reads at boot. */
-	public static void setSpeedLimits(boolean frameLimit, int speedPercent, int fpsLimit, float fastForwardSpeed, int frameSkip) { if (lab == null) { return; } if (!frameLimit || speedPercent != 100) backendNotice("PSX Lab migration testing currently uses normal speed and fast forward."); return; }
+	public static void setSpeedLimits(boolean frameLimit, int speedPercent, int fpsLimit, float fastForwardSpeed, int frameSkip) { if (lab == null) { return; } lab.fastForwardSpeed(fastForwardSpeed); if (!frameLimit || speedPercent != 100) backendNotice("PSX Lab migration testing currently uses normal speed and fast forward."); return; }
 	/** Implemented natively: queue a game path/URI for the running loop to boot, so a disc
 	 *  swap does not need the process torn down. */
 	public static void enqueueLaunchArgument(String argument) { unsupported("enqueueLaunchArgument"); }

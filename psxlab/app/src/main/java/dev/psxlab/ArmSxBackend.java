@@ -46,7 +46,23 @@ public final class ArmSxBackend {
     private long insertAt;
     private Restore restart;
     private final ArrayDeque<String> events=new ArrayDeque<>();
-    private Map<String,String> options=Map.of();
+    private volatile Map<String,String> options=Map.of();
+    private volatile int volumeOverride=-1;
+    private volatile float fastSpeedOverride=-1;
+    private volatile Boolean mutedOverride;
+    private static float decimal(String value,float fallback){try{float result=Float.parseFloat(value);return Float.isFinite(result)?result:fallback;}catch(Exception e){return fallback;}}
+    public void audioVolume(int volume){volumeOverride=volume;updateAudio();}
+    public void audioMuted(boolean muted){mutedOverride=muted;updateAudio();}
+    public void fastForwardSpeed(float speed){fastSpeedOverride=Float.isFinite(speed)?speed:2;updateAudio();}
+    private boolean muteFast(){return fast&&Boolean.parseBoolean(options.getOrDefault("audio.mute_fast_forward","false"));}
+    private float fastTempo(){float configured=fastSpeedOverride>=0?fastSpeedOverride:decimal(options.get("runtime.fast_forward_speed"),2);return configured<=0?16:Math.max(1,Math.min(16,configured));}
+    private void updateAudio(){
+        AudioOutput output=audio;if(output==null)return;output.setTempoFactor(fast&&!muteFast()?fastTempo():1);
+        boolean muted=mutedOverride!=null?mutedOverride:Boolean.parseBoolean(options.getOrDefault("audio.muted","false"));
+        float normal=volumeOverride>=0?volumeOverride:decimal(options.get("audio.volume"),100);
+        float volume=fast?decimal(options.get("audio.fast_forward_volume"),100):normal;
+        output.setGain(muted||muteFast()?0:volume/100f);
+    }
     private record Restore(byte[] state,String disc,CompletableFuture<Boolean> ready) {}
     private static final class Media implements AutoCloseable {
         final ByteSource source; final CueDisc cue; final IsoDisc disc; final byte[] executable;
@@ -168,7 +184,7 @@ public final class ArmSxBackend {
                             else if(media!=null&&(media.disc==null||Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
                             cpu.enableNative(true,true,true);
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
-                                audio=output;output.setJournal(journal);output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});
+                                audio=output;output.setJournal(journal);updateAudio();output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});
                                 renderer="PSX Lab / "+gpu.renderer();booted=true;
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
                                 try{loop(output);}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}}
@@ -190,8 +206,8 @@ public final class ArmSxBackend {
             if(blocked()){
                 output.setPaused(true);wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
             }
-            if(wasBlocked){output.setPaused(fast);pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
-            if(fast!=wasFast){bus.spu.flushAudio();bus.spu.setAudioSink(fast?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});output.setPaused(fast);pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
+            if(wasBlocked){output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
+            if(fast!=wasFast){bus.spu.flushAudio();bus.spu.setAudioSink(muteFast()?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});updateAudio();output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
             if(pendingMedia!=null&&cpu.instructions>=insertAt){bus.cdrom.insert(pendingMedia.disc);if(media!=null)media.close();media=pendingMedia;pendingMedia=null;}
             if(diagnosticFrame==null)diagnosticFrame=journal.frame(cpu.instructions,cpu.pc);
             try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}guestClocks=cpu.instructions;lastPc=cpu.pc;
@@ -216,11 +232,11 @@ public final class ArmSxBackend {
         try{Canvas canvas=target.lockCanvas(null);try{canvas.drawColor(Color.BLACK);float width=Math.min(canvas.getWidth(),canvas.getHeight()*4f/3),height=width*3/4;float x=(canvas.getWidth()-width)/2,y=(canvas.getHeight()-height)/2;canvas.drawBitmap(bitmap,null,new RectF(x,y,x+width,y+height),new Paint(Paint.FILTER_BITMAP_FLAG));}finally{target.unlockCanvasAndPost(canvas);}}catch(IllegalArgumentException|IllegalStateException ignored){}finally{bitmap.recycle();}
     }
     public void surface(Surface value){surface=value;if(value==null)resetButtons();event(value==null?"surface-lost":"surface-attached");wake();}
-    public void pause(boolean value){paused=value;if(value)resetButtons();AudioOutput out=audio;if(out!=null)out.setPaused(blocked()||fast);pauseCallback.accept(value);event(value?"pause":"resume");wake();}
+    public void pause(boolean value){paused=value;if(value)resetButtons();AudioOutput out=audio;if(out!=null)out.setPaused(blocked()||muteFast());pauseCallback.accept(value);event(value?"pause":"resume");wake();}
     public void suspendAudio(boolean value){audioSuspended=value;event("audio-suspended="+value);wake();}
     public void suspendPresentation(boolean value){presentationSuspended=value;event("presentation-suspended="+value);wake();}
     public void stop(){stop=true;resetButtons();AudioOutput out=audio;if(out!=null)out.close();wake();}
-    public void fastForward(boolean value){fast=value;wake();}
+    public void fastForward(boolean value){fast=value;updateAudio();wake();}
     private void wake(){synchronized(gate){gate.notifyAll();}}
     private <T> T call(Callable<T> action,T failed){
         if(!active)return failed;CompletableFuture<T> result=new CompletableFuture<>();commands.add(()->{if(result.isCancelled())return;try{result.complete(!stop&&bus!=null?action.call():failed);}catch(Exception e){error(e);result.complete(failed);}});wake();
