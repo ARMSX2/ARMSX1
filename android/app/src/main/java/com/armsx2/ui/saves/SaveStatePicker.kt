@@ -287,6 +287,12 @@ private fun AutosaveTile(enabled: Boolean = true, onPick: () -> Unit) {
     val gamePath by produceState<String?>(initialValue = null) {
         value = withContext(Dispatchers.IO) { runCatching { NativeApp.getAutosaveGamePath() }.getOrNull() }
     }
+    // Keyed on gamePath, like the slots below: 0L means "no usable timestamp", never "the epoch".
+    val stamp by produceState(initialValue = 0L, gamePath) {
+        value = if (gamePath.isNullOrEmpty()) 0L else withContext(Dispatchers.IO) {
+            runCatching { NativeApp.getStateTimeSlot(NativeApp.AUTOSAVE_SLOT) }.getOrDefault(0L)
+        }
+    }
     val image by produceState<android.graphics.Bitmap?>(initialValue = null) {
         value = withContext(Dispatchers.IO) {
             runCatching {
@@ -308,7 +314,8 @@ private fun AutosaveTile(enabled: Boolean = true, onPick: () -> Unit) {
         }
         BottomLabel(
             title = str("savestate.autosave.title"),
-            subtitle = gamePath?.substringAfterLast('/')?.substringBeforeLast('.')
+            subtitle = formatSlotStamp(stamp)
+                ?: gamePath?.substringAfterLast('/')?.substringBeforeLast('.')
                 ?: str("savestate.autosave.savedOnExit"),
             titleColor = Color(0xFFFFB347),
         )
@@ -328,6 +335,14 @@ private fun SlotTile(slot: Int, mode: SaveMode, busy: Boolean = false, onPick: (
             }.getOrNull()
         }
     }
+    // When the slot was written, shown in place of the game's file name as ARMSX2 and ARMSX3 do:
+    // every slot here belongs to the running game, so its name told you nothing. Keyed on
+    // gamePath so it re-reads when a save lands in this slot; 0L means "no usable timestamp".
+    val stamp by produceState(initialValue = 0L, slot, gamePath) {
+        value = if (gamePath.isNullOrEmpty()) 0L else withContext(Dispatchers.IO) {
+            runCatching { NativeApp.getStateTimeSlot(slot) }.getOrDefault(0L)
+        }
+    }
     val empty = gamePath.isNullOrEmpty()
     // Load: empty slots disabled. Save: any slot is a valid target.
     val enabled = !busy && (mode == SaveMode.Save || !empty)
@@ -345,7 +360,8 @@ private fun SlotTile(slot: Int, mode: SaveMode, busy: Boolean = false, onPick: (
         BottomLabel(
             title = "${str("memcard.slot1").substringBefore(' ')} ${slot + 1}",
             subtitle = when {
-                !empty -> gamePath?.substringAfterLast('/')?.substringBeforeLast('.') ?: ""
+                !empty -> formatSlotStamp(stamp)
+                    ?: gamePath?.substringAfterLast('/')?.substringBeforeLast('.') ?: ""
                 mode == SaveMode.Save -> str("savestate.slot.emptyTapToSave")
                 else -> null
             },
@@ -375,6 +391,14 @@ private fun TileFrame(
         content = content,
     )
 }
+
+/** Slot timestamp for a tile subtitle, or null when the file gave us nothing usable. From ARMSX2. */
+private fun formatSlotStamp(stamp: Long): String? =
+    if (stamp <= 0L) null
+    else runCatching {
+        java.text.SimpleDateFormat("d MMM yyyy, HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date(stamp))
+    }.getOrNull()
 
 @Composable
 private fun BoxScope.BottomLabel(title: String, subtitle: String?, titleColor: Color) {
