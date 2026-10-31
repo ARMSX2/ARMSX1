@@ -163,3 +163,34 @@ atomic completion of long valid lists, terminal-only IRQs, disable/cancel, batch
 clock updates, state restoration and old-state defaults. An Android regression
 exercises the DMA-start callback and subsequent guest store on native interpreted
 and recompiled CPUs, with event scheduling enabled and disabled.
+
+## CPU cache, GPU batching and memory (0.3.19)
+
+Vulkan CPU staging is allocated on the first CPU-pixel upload and grows to fit
+the uploaded frame, with geometric reuse bounded by the existing frame capacity.
+Shared AHardwareBuffer presentation needs no staging allocation. The previous
+eager buffer capacity was 18 MiB at 3x and 50 MiB at 5x; actual process RSS savings
+depend on the driver. Software upload, fallback, resizing and native readback keep
+their submission-fence ownership. Logs include staging capacity, allocated bytes
+and allocation count.
+
+JNI command batches no longer force a compute dispatch at every Java batch end.
+The existing 32-primitive limit, texture dependencies, transfers, readback and
+scanout remain flush boundaries. Texture/CLUT region scratch storage is a fixed
+eight-rectangle array; each wrapped region needs at most four entries. Each
+primitive computes its ranges once for feedback and batch dependency checks.
+
+A CPU page generation change now checks the cached block's own instruction words
+before recompiling it. An unchanged block retains its decoded/native code and
+updates its generation. Changed instructions, included delay slots and DMA writes
+still invalidate it. Native diagnostics retain their first eight counters and add
+unchanged-block reuse and process-wide mapped JIT bytes. Guest clock budgets,
+RAM waits and audio processing are unchanged.
+
+Android regressions check shared staging at 1x/3x/5x, CPU-upload growth/reuse,
+native transfer readback, cross-JNI batch ordering and transfer boundaries,
+independent raster/HD pixel parity, sibling code writes, actual code changes,
+RAM aliases, delay-slot replacement and DMA writes. CPU interpreter/recompiler,
+event scheduling and state/PCM continuation are checked separately. The Samsung
+A52s report identifies CPU pressure; these checks do not establish a universal
+performance gain on that phone or on a Snapdragon 865 without device retesting.
