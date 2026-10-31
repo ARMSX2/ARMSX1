@@ -35,6 +35,16 @@ visibility culling and 2D elements, which this projection adjustment does not re
 
 ## Shared shader presentation
 
+The PS1 launch gate restores the host's resolved global shader settings on every
+launch, including cold starts and title changes. Explicit per-game shader choices
+remain overrides; "Use global shader settings" clears just those shader overrides.
+Both the settings hub and pause menu edit the scope shown by their header.
+
+Settings rows show a small accent dot and "Changed" when their effective value
+differs from the factory default. This includes values inherited from global settings;
+the existing per-game badges still identify the storage layer. Resetting a value
+removes the changed marker. Comparison snapshots are built only for visible menus.
+
 Software, OpenGL and Vulkan game rendering can feed the same Vulkan postprocessing
 stage. Software keeps its CPU rasterizer; OpenGL keeps its integer/HD rasterizer.
 OpenGL native frames use a shared hardware buffer where the driver supports it,
