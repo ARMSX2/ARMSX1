@@ -475,6 +475,7 @@
   "savestate.title.save": "Savestate speichern",
   "scope.game": "Spiel",
   "scope.global": "Global",
+  "settings.changedFromDefault": "Nicht Standard",
   "setup.aspect.stretch": "Strecken",
   "setup.bios.error.noneFound": "In diesem Ordner wurden keine gültigen PS1-BIOS-Dateien gefunden.",
   "setup.bios.multipleFound": "BIOS-Dateien bereit — Wechsel jederzeit in den BIOS-Einstellungen möglich.",

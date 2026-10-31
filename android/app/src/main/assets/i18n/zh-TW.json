@@ -1,5 +1,6 @@
 {
   "_note": "Machine-translated (zh-TW); report bad strings to fix.",
+  "settings.changedFromDefault": "非預設",
   "tab.app": "應用程式",
   "tab.performance": "效能",
   "tab.renderer": "渲染器",

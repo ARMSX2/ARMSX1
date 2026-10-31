@@ -1,12 +1,9 @@
 package com.armsx2.ui.settings
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
@@ -74,15 +71,28 @@ private val HOST_FIELDS = mapOf(
     "overlay.toggle.controlInputs" to "osdShowInputs",
 )
 
+/**
+ * The "Not default" line above a row's title, as ARMSX3 draws it, when [label]'s value differs from
+ * its factory default. It used to be a small dot and "Changed" beside the title, which was easy to
+ * miss entirely. Draws nothing outside a [ChangedSettingsProvider].
+ */
 @Composable
-internal fun ChangedSettingMarker(label: String) {
+internal fun ChangedSettingMarker(label: String, modifier: Modifier = Modifier) {
     if (label !in LocalChangedLabels.current) return
+    NotDefaultLabel(modifier)
+}
+
+/** The red line itself, for rows that compare their own value with the default (the quick menu's). */
+@Composable
+internal fun NotDefaultLabel(modifier: Modifier = Modifier) {
     val hint = str("settings.changedFromDefault.help")
-    Row(verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(start = 6.dp).semantics { contentDescription = hint }) {
-        Box(Modifier.size(6.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
-        Spacer(Modifier.width(4.dp))
-        Text(str("settings.changedFromDefault"), color = MaterialTheme.colorScheme.primary,
-            fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-    }
+    Text(
+        str("settings.changedFromDefault"),
+        color = MaterialTheme.colorScheme.error,
+        fontSize = 12.sp,
+        lineHeight = 15.sp,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        modifier = modifier.padding(bottom = 2.dp).semantics { contentDescription = hint },
+    )
 }

@@ -150,6 +150,7 @@ internal fun Ps1InfoRow(label: String, value: String, description: String? = nul
             )
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
+        ChangedSettingMarker(label)
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(
                 label,
@@ -220,6 +221,7 @@ internal fun Ps1TextRow(
             .controllerFocusable(controllerId = controllerId)
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
+        ChangedSettingMarker(label)
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(
                 label,

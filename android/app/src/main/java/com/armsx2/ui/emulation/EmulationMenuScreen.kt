@@ -520,6 +520,12 @@ private fun MenuRail(
 
 private val menuTabBlue = SelectionBlue
 
+/** Factory values the "Not default" line compares against, as ARMSX3's rows do: the stored field,
+ *  not the chip or label a row derives from it. These rows have their own widgets, so the label
+ *  matching the Settings tabs use (ChangedSettingsProvider) cannot see them. */
+private val Ps1Stock by lazy { com.armsx2.config.Ps1Settings() }
+private val HostStock by lazy { com.armsx2.config.Settings() }
+
 @Composable
 private fun MenuRailTab(tab: EmulationMenuTab, active: Boolean, onSelect: (EmulationMenuTab) -> Unit) {
     val focused = active && !EmulationMenuInputController.inContent.value &&
@@ -830,6 +836,7 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
                 MenuCycleRow(
                     title = str("overlay.master.label"),
                     valueLabel = com.armsx2.ui.InGameOverlay.osdModeLabel(osdModes[osdModeIndex]),
+                    notDefault = osdModes[osdModeIndex] != com.armsx2.ui.InGameOverlay.OsdMode.Off,
                 ) { step ->
                     val size = osdModes.size
                     val next = ((osdModeIndex + step) % size + size) % size
@@ -859,7 +866,8 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
             // the core had exactly one hard-coded 2x. Both are real now.
             val pacingContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
             MenuOrderItem("MenuSwitchRow.perf.frameLimit.label") {
-                MenuSwitchRow(str("perf.frameLimit.label"), com.armsx2.ui.InGameOverlay.frameLimitOn.value) { value ->
+                MenuSwitchRow(str("perf.frameLimit.label"), com.armsx2.ui.InGameOverlay.frameLimitOn.value,
+                    notDefault = com.armsx2.ui.InGameOverlay.frameLimitOn.value != Ps1Stock.frameLimit) { value ->
                     com.armsx2.ui.InGameOverlay.frameLimitOn.value = value
                     com.armsx2.core.Ps1Pacing.setFrameLimit(pacingContext, value)
                 }
@@ -872,6 +880,7 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
                 MenuCycleRow(
                     title = str("perf.fastForwardSpeed.label"),
                     valueLabel = com.armsx2.config.Ps1Settings.fastForwardSpeedLabel(ffSpeeds[ffSpeedIndex]),
+                    notDefault = ffSpeeds[ffSpeedIndex] != Ps1Stock.fastForwardSpeed,
                 ) { step ->
                     val size = ffSpeeds.size
                     val next = ((ffSpeedIndex + step) % size + size) % size
@@ -891,6 +900,7 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
                 MenuCycleRow(
                     title = str("overlay.osdColor.label"),
                     valueLabel = str(com.armsx2.ui.settings.OSD_COLOR_LABEL_KEYS[osdColorIndex]),
+                    notDefault = state.settings.osdColor != HostStock.osdColor,
                 ) { step ->
                     val size = com.armsx2.ui.settings.OSD_COLORS.size
                     val next = ((osdColorIndex + step) % size + size) % size
@@ -1015,6 +1025,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
             options = com.armsx2.config.Ps1Settings.GPU_BACKENDS
                 .zip(com.armsx2.config.Ps1Settings.GPU_BACKEND_LABELS),
             selected = ps1.gpuBackend,
+            notDefault = ps1.gpuBackend != Ps1Stock.gpuBackend,
             onSelect = { token -> editRunningGraphics { it.copy(gpuBackend = token) } },
         )
     }
@@ -1098,6 +1109,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
             title = str("renderer.upscale.label"),
             options = listOf(1 to "Native") + (2..8).map { it to "${it}x" },
             selected = if (ps1.hwRasterizer) ps1.internalScale.coerceIn(1, 8) else 1,
+            notDefault = ps1.hwRasterizer != Ps1Stock.hwRasterizer || ps1.internalScale != Ps1Stock.internalScale,
             onSelect = { scale ->
                 editRunningGraphics {
                     it.copy(hwRasterizer = scale > 1, internalScale = scale)
@@ -1119,6 +1131,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
             options = listOf(-1 to str("setup.aspect.stretch")) +
                 aspects.indices.map { it to com.armsx2.config.Ps1Settings.ASPECT_LABELS[it] },
             selected = if (ps1.stretchMode) -1 else aspects.indexOf(ps1.displayAspect).coerceAtLeast(0),
+            notDefault = ps1.stretchMode != Ps1Stock.stretchMode || ps1.displayAspect != Ps1Stock.displayAspect,
             onSelect = { index ->
                 editPs1 {
                     if (index < 0) it.copy(stretchMode = true)
@@ -1138,6 +1151,8 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
                 selected = presets.indexOfFirst {
                     kotlin.math.abs(it.second - ps1.displayAspectCustom) < 0.001f
                 },
+                // Same tolerance: the stored ratio is rounded, so == would call 16:9 "not default".
+                notDefault = kotlin.math.abs(ps1.displayAspectCustom - Ps1Stock.displayAspectCustom) >= 0.001f,
                 onSelect = { index -> editPs1 { it.copy(displayAspectCustom = presets[index].second) } },
             )
         }
@@ -1161,31 +1176,35 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
                 true to str("renderer.textureFilter.bilinear"),
             ),
             selected = ps1.textureScaleMode,
+            notDefault = ps1.textureScaleMode != Ps1Stock.textureScaleMode,
             onSelect = { linear -> editPs1 { it.copy(textureScaleMode = linear) } },
         )
     }
     MenuOrderItem("MenuSwitchRow.renderer.vsync.label") {
-        MenuSwitchRow(str("renderer.vsync.label"), ps1.vsync) { v -> editPs1 { it.copy(vsync = v) } }
+        MenuSwitchRow(str("renderer.vsync.label"), ps1.vsync, notDefault = ps1.vsync != Ps1Stock.vsync) { v -> editPs1 { it.copy(vsync = v) } }
     }
     MenuOrderItem("FramePacing.optimal") {
         MenuSwitchRow("Optimal frame pacing", ps1.optimalFramePacing,
-            description = "Evenly scheduled presentation. Applies after restarting the game.") { on -> editRunningGraphics { it.copy(optimalFramePacing = on) } }
+            description = "Evenly scheduled presentation. Applies after restarting the game.",
+            notDefault = ps1.optimalFramePacing != Ps1Stock.optimalFramePacing) { on -> editRunningGraphics { it.copy(optimalFramePacing = on) } }
     }
     MenuOrderItem("FramePacing.refresh") {
         MenuSwitchRow("Sync to host refresh rate", ps1.syncHostRefresh,
-            description = "Up to 1% speed adjustment with audio resampling; requires VSync. Next game start.") { on -> editRunningGraphics { it.copy(syncHostRefresh = on) } }
+            description = "Up to 1% speed adjustment with audio resampling; requires VSync. Next game start.",
+            notDefault = ps1.syncHostRefresh != Ps1Stock.syncHostRefresh) { on -> editRunningGraphics { it.copy(syncHostRefresh = on) } }
     }
     MenuOrderItem("FramePacing.latency") {
         MenuSwitchRow("Reduce input latency", ps1.reduceInputLatency,
-            description = "Starts work closer to presentation with optimal frame pacing. Next game start.") { on -> editRunningGraphics { it.copy(reduceInputLatency = on) } }
+            description = "Starts work closer to presentation with optimal frame pacing. Next game start.",
+            notDefault = ps1.reduceInputLatency != Ps1Stock.reduceInputLatency) { on -> editRunningGraphics { it.copy(reduceInputLatency = on) } }
     }
     MenuOrderItem("FramePacing.buffer") {
         HorizontalOptions(title = "Frame-time buffer", options = (0..10).map { it to "$it ms" },
-            selected = ps1.frameTimeBufferMs, onSelect = { value -> editRunningGraphics { it.copy(frameTimeBufferMs = value) } })
+            selected = ps1.frameTimeBufferMs, notDefault = ps1.frameTimeBufferMs != Ps1Stock.frameTimeBufferMs, onSelect = { value -> editRunningGraphics { it.copy(frameTimeBufferMs = value) } })
     }
     MenuOrderItem("FramePacing.queue") {
         HorizontalOptions(title = "Maximum queued frames", options = (1..3).map { it to it.toString() },
-            selected = ps1.maxQueuedFrames, onSelect = { value -> editRunningGraphics { it.copy(maxQueuedFrames = value) } })
+            selected = ps1.maxQueuedFrames, notDefault = ps1.maxQueuedFrames != Ps1Stock.maxQueuedFrames, onSelect = { value -> editRunningGraphics { it.copy(maxQueuedFrames = value) } })
     }
 
     // The PlayStation GPU's own accuracy flags, both real [video] keys and both off by default
@@ -1199,6 +1218,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
             str("fixes.dithering.label"),
             ps1.accurateDither,
             description = str("fixes.dithering.description"),
+            notDefault = ps1.accurateDither != Ps1Stock.accurateDither,
         ) { v -> editPs1 { it.copy(accurateDither = v) } }
     }
     MenuOrderItem("MenuSwitchRow.fixes.maskBit.label") {
@@ -1206,6 +1226,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
             str("fixes.maskBit.label"),
             ps1.accurateMaskBit,
             description = str("fixes.maskBit.description"),
+            notDefault = ps1.accurateMaskBit != Ps1Stock.accurateMaskBit,
         ) { v -> editPs1 { it.copy(accurateMaskBit = v) } }
     }
 
@@ -1280,7 +1301,10 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
     // owns the policy and writes the file itself; these rows only hand it one value and re-read.
     var pacing by remember { mutableStateOf(com.armsx2.core.Ps1Pacing.settings(context)) }
     MenuOrderItem("SectionCard.perf.speedLimit.label") {
-        SectionCard(str("perf.speedLimit.label")) {
+        SectionCard(
+            str("perf.speedLimit.label"),
+            notDefault = pacing.frameLimit != Ps1Stock.frameLimit || pacing.speedPercent != Ps1Stock.speedPercent,
+        ) {
             MenuOrderItem("Row.setup.toggle.off") {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -1321,6 +1345,7 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                 it to if (it == 0) str("setup.toggle.off") else "$it FPS"
             },
             selected = pacing.fpsLimit,
+            notDefault = pacing.fpsLimit != Ps1Stock.fpsLimit,
             onSelect = { fps ->
                 com.armsx2.core.Ps1Pacing.setFpsLimit(context, fps)
                 pacing = com.armsx2.core.Ps1Pacing.settings(context)
@@ -1339,6 +1364,7 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                 it to com.armsx2.config.Ps1Settings.frameSkipLabel(it)
             },
             selected = pacing.frameSkip,
+            notDefault = pacing.frameSkip != Ps1Stock.frameSkip,
             onSelect = { skip ->
                 com.armsx2.core.Ps1Pacing.setFrameSkip(context, skip)
                 pacing = com.armsx2.core.Ps1Pacing.settings(context)
@@ -1384,6 +1410,7 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                     title = "Display refresh rate",
                     options = listOf(0 to "Auto", 60 to "60 Hz", 120 to "120 Hz"),
                     selected = settings.displayRefreshRate,
+                    notDefault = settings.displayRefreshRate != HostStock.displayRefreshRate,
                     onSelect = { rate ->
                         viewModel.updateSettings { it.copy(displayRefreshRate = rate) }
                         com.armsx2.runtime.MainActivityRuntime.surface.value?.applyFrameRatePreference()
@@ -1400,7 +1427,8 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
             // Zero queued frames + a display refresh vote that is an integer multiple of the game's
             // rate (60 -> 120 Hz, PAL 50 -> 100 Hz), so there is no 3:2 cadence.
             MenuOrderItem("MenuSwitchRow.renderer.lowLatency.label") {
-                MenuSwitchRow(str("renderer.lowLatency.label"), settings.vsyncQueueSize == 0) { enabled ->
+                MenuSwitchRow(str("renderer.lowLatency.label"), settings.vsyncQueueSize == 0,
+                    notDefault = settings.vsyncQueueSize != HostStock.vsyncQueueSize) { enabled ->
                     viewModel.updateSettings { it.copy(vsyncQueueSize = if (enabled) 0 else 2) }
                     runCatching {
                         com.armsx2.runtime.MainActivityRuntime.surface.value?.applyFrameRatePreference()
@@ -1415,7 +1443,8 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                 val labels = listOf("Screen", "3x native", "2x native", "1x native")
                 val toIndex = when (settings.hwScaler) { 3 -> 1; 2 -> 2; 1 -> 3; else -> 0 }
                 MenuOrderItem("MenuCycleRow.item") {
-                    MenuCycleRow("Display resolution", labels[toIndex]) { step ->
+                    MenuCycleRow("Display resolution", labels[toIndex],
+                        notDefault = settings.hwScaler != HostStock.hwScaler) { step ->
                         val next = ((toIndex + step) % labels.size + labels.size) % labels.size
                         viewModel.updateSettings {
                             it.copy(hwScaler = when (next) { 1 -> 3; 2 -> 2; 3 -> 1; else -> 0 })
@@ -1434,7 +1463,8 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                 val labels = listOf("Auto", "1440p", "1080p", "720p")
                 val idx = presets.indexOf(settings.screenResOverride).let { if (it >= 0) it else 0 }
                 MenuOrderItem("MenuCycleRow.item.1") {
-                    MenuCycleRow("Screen resolution", labels[idx]) { step ->
+                    MenuCycleRow("Screen resolution", labels[idx],
+                        notDefault = settings.screenResOverride != HostStock.screenResOverride) { step ->
                         val next = ((idx + step) % presets.size + presets.size) % presets.size
                         viewModel.updateSettings { it.copy(screenResOverride = presets[next]) }
                         runCatching {
@@ -1451,7 +1481,8 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                 val prefs = com.armsx2.runtime.MainActivityRuntime.prefs
                 var sustained by remember { mutableStateOf(prefs.getBoolean("ui.sustainedPerf", false)) }
                 MenuOrderItem("MenuSwitchRow.renderer.sustainedPerf.label") {
-                    MenuSwitchRow(str("renderer.sustainedPerf.label"), sustained) { enabled ->
+                    // Default off, like the pref it reads.
+                    MenuSwitchRow(str("renderer.sustainedPerf.label"), sustained, notDefault = sustained) { enabled ->
                         sustained = enabled
                         prefs.edit().putBoolean("ui.sustainedPerf", enabled).apply()
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
@@ -1477,7 +1508,7 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                 val prefs = com.armsx2.runtime.MainActivityRuntime.prefs
                 var adpf by remember { mutableStateOf(prefs.getBoolean("ui.adpf", false)) }
                 MenuOrderItem("MenuSwitchRow.renderer.adpf.label") {
-                    MenuSwitchRow(str("renderer.adpf.label"), adpf) { enabled ->
+                    MenuSwitchRow(str("renderer.adpf.label"), adpf, notDefault = adpf) { enabled ->
                         adpf = enabled
                         prefs.edit().putBoolean("ui.adpf", enabled).apply()
                         runCatching { kr.co.iefriends.pcsx2.NativeApp.setAdpfEnabled(enabled) }
@@ -1496,7 +1527,8 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                 )
                 val toIndex = when (settings.affinityMode) { 1, 7 -> 1; 2 -> 2; 3 -> 3; else -> 0 }
                 MenuOrderItem("MenuCycleRow.renderer.affinity.label") {
-                    MenuCycleRow(str("renderer.affinity.label"), labels[toIndex]) { step ->
+                    MenuCycleRow(str("renderer.affinity.label"), labels[toIndex],
+                        notDefault = settings.affinityMode != HostStock.affinityMode) { step ->
                         val next = ((toIndex + step) % labels.size + labels.size) % labels.size
                         viewModel.updateSettings { it.copy(affinityMode = next) }
                         runCatching { kr.co.iefriends.pcsx2.NativeApp.setAffinityMode(next) }
@@ -1511,13 +1543,13 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
     MenuOrderItem("SectionCard.tab.overlay") {
         SectionCard(str("tab.overlay")) {
             MenuOrderItem("MenuSwitchRow.overlay.toggle.fps") {
-                MenuSwitchRow(str("overlay.toggle.fps"), settings.osdShowFps) { value ->
+                MenuSwitchRow(str("overlay.toggle.fps"), settings.osdShowFps, notDefault = settings.osdShowFps != HostStock.osdShowFps) { value ->
                     viewModel.updateSettings { it.copy(osdShowFps = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.overlay.toggle.emulationSpeed") {
-                MenuSwitchRow(str("overlay.toggle.emulationSpeed"), settings.osdShowSpeed) { value ->
+                MenuSwitchRow(str("overlay.toggle.emulationSpeed"), settings.osdShowSpeed, notDefault = settings.osdShowSpeed != HostStock.osdShowSpeed) { value ->
                     viewModel.updateSettings { it.copy(osdShowSpeed = value) }
                 }
             }
@@ -1529,54 +1561,54 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
             // instrumentation inside the emulator, so they stay individually toggleable and off by
             // default; with all four clear the core carries no counters at all.
             MenuOrderItem("MenuSwitchRow.item") {
-                MenuSwitchRow("R3000A + GTE", settings.osdShowCpu) { value ->
+                MenuSwitchRow("R3000A + GTE", settings.osdShowCpu, notDefault = settings.osdShowCpu != HostStock.osdShowCpu) { value ->
                     viewModel.updateSettings { it.copy(osdShowCpu = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.overlay.toggle.gpuPrimitives") {
-                MenuSwitchRow(str("overlay.toggle.gpuPrimitives"), settings.osdShowGpu) { value ->
+                MenuSwitchRow(str("overlay.toggle.gpuPrimitives"), settings.osdShowGpu, notDefault = settings.osdShowGpu != HostStock.osdShowGpu) { value ->
                     viewModel.updateSettings { it.copy(osdShowGpu = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.item.1") {
-                MenuSwitchRow("SPU / MDEC / CD-ROM / DMA", settings.osdShowGsStats) { value ->
+                MenuSwitchRow("SPU / MDEC / CD-ROM / DMA", settings.osdShowGsStats, notDefault = settings.osdShowGsStats != HostStock.osdShowGsStats) { value ->
                     viewModel.updateSettings { it.copy(osdShowGsStats = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.overlay.toggle.frameTimes") {
-                MenuSwitchRow(str("overlay.toggle.frameTimes"), settings.osdShowFrameTimes) { value ->
+                MenuSwitchRow(str("overlay.toggle.frameTimes"), settings.osdShowFrameTimes, notDefault = settings.osdShowFrameTimes != HostStock.osdShowFrameTimes) { value ->
                     viewModel.updateSettings { it.copy(osdShowFrameTimes = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.overlay.toggle.internalResolution") {
-                MenuSwitchRow(str("overlay.toggle.internalResolution"), settings.osdShowResolution) { value ->
+                MenuSwitchRow(str("overlay.toggle.internalResolution"), settings.osdShowResolution, notDefault = settings.osdShowResolution != HostStock.osdShowResolution) { value ->
                     viewModel.updateSettings { it.copy(osdShowResolution = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.tab.renderer") {
-                MenuSwitchRow(str("tab.renderer"), settings.osdShowHardwareInfo) { value ->
+                MenuSwitchRow(str("tab.renderer"), settings.osdShowHardwareInfo, notDefault = settings.osdShowHardwareInfo != HostStock.osdShowHardwareInfo) { value ->
                     viewModel.updateSettings { it.copy(osdShowHardwareInfo = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.overlay.toggle.deviceUsage") {
-                MenuSwitchRow(str("overlay.toggle.deviceUsage"), settings.osdShowHostUsage) { value ->
+                MenuSwitchRow(str("overlay.toggle.deviceUsage"), settings.osdShowHostUsage, notDefault = settings.osdShowHostUsage != HostStock.osdShowHostUsage) { value ->
                     viewModel.updateSettings { it.copy(osdShowHostUsage = value) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             MenuOrderItem("MenuSwitchRow.overlay.toggle.onScreenNotifications") {
-                MenuSwitchRow(str("overlay.toggle.onScreenNotifications"), settings.osdShowMessages) { value ->
+                MenuSwitchRow(str("overlay.toggle.onScreenNotifications"), settings.osdShowMessages, notDefault = settings.osdShowMessages != HostStock.osdShowMessages) { value ->
                     viewModel.updateSettings { it.copy(osdShowMessages = value) }
                 }
             }
             MenuOrderItem("MenuSwitchRow.overlay.toggle.controlInputs") {
-                MenuSwitchRow(str("overlay.toggle.controlInputs"), settings.osdShowInputs) { value ->
+                MenuSwitchRow(str("overlay.toggle.controlInputs"), settings.osdShowInputs, notDefault = settings.osdShowInputs != HostStock.osdShowInputs) { value ->
                     viewModel.updateSettings { it.copy(osdShowInputs = value) }
                 }
             }
@@ -1752,7 +1784,8 @@ private fun OptionsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
         // switch snaps back to it rather than pretending the change took.
         val ps1Local = remember { mutableStateOf(com.armsx2.config.Ps1SettingsStore.active(ctx)) }
         MenuOrderItem("MenuSwitchRow.perf.fix.skipBios") {
-            MenuSwitchRow(str("perf.fix.skipBios"), ps1Local.value.fastBoot) { on ->
+            MenuSwitchRow(str("perf.fix.skipBios"), ps1Local.value.fastBoot,
+                notDefault = ps1Local.value.fastBoot != Ps1Stock.fastBoot) { on ->
                 runCatching { com.armsx2.config.Ps1SettingsStore.update(ctx, null) { it.copy(fastBoot = on) } }
                 ps1Local.value = runCatching { com.armsx2.config.Ps1SettingsStore.active(ctx) }
                     .getOrDefault(ps1Local.value)
@@ -1963,7 +1996,7 @@ private fun ActionGrid(actions: List<MenuAction>, selected: Int, onSelect: (Int)
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
+private fun SectionCard(title: String, notDefault: Boolean = false, content: @Composable () -> Unit) {
     val parent = LocalMenuMoveTarget.current
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1972,6 +2005,7 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.34f)),
     ) {
         Column(Modifier.padding(13.dp)) {
+            if (notDefault) com.armsx2.ui.settings.NotDefaultLabel()
             Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             MenuOrderColumn(group = "${parent?.group}/${parent?.id}", spacing = 0.dp, content = content)
@@ -1984,9 +2018,10 @@ private fun <T> HorizontalOptions(
     title: String,
     options: List<Pair<T, String>>,
     selected: T,
+    notDefault: Boolean = false,
     onSelect: (T) -> Unit,
 ) {
-    SectionCard(title) {
+    SectionCard(title, notDefault) {
         HorizontalOptionRow(options, selected, keyPrefix = title, onSelect = onSelect)
     }
 }
@@ -2046,6 +2081,7 @@ private fun MenuSwitchRow(
     checked: Boolean,
     enabled: Boolean = true,
     description: String? = null,
+    notDefault: Boolean = false,
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Surface(
@@ -2068,6 +2104,7 @@ private fun MenuSwitchRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
+                if (notDefault) com.armsx2.ui.settings.NotDefaultLabel()
                 Text(
                     title,
                     style = MaterialTheme.typography.titleSmall,
@@ -2096,6 +2133,7 @@ private fun MenuSwitchRow(
 private fun MenuCycleRow(
     title: String,
     valueLabel: String,
+    notDefault: Boolean = false,
     onStep: (Int) -> Unit,
 ) {
     Surface(
@@ -2116,13 +2154,15 @@ private fun MenuCycleRow(
             Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                title,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
-            )
+            Column(Modifier.weight(1f)) {
+                if (notDefault) com.armsx2.ui.settings.NotDefaultLabel()
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                )
+            }
             Spacer(Modifier.width(10.dp))
             Text(
                 valueLabel,

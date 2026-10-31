@@ -1,5 +1,6 @@
 {
   "_note": "Machine-translated (ja); report bad strings to fix.",
+  "settings.changedFromDefault": "デフォルト以外",
   "tab.app": "アプリ",
   "tab.performance": "パフォーマンス",
   "tab.renderer": "Renderer",

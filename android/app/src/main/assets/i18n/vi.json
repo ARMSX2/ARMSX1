@@ -1,5 +1,6 @@
 {
   "_note": "Machine-translated (vi); report bad strings to fix.",
+  "settings.changedFromDefault": "Không mặc định",
   "tab.app": "Ứng dụng",
   "tab.performance": "Hiệu năng",
   "tab.renderer": "Renderer",

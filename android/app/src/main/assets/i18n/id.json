@@ -1,5 +1,6 @@
 {
   "_note": "Machine-translated (id); report bad strings to fix.",
+  "settings.changedFromDefault": "Bukan bawaan",
   "tab.app": "Aplikasi",
   "tab.performance": "Performa",
   "tab.renderer": "Renderer",

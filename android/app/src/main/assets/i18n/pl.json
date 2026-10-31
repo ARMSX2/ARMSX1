@@ -1,5 +1,6 @@
 {
   "_note": "Machine-translated (pl); report bad strings to fix.",
+  "settings.changedFromDefault": "Niedomyślne",
   "tab.app": "Aplikacja",
   "tab.performance": "Wydajność",
   "tab.renderer": "Renderer",

@@ -692,6 +692,7 @@ fun ToggleRow(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                ChangedSettingMarker(label)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     // Which layer this row's value comes from. Draws nothing outside the PS1
@@ -775,6 +776,7 @@ fun IntSliderRow(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
+                    ChangedSettingMarker(label)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                         PerGameMarker(label)
@@ -1090,6 +1092,7 @@ fun SegmentedRow(
         contentAlignment = Alignment.CenterStart,
     ) {
         Column {
+            ChangedSettingMarker(label, Modifier.padding(horizontal = 16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1184,6 +1187,7 @@ fun SegmentedGridRow(
         contentAlignment = Alignment.CenterStart,
     ) {
         Column {
+            ChangedSettingMarker(label)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 PerGameMarker(label)

@@ -1,5 +1,6 @@
 {
   "_note": "Machine-translated (th); report bad strings to fix.",
+  "settings.changedFromDefault": "ไม่ใช่ค่าเริ่มต้น",
   "tab.app": "แอป",
   "tab.performance": "ประสิทธิภาพ",
   "tab.renderer": "Renderer",

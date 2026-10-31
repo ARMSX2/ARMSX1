@@ -248,11 +248,11 @@ private fun ShaderParamPicker(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             Column(Modifier.weight(1f)) {
+                com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.params.label"))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(str("renderer.shaderChain.params.label"), color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f))
-                    com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.params.label"))
                 }
                 Spacer(Modifier.height(3.dp))
                 Text(
@@ -359,11 +359,11 @@ private fun ShaderPresetPicker(preset: String, onPresetChange: (String) -> Unit)
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             Column(Modifier.weight(1f)) {
+                com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.preset.label"))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(str("renderer.shaderChain.preset.label"), color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f))
-                    com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.preset.label"))
                 }
                 Spacer(Modifier.height(3.dp))
                 Text(

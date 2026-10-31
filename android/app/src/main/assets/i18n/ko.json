@@ -1,5 +1,6 @@
 {
   "_note": "Machine-translated (ko); report bad strings to fix.",
+  "settings.changedFromDefault": "기본값 아님",
   "tab.app": "앱",
   "tab.performance": "성능",
   "tab.renderer": "렌더러",
