@@ -73,6 +73,26 @@ fun AppTab() {
             MainActivityRuntime::reopenSetup,
             controllerId = "segmented:${str("games.overflow.setup")}",
         )
+        // Appearance: interface style, UI colours, and the library background (waves, RGB
+        // cycling, custom image and the fallbacks). These also live on the sidebar Customisation
+        // page; they are here as well because this is where they have always been and where
+        // people go looking for them. Both entry points read and write the SAME
+        // ThemePreferences / LibraryBackground state, so there is one source of truth, nothing to
+        // migrate, and no way for the two screens to disagree.
+        CollapsibleSection(str("app.interface.style")) {
+            InterfaceStyleSection(showTitle = false)
+        }
+        // PS one style ships a fixed palette, so the colour picker would be inert under it --
+        // same guard the Customisation page uses.
+        if (!com.armsx2.ui.theme.InterfacePreferences.psOne) {
+            CollapsibleSection(str("app.theme")) {
+                ThemeAppearanceSection(showTitle = false)
+            }
+        }
+        CollapsibleSection(str("app.bg.style")) {
+            LibraryAppearanceSection()
+        }
+
         Surface(
             onClick = { UiNavigator.navigate(AppRoute.Language) },
             modifier = Modifier.fillMaxWidth()
