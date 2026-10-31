@@ -39,8 +39,10 @@ import java.util.Locale
  * ```
  *
  * POSIX games are identified straight off their disc. SAF discovery uses cached identities
- * and filenames only. Launch preparation can copy a complete image and native identification
- * can terminate the process on a bad image; neither belongs in a background library scan.
+ * and filenames only, so a big picked folder still lists quickly; [retryMissingSerials] then reads
+ * those discs in the background through the granted document ([Ps1SafAccess.probeDocument]).
+ * Launch preparation can copy a complete image and native identification can terminate the
+ * process on a bad image; neither belongs in a library pass, and identification uses neither.
  */
 class GameLibraryRepository(private val context: Context) {
 
@@ -138,20 +140,22 @@ class GameLibraryRepository(private val context: Context) {
      * nothing ever asks again. The user's library would keep the blank tile until they thought to
      * hit Refresh.
      *
-     * So a null serial is treated as "not determined yet", not as "known to have none". This performs
-     * disc reads for POSIX files only. SAF entries may pick up a cached identity, but must
-     * never stage a ROM or call native identification here. Returns null when nothing changed.
+     * So a null serial is treated as "not determined yet", not as "known to have none". SAF
+     * entries are read through their granted document by [Ps1SafAccess.probeDocument]: a few
+     * sectors, never a staged copy and never the native reader. [documentsOnly] limits the pass to
+     * those, for right after a full scan that has just read every POSIX disc itself. Returns null
+     * when nothing changed.
      */
-    suspend fun retryMissingSerials(games: List<GameInfo>): List<GameInfo>? = withContext(Dispatchers.IO) {
+    suspend fun retryMissingSerials(games: List<GameInfo>, documentsOnly: Boolean = false): List<GameInfo>? = withContext(Dispatchers.IO) {
         if (games.none { it.serial.isNullOrBlank() }) return@withContext null
         var changed = false
         val probeLog = ArrayList<String>()
         val updated = games.map { game ->
             if (!game.serial.isNullOrBlank()) return@map game
             val probe = if (game.uri.scheme == "content") {
-                val key = game.uri.toString()
-                Ps1Covers.cachedProbe(key)
+                runCatching { Ps1Covers.probeForDocument(context, game.uri.toString()) }.getOrNull()
             } else {
+                if (documentsOnly) return@map game
                 val path = pathOf(game.uri)?.takeIf { runCatching { File(it).isFile }.getOrDefault(false) }
                     ?: return@map game
                 // reprobe, not probe: the process-lifetime memo may already hold this scan's failure.
@@ -169,8 +173,17 @@ class GameLibraryRepository(private val context: Context) {
         // Only the rows change; the cache KEY still describes the same folders, so it is left
         // exactly as the scan that wrote it left it.
         saveGamesCache(updated)
+        // recent_games.json carries the serial too, and launchers read it; refresh it now rather
+        // than leaving null there until the next game is played.
+        recentOrder().takeIf { it.isNotEmpty() }?.let { order -> exportScope.launch { exportRecentGamesPublic(order) } }
         updated
     }
+
+    private fun recentOrder(): List<String> = runCatching {
+        MainActivityRuntime.prefs.getString("recentGameUris", null)?.let(::JSONArray)?.let { array ->
+            List(array.length()) { array.getString(it) }
+        }
+    }.getOrNull().orEmpty()
 
     fun recentGames(allGames: List<GameInfo>): List<GameInfo> {
         val raw = MainActivityRuntime.prefs.getString("recentGameUris", null) ?: return emptyList()

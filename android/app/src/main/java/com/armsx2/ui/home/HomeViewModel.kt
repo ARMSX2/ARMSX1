@@ -99,10 +99,28 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * A full scan reads every POSIX disc, but a game in a picked folder only gets its file name
+     * there, so the list appears without waiting on the document provider. Read those discs now,
+     * in the background, and swap the serials in when they land.
+     */
+    private fun identifyDocuments(games: List<GameInfo>) {
+        if (games.none { it.serial.isNullOrBlank() && it.uri.scheme == "content" }) return
+        scope.launch {
+            val updated = runCatching { repository.retryMissingSerials(games, documentsOnly = true) }
+                .getOrNull() ?: return@launch
+            // A newer scan wins, exactly as for retryMissingSerials.
+            if (state.value.allGames !== games) return@launch
+            state.value = buildState(state.value.copy(allGames = updated))
+            com.armsx2.RaLibrary.onLibraryLoaded(updated)
+        }
+    }
+
     fun refresh() {
         com.armsx2.CoverCatalogue.refreshImages()
         if (directories.isEmpty() || scanJob?.isActive == true) return
-        // A full scan re-reads every disc, so it IS the retry — no need to do it twice.
+        // A full scan re-reads every POSIX disc and identifyDocuments follows it for picked
+        // folders, so together they ARE the retry; no need to do it twice.
         retriedSerials = true
         scanJob = scope.launch {
             val initialScan = pendingInitialScan && state.value.allGames.isEmpty()
@@ -118,6 +136,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     state.value.copy(allGames = games, scanning = false, initialized = true),
                 )
                 com.armsx2.RaLibrary.onLibraryLoaded(games)
+                identifyDocuments(games)
             }.onFailure { failure ->
                 pendingInitialScan = false
                 state.value = state.value.copy(

@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.documentfile.provider.DocumentFile
@@ -41,6 +42,92 @@ object Ps1SafAccess {
     /** Hash only the boot image; do not enumerate sibling discs for a picker. */
     fun prepareForHash(context: Context, pathOrUri: String): Session =
         prepareSession(context, pathOrUri, false) { false }
+
+    /**
+     * Identify a game in a picked folder the way [Ps1DiscId.probe] identifies a file: follow a
+     * cue (or a playlist's first disc) to its data track, then read SYSTEM.CNF through the granted
+     * document, a few 2 KB sectors at a time. Nothing is staged and nothing native runs. Those two
+     * are why these games were left unidentified (a full copy, or a bad image handed to the core,
+     * has no place in a library pass), and neither is needed to read a serial. Blocking; never throws.
+     */
+    fun probeDocument(context: Context, uriString: String): Ps1DiscId.Probe {
+        val resolver = context.contentResolver
+        val uri = runCatching { Uri.parse(uriString) }.getOrNull()
+            ?: return Ps1DiscId.Probe(null, "", "unreadable document URI")
+        val name = runCatching { displayName(context, uri) }.getOrDefault("game")
+        val targets = try {
+            identificationTargets(resolver, uri, name, 0)
+        } catch (failure: Exception) {
+            return Ps1DiscId.Probe(null, "", "$name: ${failure.javaClass.simpleName}: ${failure.message}")
+        }
+        if (targets.isEmpty()) {
+            return Ps1DiscId.Probe(null, "",
+                "$name: no readable data track (compressed container, or the cue names a file that is not there)")
+        }
+        val trace = StringBuilder()
+        for ((target, targetName) in targets) {
+            val hit = try {
+                val pfd = resolver.openFileDescriptor(target, "r")
+                if (pfd == null) {
+                    trace.append(targetName).append(": the document provider returned no descriptor\n")
+                    null
+                } else {
+                    ParcelFileDescriptor.AutoCloseInputStream(pfd).use { stream ->
+                        val length = pfd.statSize.takeIf { it > 0 }
+                            ?: runCatching { stream.channel.size() }.getOrDefault(0L)
+                        Ps1DiscId.probeOpenImage(targetName, stream.channel, length, trace)
+                    }
+                }
+            } catch (failure: Exception) {
+                trace.append(targetName).append(": open failed (").append(failure.javaClass.simpleName)
+                    .append(": ").append(failure.message).append(")\n")
+                null
+            }
+            if (hit != null) return Ps1DiscId.Probe(hit.first, hit.second, trace.toString().trimEnd())
+        }
+        return Ps1DiscId.Probe(null, "", trace.toString().trimEnd())
+    }
+
+    /** The documents that could hold [uri]'s data track, best first, with their display names. */
+    private fun identificationTargets(
+        resolver: ContentResolver,
+        uri: Uri,
+        name: String,
+        depth: Int,
+    ): List<Pair<Uri, String>> {
+        if (depth > MAX_PLAYLIST_DEPTH) return emptyList()
+        return when (Ps1SafText.extension(name)) {
+            "cue" -> {
+                val siblings = runCatching { siblingDocuments(resolver, uri) }.getOrDefault(emptyMap())
+                val named = Ps1SafText.cueReferences(readSmallText(resolver, uri)).mapNotNull { reference ->
+                    runCatching { resolveReference(resolver, uri, reference, siblings) }.getOrNull()
+                        ?.let { it to Ps1SafText.baseName(reference) }
+                }
+                // A renamed dump whose cue names a file that is not there: any image sharing the
+                // cue's own stem, as the file-path identifier does.
+                named.ifEmpty {
+                    val stem = name.substringBeforeLast('.')
+                    siblings.filter { (sibling, _) ->
+                        Ps1SafText.extension(sibling) in RAW_IMAGE_EXTENSIONS &&
+                            sibling.substringBeforeLast('.').equals(stem, ignoreCase = true)
+                    }.map { (sibling, document) -> document to sibling }
+                }
+            }
+            "m3u" -> {
+                // Disc 1 is the identity the cover and the settings key hang off. Stop at the first
+                // disc that resolves even if it cannot be read here: disc 2's serial would be wrong.
+                val siblings = runCatching { siblingDocuments(resolver, uri) }.getOrDefault(emptyMap())
+                Ps1SafText.playlistEntries(readSmallText(resolver, uri)).firstNotNullOfOrNull { entry ->
+                    runCatching { resolveReference(resolver, uri, entry, siblings) }.getOrNull()
+                        ?.let { it to Ps1SafText.baseName(entry) }
+                }?.let { (disc, discName) -> identificationTargets(resolver, disc, discName, depth + 1) }.orEmpty()
+            }
+            in RAW_IMAGE_EXTENSIONS, "pbp" -> listOf(uri to name)
+            else -> emptyList() // chd/zip/exe: only the core can see inside
+        }
+    }
+
+    private val RAW_IMAGE_EXTENSIONS = setOf("bin", "iso", "img")
 
     private fun prepareSession(context: Context, pathOrUri: String, discoverDiscs: Boolean, cancelled: () -> Boolean): Session {
         if (!pathOrUri.startsWith("content://")) return Session(pathOrUri)

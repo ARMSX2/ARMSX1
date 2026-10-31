@@ -208,6 +208,51 @@ class Ps1DiscIdTest {
         assertTrue(probe.detail, probe.detail.contains("core disc reader"))
     }
 
+    // ---- an image that is already open (a game in a picked folder) ---------------------------
+
+    /**
+     * A game in a folder granted through the system picker has no path a File can open; the
+     * DocumentsProvider hands out a descriptor. Every library game there used to go unidentified
+     * because nothing read through one. Same reads, same answer.
+     */
+    @Test
+    fun openImageIsIdentifiedThroughItsDescriptor() {
+        val image = writeImage(temp.newFile("picked.bin"), 2352, 24, 24, "BOOT = cdrom:\\SLUS_007.07;1\r\n")
+        val trace = StringBuilder()
+        val hit = java.io.FileInputStream(image).use { stream ->
+            Ps1DiscId.probeOpenImage("Silent Hill (USA).bin", stream.channel, image.length(), trace)
+        }
+        assertEquals("SLUS-00707" to "iso9660", hit)
+        assertTrue(trace.toString(), trace.contains("Silent Hill (USA).bin"))
+        assertTrue(trace.toString(), trace.contains("SYSTEM.CNF extent=24"))
+    }
+
+    @Test
+    fun openImageWithNoFilesystemStillGetsTheByteScan() {
+        val file = temp.newFile("picked-broken.bin")
+        RandomAccessFile(file, "rw").use { raf ->
+            raf.setLength(4L * 1024 * 1024)
+            raf.seek(1_500_000)
+            raf.write("BOOT = cdrom:\\SLUS_009.58;1".toByteArray(Charsets.ISO_8859_1))
+        }
+        val hit = java.io.FileInputStream(file).use { stream ->
+            Ps1DiscId.probeOpenImage("broken.bin", stream.channel, file.length(), StringBuilder())
+        }
+        assertEquals("SLUS-00958" to "rawscan", hit)
+    }
+
+    @Test
+    fun openImageThatIsNotADiscComesBackEmpty() {
+        val file = temp.newFile("picked-empty.bin")
+        file.writeBytes(ByteArray(64 * 1024))
+        val trace = StringBuilder()
+        val hit = java.io.FileInputStream(file).use { stream ->
+            Ps1DiscId.probeOpenImage("empty.bin", stream.channel, file.length(), trace)
+        }
+        assertNull(hit)
+        assertTrue(trace.toString(), trace.contains("raw scan found nothing"))
+    }
+
     // ---- dump-name fallback (cover art only) -------------------------------------------------
 
     @Test
