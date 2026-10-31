@@ -49,7 +49,7 @@ public final class ArmSxBackend {
     private volatile Map<String,String> options=Map.of();
     private volatile int aspectOverride=-1,volumeOverride=-1;
     private volatile float customAspectOverride,fastSpeedOverride=-1,outputAspect=4f/3f;
-    private volatile Boolean stretchOverride,integerOverride,mutedOverride;
+    private volatile Boolean stretchOverride,integerOverride,mutedOverride,wideOverride;
     private volatile boolean outputStretch,outputInteger;
     private static float decimal(String value,float fallback){try{float result=Float.parseFloat(value);return Float.isFinite(result)?result:fallback;}catch(Exception e){return fallback;}}
     public void displayAspect(int mode){aspectOverride=mode;updateDisplay();}
@@ -64,6 +64,8 @@ public final class ArmSxBackend {
         outputInteger=integerOverride!=null?integerOverride:Boolean.parseBoolean(options.getOrDefault("video.integer_scaling","false"));
         Gpu target=gpu;if(target!=null)target.configureDisplay(outputAspect,outputStretch,outputInteger);
     }
+    public void widescreenHack(boolean enabled){wideOverride=enabled;commands.add(()->{if(cpu!=null)cpu.gte.setWidescreen(enabled);});wake();}
+    private boolean widescreenEnabled(){return wideOverride!=null?wideOverride:Boolean.parseBoolean(options.getOrDefault("video.widescreen_hack","false"));}
     public void audioVolume(int volume){volumeOverride=volume;updateAudio();}
     public void audioMuted(boolean muted){mutedOverride=muted;updateAudio();}
     public void fastForwardSpeed(float speed){fastSpeedOverride=Float.isFinite(speed)?speed:2;updateAudio();}
@@ -195,7 +197,7 @@ public final class ArmSxBackend {
                             cpu=new Cpu(bus);cpu.reset();
                             if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,gamePath);
                             else if(media!=null&&(media.disc==null||Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
-                            cpu.enableNative(true,true,true);
+                            cpu.gte.setWidescreen(widescreenEnabled());cpu.enableNative(true,true,true);
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
                                 audio=output;output.setJournal(journal);updateAudio();output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});
                                 renderer="PSX Lab / "+gpu.renderer();booted=true;

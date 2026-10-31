@@ -5,7 +5,7 @@
 #include <climits>
 using i64=int64_t;
 struct GteCore {
-    int32_t* d;int32_t* c;int shift;bool limit;
+    int32_t* d;int32_t* c;int shift;bool limit;bool widescreen=false;
     static int clamp(i64 v,int lo,int hi){return int(std::max<i64>(lo,std::min<i64>(hi,v)));}
     void flag(int b){c[31]|=int32_t(uint32_t(1)<<b);}
     void summary(){c[31]&=0x7fffffff;if(c[31]&0x7f87e000)c[31]|=int32_t(0x80000000u);}
@@ -28,7 +28,7 @@ struct GteCore {
     void modulated(i64* out){for(int i=0;i<3;i++)out[i]=i64((uint32_t(d[6])>>(i*8))&255)*int16_t(d[9+i])*16;}
     void color(int v,bool modulate,bool depth){multiply(1,v,3,false);multiply(2,3,1,false);if(modulate){i64 base[3];modulated(base);if(depth)interpolate(base);else for(int i=1;i<=3;i++)result(i,base[i-1]);}pushColor();}
     int divide(int numerator,int denominator){if(numerator>=denominator*2){flag(17);return 0x1ffff;}int normalize=__builtin_clz(unsigned(denominator))-16;i64 n=i64(numerator)<<normalize,z=i64(denominator)<<normalize;int index=int((z-0x7fc0)>>7),table=std::max(0,((0x40000/(index+0x100)+1)/2)-0x101);i64 u=table+0x101;z=(0x2000080LL-z*u)>>8;z=(0x80+z*u)>>8;return int(std::min<i64>(0x1ffff,(n*z+0x8000)>>16));}
-    void perspective(int v,bool last){int previous=c[31]&(1<<22);i64 transformed[3];multiply(0,v,0,false,transformed);c[31]=(c[31]&~(1<<22))|previous;sat(transformed[2]>>12,-32768,32767,22);d[16]=d[17];d[17]=d[18];d[18]=d[19];d[19]=sat(transformed[2]>>12,0,65535,18);int ratio=divide(c[26]&65535,d[19]);i64 x=i64(ratio)*int16_t(d[9])+c[24],y=i64(ratio)*int16_t(d[10])+c[25];mac0(x);int sx=sat(x>>16,-1024,1023,14);mac0(y);int sy=sat(y>>16,-1024,1023,13);d[12]=d[13];d[13]=d[14];d[14]=(sx&65535)|int32_t(uint32_t(sy)<<16);if(last){i64 depth=i64(ratio)*int16_t(c[27])+c[28];mac0(depth);d[8]=sat(depth>>12,0,4096,12);}}
+    void perspective(int v,bool last){int previous=c[31]&(1<<22);i64 transformed[3];multiply(0,v,0,false,transformed);c[31]=(c[31]&~(1<<22))|previous;sat(transformed[2]>>12,-32768,32767,22);d[16]=d[17];d[17]=d[18];d[18]=d[19];d[19]=sat(transformed[2]>>12,0,65535,18);int ratio=divide(c[26]&65535,d[19]);i64 projected=i64(ratio)*int16_t(d[9]);if(widescreen)projected=projected*3/4;i64 x=projected+c[24],y=i64(ratio)*int16_t(d[10])+c[25];mac0(x);int sx=sat(x>>16,-1024,1023,14);mac0(y);int sy=sat(y>>16,-1024,1023,13);d[12]=d[13];d[13]=d[14];d[14]=(sx&65535)|int32_t(uint32_t(sy)<<16);if(last){i64 depth=i64(ratio)*int16_t(c[27])+c[28];mac0(depth);d[8]=sat(depth>>12,0,4096,12);}}
     bool execute(int instruction){c[31]=0;shift=(instruction&0x80000)?12:0;limit=instruction&0x400;int op=instruction&63;
         switch(op){
             case 1:perspective(0,true);break;

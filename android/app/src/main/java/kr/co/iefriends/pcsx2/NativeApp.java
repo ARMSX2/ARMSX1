@@ -557,7 +557,7 @@ public class NativeApp {
 	 *  flip while a game runs. 2D and UI are not projected through the GTE, so they
 	 *  still stretch. Boot-time value comes from settings.toml
 	 *  ({@code [video] widescreen_hack}); persist UI changes there too. */
-	public static void setWidescreenHack(boolean enabled) { unsupported("setWidescreenHack"); }
+	public static void setWidescreenHack(boolean enabled) { if(lab!=null)lab.widescreenHack(enabled); }
 
 	/** Deinterlacing for 480-line modes: 0 = weave (default, what always shipped),
 	 *  1 = bob, 2 = adaptive. Negative clears the override back to settings.toml

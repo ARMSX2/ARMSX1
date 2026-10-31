@@ -12,7 +12,9 @@ final class StateCodec {
         skip(Bus.class,"nativeMemory","instructionWords","instructionValid","gpu","dma","mdec","spu","timers","cdrom","sio0","nativeCores","bios");
         skip(Gpu.class,"journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","shaderAspect");
         skip(Spu.class,"nativeCore","sink","output");
-        skip(Gte.class,"nativeCore");
+        skip(Gte.class,"nativeCore","widescreen");
+        skip(NativeGte.class,"widescreen");
+        skip(ReferenceGte.class,"widescreen");
         skip(CdRom.class,"disc","xaSink","recentCommands","recentWrites","lastMediaError","cddaSectors","cddaFrames");
         skip(SerialPad.class,"state");
         skip(MemoryCard.class,"data","changed");

@@ -2,6 +2,7 @@ package dev.psxlab.core;
 /** Original native GTE arithmetic; CPU register transfers use the Java core register array. */
 final class NativeGte {
     private final int[] state=new int[64];
+    boolean widescreen;
     int[] rawState(){return state;}
     void reset(){for(int i=0;i<64;i++)state[i]=0;state[31]=32;}
     private static int clamp(int v){return Math.max(0,Math.min(31,v));}
@@ -27,6 +28,6 @@ final class NativeGte {
         case 31 -> {value&=0x7ffff000;if((value&0x7f87e000)!=0)value|=0x80000000;state[63]=value;}
         default -> state[32+reg]=value;
     }}
-    void execute(int instruction){executeNative(state,instruction);}
-    private static native void executeNative(int[] state,int instruction);
+    void execute(int instruction){executeNative(state,instruction,widescreen);}
+    private static native void executeNative(int[] state,int instruction,boolean widescreen);
 }

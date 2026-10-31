@@ -55,6 +55,12 @@ public class GteTest {
         Gte g=new Gte();identity(g,0);vector(g,0,100,-200,1000);g.writeControl(26,1000);g.execute(0x80001);
         assertEquals(100,(short)g.readData(14));assertEquals(-200,(short)(g.readData(14)>>>16));assertEquals(1000,g.readData(19));assertEquals(0,g.readControl(31));
     }
+    @Test public void widescreenChangesHorizontalProjectionAroundItsCentreOnly(){
+        Gte g=new Gte(false);identity(g,0);vector(g,0,100,-200,1000);g.writeControl(24,160<<16);g.writeControl(25,120<<16);g.writeControl(26,1000);
+        g.execute(0x80001);assertEquals(260,(short)g.readData(14));assertEquals(-80,(short)(g.readData(14)>>>16));
+        g.setWidescreen(true);g.execute(0x80001);assertEquals(235,(short)g.readData(14));assertEquals(-80,(short)(g.readData(14)>>>16));assertEquals(1000,g.readData(19));
+        g.setWidescreen(false);g.execute(0x80001);assertEquals(260,(short)g.readData(14));
+    }
     @Test public void triplePerspectivePreservesVertexOrder(){
         Gte g=new Gte();identity(g,0);for(int i=0;i<3;i++)vector(g,i,(i+1)*10,(i+1)*20,1000);g.writeControl(26,1000);g.execute(0x80030);
         for(int i=0;i<3;i++){assertEquals((i+1)*10,(short)g.readData(12+i));assertEquals((i+1)*20,(short)(g.readData(12+i)>>>16));assertEquals(1000,g.readData(17+i));}
