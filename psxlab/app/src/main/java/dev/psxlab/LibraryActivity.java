@@ -25,7 +25,7 @@ public class LibraryActivity extends MenuActivity {
     private boolean compact;
     private volatile int generation;private String section="All games";private Entry pending;
     private record Entry(String name,Uri uri,long size,Uri directory){}
-    private static String title(String name){return name.replaceFirst("(?i)\\.(chd|iso|bin|img|exe|cue)$","").replaceAll("(?i)\\s*\\((USA|Europe|Japan|World|Rev[^)]*)\\)","").replaceAll("\\s*\\[[^]]*\\]","").trim();}
+    private static String title(String name){return name.replaceFirst("(?i)\\.(chd|iso|bin|img|exe|cue|pbp)$","").replaceAll("(?i)\\s*\\((USA|Europe|Japan|World|Rev[^)]*)\\)","").replaceAll("\\s*\\[[^]]*\\]","").trim();}
     @Override public void onCreate(Bundle state){super.onCreate(state);Ui.chrome(this);covers=new CoverArt(this);if(state!=null && state.getString("coverTarget")!=null)coverTarget=Uri.parse(state.getString("coverTarget"));prefs=getSharedPreferences("LibraryActivity",0);compact=getResources().getConfiguration().screenWidthDp<600;
         LinearLayout root=new LinearLayout(this);root.setBackgroundColor(Ui.BG);
         LinearLayout nav=new LinearLayout(this);nav.setOrientation(1);nav.setPadding(Ui.dp(this,compact?8:20),Ui.dp(this,22),Ui.dp(this,compact?8:16),Ui.dp(this,16));nav.setBackgroundColor(0xff111722);

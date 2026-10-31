@@ -17,7 +17,7 @@ public final class DiscMedia implements AutoCloseable {
     public final byte[] executable;
     public final String bootName;
     private DiscMedia(AutoCloseable owner,IsoDisc disc,byte[] executable,String bootName){this.owner=owner;this.disc=disc;this.executable=executable;this.bootName=bootName;}
-    public static boolean supportedName(String name){return name!=null&&name.toLowerCase(Locale.ROOT).matches(".*\\.(chd|iso|bin|img|exe|cue)$");}
+    public static boolean supportedName(String name){return name!=null&&name.toLowerCase(Locale.ROOT).matches(".*\\.(chd|iso|bin|img|exe|cue|pbp)$");}
     public static DiscMedia open(Context context,Uri uri,String name)throws IOException{return open(context,uri,name,null);}
     public static DiscMedia open(Context context,Uri uri,String name,Uri parent)throws IOException{
         if(CueDisc.isCueName(name)){
@@ -33,7 +33,7 @@ public final class DiscMedia implements AutoCloseable {
                 if(size<4||size>2*1024*1024)throw new IOException("Invalid executable size");
                 return new DiscMedia(bytes,null,bytes.read(0,size+2048),name);
             }
-            IsoDisc disc=new IsoDisc(bytes);
+            IsoDisc disc=bytes instanceof PbpDisc?new IsoDisc((SectorSource)bytes):new IsoDisc(bytes);
             byte[] executable=disc.bootExecutable();return new DiscMedia(bytes,disc,executable,disc.bootPath);
         }catch(IOException|RuntimeException error){closeAfterFailure(bytes,error);throw error;}
     }
@@ -50,7 +50,7 @@ public final class DiscMedia implements AutoCloseable {
                 if(!containers)return raw;
                 byte[] magic=raw.read(0,8);
                 if(new String(magic,StandardCharsets.US_ASCII).equals("MComprHD")){raw.close();return new ChdSource(fd);}
-                return raw;
+                return PbpDisc.hasMagic(magic)?new PbpDisc(raw):raw;
             }catch(IOException|RuntimeException error){closeAfterFailure(raw,error);throw error;}
         }
     }

@@ -3,6 +3,9 @@ import org.junit.Test;
 import java.util.*;
 import static org.junit.Assert.*;
 public class CoverMatcherTest {
+    @Test public void cueAndPbpTitlesMatchTheSameArtworkAsOtherDiscFormats(){
+        for(String extension:new String[]{".CUE",".pbp"})assertEquals("Crash Bandicoot 2 - Cortex Strikes Back (USA).png",catalog().find("Crash Bandicoot 2"+extension).get(0));
+    }
     private CoverMatcher catalog(){return new CoverMatcher(Arrays.asList("Crash Bandicoot (USA).png","Crash Bandicoot - Warped (USA).png","Crash Bandicoot 3 - Warped (Europe) (En,Fr,De).png","Crash Bandicoot 2 - Cortex Strikes Back (USA).png","Final Fantasy VII (USA) (Disc 1).png","Dino Crisis (USA).png","Dino Crisis 2 (USA).png","Resident Evil (USA).png","Resident Evil - Director's Cut (USA).png","Resident Evil - Survivor (USA).png"));}
     @Test public void caseRegionLanguagesAndDiscTagsMatch(){assertEquals("Final Fantasy VII (USA) (Disc 1).png",catalog().find("final fantasy 7 (europe) (disc 2).chd").get(0));}
     @Test public void warpedAliasesAndRegionalRanking(){assertEquals("Crash Bandicoot - Warped (USA).png",catalog().find("Crash Bandicoot - Warped (USA).chd").get(0));assertEquals("Crash Bandicoot 3 - Warped (Europe) (En,Fr,De).png",catalog().find("Crash Bandicoot 3 - Warped (Europe).chd").get(0));}
