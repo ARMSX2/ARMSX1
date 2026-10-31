@@ -14,7 +14,7 @@ public final class Cpu {
     public void closeNative(){if(nativeCpu!=null){nativeCpu.exportState(this);nativeCpu.close();nativeCpu=null;}}
     public String executionDiagnostic(){return nativeCpu==null?"CPU Java interpreter":nativeCpu.diagnostic()+" · device dispatches="+bus.deviceDispatches;}
     public String executionMode(){return nativeCpu==null?"Java interpreter":"Native blocks / ARM64";}
-    public long[] nativeStatistics(){return nativeCpu==null?new long[8]:nativeCpu.statistics();}
+    public long[] nativeStatistics(){return nativeCpu==null?new long[10]:nativeCpu.statistics();}
     /** A snapshot boundary; tests and debugging can still single-step precisely. */
     public int run(int count){if(count<=0)return 0;if(nativeCpu!=null)return nativeCpu.run(this,count);for(int i=0;i<count;i++)step();return count;}
     public int runToFrame(int count){if(nativeCpu!=null)return nativeCpu.run(this,count,true);long frame=bus.gpu.vblanks;int i=0;for(;i<count;i++){if((i&63)==0&&bus.gpu.vblanks!=frame)break;step();}return i;}

@@ -15,7 +15,7 @@ struct CpuCore {
     int elapsed=0,deadline=32,biosReadWaits=0,cdReadWaits=0;bool irq=false,recompile,frameBoundary=false,ramWaitStates,widescreen=false;
     std::unordered_map<uint32_t,std::unique_ptr<CpuBlock>> blocks;
     CpuBlock* previous=nullptr;
-    uint64_t cacheHits=0,compiled=0,jitInstructions=0,interpreted=0,invalidations=0,linked=0,bridges=0,compileFailures=0;
+    uint64_t cacheHits=0,compiled=0,jitInstructions=0,interpreted=0,invalidations=0,linked=0,bridges=0,compileFailures=0,revalidated=0;
     uint32_t currentAt=0,currentWord=0;
     CpuCore(JNIEnv* e,jobject b,CpuState* state,uint8_t* mem,int options):bus(e->NewGlobalRef(b)),s(state),memory(mem),generations(reinterpret_cast<uint64_t*>(mem+Generations)),recompile((options&1)!=0),ramWaitStates((options&2)!=0){
         jclass cls=e->GetObjectClass(b);clockMethod=e->GetMethodID(cls,"nativeClock","(II)J");finishMethod=e->GetMethodID(cls,"nativeFinish","(II)J");readMethod=e->GetMethodID(cls,"nativeRead","(IIII)J");writeMethod=e->GetMethodID(cls,"nativeWrite","(IIIII)J");biosWaitMethod=e->GetMethodID(cls,"nativeBiosReadWaits","()I");cdWaitMethod=e->GetMethodID(cls,"nativeCdReadWaits","()I");biosReadWaits=e->CallIntMethod(b,biosWaitMethod);cdReadWaits=e->CallIntMethod(b,cdWaitMethod);e->DeleteLocalRef(cls);
@@ -130,10 +130,21 @@ struct CpuCore {
         s->r[0]=0;s->instructions++;interpreted++;
     }
     bool valid(CpuBlock* block)const{return block && block->pc==s->pc && (block->page<0||block->version==generations[block->page]);}
+    bool revalidate(CpuBlock* block){
+        if(block->code.empty()||block->page<0)return false;
+        // A page generation covers every block on that 4 KiB page. Only discard
+        // this block if one of its own decoded instructions actually changed,
+        // including an included branch delay slot. RAM is owned by this thread.
+        for(const Decoded& instruction:block->code){
+            uint32_t word;memcpy(&word,memory+(instruction.at&0x1fffff),4);
+            if(word!=instruction.word)return false;
+        }
+        block->version=generations[block->page];revalidated++;return true;
+    }
     CpuBlock* findBlock(){
         if(previous)for(CpuBlock* link:previous->links)if(valid(link)){linked++;return link;}
         auto it=blocks.find(s->pc);CpuBlock* block=it==blocks.end()?nullptr:it->second.get();
-        if(block&&!valid(block)){invalidations++;block->function=nullptr;block->codePage.reset();block->executable=nullptr;block->code.clear();}
+        if(block&&!valid(block)){invalidations++;if(!revalidate(block)){block->function=nullptr;block->codePage.reset();block->executable=nullptr;block->code.clear();}}
         if(block&&!block->code.empty()){cacheHits++;}
         else{
             if(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)>32*1024*1024){blocks.clear();previous=nullptr;block=nullptr;memset(memory+CodeMask,0,65536);}
@@ -199,6 +210,6 @@ extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_NativeCpu_create(JNIEnv*
 }
 extern "C" JNIEXPORT jint JNICALL Java_dev_psxlab_core_NativeCpu_runNative(JNIEnv* env,jclass,jlong handle,jint budget,jboolean stopFrame){return reinterpret_cast<CpuCore*>(handle)->run(env,budget,stopFrame);}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_destroy(JNIEnv* env,jclass,jlong handle){auto* core=reinterpret_cast<CpuCore*>(handle);if(core){env->DeleteGlobalRef(core->bus);delete core;}}
-extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_statisticsNative(JNIEnv* env,jclass,jlong handle){auto* c=reinterpret_cast<CpuCore*>(handle);jlong values[]={jlong(c->compiled),jlong(c->jitInstructions),jlong(c->interpreted),jlong(c->cacheHits),jlong(c->linked),jlong(c->invalidations),jlong(c->bridges),jlong(c->compileFailures)};jlongArray result=env->NewLongArray(8);env->SetLongArrayRegion(result,0,8,values);return result;}
+extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_statisticsNative(JNIEnv* env,jclass,jlong handle){auto* c=reinterpret_cast<CpuCore*>(handle);jlong values[]={jlong(c->compiled),jlong(c->jitInstructions),jlong(c->interpreted),jlong(c->cacheHits),jlong(c->linked),jlong(c->invalidations),jlong(c->bridges),jlong(c->compileFailures),jlong(c->revalidated),jlong(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed))};jlongArray result=env->NewLongArray(10);env->SetLongArrayRegion(result,0,10,values);return result;}
 
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProjectionNative(JNIEnv*,jclass,jlong handle,jboolean enabled){reinterpret_cast<CpuCore*>(handle)->widescreen=enabled;}
