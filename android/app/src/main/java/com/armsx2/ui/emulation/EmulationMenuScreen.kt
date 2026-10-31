@@ -699,6 +699,17 @@ private fun MenuHeader(
         // Clock + battery, same cluster as the library toolbar. Worth having here specifically:
         // this menu is what you open mid-session on a handheld, so it's exactly when you want to
         // know the time and how much charge is left. Not controllerFocusable — it's a readout.
+        // Friends, where ARMSX2/ARMSX3 put it: top-right of the quick-menu header. Checking who
+        // is online is a mid-session thing, so it should not mean backing out to the library
+        // drawer. Opens as an in-game screen, so dismissing it resumes the game like every other
+        // manager screen here.
+        Spacer(Modifier.width(8.dp))
+        com.armsx2.ui.common.RoundAction(
+            "\uD83D\uDC65",
+            str("friends.title"),
+            onClick = { com.armsx2.ui.WindowImpl.openInGameScreen(com.armsx2.ui.InGameScreen.Friends) },
+        )
+
         Spacer(Modifier.width(8.dp))
         com.armsx2.ui.common.LibraryStatusCluster(
             Modifier.align(Alignment.CenterVertically),
