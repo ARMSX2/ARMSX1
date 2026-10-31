@@ -162,21 +162,13 @@ namespace
 	// Presence and the friends list. Deliberately no voice scopes: we do not ship voice, and the
 	// consent screen should not ask for anything we cannot use.
 	const char* kScopes = "sdk.social_layer_presence sdk.social_layer";
-	// LargeImage takes "an identifier OR URL" (discordpp.h), and we use both kinds.
-	//
-	// Our own logo is an Art Asset uploaded to the application in the developer portal, referenced
-	// by its key: upload the ARMSX mark as "armsx" under Rich Presence -> Art Assets. Referencing a
-	// URL in the repo instead looked equivalent in ARMSX2 and was not — it pinned the presence to
-	// whatever mark was committed at the time.
-	const char* kIdleImageKey = "armsx";
-
-	// ★ An unuploaded key does NOT "simply render as no image", which is what this file used to
-	// claim and build on. Discord REJECTS THE ENTIRE UpdateRichPresence — "Unable to resolve large
-	// image asset: armsx" — so one missing image meant no rich presence at all: connected, signed
-	// in, and publishing nothing. The key stays (upload it and the logo returns with no code
-	// change), but it is no longer allowed to take the whole status down with it. Cleared the first
-	// time Discord rejects an update over it, after which every push omits it.
-	std::atomic<bool> g_asset_key_resolves{true};
+	// LargeImage takes "an identifier OR URL" (discordpp.h). Our logo goes by URL: the launcher icon
+	// out of this repository, as ARMSX3 does. An Art Asset key resolves only if that name was
+	// uploaded to the application in the developer portal, and "armsx" never was, so Discord
+	// rejected it and every presence went out without the logo in the corner. A URL always resolves.
+	const char* kLogoUrl =
+		"https://raw.githubusercontent.com/ARMSX2/ARMSX1/main/android/app/src/main/res/"
+		"mipmap-xxxhdpi/ic_launcher.png";
 
 	const char* StatusName(BridgeStatus s)
 	{
@@ -273,46 +265,25 @@ namespace
 
 		// The game's own cover while playing, our logo when idle. The cover URL is whatever the
 		// library is already showing (xlenore's psx-covers, keyed by serial), so a game with no
-		// cover published simply falls back to the logo rather than showing a broken image. Mixing
-		// the two forms is fine: Discord resolves each asset field independently, so a URL in the
-		// large slot and an asset key in the small one both render.
-		//
-		// Every use of the key is conditional on it having resolved: an application with no "armsx"
-		// asset uploaded publishes an image-less presence rather than none at all.
-		const bool use_key = g_asset_key_resolves.load(std::memory_order_acquire);
+		// cover published simply falls back to the logo rather than showing a broken image.
 		discordpp::ActivityAssets assets;
-		if (!cover.empty())
-			assets.SetLargeImage(cover);
-		else if (use_key)
-			assets.SetLargeImage(std::string(kIdleImageKey));
+		assets.SetLargeImage(cover.empty() ? std::string(kLogoUrl) : cover);
 		// LargeText carries the SERIAL, because State no longer can -- a friend's client reads this
 		// to look up cover art. Nothing else may be appended: it is parsed, not just shown. (Hover
 		// text on the cover is a reasonable home for a serial anyway.)
 		assets.SetLargeText(DiscordField(serial.empty() ? (title.empty() ? std::string("ARMSX") : title) : serial, "ARMSX"));
-		if (!cover.empty() && use_key)
+		if (!cover.empty())
 		{
-			// Small badge in the corner keeps ARMSX identifiable when the big image is a cover.
-			assets.SetSmallImage(std::string(kIdleImageKey));
-			assets.SetSmallText(std::string("ARMSX"));
+			// The ARMSX1 logo in the small bubble on the cover's corner, as ARMSX2 and ARMSX3 show
+			// theirs: playing this game, on this emulator.
+			assets.SetSmallImage(std::string(kLogoUrl));
+			assets.SetSmallText(std::string("ARMSX1"));
 		}
 		activity.SetAssets(std::move(assets));
 
-		client->UpdateRichPresence(std::move(activity), [use_key](discordpp::ClientResult result) {
-			if (result.Successful())
-				return;
-			const std::string error = result.Error();
-			DLOGW("presence update failed: %s", error.c_str());
-			// "Unable to resolve <large|small> image asset: armsx" — the key is not uploaded to this
-			// application. Latch it off and publish once more without it, so the status still
-			// appears. use_key is captured, so the retry (which runs with it false) cannot loop.
-			if (use_key && error.find("image asset") != std::string::npos)
-			{
-				g_asset_key_resolves.store(false, std::memory_order_release);
-				DLOGW("art asset '%s' does not resolve for this application; republishing without "
-					  "the logo — upload it under Rich Presence -> Art Assets to restore it",
-					kIdleImageKey);
-				PushPresence();
-			}
+		client->UpdateRichPresence(std::move(activity), [](discordpp::ClientResult result) {
+			if (!result.Successful())
+				DLOGW("presence update failed: %s", result.Error().c_str());
 		});
 	}
 
