@@ -7,13 +7,16 @@ import java.util.regex.*;
 /** Bounded ISO9660 boot extraction; first data track only. */
 public final class IsoDisc implements SectorSource {
     private final ByteSource source;
+    private final SectorSource mapped;
     private int stride,dataOffset;
     private Record root;
     private int sectors;
     public String bootPath;
     private record Record(int sector,int size,boolean directory){}
-    public IsoDisc(ByteSource source)throws IOException{
-        this.source=source;
+    public IsoDisc(ByteSource source)throws IOException{this(source,null);}
+    public IsoDisc(SectorSource source)throws IOException{this(CueDisc.rawBytes(source),source);}
+    private IsoDisc(ByteSource source,SectorSource mapped)throws IOException{
+        this.source=source;this.mapped=mapped;
         int[][] layouts={{2048,0},{2352,24},{2352,16},{2448,24},{2448,16}};
         for(int[] layout:layouts){
             try{
@@ -71,7 +74,13 @@ public final class IsoDisc implements SectorSource {
         Record exe=find(bootPath);if(exe.directory)throw new IOException("Boot entry is a directory");
         return contents(exe,2*1024*1024+2048);
     }
-    @Override public int sectorCount(){return sectors;}
+    @Override public int sectorCount(){return mapped==null?sectors:mapped.sectorCount();}
+    @Override public int lastTrack(){return mapped==null?1:mapped.lastTrack();}
+    @Override public int trackStart(int number){return mapped==null?SectorSource.super.trackStart(number):mapped.trackStart(number);}
+    @Override public int trackNumber(int lba){return mapped==null?1:mapped.trackNumber(lba);}
+    @Override public int trackIndex(int lba){return mapped==null?1:mapped.trackIndex(lba);}
+    @Override public int trackRelative(int lba){return mapped==null?Math.max(0,lba):mapped.trackRelative(lba);}
+    @Override public boolean audioTrack(int lba){return mapped!=null&&mapped.audioTrack(lba);}
     @Override public char region(){
         String name=bootPath==null?"":bootPath.toUpperCase(Locale.ROOT);
         if(name.matches(".*S[CL]US_.*"))return 'A';
@@ -80,6 +89,7 @@ public final class IsoDisc implements SectorSource {
         return ' ';
     }
     @Override public byte[] readSector(int lba)throws IOException{
+        if(mapped!=null)return mapped.readSector(lba);
         if(lba<0 || sectors>0 && lba>=sectors)throw new EOFException("Sector outside disc: "+lba);
         if(stride!=2048)return source.read((long)lba*stride,2352);
         // Cooked ISO lacks sync/header/ECC. Rebuild the header, preserve all user data.

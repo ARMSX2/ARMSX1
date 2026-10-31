@@ -49,15 +49,16 @@ public final class ArmSxBackend {
     private Map<String,String> options=Map.of();
     private record Restore(byte[] state,String disc,CompletableFuture<Boolean> ready) {}
     private static final class Media implements AutoCloseable {
-        final ByteSource source; final IsoDisc disc; final byte[] executable;
+        final ByteSource source; final CueDisc cue; final IsoDisc disc; final byte[] executable;
         Media(ByteSource source)throws IOException{
-            this.source=source;
+            this.source=source;cue=null;
             if(new String(source.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
                 disc=null;byte[] header=source.read(0,2048);int size=ExeLoader.le(header,28);
                 if(size<4||size>2*1024*1024)throw new IOException("Invalid executable size");executable=source.read(0,size+2048);
             }else{disc=new IsoDisc(source);executable=disc.bootExecutable();}
         }
-        public void close()throws IOException{source.close();}
+        Media(CueDisc cue)throws IOException{this.source=null;this.cue=cue;disc=new IsoDisc((SectorSource)cue);executable=disc.bootExecutable();}
+        public void close()throws IOException{if(cue!=null)cue.close();else source.close();}
     }
     public ArmSxBackend(Context context,Consumer<Boolean> pauseCallback,Consumer<String> notice){
         this(context,pauseCallback,notice,new File(context.getFilesDir(),"logs/psxlab"));
@@ -126,6 +127,19 @@ public final class ArmSxBackend {
         }
     }
     private Media openMedia(String path)throws IOException{
+        Uri uri=Uri.parse(path);String filePath=uri.getScheme()==null?path:uri.getPath();
+        if(CueDisc.isCueName(filePath)){
+            if(uri.getScheme()!=null&&!uri.getScheme().equals("file"))throw new IOException("Launch the CUE through the game library so its BIN files can be prepared together");
+            File cueFile=new File(filePath).getCanonicalFile(),parent=cueFile.getParentFile();
+            if(cueFile.length()>1024*1024)throw new IOException("CUE text exceeds 1 MiB");
+            CueDisc cue=new CueDisc(new String(Files.readAllBytes(cueFile.toPath()),StandardCharsets.UTF_8),name->{
+                File track=new File(parent,CueDisc.relativeName(name)).getCanonicalFile();
+                if(!track.toPath().startsWith(parent.toPath()))throw new IOException("CUE track is outside its folder");
+                return new FileSource(new FileInputStream(track),journal);
+            });
+            try{Media result=new Media(cue);journal.event(EngineLog.INFO,"cd.cue.mounted",Map.of("tracks",cue.lastTrack(),"sectors",cue.sectorCount()));return result;}
+            catch(Exception e){try{cue.close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
+        }
         ByteSource source=source(path);try{return new Media(source);}catch(Exception e){source.close();throw e;}
     }
     /** Blocking, as ArmSX1's existing runVMThread contract requires. */

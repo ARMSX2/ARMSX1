@@ -13,7 +13,7 @@ final class StateCodec {
         skip(Gpu.class,"journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames");
         skip(Spu.class,"nativeCore","sink","output");
         skip(Gte.class,"nativeCore");
-        skip(CdRom.class,"disc","xaSink","recentCommands","recentWrites","lastMediaError");
+        skip(CdRom.class,"disc","xaSink","recentCommands","recentWrites","lastMediaError","cddaSectors","cddaFrames");
         skip(SerialPad.class,"state");
         skip(MemoryCard.class,"data","changed");
     }

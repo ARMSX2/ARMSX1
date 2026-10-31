@@ -3,8 +3,8 @@ package dev.psxlab.core;
 import java.io.IOException;
 import java.util.*;
 
-/** Data-track CD-ROM controller. Host interfaces and scheduled responses are functional;
- * mechanics/HC05 timing, audio-track CD-DA and multi-track metadata remain unfinished. */
+/** Scheduled CD-ROM controller with data, XA and CUE track/CD-DA access.
+ * Drive/HC05 timing remains an approximation. */
 public final class CdRom {
     public static final int COMMAND_TICKS=20000,COMPLETE_TICKS=10000;
     private static final int SINGLE_SECTOR_TICKS=33868800/75;
@@ -27,7 +27,7 @@ public final class CdRom {
     private byte[] lastSector,lastDataSector,data=new byte[0];
     private int dataPosition;
     private boolean sectorPending;
-    public long commands,commandOverwrites,sectorsRead,dmaBytes,xaSectors,xaFrames,xaDroppedFrames;
+    public long commands,commandOverwrites,sectorsRead,dmaBytes,xaSectors,xaFrames,xaDroppedFrames,cddaSectors,cddaFrames;
     private final XaDecoder xa=new XaDecoder();
     private final short[] audio=new short[65536];
     private int audioHead,audioSize,xaFile=-1,xaChannel=-1;
@@ -35,9 +35,17 @@ public final class CdRom {
     private final int[] pendingVolume={128,0,128,0},volume={128,0,128,0};
     private final XaDecoder.Sink xaSink=this::queueAudio;
     private void resetAudio(){if(traceSink!=null)traceSink.accept("CD_AUDIO_RESET queued="+audioBufferedFrames()+" decoded="+xaFrames);audioHead=audioSize=0;xaFile=xaChannel=-1;xa.reset();}
-    private void queueAudio(int left,int right){
-        if(audioSize==audio.length){xaDroppedFrames++;return;}
-        int tail=(audioHead+audioSize)%audio.length;audio[tail]=(short)left;audio[(tail+1)%audio.length]=(short)right;audioSize+=2;xaFrames++;
+    private boolean enqueueAudio(int left,int right){
+        if(audioSize==audio.length){xaDroppedFrames++;return false;}
+        int tail=(audioHead+audioSize)%audio.length;audio[tail]=(short)left;audio[(tail+1)%audio.length]=(short)right;audioSize+=2;return true;
+    }
+    private void queueAudio(int left,int right){if(enqueueAudio(left,right))xaFrames++;}
+    private void queueCdda(byte[] pcm)throws IOException{
+        if(pcm.length!=2352)throw new IOException("Invalid CD-DA sector length");
+        // Binary CD audio is signed little-endian stereo. At 2x the controller takes alternate frames.
+        int step=(mode&128)!=0?8:4;
+        for(int at=0;at<pcm.length;at+=step){int left=(short)((pcm[at]&255)|(pcm[at+1]<<8)),right=(short)((pcm[at+2]&255)|(pcm[at+3]<<8));if(enqueueAudio(left,right))cddaFrames++;}
+        cddaSectors++;
     }
     /** One frame at the SPU's 44.1 kHz clock, with the CD controller's applied matrix. */
     int audioFrame(){
@@ -160,17 +168,20 @@ public final class CdRom {
                 try{
                     lastSector=disc.readSector(readLocation++);if(lastSector.length!=2352)throw new IOException("Invalid raw sector length");
                     sectorsRead++;
-                    int submode=lastSector[18]&255;
-                    boolean realtimeAudio=(lastSector[15]&255)==2 && (submode&0x44)==0x44;
-                    boolean filtered=(mode&8)!=0,matches=(lastSector[16]&255)==file && (lastSector[17]&255)==channel;
-                    if(realtimeAudio && (mode&64)!=0){
-                        if((!filtered || matches) && (lastSector[17]&255)<32){
-                            int f=lastSector[16]&255,c=lastSector[17]&255;
-                            if(xaFile<0){xaFile=f;xaChannel=c;}
-                            if(f==xaFile && c==xaChannel){int before=audioBufferedFrames(),decoded=xa.decode(lastSector,xaSink);xaSectors++;if(traceSink!=null)traceSink.accept("XA_ENQUEUE lba="+(readLocation-1)+" file="+f+" channel="+c+" coding="+(lastSector[19]&255)+" frames="+decoded+" queued="+before+"->"+audioBufferedFrames()+" dropped="+xaDroppedFrames);if((submode&128)!=0){xaFile=xaChannel=-1;}}
+                    if(disc.audioTrack(readLocation-1)){if((mode&1)!=0)queueCdda(lastSector);}
+                    else{
+                        int submode=lastSector[18]&255;
+                        boolean realtimeAudio=(lastSector[15]&255)==2 && (submode&0x44)==0x44;
+                        boolean filtered=(mode&8)!=0,matches=(lastSector[16]&255)==file && (lastSector[17]&255)==channel;
+                        if(realtimeAudio && (mode&64)!=0){
+                            if((!filtered || matches) && (lastSector[17]&255)<32){
+                                int f=lastSector[16]&255,c=lastSector[17]&255;
+                                if(xaFile<0){xaFile=f;xaChannel=c;}
+                                if(f==xaFile && c==xaChannel){int before=audioBufferedFrames(),decoded=xa.decode(lastSector,xaSink);xaSectors++;if(traceSink!=null)traceSink.accept("XA_ENQUEUE lba="+(readLocation-1)+" file="+f+" channel="+c+" coding="+(lastSector[19]&255)+" frames="+decoded+" queued="+before+"->"+audioBufferedFrames()+" dropped="+xaDroppedFrames);if((submode&128)!=0){xaFile=xaChannel=-1;}}
+                            }
+                        }else if(!(realtimeAudio && filtered)){
+                            lastDataSector=lastSector;sectorPending=true;if(request)loadData();
                         }
-                    }else if(!(realtimeAudio && filtered)){
-                        lastDataSector=lastSector;sectorPending=true;if(request)loadData();
                     }
                 }catch(IOException e){reading=false;lastMediaError=e.getMessage();error(0x80);}
             }
@@ -198,21 +209,30 @@ public final class CdRom {
         if(prefix<clocksToEvent()){tick(prefix);tick(cycles-prefix);}
         else{while(cycles>32){tick(32);cycles-=32;}if(cycles>0)tick(cycles);}
     }
-    /** Our SectorSource currently exposes track 1 data only. PLAY still moves the
-     * head and reports position on that track, but data sectors produce silence. */
+    /** PLAY advances across the mounted track map; only audio tracks feed PCM. */
     private void tickDataTrackPlay(int cycles){
         sectorTicks-=cycles;
         int period=SINGLE_SECTOR_TICKS/((mode&128)!=0?2:1);
         while(playing && sectorTicks<=0){
-            sectorTicks+=period;readLocation+=playStep;
+            sectorTicks+=period;
+            int current=readLocation;
+            if(current>=0&&current<disc.sectorCount()&&disc.audioTrack(current)){
+                try{
+                    queueCdda(disc.readSector(current));
+                }catch(IOException e){playing=false;lastMediaError=e.getMessage();error(0x80);break;}
+            }
+            readLocation+=playStep;
             if(readLocation<0){readLocation=0;playStep=1;}
             if(readLocation>=disc.sectorCount()){
                 readLocation=disc.sectorCount();playing=false;motor=false;event(0,4,status());break;
             }
+            if((mode&2)!=0&&disc.trackNumber(readLocation)!=disc.trackNumber(current)){
+                playing=false;event(0,4,status());break;
+            }
             int absolute=readLocation+149,frame=bcd(absolute%75);
             if((mode&4)!=0 && (frame&15)==0 && interrupt==0 && events.isEmpty()){
-                boolean relative=(frame&16)!=0;int position=relative?readLocation-1:absolute;
-                replaceResponse(new int[]{status(),1,1,bcd(position/4500),bcd(position/75%60)|(relative?128:0),bcd(position%75),0,0});
+                boolean relative=(frame&16)!=0;int position=relative?disc.trackRelative(current):absolute;
+                replaceResponse(new int[]{status(),bcd(disc.trackNumber(current)),bcd(disc.trackIndex(current)),bcd(position/4500),bcd(position/75%60)|(relative?128:0),bcd(position%75),0,0});
                 interrupt=1;irqLine();
             }
         }
@@ -237,10 +257,10 @@ public final class CdRom {
             case 3 -> {
                 if(p.length>1){error(0x20);break;}
                 if(!media())break;
-                int track=p.length==0?0:binary(p[0]);if(track<0){error(0x10);break;}
+                int track=p.length==0?0:binary(p[0]);if(track<0||track>disc.lastTrack()){error(0x10);break;}
                 if(disc.sectorCount()<=0){error(0x80);break;}
                 stopRead();resetAudio();
-                if(track!=0){readLocation=0;locationPending=false;}
+                if(track!=0){readLocation=disc.trackStart(track);locationPending=false;}
                 else if(locationPending){readLocation=location;locationPending=false;}
                 motor=playing=true;playStep=1;sectorTicks=SINGLE_SECTOR_TICKS/((mode&128)!=0?2:1);event(0,3,status());
             }
@@ -275,14 +295,15 @@ public final class CdRom {
             case 0x10 -> {if(count(p,0)){if(lastSector==null)error(0x80);else{int[] header=new int[8];for(int i=0;i<8;i++)header[i]=lastSector[12+i]&255;event(0,3,header);}}}
             case 0x11 -> {
                 if(!count(p,0) || !media())break;int at=Math.max(0,readLocation-1),absolute=at+150;
-                event(0,3,1,1,bcd(at/4500),bcd(at/75%60),bcd(at%75),bcd(absolute/4500),bcd(absolute/75%60),bcd(absolute%75));
+                int relative=disc.trackRelative(at);
+                event(0,3,bcd(disc.trackNumber(at)),bcd(disc.trackIndex(at)),bcd(relative/4500),bcd(relative/75%60),bcd(relative%75),bcd(absolute/4500),bcd(absolute/75%60),bcd(absolute%75));
             }
             case 0x12 -> {if(count(p,1) && media()){if(p[0]!=1)error(0x10);else{event(0,3,status());event(COMPLETE_TICKS,2,status());}}}
-            case 0x13 -> {if(count(p,0) && media())event(0,3,status(),1,1);}
+            case 0x13 -> {if(count(p,0) && media())event(0,3,status(),1,bcd(disc.lastTrack()));}
             case 0x14 -> {
-                if(!count(p,1) || !media())break;int track=binary(p[0]);if(track<0 || track>1){error(0x10);break;}
+                if(!count(p,1) || !media())break;int track=binary(p[0]);if(track<0 || track>disc.lastTrack()){error(0x10);break;}
                 if(track==0 && disc.sectorCount()<=0)throw new UnsupportedOperationException("Disc lead-out length is unavailable");
-                int frames=(track==0?disc.sectorCount():0)+150;event(0,3,status(),bcd(frames/4500),bcd(frames/75%60));
+                int frames=disc.trackStart(track)+150;event(0,3,status(),bcd(frames/4500),bcd(frames/75%60));
             }
             case 0x15,0x16 -> {
                 if(!count(p,0) || !media())break;stopRead();resetAudio();locationPending=false;events.removeIf(e->e.irq==2);
@@ -312,5 +333,5 @@ public final class CdRom {
         }
     }
     private String writesDiagnostic(){ArrayList<String> writes=new ArrayList<>();for(int value:recentWrites)writes.add(String.format(Locale.ROOT,"%d:%d=%02X",value>>>16,(value>>>8)&255,value&255));return writes.toString();}
-    public String diagnostic(){return String.format(Locale.ROOT,"CD: %d commands, %d sectors, %d DMA bytes; IRQ=%d enable=%02X busy=%s mode=%02X LBA=%d commands=%s; writes=%s IRQreads=%d bank=%d statusReads=%d%s",commands,sectorsRead,dmaBytes,interrupt,enable,pendingCommand>=0,mode,readLocation,recentCommands,writesDiagnostic(),irqReads,lastReadBank,statusReads,lastMediaError.isEmpty()?"":" media error="+lastMediaError)+"; command overwrites="+commandOverwrites+"; XA "+xaSectors+" sectors / "+xaFrames+" frames / "+xaDroppedFrames+" dropped, "+audioBufferedFrames()+" buffered";}
+    public String diagnostic(){return String.format(Locale.ROOT,"CD: %d commands, %d sectors, %d DMA bytes; IRQ=%d enable=%02X busy=%s mode=%02X LBA=%d commands=%s; writes=%s IRQreads=%d bank=%d statusReads=%d%s",commands,sectorsRead,dmaBytes,interrupt,enable,pendingCommand>=0,mode,readLocation,recentCommands,writesDiagnostic(),irqReads,lastReadBank,statusReads,lastMediaError.isEmpty()?"":" media error="+lastMediaError)+"; command overwrites="+commandOverwrites+"; XA "+xaSectors+" sectors / "+xaFrames+" frames / "+xaDroppedFrames+" dropped, "+audioBufferedFrames()+" buffered; CDDA "+cddaSectors+" sectors / "+cddaFrames+" frames";}
 }
