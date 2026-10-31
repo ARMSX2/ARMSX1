@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
+import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -84,12 +85,44 @@ object HomeShortcuts {
      *  adaptive icons mask everything outside the centre ~66% safe zone, which would crop
      *  the title off portrait box art. The app-icon fallback is already adaptive. */
     private fun coverIcon(ctx: Context, game: GameInfo): IconCompat? = runCatching {
-        val f = CustomCovers.fileFor(ctx, game) ?: return null
+        val f = coverFileFor(ctx, game) ?: return null
         val bmp = decodeScaled(f.absolutePath, maxIconEdgePx(ctx)) ?: return null
         IconCompat.createWithBitmap(bmp)
     }.getOrElse { e ->
         Log.w(TAG, "coverIcon: cover unusable, falling back to app icon: $e")
         null
+    }
+
+    /**
+     * The best box art on disk for [game], in the same priority order the library grid uses.
+     *
+     * This used to consider ONLY a user-supplied custom cover, so every game the user had not
+     * hand-assigned art for pinned as the generic app icon -- which is the whole of "add to
+     * home screen does not use the game art". The downloaded psx-covers art and a cover sitting
+     * beside the ROM are both real files on disk and just as usable, so try them too.
+     *
+     * Only local files qualify: requestPinShortcut needs a bitmap now, and a shortcut pin is
+     * not the place to start a network fetch. A game with no art anywhere still falls back to
+     * the app icon, as before.
+     */
+    private fun coverFileFor(ctx: Context, game: GameInfo): File? {
+        CustomCovers.fileFor(ctx, game)?.let { if (it.isFile) return it }
+
+        game.serial?.takeIf { it.isNotBlank() }?.let { serial ->
+            runCatching { com.armsx2.core.Ps1Covers.downloadedCover(serial) }
+                .getOrNull()?.let { return it }
+        }
+
+        // A cover the user dropped next to the ROM (<name>.jpg/png/webp). Only meaningful for
+        // file:// games; a SAF content:// URI has no sibling path to probe.
+        if (game.uri.scheme == null || game.uri.scheme == "file") {
+            game.uri.path?.takeIf { it.isNotBlank() }?.let { romPath ->
+                runCatching { com.armsx2.core.Ps1Covers.siblingCoverPath(romPath) }
+                    .getOrNull()?.let { return File(it) }
+            }
+        }
+
+        return null
     }
 
     /** The largest icon edge (px) the platform will accept for a shortcut. */
