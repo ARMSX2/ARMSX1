@@ -546,20 +546,13 @@ private fun BackupRestoreRows() {
     }
     BackupActionRow("🖼️", "app.covers", "app.covers.desc", coverStatus, busy, doCovers)
 
-    /*
-        Generate log file — the bug-report checkbox. Ticking it asks WHERE through the system
-        save dialog. Startup refreshes a private report; the save button exports the core's
-        armsx.log, frontend session log, recent crashes, settings and this process's logcat
-        (DiagnosticsReport). Core logging is switched on when the box is ticked, so the next
-        session captures the full emulator/interpreter/renderer stream.
-    */
+    // Capture writes bounded private logs; only explicit export opens the document picker.
     var logCapture by remember { mutableStateOf(com.armsx2.DiagnosticsReport.isEnabled(context)) }
     val logPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain"),
     ) { uri ->
         if (uri != null) {
-            com.armsx2.DiagnosticsReport.enable(context, uri)
-            logCapture = true
+            com.armsx2.DiagnosticsReport.setExportDestination(context, uri)
             scope.launch {
                 val result = withContext(Dispatchers.IO) { com.armsx2.DiagnosticsReport.refresh(context) }
                 val message = when (result) {
@@ -581,7 +574,8 @@ private fun BackupRestoreRows() {
         description = str("app.logs.desc"),
     ) { v ->
         if (v) {
-            logPicker.launch("armsx-report.txt")
+            com.armsx2.DiagnosticsReport.enable(context)
+            logCapture = true
         } else {
             com.armsx2.DiagnosticsReport.disable(context)
             logCapture = false

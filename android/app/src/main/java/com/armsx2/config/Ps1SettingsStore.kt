@@ -193,6 +193,7 @@ object Ps1SettingsStore {
             file.parentFile?.mkdirs()
             file.writeText(preserveUnknown(serialize(merged, resolved?.absolutePath.orEmpty()), existing))
         }
+        runCatching { kr.co.iefriends.pcsx2.NativeApp.setRuntimeLogging(merged.loggingEnabled, merged.logLevel) }
     }
 
     // ---- key space ------------------------------------------------------------------------

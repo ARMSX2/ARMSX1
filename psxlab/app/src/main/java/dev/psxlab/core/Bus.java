@@ -64,7 +64,7 @@ public final class Bus {
         next=Math.min(next,Math.min(cdrom.clocksToEvent(),Math.min(sio0.clocksToEvent(),dma.clocksToEvent())));
         clockDeadline=Math.max(32,((next+31)/32)*32);
     }
-    private long nativeStatus(int value){updateDeadline();if(nativeMemory!=null){nativeMemory.put(CD_STATUS_OFFSET,(byte)cdrom.statusRegister());nativeMemory.put(CD_STATUS_OFFSET+3,(byte)cdrom.interruptRegister());}return Integer.toUnsignedLong(value)|((long)Math.max(1,clockDeadline-pendingClocks)<<32)|(gpu.vblanks!=nativeFrame?1L<<61:0)|(interruptPending()?1L<<62:0)|(cacheIsolated?1L<<63:0);}
+    private long nativeStatus(int value){if(deadlineDirty)updateDeadline();if(nativeMemory!=null){nativeMemory.put(CD_STATUS_OFFSET,(byte)cdrom.statusRegister());nativeMemory.put(CD_STATUS_OFFSET+3,(byte)cdrom.interruptRegister());}return Integer.toUnsignedLong(value)|((long)Math.max(1,clockDeadline-pendingClocks)<<32)|(gpu.vblanks!=nativeFrame?1L<<61:0)|(interruptPending()?1L<<62:0)|(cacheIsolated?1L<<63:0);}
     long nativeClock(int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;if(pendingClocks>=clockDeadline)flushClocks();return nativeStatus(0);}
     long nativeFinish(int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;return nativeStatus(0);}
     long nativeRead(int address,int width,int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;

@@ -3,6 +3,7 @@ package dev.psxlab;
 import android.media.*;
 import android.os.Process;
 import dev.psxlab.core.Spu;
+import dev.psxlab.core.EngineLog;
 import dev.psxlab.core.AudioRateController;
 import dev.psxlab.core.AudioClockPacer;
 import dev.psxlab.core.AudioTimeline;
@@ -10,6 +11,11 @@ import dev.psxlab.core.AudioTimeline;
 /** Bounded stereo PCM queue. Only the audio thread writes to Android's AudioTrack. */
 final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private final AudioTrack track;
+    private volatile EngineLog journal;
+    private int loggedUnderruns;
+    private final int configuredRate,configuredBuffer,configuredPerformance;
+    private final String nativeOutputRate;
+    void setJournal(EngineLog value){journal=value;}
     private final boolean lockTempo;
     private final AudioCapture capture;
     private final short[] queue=new short[16384],inputQueue=new short[16384];
@@ -27,6 +33,9 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private int head,size,inFlightFrames,inputHead,inputSize;
     private boolean inputFinished,dspFinished;
     private volatile boolean running=true,paused;
+    private boolean trackReleased;
+    private int stoppedPlayed,stoppedUnderruns;
+    private String lastDiagnostic="Audio starting";
     private volatile RuntimeException failure;
     private volatile float appliedSpeed=1f;
     volatile long writtenFrames,droppedFrames;
@@ -50,12 +59,16 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
             .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(Math.max(minimum*2,17640)).build();
         if(track.getState()!=AudioTrack.STATE_INITIALIZED){track.release();throw new IllegalStateException("Cannot initialize Android audio");}
         if(android.os.Build.VERSION.SDK_INT>=31)track.setStartThresholdInFrames(Math.min(1024,track.getBufferSizeInFrames()));
+        configuredRate=track.getSampleRate();configuredBuffer=track.getBufferSizeInFrames();configuredPerformance=track.getPerformanceMode();
+        android.media.AudioManager manager=context==null?null:(android.media.AudioManager)context.getSystemService(android.content.Context.AUDIO_SERVICE);
+        nativeOutputRate=manager==null?"unknown":String.valueOf(manager.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE));
         tempo=new NativeTempo();worker=new Thread(this::play,"PSX-Audio");dspWorker=new Thread(this::process,"PSX-DSP");worker.start();dspWorker.start();
     }
     @Override public synchronized void samples(short[] pcm,int count){
         if(failure!=null)throw failure;
         if(!running)return;
-        long now=System.nanoTime();if(lastProducedNanos!=0)maxProducerGapNanos=Math.max(maxProducerGapNanos,now-lastProducedNanos);lastProducedNanos=now;
+        long now=System.nanoTime(),gap=lastProducedNanos==0?0:now-lastProducedNanos;if(lastProducedNanos!=0)maxProducerGapNanos=Math.max(maxProducerGapNanos,gap);lastProducedNanos=now;
+        if(journal!=null&&journal.enabled()&&gap>30_000_000L)journal.event(EngineLog.WARN,"audio.producer_gap",java.util.Map.of("gap_ns",gap,"source_frames",sourceFrames,"input_queue_frames",inputSize/2,"ready_frames",size/2));
         if(count<0 || count>pcm.length || (count&1)!=0)throw new IllegalArgumentException("Stereo PCM length");
         if(inputFinished)throw new IllegalStateException("Audio input already finished");
         if(capture!=null)capture.source(pcm,count);
@@ -92,12 +105,12 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
                 }
                 // Native search work runs without holding either queue's monitor.
                 long workStarted=android.os.Debug.threadCpuTimeNanos();
-                float speed=appliedSpeed;timeline.feed(count/2,speed);tempo.feed(block,count,speed);drainTempo();
+                try(EngineLog.Span span=journal==null?null:journal.watch("audio.dsp.process",EngineLog.TRACE,8_000_000L)){float speed=appliedSpeed;timeline.feed(count/2,speed);tempo.feed(block,count,speed);drainTempo();}
                 dspCpuNanos+=android.os.Debug.threadCpuTimeNanos()-workStarted;dspInputFrames+=count/2;
             }
             if(running){tempo.finish();drainTempo();}
         }catch(InterruptedException e){Thread.currentThread().interrupt();}
-        catch(RuntimeException e){if(running){failure=e;running=false;try{track.pause();}catch(IllegalStateException ignored){}}}
+        catch(RuntimeException e){if(running){if(journal!=null)journal.error("audio.dsp.error",e);failure=e;running=false;try{track.pause();}catch(IllegalStateException ignored){}}}
         finally{tempo.close();synchronized(this){dspFinished=true;notifyAll();}}
     }
     private void drainTempo(){int count;while(running && (count=tempo.receive(stretched))>0){if(capture!=null)capture.processed(stretched,count);enqueue(stretched,count);}}
@@ -139,7 +152,7 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
                         long pending=writtenFrames-Integer.toUnsignedLong(track.getPlaybackHeadPosition());
                         if(pending<=0){
                             // Retain queued PCM and playback position; don't flush or discard it.
-                            track.pause();recoveries++;
+                            track.pause();recoveries++;if(journal!=null)journal.event(EngineLog.WARN,"audio.refill",java.util.Map.of("refills",recoveries,"pending_frames",pending,"ready_frames",size/2));
                             while(size<6144 && running)wait();if(!running)break;
                             rateControl.recovered();track.play();
                         }else wait(2);
@@ -150,23 +163,38 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
                     head=(head+count)%queue.length;size-=count;inFlightFrames=count/2;notifyAll();
                 }
                 int offset=0;
-                while(offset<count && running){int n=track.write(block,offset,count-offset,AudioTrack.WRITE_BLOCKING);if(n<=0){if(running)throw new IllegalStateException("Android audio write failed: "+n);break;}offset+=n;synchronized(this){writtenFrames+=n/2;inFlightFrames-=n/2;}}
+                while(offset<count && running){int n;try(EngineLog.Span span=journal==null?null:journal.watch("audio.track.write",EngineLog.TRACE,20_000_000L)){n=track.write(block,offset,count-offset,AudioTrack.WRITE_BLOCKING);}if(n<=0){if(running)throw new IllegalStateException("Android audio write failed: "+n);break;}offset+=n;synchronized(this){writtenFrames+=n/2;inFlightFrames-=n/2;}}
             }
         }catch(InterruptedException e){Thread.currentThread().interrupt();}
-        catch(RuntimeException e){if(running)failure=e;}
-        finally{running=false;synchronized(this){notifyAll();}track.release();}
+        catch(RuntimeException e){if(running){if(journal!=null)journal.error("audio.track.error",e);failure=e;}}
+        finally{running=false;synchronized(this){
+            try{stoppedPlayed=track.getPlaybackHeadPosition();stoppedUnderruns=track.getUnderrunCount();diagnostic();}catch(IllegalStateException ignored){}
+            trackReleased=true;track.release();notifyAll();
+        }}
     }
     synchronized void setPaused(boolean value){if(paused!=value){lastProducedNanos=0;if(capture!=null)traceEvent(-1,-1,-1,value?"PAUSE":"RESUME");}if(paused && !value)timestampAfter=System.nanoTime();paused=value;notifyAll();}
-    long bufferedFrames(){long played=Integer.toUnsignedLong(track.getPlaybackHeadPosition());synchronized(this){return size/2+inFlightFrames+Math.max(0,writtenFrames-played);}}
+    synchronized long bufferedFrames(){if(trackReleased)return 0;long played=Integer.toUnsignedLong(track.getPlaybackHeadPosition());return size/2+inFlightFrames+Math.max(0,writtenFrames-played);}
     void pace()throws InterruptedException{
         while(running){if(failure!=null)throw failure;long wait=AudioClockPacer.waitNanos(bufferedFrames());if(wait==0)return;java.util.concurrent.TimeUnit.NANOSECONDS.sleep(wait);}
     }
     record Diagnostic(long source,long dspInput,long written,long played,int inputQueue,long ready,long sourceWait,long dspCpu,int underruns,long refills){}
-    synchronized Diagnostic snapshotDiagnostic(){return new Diagnostic(sourceFrames,dspInputFrames,writtenFrames,Integer.toUnsignedLong(track.getPlaybackHeadPosition()),inputSize/2,bufferedFrames(),sourceBlockedNanos,dspCpuNanos,track.getUnderrunCount(),recoveries);}
+    synchronized Diagnostic snapshotDiagnostic(){return new Diagnostic(sourceFrames,dspInputFrames,writtenFrames,Integer.toUnsignedLong(playbackFrames()),inputSize/2,bufferedFrames(),sourceBlockedNanos,dspCpuNanos,underruns(),recoveries);}
+    synchronized java.util.Map<String,Object> loggingSnapshot(){
+        java.util.Map<String,Object> values=new java.util.LinkedHashMap<>();int under=underruns(), delta=Math.max(0,under-loggedUnderruns);
+        values.put("source_frames",sourceFrames);values.put("dsp_input_frames",dspInputFrames);values.put("written_frames",writtenFrames);values.put("played_frames",Integer.toUnsignedLong(playbackFrames()));values.put("input_queue_frames",inputSize/2);values.put("ready_queue_frames",size/2);values.put("in_flight_frames",inFlightFrames);values.put("buffered_frames",bufferedFrames());values.put("underruns",under);values.put("underrun_delta",delta);loggedUnderruns=under;values.put("refills",recoveries);values.put("dropped_frames",droppedFrames);values.put("stretch_ratio",appliedSpeed);values.put("dsp_cpu_ns",dspCpuNanos);values.put("producer_blocked_ns",sourceBlockedNanos);values.put("worst_producer_gap_ns",maxProducerGapNanos);values.put("track_sample_rate",configuredRate);values.put("native_output_sample_rate",nativeOutputRate);values.put("track_buffer_frames",configuredBuffer);values.put("performance_mode",configuredPerformance);
+        if(!trackReleased){android.media.AudioDeviceInfo device=track.getRoutedDevice();if(device!=null){values.put("route_type",device.getType());values.put("route_id",device.getId());}}
+        if(journal!=null&&delta>0)journal.event(EngineLog.WARN,"audio.underrun_snapshot",java.util.Map.of("underruns",under));return values;
+    }
     float playbackSpeed(){return appliedSpeed;}
-    String diagnostic(){return String.format(java.util.Locale.ROOT,"Audio DSP: %.0f%% stretch · %d underruns · %d refills · %d dropped\nBuffer %d ms · worst producer gap %d ms · DSP CPU %d%%",appliedSpeed*100,track.getUnderrunCount(),recoveries,droppedFrames,bufferedFrames()*1000/44100,maxProducerGapNanos/1000000,dspInputFrames==0?0:dspCpuNanos*44100/(dspInputFrames*10000000))+(capture==null?"":"\n"+capture.status());}
-    int playbackFrames(){return track.getPlaybackHeadPosition();}
-    int underruns(){return track.getUnderrunCount();}
+    String diagnostic(){
+        int underruns;long buffered;
+        synchronized(this){if(trackReleased)return lastDiagnostic;underruns=track.getUnderrunCount();buffered=bufferedFrames();}
+        // Formatting must not hold the PCM queue's monitor during playback.
+        String snapshot=String.format(java.util.Locale.ROOT,"Audio DSP: %.0f%% stretch · %d underruns · %d refills · %d dropped\nBuffer %d ms · worst producer gap %d ms · DSP CPU %d%%",appliedSpeed*100,underruns,recoveries,droppedFrames,buffered*1000/44100,maxProducerGapNanos/1000000,dspInputFrames==0?0:dspCpuNanos*44100/(dspInputFrames*10000000))+(capture==null?"":"\n"+capture.status());
+        synchronized(this){if(!trackReleased)lastDiagnostic=snapshot;return lastDiagnostic;}
+    }
+    synchronized int playbackFrames(){return trackReleased?stoppedPlayed:track.getPlaybackHeadPosition();}
+    synchronized int underruns(){return trackReleased?stoppedUnderruns:track.getUnderrunCount();}
     /** AudioTimestamp includes the device presentation clock, unlike queue occupancy.
      * Wait for a valid timestamp at startup rather than guessing a fixed video offset.
      */

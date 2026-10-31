@@ -22,9 +22,9 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * "Generate log file": everything a bug report needs, in one file the USER chose the location of.
+ * Opt-in local diagnostics with a separate user-selected export destination.
  *
- * Uses the active SwanStation host's bounded session journal and process-filtered logcat.
+ * Uses the active PSX Lab engine's bounded session journal and process-filtered logcat.
  * Session metadata identifies the game, build, renderer and timing source. Older saved
  * sessions are explicitly recovery/history data. No legacy emulator logs are imported.
  * Startup refreshes a private report; explicit export writes the chosen destination.
@@ -52,40 +52,20 @@ object DiagnosticsReport {
     private fun reportUri(context: Context): Uri? =
         prefs(context).getString(KEY_URI, null)?.let { runCatching { Uri.parse(it) }.getOrNull() }
 
-    /**
-     * Persist the destination the user picked in the save dialog and switch capture on: the
-     * grant is kept across restarts where the provider allows it, and the core's
-     * logging preference goes on globally, paired with `quiet`. The SwanStation session
-     * journal records bounded timing and warnings/errors independently of the OSD.
-     */
-    fun enable(context: Context, target: Uri) {
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                target,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-            )
-        }
-        prefs(context).edit()
-            .putBoolean(KEY_ENABLED, true)
-            .putString(KEY_URI, target.toString())
-            .apply()
-        runCatching {
-            val s = Ps1SettingsStore.load(context)
-            // Report capture excludes high-frequency trace and debug events.
-            val level = if (s.logLevel < LOG_LEVEL_INFO) LOG_LEVEL_INFO else s.logLevel
-            if (!s.loggingEnabled || level != s.logLevel) {
-                Ps1SettingsStore.save(
-                    context,
-                    s.copy(loggingEnabled = true, quiet = false, logLevel = level),
-                )
-            }
-        }
+    /** Capture locally without opening a document picker or enabling high-frequency trace. */
+    fun enable(context: Context) {
+        prefs(context).edit().putBoolean(KEY_ENABLED, true).apply()
+        runCatching { NativeApp.setDiagnosticCapture(true) }
     }
-
-    /** Stop refreshing the report. The core's logging toggle is left as-is — it is the user's
-     *  (and Advanced tab's) setting, and turning it off here would surprise both. */
+    fun setExportDestination(context: Context, target: Uri) {
+        runCatching { context.contentResolver.takePersistableUriPermission(target,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+        prefs(context).edit().putString(KEY_URI, target.toString()).apply()
+    }
+    /** Advanced engine logging remains a separate user preference. */
     fun disable(context: Context) {
         prefs(context).edit().putBoolean(KEY_ENABLED, false).apply()
+        runCatching { NativeApp.setDiagnosticCapture(false) }
     }
 
     /**
@@ -93,10 +73,10 @@ object DiagnosticsReport {
      * Blocking: call from an IO thread.
      */
     fun refresh(context: Context, export: Boolean = true): DiagnosticExportGate.Result {
-        if (!isEnabled(context) && !BuildConfig.DIAGNOSTIC_BUILD) return DiagnosticExportGate.Result.FAILED
+        if (!export && !isEnabled(context) && !BuildConfig.DIAGNOSTIC_BUILD) return DiagnosticExportGate.Result.FAILED
         if (!DiagnosticCapture.isMainProcess(context)) return DiagnosticExportGate.Result.FAILED
         val local = File(context.filesDir, "logs/diagnostic-report.txt")
-        val exportRequested = export && isEnabled(context)
+        val exportRequested = export
         val uri = if (exportRequested) reportUri(context) else null
         if (exportRequested && uri == null) return DiagnosticExportGate.Result.FAILED
         if (uri == null) {
@@ -130,6 +110,7 @@ object DiagnosticsReport {
     }
 
     private fun writeReport(context: Context, w: BufferedWriter) {
+        runCatching { NativeApp.flushEngineLog(1500) }
         val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
         val externalLogs = File(context.getExternalFilesDir(null) ?: context.filesDir, "logs")
 
@@ -170,21 +151,20 @@ object DiagnosticsReport {
                 "3=severe, 4=critical, 5=emergency, 6=shutdown, -1=unavailable)")
         }
         val coreLogging = BuildConfig.DIAGNOSTIC_BUILD ||
-            runCatching { Ps1SettingsStore.load(context).loggingEnabled }.getOrDefault(false)
-        w.appendLine("core: SwanStation")
+            isEnabled(context) || runCatching { Ps1SettingsStore.active(context).loggingEnabled }.getOrDefault(false)
+        w.appendLine("core: PSX Lab (original engine)")
         w.appendLine("core logging preference: " + if (coreLogging) "on" else "off")
         w.appendLine("process id at export: ${Process.myPid()}")
         w.appendLine("Configuration files show requested settings, not proof of the active renderer.")
         w.appendLine()
 
-        w.appendLine("===== latest SwanStation session in this process =====")
-        // The native snapshot is copied under its own mutex, without scheduling work on
-        // the VM thread. Safe while paused, booting, running or after a failed launch.
-        val current = if (MainActivityRuntime.nativeReady.value) {
-            runCatching { NativeApp.getSwanDiagnostics() }.getOrElse {
+        w.appendLine("===== current PSX Lab session in this process =====")
+        // Read the adapter's cached counters; do not schedule work on the VM thread.
+        val current = run {
+            runCatching { NativeApp.getEngineDiagnostics() }.getOrElse {
                 "Native session snapshot unavailable: ${it.javaClass.simpleName}"
             }
-        } else ""
+        }
         if (current.isNotBlank()) {
             w.appendLine(current)
             w.appendLine("Session state above identifies whether this is running, paused or ended.")
@@ -193,10 +173,21 @@ object DiagnosticsReport {
         }
         w.appendLine()
         section(w, "saved settings.toml (requested configuration)", File(context.filesDir, "settings.toml"))
-        section(w, "SwanStation disk checkpoint — historical/recovery copy; use native session above for current data",
-            File(context.filesDir, "logs/swan-session.log"))
-        section(w, "previous SwanStation session — historical, may be a different build/game",
-            File(context.filesDir, "logs/swan-session.previous.log"))
+        val engineLogs = File(context.filesDir, "logs/psxlab")
+        section(w, "PSX Lab session checkpoint (historical, timestamped)", File(engineLogs,"last-session.json"))
+        section(w, "PSX Lab structured engine log (current tail)", File(engineLogs,"engine-current.jsonl"))
+        section(w, "PSX Lab structured engine log (previous tail)", File(engineLogs,"engine-previous.jsonl"))
+        w.appendLine("Timing interpretation: wall_ns includes waiting; cpu_ns is active thread CPU time. " +
+            "largest_phase identifies a candidate path, not a proven cause. " +
+            "GPU/API completion is not physical display presentation. Logging can affect timing.")
+        w.appendLine("===== current engine thread stacks (snapshot at export) =====")
+        runCatching { Thread.getAllStackTraces().entries.filter { (thread, _) ->
+            thread.name.startsWith("PSX-") || thread.name.contains("VM", ignoreCase = true)
+        }.take(24).forEach { (thread, stack) ->
+            w.appendLine("${thread.name} java_id=${thread.id} state=${thread.state}")
+            stack.take(24).forEach { w.appendLine("  at $it") }
+        } }.onFailure { w.appendLine("unavailable: ${it.javaClass.simpleName}") }
+        w.appendLine()
         w.appendLine("===== input devices =====")
         w.appendLine("Controller settings at export:")
         w.appendLine(runCatching { com.armsx2.input.ControllerMappings.diagnosticStickSettings() }

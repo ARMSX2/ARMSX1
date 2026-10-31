@@ -16,6 +16,9 @@ import java.util.function.Consumer;
 /** ArmSX1 host contract. All guest mutations execute at a CPU frame boundary. */
 public final class ArmSxBackend {
     private final Context context;
+    private final EngineLog journal;
+    private boolean runtimeLogging,captureLogging;private int runtimeLogLevel=2;
+    private volatile float displayRefreshHz;private volatile int surfaceWidth,surfaceHeight;
     private final Consumer<Boolean> pauseCallback;
     private final Consumer<String> notice;
     private final Object gate=new Object();
@@ -57,7 +60,21 @@ public final class ArmSxBackend {
         public void close()throws IOException{source.close();}
     }
     public ArmSxBackend(Context context,Consumer<Boolean> pauseCallback,Consumer<String> notice){
+        this(context,pauseCallback,notice,new File(context.getFilesDir(),"logs/psxlab"));
+    }
+    public ArmSxBackend(Context context,Consumer<Boolean> pauseCallback,Consumer<String> notice,File logDirectory){
         this.context=context.getApplicationContext();this.pauseCallback=pauseCallback;this.notice=notice;
+        journal=new EngineLog(logDirectory,new EngineLog.Clock(){public long wall(){return System.nanoTime();}public long cpu(){return android.os.Debug.threadCpuTimeNanos();}public long tid(){return android.os.Process.myTid();}});
+    }
+    public synchronized void configureLogging(boolean enabled,int level){runtimeLogging=enabled;runtimeLogLevel=level;applyLogger();}
+    public synchronized void captureDiagnostics(boolean enabled){captureLogging=enabled;applyLogger();}
+    private void applyLogger(){journal.configure(runtimeLogging||captureLogging,captureLogging?Math.min(runtimeLogLevel,EngineLog.INFO):runtimeLogLevel);}
+    public void displayMetadata(int width,int height,float hz){if(width>0){surfaceWidth=width;surfaceHeight=height;}if(hz>0)displayRefreshHz=hz;journal.event(EngineLog.INFO,"presentation.display",Map.of("width",surfaceWidth,"height",surfaceHeight,"refresh_hz",displayRefreshHz));}
+    public boolean flushDiagnosticLog(long timeout){return journal.flush(timeout);}
+    public String diagnosticDirectory(){return journal.directory().getAbsolutePath();}
+    private void configureLogging(Map<String,String> settings){
+        boolean enabled=Boolean.parseBoolean(settings.getOrDefault("runtime.logging_enabled",Boolean.toString(!Boolean.parseBoolean(settings.getOrDefault("runtime.quiet","true")))));
+        int level;try{level=Integer.parseInt(settings.getOrDefault("runtime.log_level","2"));}catch(NumberFormatException e){level=2;}configureLogging(enabled,level);
     }
     public synchronized boolean initialize(String dataRoot,String biosRoot,String configuration){
         if(active)return false;
@@ -72,7 +89,7 @@ public final class ArmSxBackend {
             }
             // Onboarding initializes the host before the user has selected a BIOS.
             // Resolve and validate the selected BIOS at launch, after per-game settings.
-            lastError="";return true;
+            lastError="";configureLogging(readConfig());return true;
         }catch(Exception e){error(e);return false;}
     }
     private byte[] readBios()throws IOException{
@@ -102,10 +119,10 @@ public final class ArmSxBackend {
     private ByteSource source(String path)throws IOException{
         try(ParcelFileDescriptor fd=descriptor(path)){
             // Recognize CHD by its header, including content URIs with no extension.
-            try(FileSource probe=new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())))){
-                if(new String(probe.read(0,8),StandardCharsets.US_ASCII).equals("MComprHD"))return new ChdSource(fd);
+            try(FileSource probe=new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal)){
+                if(new String(probe.read(0,8),StandardCharsets.US_ASCII).equals("MComprHD"))return new ChdSource(fd,journal);
             }
-            return new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())));
+            return new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal);
         }
     }
     private Media openMedia(String path)throws IOException{
@@ -118,7 +135,7 @@ public final class ArmSxBackend {
         synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=discPath=path;lastError="";}
         boolean booted=false;Restore restore=null;startupTiming.reset();event("launch");
         try{
-            options=readConfig();bios=readBios();
+            options=readConfig();configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();
             do{
                 restart=null;
                 int scale=Math.max(1,Math.min(5,Integer.parseInt(options.getOrDefault("video.internal_scale","1"))));
@@ -126,7 +143,7 @@ public final class ArmSxBackend {
                 // Keep one graphics API attached to a retained Android Surface. Software
                 // still rasterizes on the CPU; its finished pixels use the texture presenter.
                 try(Gpu graphics=mode==0&&scale==1?new Gpu(true,false):new Gpu(true,mode,scale)){
-                    gpu=graphics;clearSurface();bus=new Bus(gpu,pads[0]);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
+                    gpu=graphics;gpu.setJournal(journal);clearSurface();bus=new Bus(gpu,pads[0]);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
                         String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
@@ -135,7 +152,7 @@ public final class ArmSxBackend {
                             else if(media!=null&&(media.disc==null||Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
                             cpu.enableNative(true,true,true);
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
-                                audio=output;output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{for(int i=0;i<count;i++)if(pcm[i]!=0)nonzero++;output.samples(pcm,count);});
+                                audio=output;output.setJournal(journal);output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});
                                 renderer="PSX Lab / "+gpu.renderer();booted=true;
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
                                 try{loop(output);}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}}
@@ -151,24 +168,30 @@ public final class ArmSxBackend {
     }
     private boolean blocked(){Surface target=surface;return paused||audioSuspended||presentationSuspended||target==null||!target.isValid();}
     private void loop(AudioOutput output)throws Exception{
-        AudioAwareFramePacer pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());long last=gpu.vblanks,measured=System.nanoTime(),measuredFrames=frames;boolean wasBlocked=false,wasFast=false;
+        FrameRateMeter frameRate=new FrameRateMeter();AudioAwareFramePacer pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());long last=gpu.vblanks,measured=System.nanoTime();boolean wasBlocked=false,wasFast=false;EngineLog.Frame diagnosticFrame=null;
         while(!stop&&restart==null){
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
             if(blocked()){
-                output.setPaused(true);wasBlocked=true;fps=0;synchronized(gate){gate.wait(10);}continue;
+                output.setPaused(true);wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
             }
-            if(wasBlocked){output.setPaused(fast);pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();measuredFrames=frames;wasBlocked=false;}
-            if(fast!=wasFast){bus.spu.flushAudio();bus.spu.setAudioSink(fast?null:(pcm,count)->{for(int i=0;i<count;i++)if(pcm[i]!=0)nonzero++;output.samples(pcm,count);});output.setPaused(fast);pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;}
+            if(wasBlocked){output.setPaused(fast);pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
+            if(fast!=wasFast){bus.spu.flushAudio();bus.spu.setAudioSink(fast?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});output.setPaused(fast);pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
             if(pendingMedia!=null&&cpu.instructions>=insertAt){bus.cdrom.insert(pendingMedia.disc);if(media!=null)media.close();media=pendingMedia;pendingMedia=null;}
-            cpu.runToFrame(20000);guestClocks=cpu.instructions;lastPc=cpu.pc;
-            if(gpu.vblanks==last)continue;last=gpu.vblanks;bus.flushClocks();bus.spu.flushAudio();
-            long wait=fast?0:pacer.waitNanos(cpu.instructions,System.nanoTime(),output.bufferedFrames());if(wait>0)TimeUnit.NANOSECONDS.sleep(wait);
+            if(diagnosticFrame==null)diagnosticFrame=journal.frame(cpu.instructions,cpu.pc);
+            try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}guestClocks=cpu.instructions;lastPc=cpu.pc;
+            if(gpu.vblanks==last)continue;last=gpu.vblanks;if(diagnosticFrame!=null)diagnosticFrame.cpuDone(cpu.instructions,cpu.pc);
+            try(EngineLog.Span span=journal.begin("cpu.flush_devices",EngineLog.DEBUG)){bus.flushClocks();bus.spu.flushAudio();}
+            long paceStarted=diagnosticFrame==null?0:System.nanoTime(),buffered=output.bufferedFrames();
+            long wait=fast?0:pacer.waitNanos(cpu.instructions,System.nanoTime(),buffered);if(wait>0)TimeUnit.NANOSECONDS.sleep(wait);
+            if(diagnosticFrame!=null)diagnosticFrame.pacing(wait,System.nanoTime()-paceStarted,buffered);
+            EngineLog.Frame submitted=diagnosticFrame;diagnosticFrame=null;if(submitted!=null)submitted.queued();
             Surface target=surface;
             if(target!=null&&target.isValid()){
                 boolean trace=traceStartup;long requested=trace?System.nanoTime():0,clock=cpu.instructions;
-                gpu.requestSurfaceFrame(target,true,frame->{if(frame!=null)draw(target,frame);frames++;if(trace)startupTiming.record(clock,requested,System.nanoTime());});
+                gpu.requestSurfaceFrame(target,true,frame->{if(frame!=null)draw(target,frame);long completed=System.nanoTime();frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);},submitted);
             }
-            long now=System.nanoTime();if(now-measured>=500000000L){fps=(float)((frames-measuredFrames)*1e9/(now-measured));nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();measured=now;measuredFrames=frames;}
+            journal.leaveFrame();
+            long now=System.nanoTime();if(now-measured>=500000000L){nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled())journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics()));measured=now;}
         }
     }
     private void clearSurface(){Surface target=surface;if(target==null||!target.isValid()||gpu==null)return;gpu.control(0x03000001);gpu.requestSurfaceFrame(target,false,frame->{if(frame!=null)draw(target,frame);});gpu.sync();}
@@ -224,12 +247,12 @@ public final class ArmSxBackend {
     public boolean active(){return active;}public float fps(){return fps;}public long frames(){return frames;}public long audioNonzero(){return nonzero;}
     public long guestClocks(){return guestClocks;}public String renderer(){return renderer;}public String lastError(){return lastError;}
     public String audioDiagnostic(){AudioOutput out=audio;try{return out==null?lastAudio:out.diagnostic();}catch(IllegalStateException ignored){return lastAudio;}}
-    private synchronized void event(String value){if(events.size()==128)events.removeFirst();events.addLast(android.os.SystemClock.elapsedRealtime()+" "+value);android.util.Log.i("PSXLabBackend",value);}
+    private synchronized void event(String value){if(events.size()==128)events.removeFirst();events.addLast(android.os.SystemClock.elapsedRealtime()+" "+value);android.util.Log.i("PSXLabBackend",value);journal.event(EngineLog.INFO,"runtime.event",Map.of("message",value));}
     /** No BIOS/RAM/game data or authentication settings are included in a report. */
     public synchronized String diagnosticReport(){
-        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8)));json.put("renderer",renderer);org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("events",new org.json.JSONArray(events));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
+        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8)));json.put("renderer",renderer);org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("events",new org.json.JSONArray(events));json.put("logging",new org.json.JSONObject(journal.summary()));json.put("display",new org.json.JSONObject(Map.of("width",surfaceWidth,"height",surfaceHeight,"refreshHz",displayRefreshHz,"timingDomain","host/API; physical present timestamps unavailable")));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
     }
-    private void writeReport(){try{if(root!=null)atomic(new File(root,"last-session.json"),diagnosticReport().getBytes(StandardCharsets.UTF_8));}catch(IOException e){android.util.Log.e("PSXLabBackend","Cannot write diagnostic report",e);}}
-    private void error(Exception e){lastError=e.toString();event("error: "+e.getClass().getSimpleName());android.util.Log.e("PSXLabBackend",lastError,e);writeReport();notice.accept(lastError);}
+    private void writeReport(){try{if(root!=null){byte[] report=diagnosticReport().getBytes(StandardCharsets.UTF_8);atomic(new File(root,"last-session.json"),report);atomic(new File(journal.directory(),"last-session.json"),report);}}catch(IOException e){android.util.Log.e("PSXLabBackend","Cannot write diagnostic report",e);}}
+    private void error(Exception e){lastError=e.toString();journal.error(EngineLog.FATAL,"runtime.error",e);event("error: "+e.getClass().getSimpleName());android.util.Log.e("PSXLabBackend",lastError,e);writeReport();notice.accept(lastError);}
     private static void atomic(File target,byte[] bytes)throws IOException{BackendStateStore.atomic(target,bytes);}
 }

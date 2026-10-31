@@ -12,13 +12,14 @@ public final class HardwareRasterizer implements AutoCloseable {
     void drawBatch(int[] words){batchNative(handle,words);}
     void readVram(int[] out){readNative(handle,out);}
     void setVram(int[] in){setNative(handle,in);}
+    void setDisplayVram(int[] in,int[] state,long revision){setDisplayNative(handle,in,state,revision);}
     void fill(int color,int xy,int wh){fillNative(handle,color,xy,wh);}
     void copy(int from,int to,int wh,int mask){copyNative(handle,from,to,wh,mask);}
     void upload(int[] words,int start,int x,int y,int width,int total,int mask){uploadNative(handle,words,start,x,y,width,total,mask);}
     boolean present(Surface surface,int[] state){return presentNative(handle,surface,state);}
     boolean presentResolved(Surface surface,int[] state,long vulkan){return presentResolvedNative(handle,surface,state,vulkan);}
     Gpu.Frame capture(int[] state){int status=state[0],divider=(status&0x10000)!=0?7:switch((status>>>17)&3){case 0->10;case 1->8;case 2->5;default->4;};int w=Math.max(1,Math.min(1024,(state[4]-state[3])/divider))*scale,h=Math.max(1,Math.min(512,(state[6]-state[5])*((status&0x480000)==0x480000?2:1)))*scale;return new Gpu.Frame(w,h,captureNative(handle,state));}
-    String statistics(){long[] s=new long[8];statsNative(handle,s);return "GPU draws="+s[0]+" feedback="+s[1]+" readbacks="+s[2]+" passes="+s[3]+" presented="+s[4]+" nativeCopies="+s[5]+" sharedFrames="+s[6]+" asyncFrames="+s[7];}
+    String statistics(){long[] s=new long[12];statsNative(handle,s);return "GPU draws="+s[0]+" feedback="+s[1]+" readbacks="+s[2]+" passes="+s[3]+" presented="+s[4]+" nativeCopies="+s[5]+" sharedFrames="+s[6]+" asyncFrames="+s[7]+" uploadBytes="+s[8]+" scanouts="+s[9]+" reused="+s[10];}
     private void draw(int[] packet,int[] state){int[] commands=new int[1+packet.length+7];commands[0]=packet.length;System.arraycopy(packet,0,commands,1,packet.length);System.arraycopy(state,0,commands,packet.length+1,7);drawBatch(commands);}
     @Override public void close(){if(handle!=0){destroy(handle);handle=0;}}
     private static native long create(int scale);
@@ -27,6 +28,7 @@ public final class HardwareRasterizer implements AutoCloseable {
     private static native void batchNative(long handle,int[] commands);
     private static native void readNative(long handle,int[] vram);
     private static native void setNative(long handle,int[] vram);
+    private static native void setDisplayNative(long handle,int[] vram,int[] state,long revision);
     private static native void fillNative(long handle,int color,int xy,int wh);
     private static native void copyNative(long handle,int from,int to,int wh,int mask);
     private static native void uploadNative(long handle,int[] words,int start,int x,int y,int width,int total,int mask);
@@ -38,6 +40,24 @@ public final class HardwareRasterizer implements AutoCloseable {
     private static native void statsNative(long handle,long[] out);
 
     public static String verify(){return verifyRaster(1);}
+    public static String verifySoftwareDisplayUploads(){
+        int[] vram=new int[1024*512];Random random=new Random(0x5343414e);
+        for(int i=0;i<vram.length;i++)vram[i]=random.nextInt(65536);
+        int cases=0;long revision=1;
+        try(HardwareRasterizer reference=new HardwareRasterizer(1);HardwareRasterizer partial=new HardwareRasterizer(1)){
+            for(int mode:new int[]{0,0x20000,0x60000,0x200000,0x220000,0x480000,0x680000,0x800000})
+                for(int y:new int[]{0,250,510,511})for(int height:new int[]{1,17,240,512}){
+                    int[] state={mode,1007,y,0,3200,0,height,1};
+                    reference.setVram(vram);partial.setDisplayVram(vram,state,revision);
+                    if(!Arrays.equals(reference.capture(state).pixels(),partial.capture(state).pixels()))throw new AssertionError("Partial display upload differs: mode="+Integer.toHexString(mode)+" y="+y+" height="+height);
+                    // Same revision is reusable; a later visible write must upload again.
+                    partial.setDisplayVram(vram,state,revision);vram[y*1024+1007]^=0x7fff;revision++;
+                    partial.setDisplayVram(vram,state,revision);reference.setVram(vram);
+                    if(!Arrays.equals(reference.capture(state).pixels(),partial.capture(state).pixels()))throw new AssertionError("Revised display upload stale");cases++;
+                }
+        }
+        return "Software display uploads: "+cases+" 15/24-bit, interlaced, disabled and wrapped-row cases match full VRAM uploads.\n";
+    }
     private static String verifyRaster(int scale){
         Random random=new Random(0x505358);int[] expected=new int[524288];for(int i=0;i<expected.length;i++)expected[i]=random.nextInt(65536);int[] actual=expected.clone();
         SoftwareRasterizer reference=new SoftwareRasterizer(expected,false);

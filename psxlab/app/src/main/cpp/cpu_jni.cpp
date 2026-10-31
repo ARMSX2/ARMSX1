@@ -21,15 +21,16 @@ struct CpuCore {
         jclass cls=e->GetObjectClass(b);clockMethod=e->GetMethodID(cls,"nativeClock","(II)J");finishMethod=e->GetMethodID(cls,"nativeFinish","(II)J");readMethod=e->GetMethodID(cls,"nativeRead","(IIII)J");writeMethod=e->GetMethodID(cls,"nativeWrite","(IIIII)J");biosWaitMethod=e->GetMethodID(cls,"nativeBiosReadWaits","()I");cdWaitMethod=e->GetMethodID(cls,"nativeCdReadWaits","()I");biosReadWaits=e->CallIntMethod(b,biosWaitMethod);cdReadWaits=e->CallIntMethod(b,cdWaitMethod);e->DeleteLocalRef(cls);
     }
     void status(jlong packed){deadline=int((uint64_t(packed)>>32)&0x1fffffff);irq=(uint64_t(packed)>>62)&1;frameBoundary=(uint64_t(packed)>>61)&1;elapsed=0;bridges++;if(env->ExceptionCheck()){s->faultPc=currentAt;s->faultInstruction=currentWord;throw Stop{};}}
-    void tick(){if(++elapsed>=deadline)status(env->CallLongMethod(bus,clockMethod,elapsed,int(s->cacheIsolated)));}
-    void wait(int clocks){elapsed+=clocks;s->instructions+=clocks;if(elapsed>=deadline)status(env->CallLongMethod(bus,clockMethod,elapsed,int(s->cacheIsolated)));}
+    jlong clockCall(jmethodID method){jvalue args[2]{};args[0].i=elapsed;args[1].i=int(s->cacheIsolated);return env->CallLongMethodA(bus,method,args);}
+    void tick(){if(++elapsed>=deadline)status(clockCall(clockMethod));}
+    void wait(int clocks){elapsed+=clocks;s->instructions+=clocks;if(elapsed>=deadline)status(clockCall(clockMethod));}
     int biosWait(int width)const{return (biosReadWaits>>(width==4?16:width==2?8:0))&255;}
     int fetchWait(uint32_t pc)const{return ramWaitStates && pc>=0xbfc00000 && pc<0xbfc80000?biosWait(4):0;}
     uint32_t read(uint32_t address,int width,bool instruction=false){
         if(width>1 && (address&uint32_t(width-1)))throw AddressFault{address,false};uint32_t a=address&0x1fffffff,offset;
         // Data RAM reads consume six bus clocks in addition to the instruction.
         // Cached instruction fetches and scratchpad accesses do not use this wait.
-        if(a<0x800000){offset=a&0x1fffff;if(ramWaitStates&&!instruction){elapsed+=6;s->instructions+=6;if(elapsed>=deadline)status(env->CallLongMethod(bus,clockMethod,elapsed,int(s->cacheIsolated)));}}
+        if(a<0x800000){offset=a&0x1fffff;if(ramWaitStates&&!instruction){elapsed+=6;s->instructions+=6;if(elapsed>=deadline)status(clockCall(clockMethod));}}
         else if(a>=0x1fc00000&&a<0x1fc80000){offset=Bios+a-0x1fc00000;if(ramWaitStates&&!instruction)wait(biosWait(width));}
         else if(a>=0x1f800000&&a<0x1f800400)offset=Scratch+a-0x1f800000;
         else{
@@ -39,7 +40,7 @@ struct CpuCore {
                 // boundary. Result/data ports still take the synchronized path.
                 if(width==1&&(a==0x1f801800||a==0x1f801803))return memory[CdStatus+(a&3)];
             }
-            jlong result=env->CallLongMethod(bus,readMethod,jint(address),width,elapsed,int(s->cacheIsolated));status(result);return uint32_t(result);
+            jvalue args[4]{};args[0].i=jint(address);args[1].i=width;args[2].i=elapsed;args[3].i=int(s->cacheIsolated);jlong result=env->CallLongMethodA(bus,readMethod,args);status(result);return uint32_t(result);
         }
         uint32_t value=0;memcpy(&value,memory+offset,size_t(width));return value;
     }
@@ -49,7 +50,7 @@ struct CpuCore {
         if(a>=0x1f800000&&a<0x1f800400){memcpy(memory+Scratch+a-0x1f800000,&value,size_t(width));return;}
         if(a>=0x1fc00000&&a<0x1fc80000)return;
         if(ramWaitStates&&width==1&&a==0x1f801800&&(value&3)==(memory[CdStatus]&3))return;
-        status(env->CallLongMethod(bus,writeMethod,jint(address),width,jint(value),elapsed,int(s->cacheIsolated)));
+        jvalue args[5]{};args[0].i=jint(address);args[1].i=width;args[2].i=jint(value);args[3].i=elapsed;args[4].i=int(s->cacheIsolated);status(env->CallLongMethodA(bus,writeMethod,args));
         if(a>=0x1f801000&&a<=0x1f801023){biosReadWaits=env->CallIntMethod(bus,biosWaitMethod);cdReadWaits=env->CallIntMethod(bus,cdWaitMethod);}
     }
     GteCore geometry(){return GteCore{s->gte,s->gte+32,0,false};}
@@ -185,7 +186,7 @@ struct CpuCore {
                 }else step();
                 previous=block;
             }
-            status(env->CallLongMethod(bus,finishMethod,elapsed,int(s->cacheIsolated)));
+            status(clockCall(finishMethod));
         }catch(Stop&){}
         return int(s->instructions-start);
     }

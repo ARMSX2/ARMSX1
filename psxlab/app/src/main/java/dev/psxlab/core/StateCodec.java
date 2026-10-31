@@ -10,7 +10,7 @@ final class StateCodec {
     static {
         skip(Cpu.class,"nativeCpu","bus","gte");
         skip(Bus.class,"nativeMemory","instructionWords","instructionValid","gpu","dma","mdec","spu","timers","cdrom","sio0","nativeCores","bios");
-        skip(Gpu.class,"worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized");
+        skip(Gpu.class,"journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames");
         skip(Spu.class,"nativeCore","sink","output");
         skip(Gte.class,"nativeCore");
         skip(CdRom.class,"disc","xaSink","recentCommands","recentWrites","lastMediaError");

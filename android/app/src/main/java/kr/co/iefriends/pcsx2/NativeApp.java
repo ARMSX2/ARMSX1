@@ -30,11 +30,18 @@ public class NativeApp {
     // Original PSX Lab engine; no second emulator is loaded.
     private static dev.psxlab.ArmSxBackend lab;
     private static volatile Surface labSurface;
+    private static volatile int displayWidth, displayHeight;
+    private static volatile float displayHz;
     private static final Object surfaceLock = new Object();
     private static long surfaceOwner;
     private static long nextRunToken, preparedRunToken;
     private static final java.util.Set<String> unavailable = java.util.concurrent.ConcurrentHashMap.newKeySet();
     public static dev.psxlab.ArmSxBackend psxLabBackend() { return lab; }
+    public static void setRuntimeLogging(boolean enabled,int level){if(lab!=null)lab.configureLogging(enabled,level);}
+    public static void setDiagnosticCapture(boolean enabled){if(lab!=null)lab.captureDiagnostics(enabled);}
+    public static String getEngineDiagnostics(){return lab==null?"PSX Lab not initialized":lab.diagnosticReport();}
+    public static boolean flushEngineLog(long timeout){return lab==null||lab.flushDiagnosticLog(timeout);}
+
     private static void unsupported(String feature) {
         if (unavailable.add(feature)) android.util.Log.w("PSXLabBackend", feature + " is not supported by this backend");
     }
@@ -138,7 +145,9 @@ public class NativeApp {
         String config = new File(context.getFilesDir(), "settings.toml").getAbsolutePath();
         if (lab == null) lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice);
         if (!lab.initialize(path, biosFolder, config)) throw new IllegalStateException(lab.lastError());
+        lab.captureDiagnostics(context.getSharedPreferences("ARMSX2",Context.MODE_PRIVATE).getBoolean("diagnostics.generateLog",false));
         if (labSurface != null) lab.surface(labSurface);
+        lab.displayMetadata(displayWidth, displayHeight, displayHz);
     }
 
 	public static long getAudioNonZeroSampleCount() { if (lab == null) { return 0L; } return lab.audioNonzero();  }
@@ -520,7 +529,7 @@ public class NativeApp {
 	public static String getActiveRenderer() { if (lab == null) { return ""; } return lab.renderer();  }
 	/** Bounded, synchronized snapshot of the latest SwanStation session in this process.
 	 * Empty before a session; never combines prior games, builds or legacy PSXE logs. */
-	public static String getSwanDiagnostics() { return lab == null ? "PSX Lab not initialized" : lab.diagnosticReport(); }
+	public static String getSwanDiagnostics() { return getEngineDiagnostics(); }
 
 	/** Live display aspect: 0 = classic 4:3, 1 = square 1:1, 2 = wide 16:9.
 	 *  Anything negative reverts to settings.toml's {@code [video] display_aspect}.
@@ -1193,7 +1202,7 @@ public class NativeApp {
             if (lab != null) lab.surface(null);
         }
     }
-	public static void setDisplayRefreshRate(float hz) { unsupported("setDisplayRefreshRate"); }
+	public static void setDisplayRefreshRate(float hz) { displayHz=hz; if(lab!=null)lab.displayMetadata(displayWidth,displayHeight,hz); }
 	public static void setDisplayVsyncTimestamp(long frameTimeNanos) { unsupported("setDisplayVsyncTimestamp"); }
 	public static void setFramePresentation(int mode, int multiple) { unsupported("setFramePresentation"); }
 	/** Diagnostic APK only; normal builds ignore the request. */
