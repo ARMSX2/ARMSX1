@@ -1428,44 +1428,89 @@ open class MainActivityRuntime : ComponentActivity() {
             // while the same title launched from our own library applied them correctly.
             // Build a GameInfo for the incoming URI so the external path keys off the same
             // settingsKey the library path does (serial for discs, filename stem otherwise).
-            launchGame(queued, externalGameInfo(queued), external = true)
+            // Identifying it reads the disc (a few sectors, through the frontend's grant for a
+            // content URI), so that happens off the main thread and the launch comes back to it.
+            Thread({
+                val info = externalGameInfo(queued)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    launchGame(queued, info, external = true)
+                }
+            }, "armsx-external-launch").start()
         }
 
         /**
-         * Minimal [GameInfo] for a URI arriving from outside the app. The serial is probed
-         * off the image the same way the library scan does (SYSTEM.CNF via
-         * NativeApp.getGameSerialFromFd) so per-game settings stored under the serial are
-         * found. A failed probe is fine and expected for ELF/homebrew — settingsKey then
-         * falls back to the filename stem, matching issue #253's behaviour.
+         * The [GameInfo] for a URI arriving from outside the app (ES-DE, Daijisho, Beacon and the
+         * like), as ARMSX3 builds it.
+         *
+         * The library's entry when it has the same file, or the same disc under another address:
+         * a frontend hands over its own form of a path, and the library's entry carries the
+         * serial, title, cover and memory-card identity a launch from the library would have.
+         * Otherwise the serial comes off the disc itself, read the way the library scan reads it
+         * ([com.armsx2.core.Ps1Covers]). This used to ask NativeApp.getGameSerialFromFd, which
+         * PSX Lab does not implement, so every frontend launch came up with no serial: per-game
+         * settings keyed by the file name, no cover, and Discord with nothing to show. With no
+         * serial (ELF, homebrew) settingsKey still falls back to the filename stem, as in #253.
+         *
+         * Blocking: reads the disc. Call off the main thread.
          */
         private fun externalGameInfo(uriString: String): GameInfo? = runCatching {
             val uri = uriString.toUri()
             val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':').orEmpty()
             val stem = name.substringBeforeLast('.').ifBlank { name }
-            val serial = runCatching {
-                val ctx = instance ?: return@runCatching null
-                // detachFd() hands ownership of the fd to native, which closes it — same
-                // contract GameLibraryRepository.probeDocument/probeRaw use. Do NOT wrap in
-                // use{}: closing an already-detached descriptor is not ours to do.
-                val raw = if (uri.scheme == "content") {
-                    val pfd = ctx.contentResolver.openFileDescriptor(uri, "r") ?: return@runCatching null
-                    NativeApp.getGameSerialFromFd(pfd.detachFd())
-                } else {
-                    val f = java.io.File(uri.path ?: return@runCatching null)
-                    if (!f.isFile) return@runCatching null
-                    val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-                    NativeApp.getGameSerialFromFd(pfd.detachFd())
+            val ctx = instance?.applicationContext
+            val library = ctx?.let {
+                runCatching { com.armsx2.data.library.GameLibraryRepository(it).loadCached().games }.getOrNull()
+            }.orEmpty()
+            libraryGameAt(library, uri)?.let {
+                android.util.Log.i("ARMSX-Launch", "external launch: '$name' is the library's '${it.title}'")
+                return@runCatching it
+            }
+            val path = if (uri.scheme == null || uri.scheme == "file") uri.path?.takeIf { it.isNotBlank() } else null
+            val probe = when {
+                path != null -> runCatching { com.armsx2.core.Ps1Covers.probeForPath(path) }.getOrNull()
+                uri.scheme == "content" && ctx != null ->
+                    runCatching { com.armsx2.core.Ps1Covers.probeForDocument(ctx, uriString) }.getOrNull()
+                else -> null
+            }
+            val serial = probe?.serial?.takeIf { it.isNotBlank() }
+            // The same disc the library scanned under another address. A playlist entry carries
+            // its first disc's serial, so a single disc is preferred when both match.
+            serial?.let { s ->
+                val matches = library.filter { it.serial.equals(s, ignoreCase = true) }
+                (matches.firstOrNull { it.extension != "M3U" } ?: matches.firstOrNull())?.let {
+                    android.util.Log.i("ARMSX-Launch", "external launch: '$name' is $s, the library's '${it.title}'")
+                    return@runCatching it
                 }
-                // The probe tags its result "<platform>:<serial>" when SYSTEM.CNF parsed.
-                raw?.takeIf { it.isNotBlank() }?.substringAfterLast(':')?.takeIf { it.isNotBlank() }
-            }.getOrNull()
+            }
+            android.util.Log.i("ARMSX-Launch", "external launch: '$name' is ${serial ?: "a disc with no serial"}")
+            val (fileTitle, fileSerial) = com.armsx2.FilenameParser.parse(name)
             GameInfo(
                 uri = uri,
-                title = stem,
-                serial = serial,
+                title = fileTitle.ifBlank { stem },
+                serial = serial ?: fileSerial,
                 extension = name.substringAfterLast('.', "").uppercase(),
             )
         }.getOrNull()
+
+        /** The library entry for the very file [uri] names: the same URI, the same file path
+         *  (symlinks such as /sdcard resolved), or the same document under another grant. */
+        private fun libraryGameAt(library: List<GameInfo>, uri: Uri): GameInfo? {
+            library.firstOrNull { it.uri == uri }?.let { return it }
+            if (uri.scheme == null || uri.scheme == "file") {
+                val wanted = uri.path?.let { p -> runCatching { java.io.File(p).canonicalPath }.getOrDefault(p) }
+                    ?: return null
+                return library.firstOrNull { game ->
+                    game.uri.scheme == "file" && game.uri.path?.let { p ->
+                        runCatching { java.io.File(p).canonicalPath }.getOrDefault(p)
+                    } == wanted
+                }
+            }
+            fun documentKey(u: Uri): String? = runCatching {
+                u.authority + "\u0000" + android.provider.DocumentsContract.getDocumentId(u)
+            }.getOrNull()
+            val wanted = documentKey(uri) ?: return null
+            return library.firstOrNull { it.uri.scheme == "content" && documentKey(it.uri) == wanted }
+        }
 
         /**
          * Boot to BIOS (no game disc). Unlike `start()` this does NOT
