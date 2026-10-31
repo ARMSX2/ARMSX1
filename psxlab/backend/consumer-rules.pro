@@ -1,4 +1,3 @@
-# Native names and versioned device-state field names are part of the backend ABI.
--keep class dev.psxlab.core.** { *; }
--keep class dev.psxlab.NativeTempo { *; }
--keep class dev.psxlab.ChdSource { *; }
+# Engine state fields, native callbacks and diagnostic paths retain their original names.
+# The Android host is small; keep its reflective tests and bug reports readable as well.
+-keep class dev.psxlab.** { *; }

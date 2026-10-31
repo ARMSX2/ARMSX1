@@ -190,7 +190,15 @@ android {
 
     buildTypes {
         debug {
-            if (project.hasProperty('psxlabRuntimeTest')) { debuggable false; jniDebuggable false }
+            if (project.hasProperty('psxlabRuntimeTest')) {
+                // Installable runtime builds keep release performance and discard unused
+                // dependency code/resources. Ordinary developer debug builds stay unshrunk.
+                debuggable false
+                jniDebuggable false
+                minifyEnabled true
+                shrinkResources true
+                proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            }
             matchingFallbacks = ['release']
             if (hasRepoDebugKeystore) {
                 signingConfig signingConfigs.debug
