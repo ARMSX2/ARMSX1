@@ -103,7 +103,7 @@ static const char g_default_settings[] =
 #endif
     "\n"
 #ifdef USE_HARDWARE
-    "    gpu_backend = \"software\" # software | sdl-accelerated | opengl | angle | vulkan\n"
+    "    gpu_backend = \"vulkan\"   # software | sdl-accelerated | opengl | angle | vulkan\n"
     "    gl_driver = \"system\"     # GLES implementation for the opengl backend: system | angle\n"
     "    renderer = \"software\"    # rasterizer: software | hardware | hardware-cpu | hardware-gl\n"
     "    internal_scale = 1        # 1..8; internal resolution, hardware rasterizer only\n"
@@ -486,10 +486,16 @@ void psxe_cfg_load_defaults(psxe_config_t* cfg) {
     cfg->vsync_enabled = 1;
 #endif
 #ifdef USE_HARDWARE
-    /* 0 = SDL software presentation. GPU presentation is opt-in so the deterministic SDL path
-       remains the default on every platform, including Android surfaces that cannot be adopted
-       by SDL_CreateWindowFrom(). MUST match Ps1Settings.gpuBackend's default. */
-    cfg->gpu_backend = 0;
+    /* 3 = Vulkan presentation. Software present does a full-resolution CPU blit every frame,
+       which is the slowest path we ship; Vulkan matches what ARMSX2/ARMSX3 default to.
+       The SDL software path is NOT removed -- it remains the fallback for any surface the
+       GPU backends decline, including Android surfaces that SDL_CreateWindowFrom() cannot
+       adopt, so a device without a usable Vulkan surface still presents.
+       MUST match Ps1Settings.gpuBackend's default and the settings.toml template above: a
+       disagreement is how a renderer setting shows one thing while the core runs another.
+       gl_driver stays 0 (system GLES). ANGLE is only ever selected by the explicit "angle"
+       token, never by picking the OpenGL backend. */
+    cfg->gpu_backend = 3;
     cfg->gl_driver = 0;
     /* 0 = the native, accuracy-authoritative rasterizer. The scale-aware hardware rasterizer
        is opt-in: its CPU fallback is materially slower on SDL-only Android surfaces, and a

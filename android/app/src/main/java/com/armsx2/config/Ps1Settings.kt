@@ -83,11 +83,13 @@ data class Ps1Settings(
     val reduceInputLatency: Boolean = false,
     val frameTimeBufferMs: Int = 2,
     val maxQueuedFrames: Int = 2,
-    // SDL software presentation by default. GPU presentation is opt-in so the deterministic,
-    // portable path remains the default on every platform and does not depend on an adopted
-    // native window or a particular GLES/Vulkan driver.
-    // MUST match config.c's cfg->gpu_backend default (0 = software).
-    val gpuBackend: String = GPU_SOFTWARE,       // software | sdl-accelerated | opengl | angle | vulkan
+    // Vulkan presentation by default, matching ARMSX2/ARMSX3. Software present does a
+    // full-resolution CPU blit every frame and is the slowest path we ship. The SDL software
+    // path stays as the fallback for any surface the GPU backends decline, so a device without
+    // a usable Vulkan surface still presents.
+    // MUST match config.c's cfg->gpu_backend default (3 = vulkan). A Kotlin default that
+    // disagrees with the core's is how a renderer ends up showing one thing and running another.
+    val gpuBackend: String = GPU_VULKAN,         // software | sdl-accelerated | opengl | angle | vulkan
     val textureScaleMode: Boolean = false,       // bilinear filtering
     val debugPanel: Boolean = false,
     val stretchMode: Boolean = false,
