@@ -11,7 +11,7 @@ final class StateCodec {
         skip(Cpu.class,"nativeCpu","bus","gte");
         skip(Bus.class,"nativeMemory","instructionWords","instructionValid","gpu","dma","mdec","spu","timers","cdrom","sio0","nativeCores","bios");
         skip(Gpu.class,"performanceEnabled","performanceTriangles","performanceRectangles","performanceLines","performance","journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","highRefresh","presentationDecision","presentationRate","shaderAspect","blackPresented","shaderSubframes","displayVsync","baseVulkanOutput","shaderPresenterFailed","displayStretch","displayInteger","baseRenderer","shaderPresenterError");
-        skip(Dma.class,"performanceEnabled","performanceWords");
+        skip(Dma.class,"performanceEnabled","performanceWords","journal","linkedYields","linkedLastAddress","linkedLastHeader");
         skip(Spu.class,"nativeCore","sink","output");
         skip(Gte.class,"nativeCore","widescreen");
         skip(NativeGte.class,"widescreen");
@@ -87,6 +87,11 @@ final class StateCodec {
         // Version-1 states made before drive mechanics had no operation in flight.
         if(existing instanceof CdRom){
             for(String key:new String[]{"driveTicks","seekTicks","seekTarget","readAfterSeek","explicitSeek","seekReady"})if(!n.fields.containsKey(key)){boolean flag=key.equals("readAfterSeek")||key.equals("explicitSeek")||key.equals("seekReady");Node value=new Node(flag?3:1);value.scalar=flag?Boolean.FALSE:Integer.valueOf(0);n.fields.put(key,value);}
+        }
+        // Older states could only capture completed GPU lists. No deferred slice
+        // was in flight, even when loading into a machine that currently has one.
+        if(existing instanceof Dma && !n.fields.containsKey("linkedDelay")){
+            Node delay=new Node(1);delay.scalar=0;n.fields.put("linkedDelay",delay);
         }
         List<Field> fs=fields(existing.getClass());if(fs.size()!=n.fields.size())throw new IOException("State schema differs from this engine");
         // Records are immutable; their constructor already consumed every field.

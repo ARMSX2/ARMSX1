@@ -212,7 +212,7 @@ public final class ArmSxBackend {
                 // Keep one graphics API attached to a retained Android Surface. Software
                 // still rasterizes on the CPU; its finished pixels use the texture presenter.
                 try(Gpu graphics=mode==0&&scale==1&&!selected.hardware()?new Gpu(true,false):new Gpu(true,mode,scale,selected.hardware())){
-                    gpu=graphics;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();bus=new Bus(gpu,pads[0]);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
+                    gpu=graphics;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
                         String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{

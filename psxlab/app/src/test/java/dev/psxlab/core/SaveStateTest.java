@@ -2,6 +2,23 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class SaveStateTest {
+    @Test public void deferredGpuListSurvivesSaveAndRestore()throws Exception{
+        try(Gpu ga=new Gpu(false);Gpu gb=new Gpu(false)){
+            Bus a=new Bus(ga,new PadState(),false),b=new Bus(gb,new PadState(),false);Cpu ca=new Cpu(a),cb=new Cpu(b);
+            a.write32(0x100,0x100);a.write32(0x1f8010f0,0x07654b21);a.write32(0x1f8010a0,0x100);a.write32(0x1f8010a8,0x01000401);a.dma.tick(123);
+            byte[] state=SaveState.capture(ca,a,ga,"dma");SaveState.restore(state,cb,b,gb,"dma");
+            assertEquals(901,b.dma.clocksToEvent());assertNotEquals(0,b.read32(0x1f8010a8)&0x1000000);
+            b.write32(0x100,0xffffff);b.dma.tick(900);assertNotEquals(0,b.read32(0x1f8010a8)&0x1000000);
+            b.dma.tick(1);assertEquals(0,b.read32(0x1f8010a8)&0x1000000);assertEquals(0xffffff,b.read32(0x1f8010a0));
+        }
+    }
+    @Test public void oldDmaStateDefaultsToNoDeferredSlice()throws Exception{
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);StateCodec.Node old=StateCodec.capture(b.dma);old.fields.remove("linkedDelay");
+            b.write32(0x100,0x100);b.write32(0x1f8010f0,0x07654b21);b.write32(0x1f8010a0,0x100);b.write32(0x1f8010a8,0x01000401);
+            StateCodec.apply(old,b.dma);assertEquals(Integer.MAX_VALUE,b.dma.clocksToEvent());
+        }
+    }
     @Test public void overlayMeasurementsDoNotChangeSaveStateSchemaOrGuestState()throws Exception{
         try(Gpu gpu=new Gpu(false)){
             Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);

@@ -10,6 +10,14 @@ public final class Dma {
     private final Chopped[] chopped=new Chopped[7];
     private int choppedMask;
     private OutputTransfer mdecOutput;
+    // Bound host work even if a guest list points back into itself. Keep MADR
+    // and CHCR live so the CPU can update the list or cancel the transfer.
+    private static final int LINKED_SLICE_BUDGET=1024;
+    private int linkedDelay;
+    private long linkedYields;
+    private int linkedLastAddress,linkedLastHeader;
+    private EngineLog journal;
+    public void setJournal(EngineLog value){journal=value;}
     private int priority=0x07654321,interrupt;
     public long choppedTransfers,choppedWindows;
     public boolean performanceEnabled;
@@ -39,7 +47,7 @@ public final class Dma {
     }
     public void write(int address,int value,int mask){
         int offset=address-0x1f801080;
-        if(offset<0x70){int ch=offset/16,reg=(offset&15)/4;if(reg<3){channels[ch][reg]=(channels[ch][reg]&~mask)|(value&mask);if(reg==0)channels[ch][reg]&=0xffffff;if(reg==2){chopped[ch]=null;choppedMask&=~(1<<ch);if(ch==1)mdecOutput=null;start(ch);}}}
+        if(offset<0x70){int ch=offset/16,reg=(offset&15)/4;if(reg<3){channels[ch][reg]=(channels[ch][reg]&~mask)|(value&mask);if(reg==0)channels[ch][reg]&=0xffffff;if(reg==2){chopped[ch]=null;choppedMask&=~(1<<ch);if(ch==1)mdecOutput=null;if(ch==2)linkedDelay=0;start(ch);}}}
         else if((offset&~3)==0x70){priority=(priority&~mask)|(value&mask);for(int ch=0;ch<7;ch++)start(ch);}
         else if((offset&~3)==0x74){int controls=mask&0xffffff;interrupt=(interrupt&~controls)|(value&controls);interrupt&=~(value&mask&0x7f000000);updateInterrupt();}
     }
@@ -54,7 +62,7 @@ public final class Dma {
         try{transfer(ch);}finally{running[ch]=false;}
     }
     private void transfer(int ch){
-            if(chopped[ch]!=null || ch==1 && mdecOutput!=null)return;
+        if(chopped[ch]!=null || ch==1 && mdecOutput!=null || ch==2 && linkedDelay>0)return;
         int control=channels[ch][2],mode=(control>>>9)&3;
         if((priority&(8<<(ch*4)))==0 || (control&0x1000000)==0 || mode==0 && (control&0x10000000)==0)return;
         if(ch==5)throw new UnsupportedOperationException("DMA channel "+ch+" is not implemented");
@@ -63,15 +71,24 @@ public final class Dma {
         int address=channels[ch][0]&0x1ffffc,step=(control&2)!=0?-4:4;
         if(mode==2){
             if(ch!=2 || (control&1)==0)throw new UnsupportedOperationException("Invalid GPU linked-list DMA direction");
-            java.util.HashSet<Integer> visited=new java.util.HashSet<>();
-            while(true){
-                if(!visited.add(address) || visited.size()>524288)throw new IllegalStateException("Cyclic DMA linked list");
+            int budget=LINKED_SLICE_BUDGET;
+            while(budget>0){
                 int header=bus.read32(address),words=header>>>24;
+                linkedLastAddress=address;linkedLastHeader=header;
                 if(performanceEnabled)performanceWords[2]+=words;
                 for(int i=0;i<words;i++){address=(address+4)&0x1ffffc;bus.gpu.write(bus.read32(address));}
-                if((header&0x800000)!=0)break;address=header&0x1ffffc;
+                // Test the end bit before masking the RAM mirror/address bits.
+                if((header&0x800000)!=0){channels[ch][0]=0xffffff;complete(ch);return;}
+                channels[ch][0]=header&0xfffffc;address=header&0x1ffffc;
+                budget-=1+words;
             }
-            channels[ch][0]=0xffffff;
+            // A repeated pointer is not a host exception or a completion. Yield
+            // and re-read RAM on the next slice, without allocating a visited set.
+            // This is a functional scheduling budget, not cycle-exact DMA stalls.
+            linkedDelay=LINKED_SLICE_BUDGET;linkedYields++;
+            if(journal!=null && (linkedYields<=4 || (linkedYields&(linkedYields-1))==0))
+                journal.event(EngineLog.WARN,"dma.gpu.linked.yield",java.util.Map.of("yields",linkedYields,"last_address",linkedLastAddress,"last_header",Integer.toUnsignedLong(linkedLastHeader),"next_address",channels[2][0],"control",channels[2][2],"resume_clocks",linkedDelay));
+            return;
         }else{
             if(mode>1)throw new UnsupportedOperationException("Reserved DMA synchronization mode");
             long words=channels[ch][1]&65535;if(words==0)words=65536;
@@ -126,6 +143,11 @@ public final class Dma {
     }
     /** Advance DMA/CPU windows without skipping devices or completing the DMA early. */
     public void tick(int cycles){
+        int linkedElapsed=cycles;
+        while(linkedDelay>0 && (priority&0x800)!=0){
+            if(linkedElapsed<linkedDelay){linkedDelay-=linkedElapsed;break;}
+            linkedElapsed-=linkedDelay;linkedDelay=0;start(2);
+        }
         if(mdecOutput!=null && (priority&0x80)!=0){
             OutputTransfer state=mdecOutput;
             state.delay=Math.max(0,state.delay-cycles);
@@ -169,6 +191,6 @@ public final class Dma {
         if((interrupt&0x800000)!=0 && (interrupt&(1<<(16+ch)))!=0)interrupt|=1<<(24+ch);
         updateInterrupt();
     }
-    int clocksToEvent(){int n=mdecOutput!=null&&(priority&0x80)!=0?Math.max(1,mdecOutput.delay):Integer.MAX_VALUE;for(int ch=0;ch<7;ch++)if(chopped[ch]!=null&&(priority&(8<<(ch*4)))!=0)n=Math.min(n,Math.max(1,chopped[ch].delay));return n;}
-    public String diagnostic(){return "DMA chopped="+choppedTransfers+" windows="+choppedWindows+String.format(java.util.Locale.ROOT," active=%02X CD-MADR=%06X BCR=%08X CHCR=%08X",choppedMask,channels[3][0],channels[3][1],channels[3][2]);}
+    int clocksToEvent(){int n=mdecOutput!=null&&(priority&0x80)!=0?Math.max(1,mdecOutput.delay):Integer.MAX_VALUE;if(linkedDelay>0&&(priority&0x800)!=0)n=Math.min(n,linkedDelay);for(int ch=0;ch<7;ch++)if(chopped[ch]!=null&&(priority&(8<<(ch*4)))!=0)n=Math.min(n,Math.max(1,chopped[ch].delay));return n;}
+    public String diagnostic(){return "DMA chopped="+choppedTransfers+" windows="+choppedWindows+String.format(java.util.Locale.ROOT," active=%02X CD-MADR=%06X BCR=%08X CHCR=%08X; GPU-MADR=%06X CHCR=%08X linked-yields=%d resume=%d last=%06X header=%08X",choppedMask,channels[3][0],channels[3][1],channels[3][2],channels[2][0],channels[2][2],linkedYields,linkedDelay,linkedLastAddress,linkedLastHeader);}
 }

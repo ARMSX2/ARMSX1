@@ -9,6 +9,16 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class EngineLogTest {
+    @Test public void dmaYieldRecordsPointerAndSourceWithoutFloodingLog()throws Exception{
+        File dir=temp.newFolder();try(EngineLog log=new EngineLog(dir,new Clock());Gpu gpu=new Gpu(false)){
+            log.configure(true,EngineLog.INFO);Bus b=new Bus(gpu);b.dma.setJournal(log);
+            b.write32(0x100,0x100);b.write32(0x1f8010f0,0x07654b21);b.write32(0x1f8010a0,0x100);b.write32(0x1f8010a8,0x01000401);
+            for(int i=0;i<128;i++)b.dma.tick(1024);assertTrue(log.flush(2000));
+            String text=new String(Files.readAllBytes(new File(dir,"engine-current.jsonl").toPath()),java.nio.charset.StandardCharsets.UTF_8);
+            assertEquals(9,Arrays.stream(text.split("\n")).filter(line->line.contains("dma.gpu.linked.yield")).count());
+            assertTrue(text.contains("Dma.java#transfer/tick"));assertTrue(text.contains("\"next_address\":256"));assertTrue(text.contains("\"last_header\":256"));
+        }
+    }
     @Rule public TemporaryFolder temp=new TemporaryFolder();
     private static final class Clock implements EngineLog.Clock {
         long ns=1000,cpu=100;
