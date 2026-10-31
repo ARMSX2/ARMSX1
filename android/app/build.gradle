@@ -84,8 +84,8 @@ def isDiscordSdkAvailable = file("${project.projectDir}/libs/discord_partner_sdk
 // This matters to the in-app updater (src/github): it decides whether a GitHub release is newer by
 // comparing the release tag against BuildConfig.VERSION_NAME. A published APK still carrying the
 // placeholder 0.1.0 would go on offering the user the very release they just installed, forever.
-def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.3.19-efficiency').toString()
-def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '92183375').toString() as Integer
+def armsxVersionName = (project.findProperty('armsx.versionName') ?: '0.3.20').toString()
+def armsxVersionCode = (project.findProperty('armsx.versionCode') ?: '93486616').toString() as Integer
 // Optional isolated builds keep the normal app and its private data untouched.
 def armsxApplicationId = (project.findProperty('armsx.applicationId') ?: 'com.nanodata.armsx').toString()
 def armsxAppLabel = (project.findProperty('armsx.appLabel') ?: '@string/app_name').toString()
