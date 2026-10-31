@@ -124,7 +124,8 @@ internal fun rememberPs1SettingsEditor(): Ps1SettingsEditor {
     // clearing an override from a badge, re-resolves the merge instead of showing the old tier's
     // values with the new tier's badges.
     val overrideVersion = com.armsx2.config.Ps1GameSettings.version.intValue
-    val state = remember(gameKey, overrideVersion) {
+    val globalVersion = Ps1SettingsStore.version.intValue
+    val state = remember(gameKey, overrideVersion, globalVersion) {
         mutableStateOf(Ps1SettingsStore.load(context, gameKey))
     }
     return remember(state, gameKey) { Ps1SettingsEditor(context, state, gameKey) }

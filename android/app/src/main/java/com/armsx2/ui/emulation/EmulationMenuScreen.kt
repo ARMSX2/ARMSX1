@@ -420,6 +420,10 @@ private fun MenuPage(
         com.armsx2.ui.settings.LocalSettingsScrollState provides scrollState,
         LocalMenuDragViewport provides dragViewport,
     ) {
+        com.armsx2.ui.settings.ChangedSettingsProvider(
+            if (InGameOverlay.settingsScope.value == com.armsx2.config.SettingsScope.Game)
+                InGameOverlay.currentSerial.value else null,
+        ) {
         Column(
             modifier
                 .onGloballyPositioned { dragViewport.bounds = it.boundsInRoot() }
@@ -452,6 +456,7 @@ private fun MenuPage(
                     EmulationMenuTab.Achievements -> AchievementsPane(state, viewModel)
                 }
             }
+        }
         }
     }
 }

@@ -19,6 +19,7 @@ import java.util.Locale
  * [render]. See the layer comment at the top of the object.
  */
 object Ps1SettingsStore {
+    val version = androidx.compose.runtime.mutableIntStateOf(0)
 
     // ---- layers ---------------------------------------------------------------------------
     //
@@ -114,6 +115,7 @@ object Ps1SettingsStore {
             g.writeText(preserveUnknown(serialize(s), existing))
         }
         render(context)
+        version.intValue++
     }
 
     /**
@@ -207,6 +209,12 @@ object Ps1SettingsStore {
      * wrong.
      */
     val ALL_KEYS: Set<String> by lazy { keyValues(serialize(Ps1Settings())).keys }
+
+    private val defaultValues by lazy { keyValues(serialize(Ps1Settings())) }
+
+    /** Compare effective serialized values, including the global values inherited by a game. */
+    fun changedFromDefaults(settings: Ps1Settings): Set<String> =
+        keyValues(serialize(settings)).filter { (key, value) -> defaultValues[key] != value }.keys
 
     /**
      * The subset a game may override.

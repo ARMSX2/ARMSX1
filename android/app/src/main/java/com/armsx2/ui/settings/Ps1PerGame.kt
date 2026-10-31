@@ -105,6 +105,7 @@ internal fun Ps1Scoped(
         )
     }
     CompositionLocalProvider(LocalPs1SettingsScope provides scope) {
+        ChangedSettingsProvider(scope.gameKey) {
         Column(Modifier.fillMaxWidth()) {
             // Cheats always target a game; their own header identifies it.
             // Keep the scope provider, but not generic global/override notices.
@@ -113,6 +114,7 @@ internal fun Ps1Scoped(
                 Ps1PerGamePanel(category)
             }
             content()
+        }
         }
     }
 }
@@ -267,6 +269,9 @@ private fun ensureLabelIndex() {
     labelIndexLang = lang
 }
 
+internal fun changedCoreLabels(keys: Set<String>): Set<String> =
+    ROWS.filter { row -> row.keys.any(keys::contains) }.mapTo(HashSet()) { I18n.get(it.labelKey) }
+
 private val LABELKEY_BY_KEY: Map<String, String> = buildMap {
     // First declaration wins so "Quiet mode"'s secondary claim on runtime.quiet doesn't steal the
     // name from "Enable logging" in the panel listing.
@@ -315,6 +320,7 @@ internal fun ps1CategoryIsPerGameCapable(category: SettingsCategory): Boolean = 
  */
 @Composable
 internal fun PerGameMarker(label: String) {
+    ChangedSettingMarker(label)
     val scope = LocalPs1SettingsScope.current ?: return
     val context = LocalContext.current.applicationContext
     // Subscribe to the language, then re-resolve the label index against it — the label arriving
@@ -402,6 +408,9 @@ internal fun Ps1ScopeNote() {
         lineHeight = 18.sp,
         modifier = Modifier.padding(bottom = 8.dp),
     )
+    Text(str("settings.changedFromDefault.help"),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 12.sp, modifier = Modifier.padding(bottom = 8.dp))
 }
 
 /**

@@ -1272,6 +1272,8 @@ val EN: Map<String, String> = mapOf(
     "renderer.shaderChain.scope.global" to "Global shader settings apply to games without their own shader override.",
     "renderer.shaderChain.scope.game" to "This game has its own shader settings.",
     "renderer.shaderChain.scope.inherited" to "This game is using global shader settings.",
+    "settings.changedFromDefault" to "Changed",
+    "settings.changedFromDefault.help" to "Changed marks a value that differs from its factory default.",
     "renderer.shaderChain.preset.none" to "None",
     "renderer.shaderChain.uncategorised" to "Uncategorised",
     "renderer.shaderPack.cancelled" to "Download cancelled",
