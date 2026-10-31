@@ -42,7 +42,7 @@ public final class Gpu implements AutoCloseable {
             try(EngineLog.Span span=timing==null?null:timing.stage(decision==PresentationPolicy.BFI?"gpu.present.bfi":"gpu.present.shader_subframe")){
                 boolean accepted;
                 if(decision==PresentationPolicy.BFI){accepted=vulkan!=null?vulkan.presentBlack(surface):hardware!=null&&hardware.presentBlack(surface);if(accepted)blackPresented++;}
-                else break;
+                else{if(vulkan==null||!ShaderChain.active())break;ShaderChain.phase(multiple,phase,presentationRate,shaderAspect);accepted=vulkan.presentSubframe(surface);if(accepted)shaderSubframes++;}
                 if(timing!=null)timing.extraPresentation(phase,accepted);
                 if(!accepted)break;
             }

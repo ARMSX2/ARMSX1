@@ -67,8 +67,9 @@ public class PresentationEffectsTest {
             VulkanPresenter output=vulkan(gpu);assertNotNull(output);
             ShaderChain.phase(2,1,60,4f/3);assertTrue(output.presentSubframe(activity.gameSurface()));SystemClock.sleep(50);red=pixel(activity);assertTrue(Integer.toHexString(red),((red>>16)&255)>150&&((red>>8)&255)<3);
             ShaderChain.phase(2,2,60,4f/3);assertTrue(output.presentSubframe(activity.gameSurface()));SystemClock.sleep(50);int green=pixel(activity);assertTrue(Integer.toHexString(green),((green>>8)&255)>150&&((green>>16)&255)<3);
+            gpu.configurePresentation(2,2,120,true);show(gpu,activity);assertEquals(1,gpu.shaderSubframesPresented());assertTrue(gpu.presentationStatus(),gpu.presentationStatus().contains("active"));
             ShaderChain.request(true,new File(directory,"missing.slangp").getAbsolutePath());gpu.prepareShaders();show(gpu,activity);assertFalse(ShaderChain.active());assertEquals(plain,pixel(activity));
-            ShaderChain.request(false,"");show(gpu,activity);assertEquals(plain,pixel(activity));
+            ShaderChain.request(false,"");gpu.configurePresentation(0,2,60,true);show(gpu,activity);assertEquals(plain,pixel(activity));
             android.util.Log.i("PSXEffectsAudit","PASS shader scale="+scale+" "+gpu.renderStatistics());
         }}finally{ShaderChain.request(false,"");inst.runOnMainSync(activity::finish);for(File file:directory.listFiles())assertTrue(file.delete());assertTrue(directory.delete());}
     }

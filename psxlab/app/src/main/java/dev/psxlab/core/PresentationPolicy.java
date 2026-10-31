@@ -6,7 +6,7 @@ public final class PresentationPolicy {
     private PresentationPolicy(){}
     public static int evaluate(int mode,int multiple,float displayHz,float gameHz,boolean allowed,boolean nativePresent,boolean vulkan,boolean shader){
         if(mode<=0)return OFF;if(!allowed)return SUSPENDED;if(!nativePresent)return NO_NATIVE;
-        if(mode==2&&!vulkan)return NEEDS_VULKAN;if(mode==2)return NO_SHADER;
+        if(mode==2&&!vulkan)return NEEDS_VULKAN;if(mode==2&&!shader)return NO_SHADER;
         if(!Float.isFinite(displayHz)||displayHz<=0)return NO_RATE;
         if(multiple<2||multiple>4||!Float.isFinite(gameHz)||gameHz<=0||Math.abs(displayHz-gameHz*multiple)>1f)return RATE_MISMATCH;
         return mode==1?BFI:SHADER;

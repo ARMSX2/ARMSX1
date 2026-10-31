@@ -112,6 +112,7 @@ public final class EngineLog implements AutoCloseable {
     }
     public static String source(String path){
         if(path.equals("gpu.present.bfi"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::presentStored or hardware_gpu.cpp#HardwareGpu::presentBlack";
+        if(path.equals("gpu.present.shader_subframe"))return "psxlab/app/src/main/cpp/shader_chain.cpp#armsx_shader_vk_render + vulkan_output.cpp#Output::presentStored";
         if(path.equals("presentation.mode"))return "psxlab/app/src/main/java/dev/psxlab/core/PresentationPolicy.java#evaluate";
         if(path.startsWith("gpu.raster"))return "psxlab/app/src/main/java/dev/psxlab/core/Gpu.java#flushDrawBatch";
         if(path.startsWith("gpu.present.vulkan"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::presentOnce/presentSharedOnce";
