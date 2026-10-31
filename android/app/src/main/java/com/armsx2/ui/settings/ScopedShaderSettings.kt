@@ -1,5 +1,7 @@
 package com.armsx2.ui.settings
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -30,6 +32,12 @@ internal fun ScopedShaderSettings(gameKey: String? = LocalPs1SettingsScope.curre
         ConfigStore.update(if (gameKey == null) SettingsScope.Global else SettingsScope.Game, gameKey, edit)
         refresh()
     }
+    // One Column of its own. This emits three things -- the scope line, the shader card and the
+    // "use global" button -- and they used to be loose siblings, which only stack when the CALLER
+    // happens to be a Column. The settings hub is one; the quick menu wraps each section in
+    // MenuOrderItem, a Box, so all three were drawn at the same origin on top of each other.
+    // Default arrangement, matching the hub's Column, so the hub looks exactly as before.
+    Column(Modifier.fillMaxWidth()) {
     Text(com.armsx2.i18n.str(when {
         gameKey == null -> "renderer.shaderChain.scope.global"
         pinned -> "renderer.shaderChain.scope.game"
@@ -56,5 +64,6 @@ internal fun ScopedShaderSettings(gameKey: String? = LocalPs1SettingsScope.curre
         TextButton(onClick = inherit, modifier = Modifier.controllerFocusable("settings.shaders.inherit", onConfirm = inherit)) {
             Text(com.armsx2.i18n.str("renderer.shaderChain.inherit"))
         }
+    }
     }
 }
