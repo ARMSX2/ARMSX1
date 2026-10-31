@@ -37,6 +37,7 @@ import java.io.File
 enum class SettingsScope { Global, Game }
 
 object ConfigStore {
+    val version = androidx.compose.runtime.mutableIntStateOf(0)
     private const val KEY_GLOBAL = "config.global"
     private const val KEY_BLEND_BASIC_MIGRATED = "config.migrated.blendBasic"
     // One-time seed of the (now per-game) renderer/upscale fields from the legacy
@@ -191,6 +192,7 @@ object ConfigStore {
 
     fun saveGlobal(s: Settings) {
         MainActivityRuntime.prefs.edit { putString(KEY_GLOBAL, s.toJson().toString()) }
+        version.intValue++
         writeBackupMirror()
     }
 
@@ -279,11 +281,13 @@ object ConfigStore {
 
     fun saveOverrides(serial: String, overrides: JSONObject) {
         MainActivityRuntime.prefs.edit { putString(keyForGame(serial), overrides.toString()) }
+        version.intValue++
         writeBackupMirror()
     }
 
     fun clearOverrides(serial: String) {
         MainActivityRuntime.prefs.edit { remove(keyForGame(serial)) }
+        version.intValue++
         writeBackupMirror()
     }
 
@@ -299,6 +303,14 @@ object ConfigStore {
         if (serial == null) return global
         val overrides = loadOverrides(serial) ?: return global
         return Settings.merge(global, overrides)
+    }
+
+    /** Edit fresh values from the selected tier, keeping unrelated settings intact. */
+    fun update(scope: SettingsScope, serial: String?, edit: (Settings) -> Settings): Settings {
+        val previous = resolveForGame(if (scope == SettingsScope.Game) serial else null)
+        val next = edit(previous)
+        save(scope, serial, next, previous)
+        return next
     }
 
     /**

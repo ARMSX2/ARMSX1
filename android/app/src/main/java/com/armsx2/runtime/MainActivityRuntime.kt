@@ -644,6 +644,9 @@ open class MainActivityRuntime : ComponentActivity() {
                             val scheduling = com.armsx2.config.ConfigStore.resolveForGame(
                                 if (kind == "BIOS") null else currentGame.value?.settingsKey,
                             )
+                            // The PS1 launch path bypasses Settings.applyTo(). Restore the
+                            // global + explicit per-game shader choice on every session.
+                            com.armsx2.core.Ps1Shaders.push(scheduling)
                             NativeApp.setAffinityMode(scheduling.affinityMode)
                             NativeApp.configureSwanSession(
                                 if (kind == "BIOS") "BIOS" else currentGame.value?.settingsKey.orEmpty(),

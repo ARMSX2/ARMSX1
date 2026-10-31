@@ -254,19 +254,7 @@ fun Ps1VideoTab() {
         )
         SettingsDivider()
 
-        // Same preset/parameter editor and storage tiers as the pause menu.
-        val shaderSettings = com.armsx2.ui.InGameOverlay.settingsState.value
-        com.armsx2.ui.common.ShaderChainSection(
-            enabled = shaderSettings.shaderChainEnabled,
-            preset = shaderSettings.shaderChainPreset,
-            params = shaderSettings.shaderChainParams,
-            onEnabledChange = { com.armsx2.ui.InGameOverlay.saveSettings(
-                com.armsx2.ui.InGameOverlay.settingsState.value.copy(shaderChainEnabled = it)) },
-            onPresetChange = { com.armsx2.ui.InGameOverlay.saveSettings(
-                com.armsx2.ui.InGameOverlay.settingsState.value.copy(shaderChainPreset = it)) },
-            onParamsChange = { com.armsx2.ui.InGameOverlay.saveSettings(
-                com.armsx2.ui.InGameOverlay.settingsState.value.copy(shaderChainParams = it)) },
-        )
+        ScopedShaderSettings()
         com.armsx2.ui.common.ShaderManagerSection()
         SettingsDivider()
         FramePresentationSettings(s,

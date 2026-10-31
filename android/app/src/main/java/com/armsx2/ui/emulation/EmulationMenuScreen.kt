@@ -1217,13 +1217,9 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         )
     }
     MenuOrderItem("ShaderChainSection.item") {
-        com.armsx2.ui.common.ShaderChainSection(
-            enabled = shaderSettings.shaderChainEnabled,
-            preset = shaderSettings.shaderChainPreset,
-            params = shaderSettings.shaderChainParams,
-            onEnabledChange = { on -> viewModel.updateSettings { it.copy(shaderChainEnabled = on) } },
-            onPresetChange = { path -> viewModel.updateSettings { it.copy(shaderChainPreset = path) } },
-            onParamsChange = { next -> viewModel.updateSettings { it.copy(shaderChainParams = next) } },
+        com.armsx2.ui.settings.ScopedShaderSettings(
+            if (InGameOverlay.settingsScope.value == com.armsx2.config.SettingsScope.Game)
+                InGameOverlay.currentSerial.value else null,
         )
     }
     MenuOrderItem("ShaderManagerSection.item") {
