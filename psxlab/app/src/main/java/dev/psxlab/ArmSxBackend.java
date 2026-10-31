@@ -243,7 +243,7 @@ public final class ArmSxBackend {
         synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=discPath=path;lastError="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
         boolean booted=false;Restore restore=null;startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=0;hostCpuPercent=hostRssMb=hostAvailableMb=-1;event("launch");
         try{
-            options=readConfig();configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();configureCheats();
+            options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();configureCheats();
             do{
                 restart=null;performance.reset();
                 int scale=Math.max(1,Math.min(5,Integer.parseInt(options.getOrDefault("video.internal_scale","1"))));
