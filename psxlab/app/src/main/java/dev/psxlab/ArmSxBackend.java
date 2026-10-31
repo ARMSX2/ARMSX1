@@ -132,7 +132,7 @@ public final class ArmSxBackend {
     public boolean run(String path){return run(path, () -> true);}
     /** The host's session cancellation and this active/stop transition share this monitor. */
     public boolean run(String path,java.util.function.BooleanSupplier allowed){
-        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=discPath=path;lastError="";}
+        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=discPath=path;lastError="";lastPc=0;lastAudio=lastCore="Not started";fps=0;}
         boolean booted=false;Restore restore=null;startupTiming.reset();event("launch");
         try{
             options=readConfig();configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();

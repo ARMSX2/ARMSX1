@@ -41,7 +41,7 @@ public class LoggerIntegrationTest {
             assertTrue("Frame records",frames>100);assertTrue("Snapshots",snapshots>5);assertTrue("Structured audio",audio);assertTrue("Presentation",present);
             backend.stop();vm.join(10000);assertFalse(vm.isAlive());
             // A failed launch should be diagnosed without terminating the application.
-            backend.run(new File(dir,"missing-game.chd").getAbsolutePath());assertFalse(backend.lastError().isEmpty());assertTrue(backend.flushDiagnosticLog(3000));
+            backend.run(new File(dir,"missing-game.chd").getAbsolutePath());assertFalse(backend.lastError().isEmpty());JSONObject failed=new JSONObject(backend.diagnosticReport());assertEquals("Not started",failed.getString("audio"));assertEquals("Not started",failed.getString("core"));assertEquals("00000000",failed.getString("pc"));assertTrue(backend.flushDiagnosticLog(3000));
             DiagnosticsReport.INSTANCE.setExportDestination(c,Uri.parse("content://"+c.getPackageName()+".logger-audit/report"));assertEquals(DiagnosticExportGate.Result.SUCCESS,DiagnosticsReport.INSTANCE.refresh(c,true));
             String report=read(new File(c.getCacheDir(),"logger-audit-report.txt"));assertTrue(report.contains("core: PSX Lab (original engine)"));assertTrue(report.contains("runtime.error"));assertTrue(report.contains("FileNotFoundException"));assertTrue(report.contains("sleep_overshoot_ns"));assertTrue(report.contains("audio"));assertTrue(report.contains("process exits"));assertTrue(report.contains("current engine thread stacks"));
             Files.write(new File(dir,"export.txt").toPath(),report.getBytes(java.nio.charset.StandardCharsets.UTF_8));
