@@ -13,6 +13,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.Ps1GameSettings
+import com.armsx2.config.Ps1HdPreset
+import com.armsx2.config.Ps1Settings
 import com.armsx2.config.Ps1SettingsStore
 import com.armsx2.config.Settings
 import com.armsx2.i18n.I18n
@@ -36,12 +38,21 @@ internal fun ChangedSettingsProvider(gameKey: String?, content: @Composable () -
         preferences.registerOnSharedPreferenceChangeListener(listener)
         onDispose { preferences.unregisterOnSharedPreferenceChangeListener(listener) }
     }
-    val core = remember(gameKey, coreVersion, gameVersion) { Ps1SettingsStore.changedFromDefaults(Ps1SettingsStore.load(context, gameKey)) }
+    val loaded = remember(gameKey, coreVersion, gameVersion) { Ps1SettingsStore.load(context, gameKey) }
+    val core = remember(loaded) { Ps1SettingsStore.changedFromDefaults(loaded) }
+    // The HD rendering preset row shows a preset, not the three keys behind it. Native after 2x
+    // keeps the hardware rasterizer on (on purpose, see Ps1HdPreset), which is not the factory
+    // renderer, so going by its keys the row kept saying Not default with Native selected. It
+    // follows the selected chip instead; the Hardware rasterizer row still marks the renderer.
+    val hdPresetChanged = remember(loaded) {
+        Ps1HdPreset.selected(loaded) != Ps1HdPreset.selected(Ps1Settings())
+    }
     val host = remember(gameKey, hostVersion) { Settings.diff(Settings(), ConfigStore.resolveForGame(gameKey)) }
     val language = I18n.current
     val osd = InGameOverlay.configuredOsdMode(if (gameKey == null) com.armsx2.config.SettingsScope.Global else com.armsx2.config.SettingsScope.Game, gameKey)
-    val labels = remember(core, host, language, preferenceVersion, osd) {
-        changedCoreLabels(core) + HOST_FIELDS.filterValues(host::has).keys.map(I18n::get) + buildSet {
+    val labels = remember(core, host, language, preferenceVersion, osd, hdPresetChanged) {
+        val hdPreset = I18n.get("renderer.hdPreset.label")
+        (changedCoreLabels(core) - hdPreset) + (if (hdPresetChanged) setOf(hdPreset) else emptySet()) + HOST_FIELDS.filterValues(host::has).keys.map(I18n::get) + buildSet {
             if (preferences.getBoolean("ui.sustainedPerf", false)) add(I18n.get("renderer.sustainedPerf.label"))
             if (preferences.getBoolean("ui.adpf", false)) add(I18n.get("renderer.adpf.label"))
             if (osd != InGameOverlay.OsdMode.Off) add(I18n.get("renderer.debugPanel.label"))
