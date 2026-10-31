@@ -2277,6 +2277,55 @@ open class MainActivityRuntime : ComponentActivity() {
             }
         }
 
+        /**
+         * Treat an install a launcher has already prepared as set up, without making anyone walk
+         * the wizard to say so. Ported from ARMSX2 (#847) and ARMSX3 (#114, #205), requested by
+         * carter-lilley.
+         *
+         * A launcher that installs ARMSX1, puts a BIOS in its BIOS folder and starts a game by
+         * path has done everything setup asks for, and setup still stood in front of it. Worse,
+         * an external launch waits for setupComplete, so the game it was asked to start never
+         * booted.
+         *
+         * Checked against the files rather than any flag a caller could set: a PS1 BIOS the
+         * wizard itself would accept ([com.armsx2.core.Ps1BiosProbe]), in the folder the core
+         * boots from, plus a game, either a ROMs folder already configured or the one this launch
+         * hands over. If placement failed, setup runs and the user can fix it, which is the
+         * failure a skip flag would have hidden. Persisted once decided, matching [finishSetup].
+         */
+        private fun adoptPreparedSetup(context: Context, launchHasGame: Boolean) {
+            if (setupComplete.value) return
+            if (romsDirs.value.isEmpty() && !launchHasGame) return
+
+            fun ps1Bios(file: File): Boolean = file.isFile && !file.name.startsWith(".") &&
+                file.length() == com.armsx2.core.Ps1BiosProbe.IMAGE_SIZE.toLong() && runCatching {
+                    file.inputStream().use { com.armsx2.core.Ps1BiosProbe.probe(it) } != null
+                }.getOrDefault(false)
+            val chosen = bios.value?.takeIf { it.isNotEmpty() }?.let(::File)
+            val found = chosen?.takeIf(::ps1Bios)
+                ?: internalBiosDir(context).listFiles()?.sortedBy { it.name.lowercase() }?.firstOrNull(::ps1Bios)
+                ?: return
+
+            android.util.Log.i("ARMSX", "setup: a BIOS and a game are already in place, skipping the wizard")
+            bios.value = found.absolutePath
+            biosDir.value = null
+            prefs.edit(commit = true) {
+                putString("bios", found.absolutePath)
+                remove("biosDir")
+                putBoolean("setupComplete", true)
+            }
+            // What the wizard's own BIOS pick records as well, so the core looks where the BIOS is.
+            runCatching {
+                com.armsx2.config.Ps1SettingsStore.update(context, null) {
+                    it.copy(
+                        preferredModel = com.armsx2.core.Ps1Config.modelForBios(found) ?: it.preferredModel,
+                        biosSearchPath = found.parent ?: it.biosSearchPath,
+                    )
+                }
+            }
+            setupComplete.value = true
+        }
+
         fun finishSetup() {
             prefs.edit { putBoolean("setupComplete", true) }
             setupComplete.value = true
@@ -3117,13 +3166,17 @@ open class MainActivityRuntime : ComponentActivity() {
                 if (legacy != null) listOf(legacy) else emptyList()
             }
         }
+        adoptPreparedSetup(applicationContext, launchHasGame = extractLaunchUri(intent) != null)
         // Setup recovery. Auto Backup can restore our prefs (incl. setupComplete + the
         // ROMs URIs) on reinstall, but SAF/all-files PERMISSIONS are never backed up — so
         // a restored setup can point at a folder we can no longer read, which would strand
         // the user in an empty library with the wizard skipped. If no configured ROMs
         // folder is actually reachable, drop setupComplete for this session so the wizard
         // re-runs (and re-requests the permission); finishSetup re-arms it.
-        if (setupComplete.value && !romsAccessible(this, romsDirs.value)) {
+        // Only when there IS a ROMs folder to lose. A launcher-prepared install has none (see
+        // adoptPreparedSetup), and romsAccessible counts an empty list as lost, which would put
+        // the wizard straight back after the skip.
+        if (setupComplete.value && romsDirs.value.isNotEmpty() && !romsAccessible(this, romsDirs.value)) {
             setupComplete.value = false
             setupRecoveryNeeded.value = true
         }
