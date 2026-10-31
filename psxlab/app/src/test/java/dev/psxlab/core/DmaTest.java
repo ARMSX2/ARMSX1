@@ -58,14 +58,13 @@ public class DmaTest {
             assertTrue(b.spu.frames>0);
         }
     }
-    @Test public void longValidListKeepsCommandOrderAcrossSlices(){
+    @Test public void longValidListRetainsAtomicCommandOrderAndCompletion(){
         for(boolean threaded:new boolean[]{false,true})try(Gpu g=new Gpu(threaded)){
             Bus b=new Bus(g);b.dma.performanceEnabled=true;
             for(int i=0;i<1200;i++){int at=0x100+8*i;b.write32(at,0x01000000|(i==1199?0xffffff:at+8));b.write32(at+4,0xe6000000|(i&3));}
-            startList(b,0x100);assertFalse(b.interruptPending());assertEquals(512,b.dma.performanceWords[2]);
-            b.dma.tick(1023);assertEquals(512,b.dma.performanceWords[2]);b.dma.tick(1);assertEquals(1024,b.dma.performanceWords[2]);
-            b.dma.tick(1024);assertEquals(1200,b.dma.performanceWords[2]);assertEquals(3<<11,g.status()&0x1800);
+            startList(b,0x100);assertEquals(1200,b.dma.performanceWords[2]);assertEquals(3<<11,g.status()&0x1800);
             assertEquals(0xffffff,b.read32(0x1f8010a0));assertTrue(b.interruptPending());
+            assertEquals(Integer.MAX_VALUE,b.dma.clocksToEvent());assertTrue(b.dma.diagnostic().contains("linked-yields=0"));
         }
     }
     @Test public void disablePausesAndStopCancelsDeferredList(){

@@ -10,9 +10,9 @@ public final class Dma {
     private final Chopped[] chopped=new Chopped[7];
     private int choppedMask;
     private OutputTransfer mdecOutput;
-    // Bound host work even if a guest list points back into itself. Keep MADR
-    // and CHCR live so the CPU can update the list or cancel the transfer.
-    private static final int LINKED_SLICE_BUDGET=1024;
+    // Keep cyclic transfers live so the CPU can repair or cancel the list.
+    // Ordinary lists retain their existing atomic transfer behaviour.
+    private static final int LINKED_RETRY_CLOCKS=1024;
     private int linkedDelay;
     private long linkedYields;
     private int linkedLastAddress,linkedLastHeader;
@@ -71,8 +71,16 @@ public final class Dma {
         int address=channels[ch][0]&0x1ffffc,step=(control&2)!=0?-4:4;
         if(mode==2){
             if(ch!=2 || (control&1)==0)throw new UnsupportedOperationException("Invalid GPU linked-list DMA direction");
-            int budget=LINKED_SLICE_BUDGET;
-            while(budget>0){
+            java.util.HashSet<Integer> visited=new java.util.HashSet<>();
+            while(true){
+                if(!visited.add(address)){
+                    // Re-read RAM after yielding. A cycle is neither a host
+                    // exception nor a successful DMA completion.
+                    linkedDelay=LINKED_RETRY_CLOCKS;linkedYields++;
+                    if(journal!=null && journal.enabled() && (linkedYields<=4 || (linkedYields&(linkedYields-1))==0))
+                        journal.event(EngineLog.WARN,"dma.gpu.linked.yield",java.util.Map.of("yields",linkedYields,"last_address",linkedLastAddress,"last_header",Integer.toUnsignedLong(linkedLastHeader),"next_address",channels[2][0],"control",channels[2][2],"resume_clocks",linkedDelay));
+                    return;
+                }
                 int header=bus.read32(address),words=header>>>24;
                 linkedLastAddress=address;linkedLastHeader=header;
                 if(performanceEnabled)performanceWords[2]+=words;
@@ -80,15 +88,7 @@ public final class Dma {
                 // Test the end bit before masking the RAM mirror/address bits.
                 if((header&0x800000)!=0){channels[ch][0]=0xffffff;complete(ch);return;}
                 channels[ch][0]=header&0xfffffc;address=header&0x1ffffc;
-                budget-=1+words;
             }
-            // A repeated pointer is not a host exception or a completion. Yield
-            // and re-read RAM on the next slice, without allocating a visited set.
-            // This is a functional scheduling budget, not cycle-exact DMA stalls.
-            linkedDelay=LINKED_SLICE_BUDGET;linkedYields++;
-            if(journal!=null && (linkedYields<=4 || (linkedYields&(linkedYields-1))==0))
-                journal.event(EngineLog.WARN,"dma.gpu.linked.yield",java.util.Map.of("yields",linkedYields,"last_address",linkedLastAddress,"last_header",Integer.toUnsignedLong(linkedLastHeader),"next_address",channels[2][0],"control",channels[2][2],"resume_clocks",linkedDelay));
-            return;
         }else{
             if(mode>1)throw new UnsupportedOperationException("Reserved DMA synchronization mode");
             long words=channels[ch][1]&65535;if(words==0)words=65536;

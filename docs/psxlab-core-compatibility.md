@@ -141,24 +141,25 @@ label; it never substitutes the requested setting for a running backend.
 ## GPU linked-list DMA recovery (0.3.18)
 
 A Moto G75 Tekken 3 report stopped in `Dma.transfer` with `Cyclic DMA linked list`
-after a knockout. Repeated addresses no longer raise a host exception. GPU lists
-run in bounded batches, retain the next MADR and busy bit, then resume through
-the device scheduler. Each batch re-reads guest RAM, allowing CPU-side repairs or
+after a knockout. Repeated addresses no longer raise a host exception. A detected
+cycle retains the next MADR and busy bit, then resumes through the device
+scheduler. Each retry re-reads guest RAM, allowing CPU-side repairs or
 cancellation. Only an end marker completes the channel and raises its completion
 interrupt; a permanently cyclic guest list remains busy. This prevents the
 reported fatal path, but does not establish why that particular list was cyclic
 or prove the affected fight will recover. The original device must be retested.
 
-The per-batch visited-address HashSet is removed. Functional work and resumption
-budgets are bounded; GPU DREQ/FIFO timing, CPU bus stalls and DMA arbitration are
-still approximate. This is not a cycle-accuracy claim. Normal short lists retain
-their immediate path. Pending slices survive save states; pre-patch states load
+Cycle detection retains the existing per-transfer visited-address set. Valid
+lists retain their immediate path, including long BIOS ordering tables. Splitting
+valid lists into work-budget batches failed a real BIOS regression check and is
+not enabled. GPU DREQ/FIFO timing, CPU bus stalls and DMA arbitration remain
+approximate. This is not a cycle-accuracy claim. Pending retries survive save states; pre-patch states load
 with no pending slice. Diagnostics include DMA2 MADR/CHCR, last header/address,
 yield count and resume delay. Rate-limited `dma.gpu.linked.yield` events identify
 `Dma.java#transfer/tick`; a yield alone is not proof of a malformed list.
 
 JVM regressions cover self/two-node cycles, CPU RAM edits, native-backed RAM,
-command ordering across batches, terminal-only IRQs, disable/cancel, batched
+atomic completion of long valid lists, terminal-only IRQs, disable/cancel, batched
 clock updates, state restoration and old-state defaults. An Android regression
 exercises the DMA-start callback and subsequent guest store on native interpreted
 and recompiled CPUs, with event scheduling enabled and disabled.
