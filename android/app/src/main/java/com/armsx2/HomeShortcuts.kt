@@ -12,6 +12,14 @@ import android.util.Log
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
+import androidx.core.graphics.drawable.toBitmap
+import coil.imageLoader
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import coil.request.SuccessResult
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -39,8 +47,11 @@ object HomeShortcuts {
     /** Ask the launcher to add a home-screen shortcut that boots [game]. Returns false
      *  if nothing was requested (the caller should surface that). A true return means the
      *  launcher *accepted the request* — it then shows its own confirm UI, so this can't
-     *  report the user's accept/decline. */
-    fun pin(ctx: Context, game: GameInfo): Boolean {
+     *  report the user's accept/decline.
+     *
+     *  Suspends: the cover may come through the image loader (see [coverIcon]), which is the only
+     *  place the library's own box art lives unless the user downloaded covers to disk. */
+    suspend fun pin(ctx: Context, game: GameInfo): Boolean {
         // Raw file:// games hand the core the
         // bare /storage path; SAF games pass the content:// URI string. The boot path
         // (MainActivityRuntime.handleExternalLaunchIntent -> extractLaunchUri) reads the "path" extra.
@@ -53,7 +64,8 @@ object HomeShortcuts {
         }
         val label = game.title.ifBlank { "PS1 Game" }
         val id = "game:" + (game.serial?.takeIf { it.isNotEmpty() } ?: game.uri.toString())
-        val icon = coverIcon(ctx, game) ?: IconCompat.createWithResource(ctx, ctx.applicationInfo.icon)
+        val icon = withContext(Dispatchers.IO) { coverIcon(ctx, game) }
+            ?: IconCompat.createWithResource(ctx, ctx.applicationInfo.icon)
 
         // Attempt the pin even when isRequestPinShortcutSupported reports false — some
         // launchers (handheld/custom) under-report it but still accept the pin. A genuine
@@ -84,12 +96,33 @@ object HomeShortcuts {
      *  #335 was reporting as success. Kept as a plain (non-adaptive) bitmap on purpose:
      *  adaptive icons mask everything outside the centre ~66% safe zone, which would crop
      *  the title off portrait box art. The app-icon fallback is already adaptive. */
-    private fun coverIcon(ctx: Context, game: GameInfo): IconCompat? = runCatching {
-        val f = coverFileFor(ctx, game) ?: return null
-        val bmp = decodeScaled(f.absolutePath, maxIconEdgePx(ctx)) ?: return null
-        IconCompat.createWithBitmap(bmp)
-    }.getOrElse { e ->
-        Log.w(TAG, "coverIcon: cover unusable, falling back to app icon: $e")
+    private suspend fun coverIcon(ctx: Context, game: GameInfo): IconCompat? {
+        val maxPx = maxIconEdgePx(ctx)
+        val fromFile = runCatching { coverFileFor(ctx, game)?.let { decodeScaled(it.absolutePath, maxPx) } }
+            .getOrElse { e -> Log.w(TAG, "coverIcon: cover file unusable: $e"); null }
+        // The box art the library grid shows comes through Coil from the psx-covers URL and lives in
+        // Coil's disk cache, NOT in any file this function can find. Looking only at files is why
+        // every game the user had not downloaded covers for still pinned as the ARMSX1 logo.
+        val bmp = fromFile ?: game.coverUrl?.let { loadCover(ctx, it, maxPx) } ?: return null
+        return IconCompat.createWithBitmap(bmp)
+    }
+
+    /** [url] through the app's image loader, so a cover the library has shown comes from its disk
+     *  cache instantly, and one it has not is fetched the same way the grid would. Memory cache
+     *  off: the bitmap is this icon's own, never one a cover tile is drawing. Null when it cannot be
+     *  had (offline and never fetched, or the cover repo has none). Ported from ARMSX3. */
+    private suspend fun loadCover(ctx: Context, url: String, maxPx: Int): Bitmap? = try {
+        val request = ImageRequest.Builder(ctx)
+            .data(url)
+            .size(maxPx)
+            .allowHardware(false)
+            .memoryCachePolicy(CachePolicy.DISABLED)
+            .build()
+        (ctx.imageLoader.execute(request) as? SuccessResult)?.drawable?.toBitmap()?.let { clampToMax(it, maxPx) }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w(TAG, "coverIcon: $url unusable: $e")
         null
     }
 

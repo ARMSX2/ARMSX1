@@ -1,4 +1,6 @@
 package com.armsx2.ui.home
+
+import kotlinx.coroutines.launch
 import com.armsx2.ui.common.selectionOutline
 import com.armsx2.ui.common.SelectionBlue
 
@@ -68,6 +70,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -209,6 +212,9 @@ fun HomeScreen(
     var overflowMenu by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
     var menuGame by remember { mutableStateOf<GameInfo?>(null) }
+    // Add to Home Screen fetches the cover first (normally from the library's image cache), so
+    // it runs as a coroutine rather than on the click.
+    val shortcutScope = rememberCoroutineScope()
     var showClearRecentsConfirm by remember { mutableStateOf(false) }
     val editFolderLabel = str("collections.edit")
     val folderEntries = buildList {
@@ -982,8 +988,10 @@ fun HomeScreen(
                 val addToHomeFailed = str("games.addToHome.unsupported")
                 GameMenuAction("📌", str("games.addToHome")) {
                     menuGame = null
-                    if (!com.armsx2.HomeShortcuts.pin(context, game))
-                        Toast.makeText(context, addToHomeFailed, Toast.LENGTH_LONG).show()
+                    shortcutScope.launch {
+                        if (!com.armsx2.HomeShortcuts.pin(context, game))
+                            Toast.makeText(context, addToHomeFailed, Toast.LENGTH_LONG).show()
+                    }
                 }
                 // Only offered when the game is actually in Recently Played — this drops
                 // just this one entry, unlike the library-wide "Show Recently Played" toggle.
