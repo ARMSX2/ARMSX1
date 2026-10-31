@@ -68,6 +68,20 @@ public class TexturePacksIntegrationTest {
             }
         }finally{remove(root);}
     }
+    @Test public void higherResolutionPackKeepsItsSubpixelTextureDetail()throws Exception{
+        assertTrue(NativeRasterizer.AVAILABLE);File root=folder();
+        try{
+            File replacements=new File(root,"replacements");assertTrue(replacements.mkdir());short[] source=new short[16];Arrays.fill(source,(short)31);
+            File file=new File(replacements,"vram-write-"+TexturePacks.hashNative(source)+".png");
+            int[] colors={0xffff0000,0xff00ff00,0xff0000ff},pixels=new int[12*12];for(int i=0;i<pixels.length;i++)pixels[i]=colors[i%3];
+            Bitmap bitmap=Bitmap.createBitmap(12,12,Bitmap.Config.ARGB_8888);bitmap.setPixels(pixels,0,12,0,0,12,12);
+            try(OutputStream out=new FileOutputStream(file)){assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG,100,out));}finally{bitmap.recycle();}
+            try(Gpu gpu=new Gpu(false,1,3,true)){
+                gpu.configureTextures(false,true,root.toString());upload(gpu,31);draw(gpu);Gpu.Frame frame=gpu.displayFrame();assertEquals(12,frame.width());
+                for(int x=0;x<12;x++)assertEquals("HD replacement sample "+x,colors[x%3],frame.pixels()[x]);
+            }
+        }finally{remove(root);}
+    }
     @Test public void invalidPacksAndSoftwareRequirementsAreVisible()throws Exception{
         assertTrue(NativeRasterizer.AVAILABLE);File root=folder();
         try{

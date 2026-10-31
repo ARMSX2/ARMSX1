@@ -31,7 +31,7 @@ int blend(int back,int front,int mode){if(mode==0)return(back>>1)+(front>>1);if(
 int texturePixel(int at,int u,int v,int clut,ivec2 fraction){int window=e(at,2),mx=(window&31)*8,my=((window>>5)&31)*8;
  u=((u&255)&~mx)|(((window>>10)&31)*8&mx);v=((v&255)&~my)|(((window>>15)&31)*8&my);
  int page=e(at,1),x=(page&15)*64,y=((page>>4)&1)*256+v,depth=(page>>7)&3;
- if(depth>=2){ivec2 p=ivec2((x+u)&1023,y&511);return replacementTextures!=0?int(imageLoad(hdImage,p*scale+(fraction*scale)/65536).r):int(ram[p.y*1024+p.x]);}
+ if(depth>=2){ivec2 p=ivec2((x+u)&1023,y&511);return replacementTextures!=0?int(imageLoad(hdImage,p*scale+(fraction*scale+ivec2(scale-1))/65536).r):int(ram[p.y*1024+p.x]);}
  ivec2 packedAt=ivec2((x+(u>>(depth==0?2:1)))&1023,y&511);
  int packed=replacementTextures!=0?int(imageLoad(hdImage,packedAt*scale).r):int(ram[packedAt.y*1024+packedAt.x]);
  int index=depth==0?(packed>>((u&3)*4))&15:(packed>>((u&1)*8))&255;
