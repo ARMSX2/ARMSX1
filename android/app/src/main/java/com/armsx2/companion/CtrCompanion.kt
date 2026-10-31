@@ -333,12 +333,12 @@ private class RacePanel(context: Context) : View(context) {
             val portraitSize=(rowHeight-12f).coerceAtMost(80f)
             val portraitTop=(top+bottom-portraitSize)/2
             if (portrait != null) picture(canvas, portrait, RectF(52f, portraitTop, 52f+portraitSize, portraitTop+portraitSize))
-            else centered(canvas, "—", 86f, (top+bottom)/2+6f, 18f, Color.LTGRAY)
+            else centered(canvas, "-", 86f, (top+bottom)/2+6f, 18f, Color.LTGRAY)
             centered(canvas, position.toString(), 29f, (top+bottom)/2+11f, 32f,
                 if (racer?.id == 0) Color.WHITE else 0xffffc857.toInt())
             // Names are a useful fallback if a portrait has not loaded. Fit them to the column.
             paint.textSize=15f
-            val name=racer?.name ?: "—"
+            val name=racer?.name ?: "-"
             val nameSize=if(paint.measureText(name)>78f) 15f*78f/paint.measureText(name) else 15f
             text(canvas, name, 136f, (top+bottom)/2-3f, nameSize.coerceAtLeast(10f), Color.LTGRAY)
             text(canvas, if(racer==null) "" else "Lap ${racer.lap}", 136f, (top+bottom)/2+17f, 13f, Color.LTGRAY)

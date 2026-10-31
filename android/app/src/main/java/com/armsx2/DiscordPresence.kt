@@ -20,6 +20,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.armsx2.discord.DiscordIpc
@@ -76,6 +78,7 @@ object DiscordPresence {
     private const val PREF_ENABLED = "discord.enabled"
     private const val PREF_TOKEN = "discord.token"
     private const val PREF_NOTIFY = "discord.notifyInGame"
+    private const val PREF_SHOW_GAME = "discord.showGameInStatus"
 
     /** Seconds between RA rich-presence re-checks. Discord rate-limits presence updates, so this
      *  stays well clear of it while still following the game within a few seconds. */
@@ -119,6 +122,21 @@ object DiscordPresence {
     private var presenceJob: Job? = null
     private var started = false
 
+    // Whether the app is on screen. Out of sight nothing shows the status or the friends list, and
+    // the device may be locked for hours: the helper drains the SDK once a second instead of twenty
+    // times, and the poll below waits for the app to come back. Ported from ARMSX3 (#196).
+    private val foreground = MutableStateFlow(true)
+
+    /** From the activity's onResume (true) and onStop (false). */
+    fun setForeground(fg: Boolean) {
+        if (foreground.value == fg) return
+        foreground.value = fg
+        sendIdle()
+    }
+
+    private fun sendIdle() =
+        send(DiscordIpc.MSG_IDLE, Bundle().apply { putBoolean(DiscordIpc.DATA_IDLE, !foreground.value) })
+
     // ---- helper-process link -------------------------------------------------------------
     //
     // The Discord SDK runs in :discord, not here. That is a licensing boundary: ARMSX2 is GPL-3.0+
@@ -159,6 +177,8 @@ object DiscordPresence {
             // the helper handles both on one queue, so its `started` guard on MSG_SET_PLAYING still
             // passes by the time this lands.
             scope.launch { pushPresence() }
+            // A restarted helper starts awake; tell it straight away if the app is out of sight.
+            sendIdle()
             if (pendingAuthorize) {
                 pendingAuthorize = false
                 Log.i(TAG, "replaying the queued authorize now the helper is up")
@@ -355,6 +375,7 @@ object DiscordPresence {
             putString(DiscordIpc.DATA_TITLE, game?.let { it.displayTitle(false) }.orEmpty())
             putString(DiscordIpc.DATA_COVER, remoteCoverUrl(game))
             putString(DiscordIpc.DATA_RA, ra)
+            putBoolean(DiscordIpc.DATA_SHOW_GAME, showGameInStatus)
         })
     }
 
@@ -395,6 +416,28 @@ object DiscordPresence {
     /** Mirror of [notifyInGame] for Compose, which cannot observe SharedPreferences. */
     val notifyState = mutableStateOf(true)
 
+    /**
+     * Name the game in the "Playing" status rather than ARMSX1. Default on, matching ARMSX2/ARMSX3:
+     * "Playing Crash Bandicoot" tells a friend far more than "Playing ARMSX1". Off is for anyone
+     * who would rather not broadcast what they are playing -- the cover and second line still
+     * publish, only the member-list headline changes.
+     *
+     * Re-publishes immediately so the toggle is visible in Discord without restarting the game.
+     * Through [sendPresence] rather than the suspend [pushPresence]: this setter runs on the main
+     * thread from a Compose click, and the last RA line is already cached, so there is nothing to
+     * recompute.
+     */
+    var showGameInStatus: Boolean
+        get() = runCatching { MainActivityRuntime.prefs.getBoolean(PREF_SHOW_GAME, true) }.getOrDefault(true)
+        set(value) {
+            runCatching { MainActivityRuntime.prefs.edit().putBoolean(PREF_SHOW_GAME, value).apply() }
+            showGameState.value = value
+            runCatching { sendPresence(MainActivityRuntime.currentGame.value, lastRaPresence) }
+        }
+
+    /** Mirror of [showGameInStatus] for Compose. */
+    val showGameState = mutableStateOf(true)
+
     // Who we had last poll, so a friend appearing can be told apart from a friend still being here.
     private var knownFriends: Set<String> = emptySet()
 
@@ -432,6 +475,7 @@ object DiscordPresence {
         if (!available() || !enabled || started) return
         started = true
         notifyState.value = notifyInGame
+        showGameState.value = showGameInStatus
         bindHelper()
         // Send it here TOO, not only from onServiceConnected.
         //
@@ -602,6 +646,8 @@ object DiscordPresence {
             // and some games update their RA line every few seconds.
             var sinceRaCheck = 0
             while (true) {
+                // Nothing to show while out of sight, so wait here instead of asking every second.
+                foreground.first { it }
                 // No pump here any more: the SDK's callback queue is drained inside the helper, on
                 // the thread that created the client. This loop only asks for a snapshot.
                 bindHelper()

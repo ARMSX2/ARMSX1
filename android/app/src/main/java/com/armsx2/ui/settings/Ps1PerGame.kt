@@ -320,7 +320,6 @@ internal fun ps1CategoryIsPerGameCapable(category: SettingsCategory): Boolean = 
  */
 @Composable
 internal fun PerGameMarker(label: String) {
-    ChangedSettingMarker(label)
     val scope = LocalPs1SettingsScope.current ?: return
     val context = LocalContext.current.applicationContext
     // Subscribe to the language, then re-resolve the label index against it — the label arriving
@@ -514,9 +513,9 @@ internal fun Ps1PerGamePanel(category: SettingsCategory) {
                                         .append(')')
                                 }
                                 if (!known) {
-                                    append("   — ").append(str("scope.overrides.unused"))
+                                    append("   · ").append(str("scope.overrides.unused"))
                                 } else if (rowLabel == null) {
-                                    append("   — ").append(str("scope.overrides.noBadge"))
+                                    append("   · ").append(str("scope.overrides.noBadge"))
                                 }
                             },
                             color = if (known && rowLabel != null) {

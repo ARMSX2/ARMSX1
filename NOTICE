@@ -37,6 +37,17 @@ must accompany distributions as required by those licenses.
   ANGLE                   BSD-3-Clause
   Discord Partner SDK     Proprietary; redistributed only under Discord's terms.
 
+Bundled audio
+-------------
+  Boot animation sound (res/raw/boot_intro.mp4, audio track)
+    "lovelyboot1" by pizzaiolo, https://freesound.org/s/320664/ (CC0 1.0).
+    Based on "KorgStrings001.aif" by humphreyswill,
+    https://freesound.org/s/61109/, licensed under CC BY 4.0
+    (https://creativecommons.org/licenses/by/4.0/). The CC BY 4.0 attribution
+    to humphreyswill carries through the derivative and is given here.
+    Changes: re-encoded to AAC and used as the audio track of the boot
+    animation; the video track is unchanged.
+
 COPYING and COPYING.LESSER are retained for files and contributor-owned
 portions that identify GPL or LGPL terms. Bundled frameworks, files under
 third_party/, and files carrying their own notices remain under those terms.

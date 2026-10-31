@@ -65,6 +65,7 @@ internal fun ControllerTypePicker(player: Int, label: String, options: List<Stri
         .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.46f), RoundedCornerShape(22.dp))) {
         Column(Modifier.fillMaxWidth().controllerFocusable(row, onConfirm = toggle)
             .clickable(onClick = toggle).padding(16.dp)) {
+            ChangedSettingMarker(label)
             Row(Modifier.fillMaxWidth()) {
                 Text(label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 PerGameMarker(label)

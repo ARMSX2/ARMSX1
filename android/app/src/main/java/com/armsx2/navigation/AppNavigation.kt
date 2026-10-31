@@ -97,8 +97,6 @@ fun AppNavigation() {
                 AppRoute.MemoryCardManager -> MemoryCardScreen(onBack = { UiNavigator.back() })
                 AppRoute.SaveManager -> SaveManagerScreen(onBack = { UiNavigator.back() })
                 AppRoute.ControllerManager -> ControllerManagerScreen(onBack = UiNavigator::home)
-                AppRoute.Customisation -> com.armsx2.ui.customisation.CustomisationScreen(onBack = UiNavigator::home)
-                AppRoute.AppHotkeys -> com.armsx2.ui.controls.AppHotkeysScreen(onBack = UiNavigator::home)
                 // Cheats. Was the lifted PS2 Patch Manager (PNACH, PS2 serials, five empty
                 // NativeApp stubs behind every apply button); it is gone.
                 AppRoute.PatchManager -> Ps1CheatsScreen(onBack = UiNavigator::home)

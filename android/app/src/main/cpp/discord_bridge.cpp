@@ -140,6 +140,9 @@ namespace
 		// RetroAchievements rich presence — the game's own "what you are doing" line, which RA
 		// updates as you play ("Wumpa Island, 12/45"). Empty when RA is off or the game has no set.
 		std::string want_ra;
+		// Name the game in the member list ("Playing <game>") rather than the app. On by default;
+		// the Friends screen can turn it off for anyone who would rather not broadcast the title.
+		bool want_show_game = true;
 	};
 
 	State& S()
@@ -159,21 +162,13 @@ namespace
 	// Presence and the friends list. Deliberately no voice scopes: we do not ship voice, and the
 	// consent screen should not ask for anything we cannot use.
 	const char* kScopes = "sdk.social_layer_presence sdk.social_layer";
-	// LargeImage takes "an identifier OR URL" (discordpp.h), and we use both kinds.
-	//
-	// Our own logo is an Art Asset uploaded to the application in the developer portal, referenced
-	// by its key: upload the ARMSX mark as "armsx" under Rich Presence -> Art Assets. Referencing a
-	// URL in the repo instead looked equivalent in ARMSX2 and was not — it pinned the presence to
-	// whatever mark was committed at the time.
-	const char* kIdleImageKey = "armsx";
-
-	// ★ An unuploaded key does NOT "simply render as no image", which is what this file used to
-	// claim and build on. Discord REJECTS THE ENTIRE UpdateRichPresence — "Unable to resolve large
-	// image asset: armsx" — so one missing image meant no rich presence at all: connected, signed
-	// in, and publishing nothing. The key stays (upload it and the logo returns with no code
-	// change), but it is no longer allowed to take the whole status down with it. Cleared the first
-	// time Discord rejects an update over it, after which every push omits it.
-	std::atomic<bool> g_asset_key_resolves{true};
+	// LargeImage takes "an identifier OR URL" (discordpp.h). Our logo goes by URL: the launcher icon
+	// out of this repository, as ARMSX3 does. An Art Asset key resolves only if that name was
+	// uploaded to the application in the developer portal, and "armsx" never was, so Discord
+	// rejected it and every presence went out without the logo in the corner. A URL always resolves.
+	const char* kLogoUrl =
+		"https://raw.githubusercontent.com/ARMSX2/ARMSX1/main/android/app/src/main/res/"
+		"mipmap-xxxhdpi/ic_launcher.png";
 
 	const char* StatusName(BridgeStatus s)
 	{
@@ -195,12 +190,36 @@ namespace
 		DLOGI("status -> %s", StatusName(s));
 	}
 
+	// Discord rejects an ENTIRE UpdateRichPresence when any one text field is outside 2..128
+	// characters -- "Field \"state\": String length is out of range. Must be between 2 and 128" --
+	// and then NOTHING shows: not the game, not the cover. So every text field goes through here.
+	// Too long is cut at a UTF-8 character boundary (titles and RA lines can be Japanese) with an
+	// ellipsis; too short takes [fallback]. Byte length bounds character length, so <= 128 bytes is
+	// always <= 128 characters.
+	std::string DiscordField(const std::string& value, const char* fallback)
+	{
+		constexpr size_t kMax = 128;
+		std::string out = value;
+		if (out.size() > kMax)
+		{
+			size_t cut = kMax - 3;
+			while (cut > 0 && (static_cast<unsigned char>(out[cut]) & 0xC0) == 0x80)
+				--cut; // never split a multi-byte character
+			out.resize(cut);
+			out += "...";
+		}
+		if (out.size() < 2)
+			out = fallback;
+		return out;
+	}
+
 	// Push the remembered game to Discord. Caller must NOT hold the mutex: UpdateRichPresence can
 	// invoke its callback inline.
 	void PushPresence()
 	{
 		std::shared_ptr<discordpp::Client> client;
 		std::string serial, title, cover, ra;
+		bool show_game = true;
 		{
 			std::lock_guard<std::mutex> lock(S().mutex);
 			client = S().client;
@@ -208,6 +227,7 @@ namespace
 			title = S().want_title;
 			cover = S().want_cover;
 			ra = S().want_ra;
+			show_game = S().want_show_game;
 		}
 		if (!client)
 			return;
@@ -219,13 +239,22 @@ namespace
 		activity.SetType(discordpp::ActivityTypes::Playing);
 		if (!title.empty())
 		{
-			activity.SetDetails(title);
+			activity.SetDetails(DiscordField(title, "PlayStation game"));
+			// The member list then reads "Playing <game>" instead of "Playing ARMSX". The library keeps
+			// the application name. Contributed by bshar1865 (https://github.com/bshar1865), ported from
+			// their PCSX2 PR #15085 by way of ARMSX3.
+			if (show_game)
+				activity.SetStatusDisplayType(discordpp::StatusDisplayTypes::Details);
 			// Second line of the Discord status. RetroAchievements' own rich presence when there is
 			// one -- that is worth reading; a disc serial is not, and it was needless detail to
 			// publish about someone. Falls back to the serial so this stays the in-a-game marker: a
 			// friend's client decides "library or game" purely from whether State is set, so a game
 			// with no serial AND no RA still has to set something.
-			activity.SetState(!ra.empty() ? ra : (serial.empty() ? std::string("-") : serial));
+			// The fallback used to be "-": ONE character, below Discord's minimum of two, so a game
+			// with no RA line and no readable serial had its whole presence rejected and showed
+			// nothing at all. "PlayStation" is a real second line, and it is still non-empty, which
+			// is what keeps the in-a-game marker above working.
+			activity.SetState(DiscordField(!ra.empty() ? ra : serial, "PlayStation"));
 		}
 		else
 		{
@@ -236,46 +265,25 @@ namespace
 
 		// The game's own cover while playing, our logo when idle. The cover URL is whatever the
 		// library is already showing (xlenore's psx-covers, keyed by serial), so a game with no
-		// cover published simply falls back to the logo rather than showing a broken image. Mixing
-		// the two forms is fine: Discord resolves each asset field independently, so a URL in the
-		// large slot and an asset key in the small one both render.
-		//
-		// Every use of the key is conditional on it having resolved: an application with no "armsx"
-		// asset uploaded publishes an image-less presence rather than none at all.
-		const bool use_key = g_asset_key_resolves.load(std::memory_order_acquire);
+		// cover published simply falls back to the logo rather than showing a broken image.
 		discordpp::ActivityAssets assets;
-		if (!cover.empty())
-			assets.SetLargeImage(cover);
-		else if (use_key)
-			assets.SetLargeImage(std::string(kIdleImageKey));
+		assets.SetLargeImage(cover.empty() ? std::string(kLogoUrl) : cover);
 		// LargeText carries the SERIAL, because State no longer can -- a friend's client reads this
 		// to look up cover art. Nothing else may be appended: it is parsed, not just shown. (Hover
 		// text on the cover is a reasonable home for a serial anyway.)
-		assets.SetLargeText(serial.empty() ? (title.empty() ? std::string("ARMSX") : title) : serial);
-		if (!cover.empty() && use_key)
+		assets.SetLargeText(DiscordField(serial.empty() ? (title.empty() ? std::string("ARMSX") : title) : serial, "ARMSX"));
+		if (!cover.empty())
 		{
-			// Small badge in the corner keeps ARMSX identifiable when the big image is a cover.
-			assets.SetSmallImage(std::string(kIdleImageKey));
-			assets.SetSmallText(std::string("ARMSX"));
+			// The ARMSX1 logo in the small bubble on the cover's corner, as ARMSX2 and ARMSX3 show
+			// theirs: playing this game, on this emulator.
+			assets.SetSmallImage(std::string(kLogoUrl));
+			assets.SetSmallText(std::string("ARMSX1"));
 		}
 		activity.SetAssets(std::move(assets));
 
-		client->UpdateRichPresence(std::move(activity), [use_key](discordpp::ClientResult result) {
-			if (result.Successful())
-				return;
-			const std::string error = result.Error();
-			DLOGW("presence update failed: %s", error.c_str());
-			// "Unable to resolve <large|small> image asset: armsx" — the key is not uploaded to this
-			// application. Latch it off and publish once more without it, so the status still
-			// appears. use_key is captured, so the retry (which runs with it false) cannot loop.
-			if (use_key && error.find("image asset") != std::string::npos)
-			{
-				g_asset_key_resolves.store(false, std::memory_order_release);
-				DLOGW("art asset '%s' does not resolve for this application; republishing without "
-					  "the logo — upload it under Rich Presence -> Art Assets to restore it",
-					kIdleImageKey);
-				PushPresence();
-			}
+		client->UpdateRichPresence(std::move(activity), [](discordpp::ClientResult result) {
+			if (!result.Successful())
+				DLOGW("presence update failed: %s", result.Error().c_str());
 		});
 	}
 
@@ -563,7 +571,7 @@ Java_com_armsx2_discord_DiscordNative_error(JNIEnv* env, jclass)
 /// Remember and publish what is being played. Empty title = back in the library.
 JNIEXPORT void JNICALL
 Java_com_armsx2_discord_DiscordNative_setPlaying(
-	JNIEnv* env, jclass, jstring serial, jstring title, jstring cover, jstring ra)
+	JNIEnv* env, jclass, jstring serial, jstring title, jstring cover, jstring ra, jboolean showGame)
 {
 	{
 		std::lock_guard<std::mutex> lock(S().mutex);
@@ -571,6 +579,7 @@ Java_com_armsx2_discord_DiscordNative_setPlaying(
 		S().want_title = JStr(env, title);
 		S().want_cover = JStr(env, cover);
 		S().want_ra = JStr(env, ra);
+		S().want_show_game = showGame == JNI_TRUE;
 	}
 	if (S().status.load(std::memory_order_acquire) == static_cast<int>(BridgeStatus::Connected))
 		PushPresence();
@@ -664,7 +673,7 @@ JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_authorize(JNIEnv*, 
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_takeToken(JNIEnv*, jclass) { return nullptr; }
 JNIEXPORT jint JNICALL Java_com_armsx2_discord_DiscordNative_status(JNIEnv*, jclass) { return 0; }
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_error(JNIEnv*, jclass) { return nullptr; }
-JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_setPlaying(JNIEnv*, jclass, jstring, jstring, jstring, jstring) {}
+JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_setPlaying(JNIEnv*, jclass, jstring, jstring, jstring, jstring, jboolean) {}
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_friends(JNIEnv* env, jclass) { return env->NewStringUTF(""); }
 JNIEXPORT jstring JNICALL Java_com_armsx2_discord_DiscordNative_self(JNIEnv* env, jclass) { return env->NewStringUTF(""); }
 JNIEXPORT void JNICALL Java_com_armsx2_discord_DiscordNative_pump(JNIEnv*, jclass) {}

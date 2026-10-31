@@ -213,7 +213,7 @@ fun PadTab(
         if (!sectionTabs) {
             Text(
                 when {
-                    editSerial != null -> "● Editing controls for THIS GAME ($editSerial) — switch to Global up top to change all games."
+                    editSerial != null -> "● Editing controls for THIS GAME ($editSerial). Switch to Global up top to change all games."
                     padSerial != null -> str("pad.scopeHint.globalWithGameHint")
                     else -> str("pad.scopeHint.global")
                 },
@@ -1017,7 +1017,7 @@ private fun StickDirPickerRow(
     }
     if (showPicker.value) {
         StickTargetPickerDialog(
-            title = "${str(if (leftStick) "pad.leftStick.label" else "pad.rightStick.label")} — ${dir.id.replaceFirstChar { it.uppercase() }}",
+            title = "${str(if (leftStick) "pad.leftStick.label" else "pad.rightStick.label")}: ${dir.id.replaceFirstChar { it.uppercase() }}",
             current = code,
             onPick = { picked ->
                 if (picked == null) ControllerMappings.resetStickCode(leftStick, dir, player, serial)

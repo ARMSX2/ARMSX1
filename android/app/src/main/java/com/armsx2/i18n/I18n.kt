@@ -196,7 +196,7 @@ val EN: Map<String, String> = mapOf(
     "driver.unavailable" to "Custom GPU drivers require a Vulkan renderer, which this emulator does not use.",
     "about.title" to "About app",
     "friends.title" to "Friends",
-    "friends.explain" to "Link Discord to show what you're playing and see which friends are in ARMSX1. Uses your existing Discord friends — ARMSX1 keeps no account and runs no server. Only while the app is open.",
+    "friends.explain" to "Link Discord to show what you're playing and see which friends are in ARMSX1. Uses your existing Discord friends. ARMSX1 keeps no account and runs no server. Only while the app is open.",
     "friends.connect" to "Connect Discord",
     "friends.connecting" to "Connecting to Discord…",
     // Separate from the line above on purpose: "connecting" while the user is actually meant to be
@@ -207,7 +207,7 @@ val EN: Map<String, String> = mapOf(
     "friends.error.helper" to
         "The Discord helper didn't start. Close ARMSX1 completely and reopen it, then try again.",
     "friends.error.authorize" to
-        "Discord sign-in didn't finish — the browser was closed, or Discord never came back to " +
+        "Discord sign-in didn't finish: the browser was closed, or Discord never came back to " +
         "ARMSX1. Tap Connect Discord to try again.",
     "friends.error.connect" to
         "Couldn't reach Discord. Check your internet connection, then tap Connect Discord to try again.",
@@ -217,6 +217,8 @@ val EN: Map<String, String> = mapOf(
     "friends.nobody" to "None of your Discord friends are in ARMSX1 right now.",
     "friends.notify" to "Notify me in game",
     "friends.notify.desc" to "Show a message over the game when a friend starts playing ARMSX1.",
+    "friends.showGame" to "Show the game in Discord",
+    "friends.showGame.desc" to "Your Discord status names the game you are playing. Turn off to show ARMSX1 instead.",
     "friends.inLibrary" to "In the library",
     "friends.playing" to "In a game",
     "friends.nowOnline" to "is now online",
@@ -285,15 +287,15 @@ val EN: Map<String, String> = mapOf(
     "app.hotkeys.title" to "App Hotkeys",
     "app.hotkeys.library" to "Open Library",
     "app.hotkeys.modifier" to "Active keys: Hold Select or Start",
-    "app.hotkeys.description" to "Tap Start for the main menu; hold Select or Start for an app hotkey. Menu navigation only—gameplay buttons and emulator hotkeys are unchanged.",
+    "app.hotkeys.description" to "Tap Start for the main menu; hold Select or Start for an app hotkey. Menu navigation only: gameplay buttons and emulator hotkeys are unchanged.",
     "app.hotkeys.holdSelect" to "Hold Select or Start first, then press a control. B cancels.",
     "app.hotkeys.pressControl" to "Keep the modifier held, then press a control. B can also be bound.",
     "app.hotkeys.unassigned" to "Not assigned",
     // --- App tab / language ---
     "app.shareRecentGames" to "Share recently played with other apps",
-    "app.shareRecentGames.desc" to "Your recently-played list — game titles, serials, last-played times and file paths. Off by default. A companion app can ask for it and you can allow just that one app, which switches this on. Turning it on yourself allows every app on the device; turning it off withdraws access from all of them, including any you allowed individually.",
+    "app.shareRecentGames.desc" to "Your recently-played list: game titles, serials, last-played times and file paths. Off by default. A companion app can ask for it and you can allow just that one app, which switches this on. Turning it on yourself allows every app on the device; turning it off withdraws access from all of them, including any you allowed individually.",
     "library.shareRequest.title" to "%s · Share recently played?",
-    "library.shareRequest.message" to "%1\$s (%2\$s) wants to read the games you recently played in %3\$s — titles, serials, last-played times and the file paths of your games.\n\nNo other app is allowed by this. To stop sharing later, switch it off in %3\$s under Settings → App.",
+    "library.shareRequest.message" to "%1\$s (%2\$s) wants to read the games you recently played in %3\$s: titles, serials, last-played times and the file paths of your games.\n\nNo other app is allowed by this. To stop sharing later, switch it off in %3\$s under Settings → App.",
     "library.shareRequest.allow" to "Allow",
     "library.shareRequest.deny" to "Deny",
     "app.libraryMusic" to "Library Music",
@@ -311,18 +313,18 @@ val EN: Map<String, String> = mapOf(
     "app.pauseMusic.default" to "Playing the built-in track.",
     "app.pauseMusic.desc" to "Play music while the in-game pause menu is open, including the settings, achievement and memory card screens. Stops the moment the game resumes, and stays quiet if something else is already playing audio.",
     "app.menuSfx" to "Menu Sound Effects",
-    "app.menuSfx.desc" to "Sound effects for menu actions — select, back, menu open, toggles, sliders. Comes with a built-in set; import a folder of named clips below to use your own instead.",
+    "app.menuSfx.desc" to "Sound effects for menu actions: select, back, menu open, toggles, sliders. Comes with a built-in set; import a folder of named clips below to use your own instead.",
     "app.menuSfx.volume" to "Sound Effects Volume",
     "app.menuSfx.choose" to "Import Sound Pack…",
     "app.menuSfx.reset" to "Use Built-in",
     "app.menuSfx.current" to "Sound pack: %s",
     "app.menuSfx.none" to "Using the built-in sound set.",
-    "app.menuSfx.hint" to "Pick a folder with clips named nav, select, submenu, menu, back, toggle_on, toggle_off, reset, slider, sleep, wake (any of .ogg / .wav / .mp3). Keep them short — a fraction of a second.",
+    "app.menuSfx.hint" to "Pick a folder with clips named nav, select, submenu, menu, back, toggle_on, toggle_off, reset, slider, sleep, wake (any of .ogg / .wav / .mp3). Keep them short: a fraction of a second.",
     "app.welcomeBack" to "Welcome Back!",
     "app.menuSfx.imported" to "Imported %d sound effect(s).",
     "app.menuSfx.importNone" to "No matching files. Name them select, back, menu, toggle_on, toggle_off, reset, or slider.",
-    "app.credits.music" to "Music: \"Calm Ambient 1 (Synthwave 4k)\" — The Cynic Project / cynicmusic.com / pixelsphere.org (CC0)",
-    "app.credits.sfx" to "Menu sounds: \"Interface SFX Pack 1\" — obsydianx.itch.io (CC0)",
+    "app.credits.music" to "Music: \"Calm Ambient 1 (Synthwave 4k)\" · The Cynic Project / cynicmusic.com / pixelsphere.org (CC0)",
+    "app.credits.sfx" to "Menu sounds: \"Interface SFX Pack 1\" · obsydianx.itch.io (CC0)",
     "app.language" to "Language",
     "app.language.desc" to "Choose the app language. Applies instantly.",
     "app.language.system" to "System language",
@@ -331,6 +333,8 @@ val EN: Map<String, String> = mapOf(
     "app.library.search.desc" to "Show the game search field on the library home screen.",
     "app.library.recents" to "Recently played games",
     "app.library.recents.desc" to "Show the Recently Played section on the library home screen.",
+    "app.library.collections" to "Collections",
+    "app.library.collections.desc" to "Show the Collections row on the library home screen.",
     "app.library.gridNames.desc" to "Show each game's name under its cover in grid view.",
     "app.library.opacity" to "Library opacity",
     "ra.website.open" to "Create an account or browse sets on retroachievements.org \u2197",
@@ -395,10 +399,10 @@ val EN: Map<String, String> = mapOf(
     "app.reset" to "Reset app",
     "app.reset.desc" to "Restore every setting to its default. Your games and saves are kept.",
     "app.reset.title" to "Reset the whole app?",
-    "app.reset.message" to "Careful — this resets EVERY setting to default: graphics, controls, hotkeys, touch layouts, per-game settings and patches. Setup will run again.\n\nYour games, BIOS, saves, memory cards, save states and texture packs are NOT deleted. Export a backup first if you want your settings back.\n\nContinue?",
+    "app.reset.message" to "Careful, this resets EVERY setting to default: graphics, controls, hotkeys, touch layouts, per-game settings and patches. Setup will run again.\n\nYour games, BIOS, saves, memory cards, save states and texture packs are NOT deleted. Export a backup first if you want your settings back.\n\nContinue?",
     "app.reset.confirm" to "Reset everything",
     "app.backup.working" to "Working…",
-    "app.backup.exported" to "Backup saved — %s.",
+    "app.backup.exported" to "Backup saved: %s.",
     "app.backup.imported" to "Restored %s. Restarting…",
     "app.backup.failed" to "Backup failed: %s",
     "app.clearCache" to "Clear cached data",
@@ -412,7 +416,7 @@ val EN: Map<String, String> = mapOf(
     "update.check" to "Check for updates",
     "update.checking" to "Checking…",
     "update.upToDate" to "You’re on the latest version.",
-    "update.onNightly" to "You’re on a nightly build — updates come through the nightly channel.",
+    "update.onNightly" to "You’re on a nightly build. Updates come through the nightly channel.",
     "update.available" to "Update available:",
     "update.install" to "Download & install",
     "update.notesUnavailable" to "No release notes.",
@@ -434,7 +438,7 @@ val EN: Map<String, String> = mapOf(
     "app.bgColor" to "Background Color",
     "app.bgColor.desc" to "Recolor the animated library background. The white waves ride over your color; the theme accent above stays separate. Updates live as you drag. Applies to both the 3D GL wave and the simpler 2D wave below.",
     "app.bg.simple" to "Simple animated background",
-    "app.bg.simple.desc" to "Use the lightweight 2D animated wave background instead of the 3D GL one \u2014 the same backdrop devices that can't run the 3D wave already use. Lighter on the GPU, and recolorable with the options above. No effect if you've set a custom background image.",
+    "app.bg.simple.desc" to "Use the lightweight 2D animated wave background instead of the 3D GL one, the same backdrop devices that can't run the 3D wave already use. Lighter on the GPU, and recolorable with the options above. No effect if you've set a custom background image.",
     "app.bgColor.rgb" to "RGB Cycle",
     "app.bgColor.rgb.desc" to "Continuously drift the background through the colour spectrum, like RGB peripherals. Overrides the fixed colour below. Same limitation as above: no effect where the fallback background is in use.",
     "app.theme.light" to "Light",
@@ -478,7 +482,7 @@ val EN: Map<String, String> = mapOf(
     "action.resume" to "Resume",
     "action.fastForward" to "Fast-Forward",
     "action.fastForward.detail" to "Resume at max speed",
-    "action.fastForward.on" to "On — tap to turn off",
+    "action.fastForward.on" to "On (tap to turn off)",
     "action.settings" to "Settings",
     "action.allSettings" to "All Settings",
     "action.back" to "Back",
@@ -513,10 +517,10 @@ val EN: Map<String, String> = mapOf(
     // --- Audio tab ---
     "audio.header.description" to "PS1 audio output. Volume/mute apply instantly; the rest reapply the moment you change them.",
     "audio.volume.label" to "Volume",
-    "audio.volume.description" to "Above 100% boosts/amplifies SPU2 output — handy for quiet games, but very high levels can distort/clip.",
+    "audio.volume.description" to "Above 100% boosts/amplifies SPU2 output. Handy for quiet games, but very high levels can distort/clip.",
     "audio.mute.label" to "Mute",
     "audio.synchronization.label" to "Audio Synchronization",
-    "audio.synchronization.description" to "Time Stretch — keeps audio pitch stable when emulation speed varies. Off = a bit less CPU, but pitch/clock can drift under load.",
+    "audio.synchronization.description" to "Time Stretch: keeps audio pitch stable when emulation speed varies. Off = a bit less CPU, but pitch/clock can drift under load.",
     "audio.buffer.label" to "Audio Buffer",
     "audio.buffer.description" to "Bigger buffer = fewer crackles/dropouts but more latency. Raise this if audio stutters on low-end devices.",
     "audio.outputLatency.label" to "Output Latency",
@@ -526,9 +530,9 @@ val EN: Map<String, String> = mapOf(
     "audio.swapChannels.label" to "Swap Left/Right Channels",
     "audio.swapChannels.description" to "Swaps the stereo output (L↔R). Useful when a device's Type-C port forces reverse-landscape and flips the physical speakers (e.g. the Clamp gamepad), which otherwise reverses the stereo image in racing games. Applies instantly.",
     "audio.spu2Simd.label" to "SPU2 SIMD audio (experimental)",
-    "audio.spu2Simd.description" to "NEON fast path for reverb audio processing — frees up CPU, which can help performance on CPU-limited devices. Off (default) uses the standard path with unchanged audio. Reboot the game to switch.",
+    "audio.spu2Simd.description" to "NEON fast path for reverb audio processing: frees up CPU, which can help performance on CPU-limited devices. Off (default) uses the standard path with unchanged audio. Reboot the game to switch.",
     "audio.openSles.label" to "OpenSL ES audio (compatibility)",
-    "audio.openSles.description" to "Uses the older OpenSL ES output path instead of AAudio. A compatibility fallback for devices where the default audio glitches, crackles, or won't initialize — at the cost of slightly higher latency. Most devices should leave this off (AAudio low-latency). Applies instantly.",
+    "audio.openSles.description" to "Uses the older OpenSL ES output path instead of AAudio. A compatibility fallback for devices where the default audio glitches, crackles, or won't initialize, at the cost of slightly higher latency. Most devices should leave this off (AAudio low-latency). Applies instantly.",
     "audio.lightweight.label" to "Lightweight audio (skip reverb)",
     "audio.lightweight.description" to "Skips SPU2 reverb processing to save CPU on low-end devices. This removes all echo and spatial reverb (caves, halls and ambience sound flat), so only enable it if you need the extra performance and SPU2 SIMD audio isn't enough. Off (default) plays full audio. Applies instantly.",
     // --- Recompiler (JIT) tab ---
@@ -581,7 +585,7 @@ val EN: Map<String, String> = mapOf(
     "backend.driver.angleSubtitle" to "GLES-on-Vulkan · non-Adreno GPUs",
     "backend.driver.use" to "Use",
     "backend.glDriver.label" to "OpenGL Driver",
-    "backend.glDriver.description" to "Choose how the OpenGL renderer runs. ANGLE translates OpenGL ES to Vulkan with a bundled driver — helps on non-Adreno GPUs (Mali / Xclipse / PowerVR) whose native OpenGL driver is weak or buggy. Restart the game to apply.",
+    "backend.glDriver.description" to "Choose how the OpenGL renderer runs. ANGLE translates OpenGL ES to Vulkan with a bundled driver. Helps on non-Adreno GPUs (Mali / Xclipse / PowerVR) whose native OpenGL driver is weak or buggy. Restart the game to apply.",
     "backend.gpuDriver.description" to "Replace the system Vulkan driver with Mesa Turnip or another Adreno driver. Recommended for Adreno-6XX devices on stale OEM drivers.",
     "backend.gpuDriver.label" to "GPU Driver",
     "backend.graphicsApi.label" to "Graphics API",
@@ -647,6 +651,7 @@ val EN: Map<String, String> = mapOf(
     "games.overflow.englishTitles" to "English titles",
     "games.overflow.gridNames" to "Game names in grid",
     "games.overflow.showHidden" to "Show hidden games",
+    "games.overflow.showCollections" to "Show collections",
     "games.addToHome" to "Add to home screen",
     "games.addToHome.unsupported" to "This launcher doesn't support adding shortcuts to the home screen.",
     "games.hide" to "Hide from library",
@@ -654,9 +659,10 @@ val EN: Map<String, String> = mapOf(
     "games.removeRecent" to "Remove from Recently Played",
     "games.recent.clearAll" to "Clear All",
     "games.recent.clearAll.title" to "Clear Recently Played?",
-    "games.recent.clearAll.message" to "This empties the Recently Played shelf. Your games, saves and settings are not touched — titles come back as you play them again.",
+    "games.recent.clearAll.message" to "This empties the Recently Played shelf. Your games, saves and settings are not touched; titles come back as you play them again.",
     "games.overflow.openNavigation" to "Open navigation",
     "games.overflow.setup" to "Setup / Change Folders",
+    "action.launchGame" to "Launch Game",
     "app.setup.description" to "Game folders, BIOS and user-data location.",
     "games.overflow.sortRecent" to "Sort by recently played",
     "games.overflow.sortTitle" to "Sort by title",
@@ -743,7 +749,7 @@ val EN: Map<String, String> = mapOf(
     "memcard.toast.folderImported" to "Folder memory card imported",
     "memcard.toast.imported" to "Memory card imported",
     "memcard.useDefaultSlots" to "Use Default Slots",
-    "overlay.interfaceScaling.description" to "Interface scaling — resize the library and menu UI to fit your screen. ",
+    "overlay.interfaceScaling.description" to "Interface scaling: resize the library and menu UI to fit your screen. ",
     "overlay.intro.description" to "Show or hide parts of the performance overlay. Turning GPU off also ",
     "overlay.toggle.controlInputs" to "Control inputs (bottom-left)",
     "overlay.toggle.cpuUsage" to "CPU usage",
@@ -782,7 +788,7 @@ val EN: Map<String, String> = mapOf(
     "overlay.osdColor.pink" to "Pink",
     "overlay.osdColor.purple" to "Purple",
     "overlay.osdSize.label" to "OSD Size",
-    "overlay.osdSize.description" to "Size of the on-screen display drawn over the game — FPS, stats and notifications. Does not affect the app's menus. 100% = the core's default; ARMSX1 ships 65% so it doesn't crowd a handheld screen.",
+    "overlay.osdSize.description" to "Size of the on-screen display drawn over the game: FPS, stats and notifications. Does not affect the app's menus. 100% = the core's default; ARMSX1 ships 65% so it doesn't crowd a handheld screen.",
     "overlay.uiSize.label" to "UI Size (borders)",
     "pad.action.bind" to "Bind",
     "pad.action.clear" to "Clear",
@@ -801,10 +807,10 @@ val EN: Map<String, String> = mapOf(
     "pad.usb.port" to "Port",
     "pad.usb.none" to "Not Connected",
     "pad.usb.subtype" to "Variant",
-    "pad.usb.help" to "Attach an emulated USB device to a port \u2014 Buzz buzzers, a Rock Band drum kit, Keyboardmania, a DJ turntable, GunCon 2 and more. Your normal controls drive it, no extra mapping needed. Restart the game after changing a port: the game checks what is plugged in when it boots.",
+    "pad.usb.help" to "Attach an emulated USB device to a port: Buzz buzzers, a Rock Band drum kit, Keyboardmania, a DJ turntable, GunCon 2 and more. Your normal controls drive it, no extra mapping needed. Restart the game after changing a port: the game checks what is plugged in when it boots.",
     "pad.lightgun.section" to "Lightgun (GunCon 2)",
     "pad.lightgun.enable.label" to "Enable GunCon 2",
-    "pad.lightgun.enable.description" to "Attaches an emulated GunCon 2 to a USB port and aims it with the touchscreen. Restart the game after changing this \u2014 the game probes the port when it boots.",
+    "pad.lightgun.enable.description" to "Attaches an emulated GunCon 2 to a USB port and aims it with the touchscreen. Restart the game after changing this: the game probes the port when it boots.",
     "pad.lightgun.port.label" to "USB port",
     "pad.lightgun.port1" to "Port 1",
     "pad.lightgun.port2" to "Port 2",
@@ -812,7 +818,7 @@ val EN: Map<String, String> = mapOf(
     "pad.lightgun.help" to "Touch to aim and fire. Touching near a screen edge fires OFF-SCREEN, which is how these games reload. A/B/C, Start, Select and Cal (recalibrate) appear down the right edge.",
     "pad.gesture.section" to "Gesture Control",
     "pad.gesture.enable.label" to "Enable gesture control",
-    "pad.gesture.enable.description" to "Swipes and a double-tap on empty screen area fire a button. Only where there is no on-screen control \u2014 a finger that lands on a button, stick or D-pad still drives that control.",
+    "pad.gesture.enable.description" to "Swipes and a double-tap on empty screen area fire a button. Only where there is no on-screen control: a finger that lands on a button, stick or D-pad still drives that control.",
     "pad.gesture.none" to "None",
     "pad.gesture.up" to "Swipe Up",
     "pad.gesture.down" to "Swipe Down",
@@ -838,26 +844,26 @@ val EN: Map<String, String> = mapOf(
     "pad.gyro.invertX.label" to "Invert gyro X",
     "pad.gyro.invertY.label" to "Invert gyro Y",
     "pad.gyro.unavailable" to "This device has no motion sensor for that mode.",
-    "pad.gyro.tiltFallback.steering" to "No gyroscope — using the accelerometer. Tilt works normally for steering. Recenter to set the neutral position.",
-    "pad.gyro.tiltFallback.aim" to "No gyroscope — using the accelerometer. Aim is tilt-based: twist to look left/right, tip to look up/down. Recenter to set the neutral position.",
+    "pad.gyro.tiltFallback.steering" to "No gyroscope, using the accelerometer. Tilt works normally for steering. Recenter to set the neutral position.",
+    "pad.gyro.tiltFallback.aim" to "No gyroscope, using the accelerometer. Aim is tilt-based: twist to look left/right, tip to look up/down. Recenter to set the neutral position.",
     "pad.instruction.tapThenPress" to "Tap an action, then press a physical controller button.",
     "pad.leftStick.description" to "What the left analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
-    "pad.leftStick.invertX.description" to "Mirror the left stick horizontally — fixes \"left is right\".",
-    "pad.leftStick.invertX.label" to "Left Stick — Invert X",
-    "pad.leftStick.invertY.description" to "Mirror the left stick vertically — fixes \"down is up\".",
-    "pad.leftStick.invertY.label" to "Left Stick — Invert Y",
+    "pad.leftStick.invertX.description" to "Mirror the left stick horizontally. Fixes \"left is right\".",
+    "pad.leftStick.invertX.label" to "Left Stick: Invert X",
+    "pad.leftStick.invertY.description" to "Mirror the left stick vertically. Fixes \"down is up\".",
+    "pad.leftStick.invertY.label" to "Left Stick: Invert Y",
     "pad.leftStick.label" to "Left Stick",
     "pad.leftStick.swapXY.description" to "Swap the left stick's horizontal and vertical axes (for a stick that reads rotated 90°).",
-    "pad.leftStick.swapXY.label" to "Left Stick — Swap X/Y",
+    "pad.leftStick.swapXY.label" to "Left Stick: Swap X/Y",
     "pad.leftStickFeel.title" to "Left Stick Feel",
     "pad.macro.notSet" to "Not set",
     "pad.macroConfig.intro" to "Tap the buttons this macro should press together.",
-    "pad.macro.frequency.description" to "Hold: the buttons stay pressed while you hold the macro. Any other value turns it into a turbo — the buttons toggle on and off at that rate, so mash-heavy games don't cost you a thumb. Lower = faster.",
+    "pad.macro.frequency.description" to "Hold: the buttons stay pressed while you hold the macro. Any other value turns it into a turbo: the buttons toggle on and off at that rate, so mash-heavy games don't cost you a thumb. Lower = faster.",
     "pad.macro.frequency.every" to "Every %d frames",
     "pad.macro.frequency.hold" to "Hold",
     "pad.macro.frequency.label" to "Frequency",
-    "pad.macros.header" to "Macros (combo buttons — touch + physical)",
-    "pad.onScreenControls.description" to "On-screen touch buttons. Never = always hidden (for physical-controls devices — also hides the settings cog so nothing overlaps R1). 1–10s = auto-hide after that long without a touch. Auto = show on touch, hide when you use a controller.",
+    "pad.macros.header" to "Macros (combo buttons: touch + physical)",
+    "pad.onScreenControls.description" to "On-screen touch buttons. Never = always hidden (for physical-controls devices; also hides the settings cog so nothing overlaps R1). 1–10s = auto-hide after that long without a touch. Auto = show on touch, hide when you use a controller.",
     "pad.multiTouch.description" to "How far from a button's center a touch still counts as a press, so you can hit two adjacent on-screen buttons at once. Higher = more reach (easier rolls and combos).",
     "pad.onScreenControls.label" to "On-screen controls",
     "pad.player1" to "Player 1",
@@ -865,15 +871,15 @@ val EN: Map<String, String> = mapOf(
     "pad.pressButton" to "Press a button...",
     "pad.pressControllerButton" to "Press a controller button…",
     "pad.rightStick.description" to "What the right analog stick sends: Analog (default), Face, or Custom (bind each direction below).",
-    "pad.rightStick.invertX.description" to "Mirror the right stick horizontally — fixes \"left is right\".",
-    "pad.rightStick.invertX.label" to "Right Stick — Invert X",
-    "pad.rightStick.invertY.description" to "Mirror the right stick vertically — fixes \"down is up\".",
-    "pad.rightStick.invertY.label" to "Right Stick — Invert Y",
+    "pad.rightStick.invertX.description" to "Mirror the right stick horizontally. Fixes \"left is right\".",
+    "pad.rightStick.invertX.label" to "Right Stick: Invert X",
+    "pad.rightStick.invertY.description" to "Mirror the right stick vertically. Fixes \"down is up\".",
+    "pad.rightStick.invertY.label" to "Right Stick: Invert Y",
     "pad.rightStick.label" to "Right Stick",
     "pad.rightStick.swapXY.description" to "Swap the right stick's horizontal and vertical axes (for a stick that reads rotated 90°).",
-    "pad.rightStick.swapXY.label" to "Right Stick — Swap X/Y",
+    "pad.rightStick.swapXY.label" to "Right Stick: Swap X/Y",
     "pad.rightStickFeel.title" to "Right Stick Feel",
-    "pad.multitap.description" to "Enable Multitap so up to 8 controllers can play. Connect your gamepads, then launch the game — the first pad is Player 1, the second is Player 2, and any others fill the multitap slots. Leave off for normal 1–2 player games.",
+    "pad.multitap.description" to "Enable Multitap so up to 8 controllers can play. Connect your gamepads, then launch the game: the first pad is Player 1, the second is Player 2, and any others fill the multitap slots. Leave off for normal 1–2 player games.",
     "pad.multitap.label" to "Multitap (up to 8 players)",
     "pad.multiplayer.label" to "Multiplayer setup",
     "pad.multiplayer.standard" to "Standard (1–2 players)",
@@ -887,11 +893,11 @@ val EN: Map<String, String> = mapOf(
     "pad.multiplayer.portDescription" to "An emulated four-controller adapter on this physical port. Unsupported games may not recognise controllers.",
     "pad.rumble.description" to "Master switch for controller rumble and the device's built-in vibration. Turn off to silence all haptics.",
     "pad.rumble.label" to "Rumble / Vibration",
-    "pad.hapticStrength.description" to "Scales all vibration — controller rumble and on-screen touch haptics alike. Below 100% tames a strong motor; above 100% boosts a weak one.",
+    "pad.hapticStrength.description" to "Scales all vibration: controller rumble and on-screen touch haptics alike. Below 100% tames a strong motor; above 100% boosts a weak one.",
     "pad.hapticStrength.label" to "Vibration Strength",
     "pad.scopeHint.global" to "○ Editing GLOBAL controls (all games).",
     "pad.scopeHint.globalWithGameHint" to "○ Editing GLOBAL controls (all games). Switch to Game up top for a per-game map.",
-    "pad.padProfiles.info" to "Save the button map, stick modes and stick binds above under a name, then pick it again later. A profile applies to the player and scope you're editing (shown above), so you can save one map and apply it per game. Stick feel — deadzone, sensitivity, rumble — isn't part of a profile: it describes your pad, not the game. Profiles save to the inputprofiles folder, so they survive moving your data folder.",
+    "pad.padProfiles.info" to "Save the button map, stick modes and stick binds above under a name, then pick it again later. A profile applies to the player and scope you're editing (shown above), so you can save one map and apply it per game. Stick feel (deadzone, sensitivity, rumble) isn't part of a profile: it describes your pad, not the game. Profiles save to the inputprofiles folder, so they survive moving your data folder.",
     "pad.padProfiles.namePlaceholder" to "Profile name",
     "pad.padProfiles.none" to "No saved profiles yet.",
     "pad.padProfiles.saveAs" to "Save As",
@@ -945,7 +951,7 @@ val EN: Map<String, String> = mapOf(
     "pad.stickFeel.acceleration.label" to "Acceleration",
     "pad.stickFeel.antiDeadzone.description" to "Smallest output sent to the game, to cancel a game's OWN built-in stick deadzone (e.g. Cold Fear / Area 51 ignore the stick until ~45%, then aim jumps). Set near the game's deadzone so any stick movement responds immediately and the full travel maps smoothly above it. 0 = off.",
     "pad.stickFeel.antiDeadzone.label" to "Anti-Deadzone",
-    "pad.stickFeel.deadzone.description" to "Fraction of physical analog travel ignored near center (applied to the stick's radial distance, so diagonals behave like cardinals). Output re-normalizes past it, so movement still ramps smoothly from 0 — which also means the on-screen effect can be masked by a game's OWN built-in deadzone (Area 51 ignores input below ~45% no matter what you set here; use Anti-Deadzone for that). 0 = off — raw hardware values pass through, including any stick drift.",
+    "pad.stickFeel.deadzone.description" to "Fraction of physical analog travel ignored near center (applied to the stick's radial distance, so diagonals behave like cardinals). Output re-normalizes past it, so movement still ramps smoothly from 0, which also means the on-screen effect can be masked by a game's OWN built-in deadzone (Area 51 ignores input below ~45% no matter what you set here; use Anti-Deadzone for that). 0 = off. Raw hardware values pass through, including any stick drift.",
     "pad.stickFeel.deadzone.label" to "Deadzone",
     "pad.stickFeel.responseCurve.label" to "Response Curve",
     "pad.stickFeel.responseCurve.description" to "Reshapes stick response: higher settings make small tilts gentler for finer aim while full tilt still reaches max. Tames over-sensitive hall-effect sticks (e.g. GTA: San Andreas).",
@@ -961,8 +967,8 @@ val EN: Map<String, String> = mapOf(
     "pad.stickTarget.hotkeys" to "Hotkeys",
     "pad.stickTarget.intro" to "Choose what this stick direction sends. Works regardless of which physical buttons are bound.",
     "pad.stickTarget.ps2Buttons" to "PS1 Buttons",
-    "pad.testRumble.player1" to "Test rumble — Player 1",
-    "pad.testRumble.player2" to "Test rumble — Player 2",
+    "pad.testRumble.player1" to "Test rumble: Player 1",
+    "pad.testRumble.player2" to "Test rumble: Player 2",
     "pad.touchHaptics.description" to "Vibrate briefly when you press an on-screen button (like PPSSPP / Azahar). Separate from controller rumble.",
     "pad.touchHaptics.label" to "Touch Haptics",
     "pad.compactShoulders.label" to "Compact shoulder touch areas",
@@ -970,13 +976,13 @@ val EN: Map<String, String> = mapOf(
     "touch.editor.compactShouldersOn" to "Compact L/R: On",
     "touch.editor.compactShouldersOff" to "Compact L/R: Off",
     "pad.pauseTapToReveal.label" to "Tap to reveal pause",
-    "pad.pauseTapToReveal.description" to "Keep the on-screen pause button (top-right ⏸) hidden until you tap its corner, which surfaces it for a few seconds — tap again to open the pause menu. Off shows the button all the time. Either way that corner always reaches the menu, so this can't lock you out. Drag/resize it in the overlay editor.",
-    "patches.disclaimer" to "Cheats and patches written for a different emulator can freeze, crash or glitch games here. If a game misbehaves, turn patches and cheats off and test again before reporting it — if it only happens with them on, it's the patch.",
+    "pad.pauseTapToReveal.description" to "Keep the on-screen pause button (top-right ⏸) hidden until you tap its corner, which surfaces it for a few seconds; tap again to open the pause menu. Off shows the button all the time. Either way that corner always reaches the menu, so this can't lock you out. Drag/resize it in the overlay editor.",
+    "patches.disclaimer" to "Cheats and patches written for a different emulator can freeze, crash or glitch games here. If a game misbehaves, turn patches and cheats off and test again before reporting it: if it only happens with them on, it's the patch.",
     "patches.bundled.header" to "Bundled with ARMSX1",
-    "patches.bundled.explain" to "These ship inside ARMSX1 and are applied to this game automatically — you didn't install them. Ones with no name are always on and can't be switched off individually.",
+    "patches.bundled.explain" to "These ship inside ARMSX1 and are applied to this game automatically; you didn't install them. Ones with no name are always on and can't be switched off individually.",
     "patches.bundled.alwaysOn" to "always on, no name to switch",
     "patches.bundled.extract" to "Copy to my patches (makes them editable)",
-    "patches.bundled.extracted" to "Copied. The bundled version is now ignored — switch the cheats off individually above.",
+    "patches.bundled.extracted" to "Copied. The bundled version is now ignored. Switch the cheats off individually above.",
     "patches.bundled.extractFailed" to "Couldn't copy the bundled patch file.",
     "patches.action.allOff" to "All off",
     "patches.action.allOn" to "All on",
@@ -992,14 +998,14 @@ val EN: Map<String, String> = mapOf(
     "patches.action.save" to "SAVE",
     "patches.action.selectAll" to "Select all",
     "patches.action.yes" to "YES",
-    "patches.applyAtBoot" to "Patches apply at boot — restart the game after changing these.",
-    "patches.button.browseOnline" to "⤓  Browse online — patches & cheats",
+    "patches.applyAtBoot" to "Patches apply at boot. Restart the game after changing these.",
+    "patches.button.browseOnline" to "⤓  Browse online: patches & cheats",
     "patches.button.enterCodes" to "+ Enter codes",
     "patches.button.fetching" to "Fetching…",
     "patches.button.importPnach" to "+ Import .pnach",
     "patches.button.myLocalToggle" to "☰  My local patches & cheats  (toggle on/off)",
     "patches.cheats.label" to "Cheats",
-    "patches.cheats.labelHardcore" to "Cheats — disabled in Hardcore",
+    "patches.cheats.labelHardcore" to "Cheats (disabled in Hardcore)",
     "patches.dialog.enterCodesTitle" to "Enter PNACH Codes",
     "patches.dialog.myLocal" to "My local patches & cheats",
     "patches.dialog.noActiveCrc" to "No active CRC found; start the game first for auto-naming.",
@@ -1009,7 +1015,7 @@ val EN: Map<String, String> = mapOf(
     "patches.field.name" to "Name",
     "patches.field.pnachLines" to "PNACH patch= lines",
     "patches.hardcoreNoticeCheatsDisabled" to "Cheats are disabled while RetroAchievements Hardcore mode is active. Patches still apply.",
-    "patches.hostFs.description" to "Lets the game read files from the host: namespace — needed for some ELF / homebrew and advanced mods.",
+    "patches.hostFs.description" to "Lets the game read files from the host: namespace. Needed for some ELF / homebrew and advanced mods.",
     "patches.hostFs.label" to "HostFS (host: filesystem)",
     "patches.installedFilesHint" to "Installed files (including cheats you copied into the cheats folder). ",
     "patches.import.folder" to "Import folder of cheats\u2026",
@@ -1033,7 +1039,7 @@ val EN: Map<String, String> = mapOf(
     "patches.warning.message" to "Using patch codes can have unpredictable effects on games, causing ",
     "patches.warning.title" to "Patch codes",
     "patches.widescreen.label" to "Auto-Apply Widescreen (16:9) Patches",
-    "patches.widescreen.description" to "Automatically applies a widescreen patch to EVERY game that has one — you don't pick them per game. Games that weren't built for 16:9 can come out stretched, cropped, or missing on-screen text, so turn this off if a game looks wrong. Applies at boot — restart the game after changing this.",
+    "patches.widescreen.description" to "Automatically applies a widescreen patch to EVERY game that has one. You don't pick them per game. Games that weren't built for 16:9 can come out stretched, cropped, or missing on-screen text, so turn this off if a game looks wrong. Applies at boot. Restart the game after changing this.",
     // ---- PS1 cheats ----------------------------------------------------------
     // GameShark codes from a .cht file, applied by psx/cheats.c. Distinct from the `patches.*`
     // keys above, which belonged to the removed PS2 PNACH manager. Keys follow the same
@@ -1059,15 +1065,15 @@ val EN: Map<String, String> = mapOf(
     "cheats.info.entries" to "Cheats in file",
     "cheats.info.noFile" to "no file yet",
     "cheats.info.armed" to "Active right now",
-    "cheats.info.armed.description" to "Counted by the emulator itself, not by what's ticked here — if these disagree, the emulator is right.",
+    "cheats.info.armed.description" to "Counted by the emulator itself, not by what's ticked here. If these disagree, the emulator is right.",
     "cheats.master.label" to "Enable cheats",
-    "cheats.master.labelHardcore" to "Cheats — disabled in Hardcore",
+    "cheats.master.labelHardcore" to "Cheats (disabled in Hardcore)",
     "cheats.master.description" to "Master switch for this game. Off leaves your selection intact but applies nothing.",
     "cheats.empty.body" to "No cheats available for this game yet. Browse the built-in database below, or paste/import your own GameShark codes.",
     "cheats.database.serial" to "Game / region ID",
     "cheats.download.button" to "Download cheats",
     "cheats.download.busy" to "Downloading and checking cheats…",
-    "cheats.download.description" to "Get the latest database from GitHub — no APK update needed. Custom codes and selections are kept; new cheats start disabled.",
+    "cheats.download.description" to "Get the latest database from GitHub. No APK update needed. Custom codes and selections are kept; new cheats start disabled.",
     "cheats.download.success" to "Cheat database updated and saved for offline use.",
     "cheats.download.current" to "You already have this database update.",
     "cheats.download.failed" to "Could not download or validate the GitHub database. Your previous database and cheats were kept. Check your connection and try again.",
@@ -1083,13 +1089,13 @@ val EN: Map<String, String> = mapOf(
     "cheats.database.otherRegionOnly" to "Lists exist for another region or release, but none were found for yours. Incompatible lists are not loaded automatically.",
     "cheats.database.allGames" to "Browse all database games",
     "cheats.database.thisGame" to "Show matches for this game",
-    "cheats.database.wrongRegion" to "Different region/release — cannot load for this game",
+    "cheats.database.wrongRegion" to "Different region/release. Cannot load for this game",
     "cheats.database.regionBlocked" to "This catalogue's region, disc or demo/retail release differs from game ID %s. Loading is blocked to avoid applying another release's codes. Choose a matching list or import codes for your release.",
     "cheats.database.coverage" to "Catalogue coverage",
     "cheats.database.coverage.description" to "Lists linked to %d of %d known game/region IDs. Some lists need revision confirmation, and many releases have no bundled codes.",
     "cheats.database.browse" to "Browse cheat database",
     "cheats.database.start.title" to "Built-in cheat database",
-    "cheats.database.start.description" to "Included from the first launch — no download or import needed. Browse all games here. To enable cheats, select a game in your library or open Cheats while that game is running.",
+    "cheats.database.start.description" to "Included from the first launch. No download or import needed. Browse all games here. To enable cheats, select a game in your library or open Cheats while that game is running.",
     "cheats.database.start.preview" to "Preview only. These codes are not enabled or assigned to a game. Open this game's Cheats screen to load the correct region/revision and select codes.",
     "cheats.database.start.disabled" to "Not enabled",
     "cheats.database.start.back" to "Back to all game lists",
@@ -1112,7 +1118,7 @@ val EN: Map<String, String> = mapOf(
     "cheats.hardcore.title" to "Cheats are off in Hardcore mode",
     "cheats.hardcore.body" to "RetroAchievements Hardcore mode disables every cheat. Your selection is kept and comes back when Hardcore is off.",
     "cheats.mismatch.title" to "This list doesn't match the emulator",
-    "cheats.mismatch.body" to "This screen read %d cheats from the file but the emulator loaded %d. Reload from file; if they still differ, please report it — the emulator's count is the one that matters.",
+    "cheats.mismatch.body" to "This screen read %d cheats from the file but the emulator loaded %d. Reload from file; if they still differ, please report it: the emulator's count is the one that matters.",
     "cheats.orphans.title" to "Some enabled cheats are missing",
     "cheats.orphans.body" to "These are switched on but no longer in the file, so they do nothing: %s. That usually means the cheat was renamed or the file was replaced.",
     "cheats.orphans.clear" to "Forget them",
@@ -1123,9 +1129,9 @@ val EN: Map<String, String> = mapOf(
     "cheats.action.import" to "Import a cheat file",
     "cheats.action.import.description" to "Add a .cht or .txt code list to this game's cheats.",
     "cheats.action.reload" to "Reload from file",
-    "cheats.action.reload.description" to "Re-read the cheat file — use this after editing it outside the app.",
+    "cheats.action.reload.description" to "Re-read the cheat file. Use this after editing it outside the app.",
     "cheats.pastedGroup" to "Pasted codes",
-    "perf.displayFpsCap.description" to "Caps the PRESENTED (display) frame rate — emulation keeps full speed, so this is a display cap, not true emulation FPS. Any value works (use with Speed Limit % to fine-tune per game). 0 = off; values between the clean rates (60/30/20/15) pace a little unevenly.",
+    "perf.displayFpsCap.description" to "Caps the PRESENTED (display) frame rate; emulation keeps full speed, so this is a display cap, not true emulation FPS. Any value works (use with Speed Limit % to fine-tune per game). 0 = off; values between the clean rates (60/30/20/15) pace a little unevenly.",
     "perf.displayFpsCap.label" to "Display FPS Cap",
     "perf.screenRes.label" to "Screen resolution override",
     "perf.screenRes.auto" to "Auto",
@@ -1133,16 +1139,16 @@ val EN: Map<String, String> = mapOf(
     "perf.fix.skipBios" to "Skip BIOS",
     // Per-setting descriptions for the GameDB Fixes toggles (restored after the UI rework).
     "perf.fix.skipBios.desc" to "Boots the game directly, skipping the console startup/BIOS animation. Safe to leave on.",
-    "perf.frameSkip.description" to "Drops frames from the SCREEN, never from the emulation — the game, its timing and its audio run exactly as they would with this off. Auto drops one only when the device falls behind, so it costs nothing while it keeps up; 1/2 and below always drop, which is choppier but predictable. To slow the game itself, use Emulation speed or Frame rate cap instead.",
+    "perf.frameSkip.description" to "Drops frames from the SCREEN, never from the emulation: the game, its timing and its audio run exactly as they would with this off. Auto drops one only when the device falls behind, so it costs nothing while it keeps up; 1/2 and below always drop, which is choppier but predictable. To slow the game itself, use Emulation speed or Frame rate cap instead.",
     "perf.frameSkip.label" to "Frame Skip",
     // Per-setting descriptions for the Advanced Speedhacks toggles (restored after the UI rework).
-    "perf.speedLimit.description" to "Emulation speed as % of native (100 = full speed). Affects audio pitch, game timing and RetroAchievements (hardcore stays at/above 100%). This is NOT a display cap — pair it with Display FPS Cap for per-game tuning. Best left at 100 unless a game needs it.",
+    "perf.speedLimit.description" to "Emulation speed as % of native (100 = full speed). Affects audio pitch, game timing and RetroAchievements (hardcore stays at/above 100%). This is NOT a display cap. Pair it with Display FPS Cap for per-game tuning. Best left at 100 unless a game needs it.",
     "perf.speedLimit.label" to "Speed Limit %",
     "perf.lowLatencyMode.label" to "Low Latency Mode",
     "perf.lowLatencyMode.description" to "Uses a zero-frame GS queue and requests a matching high-refresh display mode to reduce controller-to-screen latency. Off by default: it leaves the graphics thread no slack, so it can make games less smooth even on fast devices. Worth trying if input feels laggy, and turning back off if the frame pacing suffers.",
-    "perf.sustainedPerformance.description" to "Holds a steady, thermally-sustainable GPU/CPU clock for long play sessions — reduces mid-session throttling, heat and battery drain on handhelds. Trade-off: it caps the peak clock, so demanding games that rely on short bursts of max speed may run a little slower. Off = full peak clocks (default).",
+    "perf.sustainedPerformance.description" to "Holds a steady, thermally-sustainable GPU/CPU clock for long play sessions: reduces mid-session throttling, heat and battery drain on handhelds. Trade-off: it caps the peak clock, so demanding games that rely on short bursts of max speed may run a little slower. Off = full peak clocks (default).",
     "perf.sustainedPerformance.label" to "Sustained Performance",
-    "perf.adpf.description" to "EXPERIMENTAL, off by default. Reports each frame's active CPU work to Android's performance-hint system (ADPF) so the scheduler can raise the emulation threads' CPU frequency toward the frame deadline, countering the governor under-clocking emulation's bursty load. Helps most when a game can't quite hit full speed and is CPU-bound. This basic path hints CPU scheduling only — no explicit GPU timing — and the measured work can still include a stall behind the GS/present queue. May raise power draw and heat; gains vary by device (needs Android 13+) and can be zero if your governor is already aggressive. Measure with your own A/B before trusting it.",
+    "perf.adpf.description" to "EXPERIMENTAL, off by default. Reports each frame's active CPU work to Android's performance-hint system (ADPF) so the scheduler can raise the emulation threads' CPU frequency toward the frame deadline, countering the governor under-clocking emulation's bursty load. Helps most when a game can't quite hit full speed and is CPU-bound. This basic path hints CPU scheduling only (no explicit GPU timing) and the measured work can still include a stall behind the GS/present queue. May raise power draw and heat; gains vary by device (needs Android 13+) and can be zero if your governor is already aggressive. Measure with your own A/B before trusting it.",
     "perf.adpf.label" to "CPU clock hint (ADPF)",
     "ra.account.logout" to "Logout",
     "ra.account.signedIn" to "Signed in",
@@ -1156,7 +1162,7 @@ val EN: Map<String, String> = mapOf(
     "ra.filter.locked" to "Locked",
     "ra.filter.missable" to "Missable",
     "ra.server.reset" to "Reset achievements server",
-    "ra.server.reset.desc" to "Clears a custom/offline server override — fixes sign-in failing with 'No response'.",
+    "ra.server.reset.desc" to "Clears a custom/offline server override. Fixes sign-in failing with 'No response'.",
     "settings.search.placeholder" to "Search settings…",
     "settings.search.noResults" to "No matching settings",
     "ra.viewAchievements" to "Achievements & Options",
@@ -1184,12 +1190,12 @@ val EN: Map<String, String> = mapOf(
     "ra.options.soundVolume" to "Sound Volume",
     "ra.options.soundVolume.desc" to "Volume of the achievement unlock sound.",
     "ra.options.spectatorMode" to "Spectator Mode",
-    "ra.options.spectatorMode.desc" to "Track achievements without sending any unlocks to the server — nothing is recorded to your account.",
+    "ra.options.spectatorMode.desc" to "Track achievements without sending any unlocks to the server: nothing is recorded to your account.",
     "ra.options.unofficialTestMode" to "Test Unofficial Achievements",
     "ra.options.unofficialTestMode.desc" to "Load achievements from unofficial/in-development sets. These aren't tracked by RetroAchievements, so they unlock every session.",
     "ra.options.soundEffects.desc" to "Play a sound when an achievement unlocks.",
     "ra.options.unlockSound" to "Achievement unlock sound",
-    "ra.options.unlockSound.default" to "Default — tap to choose a custom sound (e.g. Xbox 360)",
+    "ra.options.unlockSound.default" to "Default: tap to choose a custom sound (e.g. Xbox 360)",
     "ra.options.unlockNotifications" to "Unlock Notifications",
     "ra.options.unlockNotifications.desc" to "Show a popup when you unlock an achievement.",
     "ra.status.loading.body" to "Fetching achievement list.",
@@ -1209,7 +1215,7 @@ val EN: Map<String, String> = mapOf(
     "ra.typeChip.win" to "Win",
     "ralogin.loginFailed" to "Login failed.",
     "ralogin.password.label" to "Password (A to type)",
-    "ralogin.passwordNotStored" to "Password isn't stored — rcheevos exchanges it for an auth token.",
+    "ralogin.passwordNotStored" to "Password isn't stored; rcheevos exchanges it for an auth token.",
     "ralogin.signIn" to "Sign in",
     "ralogin.signingIn" to "Signing in…",
     "ralogin.title" to "Sign in to RetroAchievements",
@@ -1217,14 +1223,14 @@ val EN: Map<String, String> = mapOf(
     "renderer.angleOpenGL.label" to "OpenGL via ANGLE",
     "renderer.angleOpenGL.description" to "Run the OpenGL renderer through ANGLE, which translates OpenGL ES to Vulkan using a bundled driver. Useful on devices whose native OpenGL ES driver is broken or slow (e.g. some MediaTek Mali). Only takes effect when the renderer is set to OpenGL. Restart the game to apply.",
     "renderer.clearShaderCache.alreadyEmpty" to "Shader cache is already empty.",
-    "renderer.clearShaderCache.description" to "Wipes the compiled Vulkan + GL shader/pipeline caches. Use if a game renders corrupt after a driver swap or update — the next launch rebuilds them clean.",
+    "renderer.clearShaderCache.description" to "Wipes the compiled Vulkan + GL shader/pipeline caches. Use if a game renders corrupt after a driver swap or update; the next launch rebuilds them clean.",
     "renderer.clearShaderCache.label" to "Clear Shader Cache",
-    "renderer.cas.description" to "AMD FidelityFX Contrast-Adaptive Sharpening — crisps up the image.",
+    "renderer.cas.description" to "AMD FidelityFX Contrast-Adaptive Sharpening: crisps up the image.",
     "renderer.cas.label" to "CAS Sharpening",
     "renderer.cas.sharpen" to "Sharpen",
     "renderer.cas.sharpenResize" to "Sharpen + Resize",
     "renderer.cas.sharpness.label" to "CAS Sharpness",
-    "renderer.fxaa.description" to "Fast post-process anti-aliasing — smooths jagged edges with a light blur.",
+    "renderer.fxaa.description" to "Fast post-process anti-aliasing: smooths jagged edges with a light blur.",
     "renderer.fxaa.label" to "FXAA",
     "renderer.displayFilter.label" to "Display Filter",
     "renderer.displayMode.description" to "Controls how the game image fits the screen.",
@@ -1244,12 +1250,12 @@ val EN: Map<String, String> = mapOf(
     "perf.affinity.label" to "Affinity Control Mode",
     "perf.affinity.disabled" to "Disabled",
     "perf.affinity.performanceCores" to "Performance Cores",
-    "perf.affinity.description" to "Experimental. Pins the emulator's EE, VU and GS threads to specific CPU cores, in the priority order you pick (the first listed gets the fastest core). \"Performance Cores\" keeps all three on the big cluster without fixing individual cores. Disabled is recommended and is the default — Android's scheduler normally places these threads better than manual pinning, but GS-heavy games can benefit from putting GS first. Applies on the next boot.",
+    "perf.affinity.description" to "Experimental. Pins the emulator's EE, VU and GS threads to specific CPU cores, in the priority order you pick (the first listed gets the fastest core). \"Performance Cores\" keeps all three on the big cluster without fixing individual cores. Disabled is recommended and is the default: Android's scheduler normally places these threads better than manual pinning, but GS-heavy games can benefit from putting GS first. Applies on the next boot.",
     "renderer.orientation.landscape" to "Landscape",
     "renderer.orientation.portrait" to "Portrait",
     "renderer.section.displayEffects" to "Display Effects",
     "renderer.section.displayResolution" to "Display & Resolution",
-    "renderer.shaderChain.description" to "Runs a RetroArch (.slangp) shader chain over the final image — CRT masks, handheld LCD looks, scalers. Costs GPU time and stacks on top of the other display effects.",
+    "renderer.shaderChain.description" to "Runs a RetroArch (.slangp) shader chain over the final image: CRT masks, handheld LCD looks, scalers. Costs GPU time and stacks on top of the other display effects.",
     "renderer.shaderChain.empty" to "No .slangp presets found. Download a pack under Shader Packs below, or drop one into this folder by hand and reopen this list:",
     "renderer.shaderChain.label" to "RetroArch Shaders",
     "renderer.shaderChain.params.countModified" to "%d changed",
@@ -1261,7 +1267,7 @@ val EN: Map<String, String> = mapOf(
     "renderer.shaderChain.params.modified" to "Changed",
     "renderer.shaderChain.params.namePlaceholder" to "Preset name…",
     "renderer.shaderChain.params.resetAll" to "Reset all to preset defaults",
-    "renderer.shaderChain.params.resetAll.confirmBody" to "Every parameter goes back to the preset's own defaults. Your changes here can't be undone — if you want to keep them, cancel and use \"Save as new preset\" first.",
+    "renderer.shaderChain.params.resetAll.confirmBody" to "Every parameter goes back to the preset's own defaults. Your changes here can't be undone. If you want to keep them, cancel and use \"Save as new preset\" first.",
     "renderer.shaderChain.params.resetAll.confirmTitle" to "Reset all parameters?",
     "renderer.shaderChain.params.saveAs" to "Save as new preset…",
     "renderer.shaderChain.pass" to "pass",
@@ -1272,12 +1278,15 @@ val EN: Map<String, String> = mapOf(
     "renderer.shaderChain.scope.global" to "Global shader settings apply to games without their own shader override.",
     "renderer.shaderChain.scope.game" to "This game has its own shader settings.",
     "renderer.shaderChain.scope.inherited" to "This game is using global shader settings.",
-    "settings.changedFromDefault" to "Changed",
-    "settings.changedFromDefault.help" to "Changed marks a value that differs from its factory default.",
+    "settings.changedFromDefault" to "Not default",
+    "settings.changedFromDefault.help" to "Not default marks a value that differs from its factory default.",
     "renderer.shaderChain.preset.none" to "None",
+    "renderer.shaderChain.folder.up" to "Up one folder",
+    "renderer.shaderChain.scanning" to "Scanning for presets…",
+    "renderer.shaderPack.indexing" to "Indexing presets…",
     "renderer.shaderChain.uncategorised" to "Uncategorised",
     "renderer.shaderPack.cancelled" to "Download cancelled",
-    "renderer.shaderPack.companion.description" to "Ready-made presets built on top of the RetroArch pack's shaders. They install into it and need it first — they contain no shaders of their own.",
+    "renderer.shaderPack.companion.description" to "Ready-made presets built on top of the RetroArch pack's shaders. They install into it and need it first: they contain no shaders of their own.",
     "renderer.shaderPack.companion.needsBase" to "Install RetroArch · Slang Shaders first",
     "renderer.shaderPack.import.browse" to "Browse",
     "renderer.shaderPack.import.description" to "Already have a pack? Install it from a folder or a .zip. It lands in the same place as the download above, so its presets show up in the Shader Preset list just the same.",
@@ -1287,7 +1296,7 @@ val EN: Map<String, String> = mapOf(
     "renderer.shaderPack.import.label" to "Import a pack",
     "renderer.shaderPack.import.zip" to "Import from .zip",
     "renderer.shaderPack.import.zip.description" to "Pick a .zip of a shader pack",
-    "renderer.shaderPack.description" to "Download RetroArch (.slangp) shader packs. Installed presets show up in the Shader Preset list above. Large download — Wi-Fi recommended.",
+    "renderer.shaderPack.description" to "Download RetroArch (.slangp) shader packs. Installed presets show up in the Shader Preset list above. Large download, Wi-Fi recommended.",
     "renderer.shaderPack.downloadFailed" to "Download failed",
     "renderer.shaderPack.downloading" to "Downloading…",
     "renderer.shaderPack.extracting" to "Extracting…",
@@ -1299,9 +1308,9 @@ val EN: Map<String, String> = mapOf(
     "renderer.shaderPack.starting" to "Starting…",
     "renderer.upscale.description" to "Internal resolution. Higher values are sharper but can expose game-specific bloom or alignment artifacts.",
     "renderer.upscale.label" to "Upscale",
-    "renderer.vsync.description" to "Sync presentation to the display refresh — less tearing/smoother, slightly more latency. Restart the game to apply.",
+    "renderer.vsync.description" to "Sync presentation to the display refresh: less tearing/smoother, slightly more latency. Restart the game to apply.",
     "savestate.autoLoadOnBoot" to "Auto-load last state on boot",
-    "savestate.autoSaveInterval.description" to "Save automatically while you play, so a crash or a flat battery costs at most this much progress. It writes the same auto-save slot as the option above, so your numbered slots stay yours. Saving pauses the game for a moment, so a short interval is felt — 5 minutes is a good starting point.",
+    "savestate.autoSaveInterval.description" to "Save automatically while you play, so a crash or a flat battery costs at most this much progress. It writes the same auto-save slot as the option above, so your numbered slots stay yours. Saving pauses the game for a moment, so a short interval is felt; 5 minutes is a good starting point.",
     "savestate.autoSaveInterval.every" to "Every %d min",
     "savestate.autoSaveInterval.label" to "Auto-save while playing",
     "savestate.autoSaveInterval.off" to "Off",
@@ -1317,7 +1326,7 @@ val EN: Map<String, String> = mapOf(
     "savestate.restore" to "Restore",
     "savestate.restoreBackup.confirmMessage" to "Replaces this game's current slots with the last backup. Current saves are overwritten.",
     "savestate.restoreBackup.confirmTitle" to "Restore backup?",
-    "savestate.slot.emptyTapToSave" to "(empty — tap to save here)",
+    "savestate.slot.emptyTapToSave" to "(empty, tap to save here)",
     "savestate.title.loadManage" to "Load / Manage Saves",
     "pad.pressureAmount.label" to "Pressure modifier amount",
     "pad.pressureAmount.description" to
@@ -1328,14 +1337,14 @@ val EN: Map<String, String> = mapOf(
     "app.blockHome" to "Block Home button while playing",
     "app.blockHome.desc" to
         "Pins the screen while a game runs, so a controller's Home or Guide button can't minimise " +
-        "it. Android asks you to confirm the first time. To leave, hold Back + Recents — or just " +
+        "it. Android asks you to confirm the first time. To leave, hold Back + Recents, or just " +
         "quit to the library, which unpins automatically.",
     "savestate.error.hardcore" to
         "Save states are disabled while RetroAchievements Hardcore Mode is on. Turn Hardcore off " +
         "in the RetroAchievements settings to use them (this forfeits hardcore points for the session).",
     "savestate.error.memcardBusy" to
         "The game is still writing to the memory card, so the state was not saved. " +
-        "Resume the game for a second or two, then try again — the card stays busy for as " +
+        "Resume the game for a second or two, then try again. The card stays busy for as " +
         "long as the game is paused.",
     "savestate.error.save" to "Couldn't save to that slot. Check the log for @@ANDROID_SAVESTATE@@.",
     "savestate.error.load" to "Couldn't load that slot.",
@@ -1346,12 +1355,12 @@ val EN: Map<String, String> = mapOf(
     "savestate.cardWarning.newer.title" to "Memory card is newer than this save state",
     "savestate.cardWarning.newer.body" to
         "You saved to the memory card after this save state was made. Loading it takes the game " +
-        "back to before that card save — and undoes it.\n\n" +
+        "back to before that card save, and undoes it.\n\n" +
         "Some games cope with this. Others refuse to load their save file afterwards, or behave " +
         "as though the memory card is damaged.",
     "savestate.cardWarning.diverged.title" to "Memory card doesn't match this save state",
     "savestate.cardWarning.diverged.body" to
-        "The memory card has changed since this save state was made — it may have been erased, " +
+        "The memory card has changed since this save state was made: it may have been erased, " +
         "imported, or written by a different session. There's no way to tell which one is newer.\n\n" +
         "Loading can leave the game and the card disagreeing about what has been saved, which " +
         "some games report as a damaged card.",
@@ -1363,8 +1372,8 @@ val EN: Map<String, String> = mapOf(
         "games refuse their own save file. Off by default.",
     "setup.aspect.stretch" to "Stretch",
     "setup.bios.error.noneFound" to "No valid PS1 BIOS files found in that folder.",
-    "setup.bios.multipleFound" to "BIOS files ready — switch anytime in BIOS settings.",
-    "setup.bios.noneSelected" to "No BIOS folder selected yet — use the Pick BIOS Folder button below.",
+    "setup.bios.multipleFound" to "BIOS files ready. Switch anytime in BIOS settings.",
+    "setup.bios.noneSelected" to "No BIOS folder selected yet. Use the Pick BIOS Folder button below.",
     "setup.bios.scanning" to "Scanning…",
     "setup.bios.selectTitle" to "Select BIOS",
     "setup.bios.unknownZone" to "Unknown",
@@ -1401,7 +1410,7 @@ val EN: Map<String, String> = mapOf(
     "setup.gpuDriver.noneAvailable" to "No drivers available right now.",
     "setup.gpuDriver.pickLocalZip" to "Pick local .zip",
     "setup.gpuDriver.select" to "Select",
-    "setup.gpuDriver.sourceNote" to "Source: github.com/K11MCH1/AdrenoToolsDrivers — Mesa Turnip and friends. Each driver lands under app-private storage.",
+    "setup.gpuDriver.sourceNote" to "Source: github.com/K11MCH1/AdrenoToolsDrivers (Mesa Turnip and friends). Each driver lands under app-private storage.",
     "setup.gpuDriver.title" to "GPU Driver",
     "setup.page.bios.title" to "Select your BIOS",
     "setup.page.renderer.title" to "Choose renderer",
@@ -1417,7 +1426,7 @@ val EN: Map<String, String> = mapOf(
     "setup.recommended.internalResolution" to "Internal Resolution",
     "setup.recommended.performance" to "Performance",
     "setup.recommended.renderer" to "Renderer",
-    "setup.recommended.subtitle" to "Optional — set these now or change them anytime in Settings.",
+    "setup.recommended.subtitle" to "Optional: set these now or change them anytime in Settings.",
     "setup.recommended.title" to "Recommended Settings",
     "setup.recommended.widescreenPatches" to "Widescreen Patches",
     "setup.restart.message" to "Moving app data to a new location takes effect after a restart. ",
@@ -1431,7 +1440,7 @@ val EN: Map<String, String> = mapOf(
     "setup.step.appData.description.allFiles" to "Where memory cards, save states, and configs are stored. Choose Internal, an SD card, or a custom folder. (Game ROMs are added separately.)",
     "setup.step.appData.description.play" to "Where memory cards, save states, and configs are stored. Internal uses your main device storage; SD Card uses a memory card if one is present. (Game ROMs are added separately.)",
     "setup.step.appData.title" to "App Data Folder",
-    "setup.step.bios.description" to "Pick a folder of PS1 BIOS files to start playing — every BIOS inside is added, along with any matching .mec and .nvm files.",
+    "setup.step.bios.description" to "Pick a folder of PS1 BIOS files to start playing. Every BIOS inside is added, along with any matching .mec and .nvm files.",
     "setup.step.bios.title" to "BIOS Location",
     "bios.boot.title" to "Boot BIOS",
     "bios.perGame.menu" to "Per-game BIOS",
@@ -1451,7 +1460,7 @@ val EN: Map<String, String> = mapOf(
     "setup.systemDir.appPrivateSubtitle" to "App-private Android/data folder",
     "setup.systemDir.customFolder" to "Custom folder",
     "setup.systemDir.error.grantAllFiles" to "Couldn't write to that folder. Grant All-Files Access, then pick it again.",
-    "setup.systemDir.error.noSdCard" to "No SD card detected — staying on Internal storage.",
+    "setup.systemDir.error.noSdCard" to "No SD card detected, staying on Internal storage.",
     "setup.systemDir.error.notWritable" to "That folder can't be used for writable emulator data on this Android version. ",
     "setup.systemDir.error.tryAnother" to "That folder can't be used for writable emulator data. Try another.",
     "setup.systemDir.intro" to "ARMSX1 stores memory cards, save states, configs, and shader data in app-private storage by default. ",
@@ -1467,7 +1476,7 @@ val EN: Map<String, String> = mapOf(
     "skins.activeSkin" to "Active skin",
     "skins.activeSkin.game" to "Active skin (this game)",
     "skins.builtinDefault" to "Built-in (default)",
-    "skins.perGame.description" to "Off, this game uses whatever skin you picked for all games. On, it keeps its own — handy for giving a light-gun or racing game its own look without touching the rest of your library.",
+    "skins.perGame.description" to "Off, this game uses whatever skin you picked for all games. On, it keeps its own. Handy for giving a light-gun or racing game its own look without touching the rest of your library.",
     "skins.perGame.label" to "Use a different skin for this game",
     "skins.description" to "Import a folder or .zip of ic_controller_*.png images (iOS-format skin packs work). ",
     "skins.browse" to "Download skins…",
@@ -1548,11 +1557,11 @@ val EN: Map<String, String> = mapOf(
         "Display mode and Stretch apply to a running game immediately.",
     "renderer.gpuBackend.label" to "Graphics backend",
     "renderer.gpuBackend.description" to
-        "How the finished frame is PRESENTED — separate from the rasteriser below, which is what " +
+        "How the finished frame is PRESENTED, separate from the rasteriser below, which is what " +
         "draws it. OpenGL ES draws straight to the surface via EGL and skips the CPU copy the " +
         "software path does; ANGLE runs that same path on Google's GLES-on-Vulkan translator, " +
         "which is worth trying when a device's own GLES driver is weak or buggy. Falls back " +
-        "automatically if a backend is unavailable — the in-game Display tab shows which one is " +
+        "automatically if a backend is unavailable. The in-game Display tab shows which one is " +
         "actually running.",
     "renderer.gpuBackend.software" to "Software",
     "renderer.gpuBackend.sdlAccel" to "SDL accel",
@@ -1582,14 +1591,14 @@ val EN: Map<String, String> = mapOf(
     "renderer.widescreenHack.label" to "Widescreen hack",
     "renderer.widescreenHack.description" to
         "Widens the 3D camera so the world FILLS a 16:9 screen instead of being stretched into " +
-        "it — you see more to the left and right, and circles stay circles. Pair it with the 16:9 " +
+        "it: you see more to the left and right, and circles stay circles. Pair it with the 16:9 " +
         "display mode below. 2D backgrounds, menus and the HUD are not drawn by the 3D unit, so " +
         "those still stretch; a few games also pop geometry in at the edges they never expected " +
         "you to see.",
     "renderer.textureFilter.label" to "Texture filtering",
     "renderer.textureFilter.description" to
         "Smooths the low-resolution textures on 3D surfaces. Bilinear blends the four nearest " +
-        "texels — softest, and the cheapest. xBR-style blends only ALONG detected edges and stays " +
+        "texels: softest, and the cheapest. xBR-style blends only ALONG detected edges and stays " +
         "sharp across them, which keeps hand-drawn texture art from turning to mush. 2D sprites, " +
         "text and the HUD are left pixel-exact either way. Hardware rasterizer only.",
     "renderer.textureFilter.nearest" to "Nearest",
@@ -1616,11 +1625,11 @@ val EN: Map<String, String> = mapOf(
     "textures.noMatches" to "No packs match this game/region or search.",
     "textures.selected" to "Selected for this game",
     "textures.use" to "Use installed pack",
-    "textures.installed" to "Installed — open this game's Video settings to use it",
+    "textures.installed" to "Installed. Open this game's Video settings to use it",
     "textures.downloadUse" to "Download and use for this game",
     "textures.download" to "Download and install",
     "textures.size" to "Download %.1f MiB · installed %.1f MiB",
-    "textures.otherRegion" to "Not compatible with this game ID — cannot apply",
+    "textures.otherRegion" to "Not compatible with this game ID. Cannot apply",
     "textures.applied" to "Pack selected for this game. Existing user texture folders were not modified.",
     "textures.downloaded" to "Pack installed and available offline. Open this game's Video settings to select it.",
     "textures.installFailed" to "Unable to install or select this pack. Existing packs and texture folders were kept. Check your connection, free storage and pack compatibility.",
@@ -1643,19 +1652,19 @@ val EN: Map<String, String> = mapOf(
         "disc serial, so one game's pack can never match another's textures by accident.",
     "renderer.textureDir.label" to "Custom texture folder",
     "renderer.textureDir.description" to
-        "Overrides the folder above — use it to keep a pack on shared storage. Leave it " +
+        "Overrides the folder above. Use it to keep a pack on shared storage. Leave it " +
         "empty to go back to the automatic per-game folder.",
     "renderer.textureDir.placeholder" to "Automatic (per game)",
     "renderer.downsample.label" to "Downsampling",
     "renderer.downsample.description" to
         "Renders at the internal resolution above, then averages blocks of pixels back down before " +
-        "showing them. That is what removes the jagged, sparkly edges upscaling leaves behind — " +
+        "showing them. That is what removes the jagged, sparkly edges upscaling leaves behind: " +
         "you pay the full cost of the high resolution and get a cleaner picture rather than a " +
         "bigger one. The factor has to divide the internal resolution evenly; anything else steps " +
         "down to the nearest one that does.",
     "renderer.downsample.active" to "Active: internal resolution is %sx.",
     "renderer.downsample.inactive" to
-        "Needs the hardware rasterizer with internal resolution above 1x — it does nothing as " +
+        "Needs the hardware rasterizer with internal resolution above 1x; it does nothing as " +
         "things are set now.",
     "renderer.lineDetect.label" to "Line detection",
     "renderer.lineDetect.unavailable" to "Not available in SwanStation",
@@ -1674,7 +1683,7 @@ val EN: Map<String, String> = mapOf(
     "renderer.deinterlace.adaptive" to "Adaptive",
     "renderer.overscan.label" to "Overscan crop",
     "renderer.overscan.description" to
-        "A TV hid the outermost few percent of the picture, so games left junk there — a black " +
+        "A TV hid the outermost few percent of the picture, so games left junk there: a black " +
         "bar, a torn column, a stray line. This trims that off and zooms what is left to fill the " +
         "same space. Small takes about 3% from each edge, Full about 6%. It is a zoom, so it does " +
         "lose a little of the real image.",
@@ -1700,11 +1709,11 @@ val EN: Map<String, String> = mapOf(
     "renderer.hdPreset.custom" to "Custom: your manual resolution/downsampling differs from these presets.",
     "renderer.internalRes.description" to
         "Renders at this multiple of the PlayStation's native resolution. Cost grows with the " +
-        "SQUARE of the multiplier, so 4x is roughly sixteen times the rasterising work of 1x — " +
+        "SQUARE of the multiplier, so 4x is roughly sixteen times the rasterising work of 1x; " +
         "raise it a step at a time.",
     "renderer.outputScale.label" to "Display resolution",
     "renderer.outputScale.description" to
-        "Renders the output surface smaller and lets the display hardware scale it back up — cuts " +
+        "Renders the output surface smaller and lets the display hardware scale it back up: cuts " +
         "GPU cost, heat and battery without changing the emulated resolution. Steps are multiples " +
         "of the PlayStation's native 240 lines.",
     "renderer.outputScale.screen" to "Screen",
@@ -1714,11 +1723,11 @@ val EN: Map<String, String> = mapOf(
     "renderer.screenRes.label" to "Screen resolution",
     "renderer.screenRes.description" to
         "Forces the output surface to a fixed size instead of the detected panel. Fixes panels " +
-        "that mis-report their size — a 1080p screen claiming 1920x1200 squishes the image.",
+        "that mis-report their size: a 1080p screen claiming 1920x1200 squishes the image.",
     "renderer.lowLatency.label" to "Low latency mode",
     "renderer.lowLatency.description" to
         "Stops the emulator running ahead of presentation and asks the panel for a refresh rate " +
-        "that is a whole multiple of the game's — 60 picks 120 Hz, PAL 50 picks 100 Hz — so there " +
+        "that is a whole multiple of the game's (60 picks 120 Hz, PAL 50 picks 100 Hz) so there " +
         "is no uneven cadence.",
     "renderer.sustainedPerf.label" to "Sustained performance",
     "renderer.sustainedPerf.description" to
@@ -1731,13 +1740,13 @@ val EN: Map<String, String> = mapOf(
         "performance-hint service so the governor can clock for the frame deadline instead of " +
         "guessing from a bursty load. Needs Android 13 or newer and does nothing below it. May " +
         "raise power draw and heat, and can be worth nothing on a device whose governor is " +
-        "already aggressive — A/B it yourself on a scene that will not hold full speed.",
+        "already aggressive. A/B it yourself on a scene that will not hold full speed.",
     "renderer.affinity.label" to "CPU affinity",
     "renderer.affinity.description" to
         "EXPERIMENTAL, off by default. Restricts the emulation thread to a group of CPU cores. " +
         "The performance cores are detected from the device's own clock table, not assumed. " +
         "Android's scheduler usually places the thread well on its own, so Off is still the " +
-        "recommendation — this is for the devices where it does not.",
+        "recommendation; this is for the devices where it does not.",
     "renderer.affinity.performanceCores" to "Performance cores",
     "renderer.affinity.allCores" to "All cores",
     "renderer.affinity.fastestCore" to "Fastest core",
@@ -1750,12 +1759,12 @@ val EN: Map<String, String> = mapOf(
     "renderer.integerScaling.label" to "Integer scaling",
     "renderer.integerScaling.description" to
         "Scale by a whole number only, so every emulated pixel becomes an exact block instead of " +
-        "some being duplicated and others not — which is what makes scrolling 2D shimmer. It " +
+        "some being duplicated and others not, which is what makes scrolling 2D shimmer. It " +
         "deliberately shrinks the image to the nearest whole multiple, and has no effect in " +
         "Stretch mode.",
     "renderer.aspect.label" to "Display mode",
     "renderer.aspect.description" to
-        "Classic is a hard 4:3 — the display aspect a PlayStation was authored for on a CRT. " +
+        "Classic is a hard 4:3, the display aspect a PlayStation was authored for on a CRT. " +
         "Square shows the raw framebuffer pixels. Stretch fills the screen and ignores the ratio " +
         "entirely. Applies immediately, including to a running game.",
     "renderer.aspect.stretch" to "Stretch",
@@ -1768,7 +1777,7 @@ val EN: Map<String, String> = mapOf(
         "rather than clamped, so an out-of-range entry keeps the previous ratio.",
     "renderer.wideUpscale.label" to "Widescreen output height",
     "renderer.wideUpscale.description" to
-        "Desktop window height for the 16:9 path — no effect on Android, and not an " +
+        "Desktop window height for the 16:9 path; no effect on Android, and not an " +
         "internal-resolution upscale.",
     "renderer.debugPanel.label" to "Performance overlay",
     "renderer.debugPanel.description" to "Show live performance text during gameplay. Minimal shows FPS/speed, Full shows all readings, and Custom uses the choices below. Uses the same mode as the quick menu; hidden while menus are open.",
@@ -1800,7 +1809,7 @@ val EN: Map<String, String> = mapOf(
         "are read while the emulator boots; the speed options apply immediately.",
     "perf.cpuMode.label" to "CPU execution mode",
     "perf.cpuMode.description" to
-        "Cached is the fast default. Interpreter is slower but the accuracy reference — try it if " +
+        "Cached is the fast default. Interpreter is slower but the accuracy reference. Try it if " +
         "a game misbehaves. Applies on next launch.",
     "perf.cpuMode.cached" to "Cached",
     "perf.cpuMode.interpreter" to "Interpreter",
@@ -1811,14 +1820,14 @@ val EN: Map<String, String> = mapOf(
     "perf.skipBios.label" to "Skip BIOS",
     "perf.skipBios.description" to
         "Boot straight into the game instead of sitting through the PlayStation startup logo. A " +
-        "few games expect the BIOS to have run and misbehave without it — turn this off if a game " +
+        "few games expect the BIOS to have run and misbehave without it; turn this off if a game " +
         "will not start.",
     "perf.frameLimit.description" to
-        "Pace the emulation to the target below. Off runs as fast as the device manages — useful " +
+        "Pace the emulation to the target below. Off runs as fast as the device manages, useful " +
         "for loading screens, but the game runs too fast to play.",
     "perf.emulationSpeed.label" to "Emulation speed",
     "perf.emulationSpeed.description" to
-        "Percentage of the game's own frame rate — 50% really does halve a 59.94 Hz game to ~30 " +
+        "Percentage of the game's own frame rate: 50% really does halve a 59.94 Hz game to ~30 " +
         "fps, audio included. Ignored while Frame limit is off.",
     "perf.fpsCap.label" to "Frame rate cap",
     "perf.fpsCap.description" to
@@ -1830,13 +1839,13 @@ val EN: Map<String, String> = mapOf(
         "Drops frames from the SCREEN, never from the emulation: the machine is still run to every " +
         "vertical blank, so the game's timing and its audio are identical either way. Auto drops a " +
         "frame only when the device has fallen behind and costs nothing while it keeps up; the " +
-        "fixed ratios always drop. This is not a speed control — for that use Emulation speed or " +
+        "fixed ratios always drop. This is not a speed control; for that use Emulation speed or " +
         "Frame rate cap above.",
     "perf.fastForwardSpeed.label" to "Fast-forward speed",
     "perf.fastForwardSpeed.description" to
         "How fast the fast-forward hotkey and button run. Unlimited removes the cap entirely; a " +
         "device that cannot reach the chosen speed simply runs as fast as it can. Audio follows " +
-        "the speed either way — see the Audio tab.",
+        "the speed either way (see the Audio tab).",
     "perf.rewind.label" to "Rewind",
     "perf.rewind.description" to
         "Hold the Rewind button (bind it under Settings › Hotkeys) to run the game backwards. " +
@@ -1844,7 +1853,7 @@ val EN: Map<String, String> = mapOf(
         "at all is allocated while this is off. Applies immediately.",
     "perf.rewindBuffer.label" to "Rewind buffer",
     "perf.rewindBuffer.description" to
-        "How far back you can go. This one really is a memory dial — the current combination " +
+        "How far back you can go. This one really is a memory dial: the current combination " +
         "reserves about %s.%s Long buffers on a handheld get the app killed by the system, so " +
         "start short.",
     "perf.rewindBuffer.capped" to "Capped to about %ds by the memory limit.",
@@ -1857,7 +1866,7 @@ val EN: Map<String, String> = mapOf(
         "Hides input lag by running the game a few frames ahead of what you see. Be aware of what " +
         "it costs: EVERY frame it saves a state, reloads it, and re-simulates that many extra " +
         "frames. A device already running at 100% will simply drop to a fraction of full speed " +
-        "instead of feeling snappier — try 1 first, and leave it Off unless you have headroom. " +
+        "instead of feeling snappier. Try 1 first, and leave it Off unless you have headroom. " +
         "Applies immediately.",
     "perf.reset.label" to "Restore emulation defaults",
     "perf.reset.description" to
@@ -1886,7 +1895,7 @@ val EN: Map<String, String> = mapOf(
         "ambience from games that use it. Applies on next launch.",
     "audio.backend.label" to "Audio backend",
     "audio.backend.description" to
-        "OpenSL ES is the compatibility path and the default — it is the only backend that needs " +
+        "OpenSL ES is the compatibility path and the default: it is the only backend that needs " +
         "nothing from SDL's Java layer, which this app does not run. AAudio can be lower latency " +
         "but is experimental here; the core falls back to OpenSL ES on its own if it cannot be " +
         "brought up safely. Applies on next launch.",
@@ -1900,7 +1909,7 @@ val EN: Map<String, String> = mapOf(
     "audio.fastForward.header" to "Fast-forward",
     "audio.fastForward.note" to
         "Audio keeps playing while fast-forwarding: the emulated stream is resampled down to the " +
-        "output rate, so nothing is dropped and nothing overruns — but the pitch rises with the " +
+        "output rate, so nothing is dropped and nothing overruns, but the pitch rises with the " +
         "speed, the same way it does on hardware you can spin faster. Mute it here if that grates.",
     "audio.muteFastForward.label" to "Mute during fast-forward",
     "audio.muteFastForward.description" to
@@ -1932,7 +1941,7 @@ val EN: Map<String, String> = mapOf(
 
     // --- Advanced tab ---
     "advanced.intro" to
-        "Diagnostics for bug reports. Leave logging off for normal play — writing a log costs " +
+        "Diagnostics for bug reports. Leave logging off for normal play: writing a log costs " +
         "performance.",
     "advanced.logging.label" to "Enable logging",
     "advanced.logging.description" to
@@ -1952,10 +1961,10 @@ val EN: Map<String, String> = mapOf(
         "of Enable logging.",
     "advanced.expansionRom.label" to "Expansion ROM",
     "advanced.expansionRom.description" to
-        "settings.toml [paths].expansion_rom — an optional EXP1 ROM image.",
+        "settings.toml [paths].expansion_rom: an optional EXP1 ROM image.",
     "advanced.defaultExe.label" to "Default PS-X executable",
     "advanced.defaultExe.description" to
-        "settings.toml [paths].default_psx_exe — booted when no disc is given.",
+        "settings.toml [paths].default_psx_exe: booted when no disc is given.",
     "advanced.settingsFile.label" to "Settings file",
     "advanced.settingsFile.description" to
         "The TOML this whole screen writes. The core re-reads it on every launch.",
@@ -1971,10 +1980,10 @@ val EN: Map<String, String> = mapOf(
         "Changes here apply to %s only. Each row shows whether it is pinned for this game " +
         "(Per-game) or following your global configuration (Global); tap a Per-game badge to drop " +
         "it back to the global value. The \"Restore … defaults\" row at the bottom pins the core's " +
-        "own defaults to this game — to go back to following global instead, use Reset this tab in " +
+        "own defaults to this game. To go back to following global instead, use Reset this tab in " +
         "the overrides box.",
     "scope.note.global" to
-        "Global configuration — the baseline every game starts from. A game can pin its own value " +
+        "Global configuration: the baseline every game starts from. A game can pin its own value " +
         "for any of these from its own settings screen, and that pin wins over anything set here.",
     "scope.overrides.countOne" to "%d per-game override · %s",
     "scope.overrides.countMany" to "%d per-game overrides · %s",
@@ -1994,7 +2003,7 @@ val EN: Map<String, String> = mapOf(
     "scope.notice.pinsOne" to "This game pins %d setting",
     "scope.notice.pinsMany" to "This game pins %d settings",
     "scope.notice.body" to
-        "%s — these win over anything changed here, which edits your global configuration.",
+        "%s: these win over anything changed here, which edits your global configuration.",
     "scope.notice.useGlobal" to "Use global for this game",
 
     // --- PS1 pad device rows (Controls tab) ---
@@ -2003,7 +2012,7 @@ val EN: Map<String, String> = mapOf(
         "Plug a Multitap into controller port 1 so up to four controllers play at once. Extra pads " +
         "are assigned in the order they are first used. ONLY turn this on for a game that supports " +
         "it: a multitap answers with its own ID, so a game that does not know about one sees no " +
-        "controller at all and nothing responds. Real hardware behaves the same way — that is why " +
+        "controller at all and nothing responds. Real hardware behaves the same way: that is why " +
         "a real Multitap has a 1-player switch. Memory cards for players 2-4 are not emulated.",
 
     // --- Library tab (settings.toml [library]) ---

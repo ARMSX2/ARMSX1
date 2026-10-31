@@ -92,8 +92,10 @@ public final class DiscordNative {
     public static native String error();
 
     /** Publish what is running. Empty title = back in the library. raPresence is
-     *  RetroAchievements' own rich-presence line, or empty when RA is off. */
-    public static native void setPlaying(String serial, String title, String coverUrl, String raPresence);
+     *  RetroAchievements' own rich-presence line, or empty when RA is off. With
+     *  showGameInStatus off, the status reads "Playing ARMSX1" instead of the game. */
+    public static native void setPlaying(String serial, String title, String coverUrl, String raPresence,
+            boolean showGameInStatus);
 
     /** Friends in ARMSX2, as name/game/serial/avatar records. */
     public static native String friends();

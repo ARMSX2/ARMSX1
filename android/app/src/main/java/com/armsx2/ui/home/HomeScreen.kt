@@ -1,4 +1,6 @@
 package com.armsx2.ui.home
+
+import kotlinx.coroutines.launch
 import com.armsx2.ui.common.selectionOutline
 import com.armsx2.ui.common.SelectionBlue
 
@@ -68,6 +70,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -209,8 +212,14 @@ fun HomeScreen(
     var overflowMenu by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
     var menuGame by remember { mutableStateOf<GameInfo?>(null) }
+    // Add to Home Screen fetches the cover first (normally from the library's image cache), so
+    // it runs as a coroutine rather than on the click.
+    val shortcutScope = rememberCoroutineScope()
     var showClearRecentsConfirm by remember { mutableStateOf(false) }
     val editFolderLabel = str("collections.edit")
+    // Read here, in composition, so toggling it recomposes the library (a read inside the
+    // SideEffect below would not subscribe to it).
+    val showCollections = LibraryChromePreferences.showCollections.value
     val folderEntries = buildList {
         fun addFolder(item: com.armsx2.data.library.GameCollection) {
             val members = state.allGames.filter { it.uri.toString() in item.gameUris }
@@ -241,7 +250,7 @@ fun HomeScreen(
     }
     SideEffect {
         HomeInputController.setCollectionActions(
-            if (state.initialized) folderEntries.map { it.action } else emptyList(),
+            if (state.initialized && showCollections) folderEntries.map { it.action } else emptyList(),
             folderEntries.map { it.edit }, keys = folderEntries.map { it.key }, collapse = {
                 when {
                     expandedCollectionId != null -> {
@@ -292,6 +301,7 @@ fun HomeScreen(
     LaunchedEffect(directories, nativeReady) { viewModel.load(directories, nativeReady) }
     DisposableEffect(viewModel, onOpenMenu) {
         HomeInputController.bind(viewModel, onOpenMenu)
+        HomeInputController.setGameMenu { menuGame = it }
         onDispose { HomeInputController.unbind(viewModel) }
     }
 
@@ -438,6 +448,7 @@ fun HomeScreen(
                 HomeInputController.setRecents(shownRecents.size) { i ->
                     shownRecents.getOrNull(i)?.let(viewModel::launch)
                 }
+                HomeInputController.setRecentGame { i -> shownRecents.getOrNull(i) }
             }
             // Camera-follow: while browsing with a controller (Grid zone), keep the
             // selected cover on screen. The grid has leading full-span items (toolbar,
@@ -578,16 +589,23 @@ fun HomeScreen(
                                 customNames = com.armsx2.CustomNames.enabled.value,
                                 englishTitles = EnglishTitles.enabled.value,
                                 showHidden = com.armsx2.HiddenGames.showHidden.value,
+                                showCollections = showCollections,
                                 hasCustomBackground = LibraryBackground.uri.value != null,
                                 onDismiss = { overflowMenu = false },
                                 onOpenNavigation = onOpenMenu,
                                 onSort = viewModel::setSort,
-                                onCollections = { foldersExpanded = true; com.armsx2.data.library.GameCollections.select(null) },
+                                // Opening Collections also reveals them: with the row hidden it would
+                                // otherwise expand something that is not on screen.
+                                onCollections = {
+                                    LibraryChromePreferences.setShowCollections(true)
+                                    foldersExpanded = true; com.armsx2.data.library.GameCollections.select(null)
+                                },
                                 onToggleCoverStyle = { CoverArtStyle.set(!CoverArtStyle.use3d.value) },
                                 onToggleGridNames = { GridLabels.set(!GridLabels.show.value) },
                                 onToggleCustomNames = { com.armsx2.CustomNames.set(!com.armsx2.CustomNames.enabled.value) },
                                 onToggleEnglishTitles = { EnglishTitles.set(!EnglishTitles.enabled.value) },
                                 onToggleShowHidden = { viewModel.setShowHidden(!com.armsx2.HiddenGames.showHidden.value) },
+                                onToggleShowCollections = { LibraryChromePreferences.setShowCollections(!showCollections) },
                                 onChooseBackground = { backgroundPicker.launch(arrayOf("image/*")) },
                                 onClearBackground = LibraryBackground::clear,
                                 onExitApp = { showExitConfirm = true },
@@ -644,7 +662,7 @@ fun HomeScreen(
                     }
                 }
 
-                if (state.initialized) {
+                if (state.initialized && showCollections) {
                     item(key = "home-collections", span = { GridItemSpan(maxLineSpan) }) {
                         val focused = libraryFocus && HomeInputController.zone.value == HomeZone.Collections
                         Column {
@@ -933,7 +951,7 @@ fun HomeScreen(
                     game.serial?.takeIf { it.isNotBlank() }?.let(::add)
                     add("CRC " + when (menuCRC) {
                         null -> "…"   // still identifying
-                        "" -> "—"     // identified as unknown
+                        "" -> "-"     // identified as unknown
                         else -> menuCRC
                     })
                 }.joinToString("  ·  ")
@@ -965,7 +983,7 @@ fun HomeScreen(
                 // disc, so the game's own menu is where people look for it — and it is the
                 // reason this is here as well as on the settings hub's Cheats tab: a feature
                 // reachable only from an in-game menu is a feature users report as missing.
-                GameMenuAction("✦", str("cheats.title")) {
+                GameMenuAction("🪄", str("cheats.title")) {
                     menuGame = null
                     com.armsx2.navigation.UiNavigator.navigate(
                         com.armsx2.navigation.AppRoute.Settings(
@@ -980,8 +998,10 @@ fun HomeScreen(
                 val addToHomeFailed = str("games.addToHome.unsupported")
                 GameMenuAction("📌", str("games.addToHome")) {
                     menuGame = null
-                    if (!com.armsx2.HomeShortcuts.pin(context, game))
-                        Toast.makeText(context, addToHomeFailed, Toast.LENGTH_LONG).show()
+                    shortcutScope.launch {
+                        if (!com.armsx2.HomeShortcuts.pin(context, game))
+                            Toast.makeText(context, addToHomeFailed, Toast.LENGTH_LONG).show()
+                    }
                 }
                 // Only offered when the game is actually in Recently Played — this drops
                 // just this one entry, unlike the library-wide "Show Recently Played" toggle.
@@ -1030,6 +1050,7 @@ private fun LibraryOverflowMenu(
     customNames: Boolean,
     englishTitles: Boolean,
     showHidden: Boolean,
+    showCollections: Boolean,
     hasCustomBackground: Boolean,
     onDismiss: () -> Unit,
     onOpenNavigation: () -> Unit,
@@ -1040,6 +1061,7 @@ private fun LibraryOverflowMenu(
     onToggleCustomNames: () -> Unit,
     onToggleEnglishTitles: () -> Unit,
     onToggleShowHidden: () -> Unit,
+    onToggleShowCollections: () -> Unit,
     onChooseBackground: () -> Unit,
     onClearBackground: () -> Unit,
     onExitApp: () -> Unit,
@@ -1067,6 +1089,13 @@ private fun LibraryOverflowMenu(
             fontWeight = FontWeight.Bold,
         )
         LibraryOverflowItem("▤", str("collections.title")) { closeThen(onCollections) }
+        LibraryOverflowItem(
+            glyph = "◫",
+            label = str("games.overflow.showCollections"),
+            trailing = if (showCollections) str("common.on") else str("common.off"),
+        ) {
+            closeThen(onToggleShowCollections)
+        }
         OverflowSeparator()
         LibraryOverflowItem(
             glyph = "A–Z",
@@ -1598,6 +1627,9 @@ object HomeInputController {
     private var recentCount = 0
     private var clearRecentsAction: (() -> Unit)? = null
     private var recentLauncher: ((Int) -> Unit)? = null
+    // Triangle's targets: the long-press menu, and the game behind a Recently Played slot.
+    private var gameMenu: ((GameInfo) -> Unit)? = null
+    private var recentGame: ((Int) -> GameInfo?)? = null
     private var searchAvailable = false
     private var searchConfirm: (() -> Unit)? = null
     private var toolbarAtBottom = false
@@ -1623,6 +1655,8 @@ object HomeInputController {
             confirmPress.reset()
             owner = null
             openMenu = null
+            gameMenu = null
+            recentGame = null
             clearRecentsAction = null
             collectionActions = emptyList()
             collectionEditActions = emptyList()
@@ -1719,6 +1753,12 @@ object HomeInputController {
     }
 
     fun setClearRecentsAction(action: () -> Unit) { clearRecentsAction = action }
+
+    /** HomeScreen registers how to open a game's long-press menu, for Triangle. */
+    fun setGameMenu(open: (GameInfo) -> Unit) { gameMenu = open }
+
+    /** HomeScreen registers how to look up the game in a Recently Played slot. */
+    fun setRecentGame(lookup: (Int) -> GameInfo?) { recentGame = lookup }
 
     /** HomeScreen registers the currently-shown Recently-Played games (0 when the
      *  shelf is hidden, e.g. while searching). */
@@ -1856,6 +1896,23 @@ object HomeInputController {
                 viewModel.launch(game)
             }
         }
+        return true
+    }
+
+    /**
+     * Triangle: the highlighted game's long-press menu (play, settings, cheats, add to home screen,
+     * ...), which a controller otherwise had no way to open. The game is the one highlighted in
+     * the grid, or in the Recently Played row when that has the selector. Ported from ARMSX3.
+     */
+    fun openSelectedMenu(): Boolean {
+        finishTileMove()
+        val viewModel = owner ?: return false
+        val game = when (zone.value) {
+            HomeZone.Grid -> viewModel.selectedGame()
+            HomeZone.Recents -> recentGame?.invoke(recentIndex.intValue)
+            else -> null
+        } ?: return false
+        gameMenu?.invoke(game) ?: return false
         return true
     }
 

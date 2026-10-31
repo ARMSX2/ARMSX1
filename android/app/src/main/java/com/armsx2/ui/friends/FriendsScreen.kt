@@ -92,6 +92,7 @@ fun FriendsPanel(modifier: Modifier = Modifier, controllerLayer: String? = null)
     val friends by DiscordPresence.friends
     val error by DiscordPresence.error
     val notify by DiscordPresence.notifyState
+    val showGame by DiscordPresence.showGameState
 
     Column(
         modifier.fillMaxWidth(),
@@ -213,12 +214,22 @@ fun FriendsPanel(modifier: Modifier = Modifier, controllerLayer: String? = null)
 
         if (status == DiscordPresence.CONNECTED) {
             GlassPanel(Modifier.fillMaxWidth()) {
-                SettingSwitchRow(
-                    title = str("friends.notify"),
-                    description = str("friends.notify.desc"),
-                    checked = notify,
-                    onCheckedChange = { DiscordPresence.notifyInGame = it },
-                )
+                // A Column, not loose siblings: GlassPanel lays its content out in a Box, so two
+                // rows placed straight inside it are drawn on top of each other.
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SettingSwitchRow(
+                        title = str("friends.notify"),
+                        description = str("friends.notify.desc"),
+                        checked = notify,
+                        onCheckedChange = { DiscordPresence.notifyInGame = it },
+                    )
+                    SettingSwitchRow(
+                        title = str("friends.showGame"),
+                        description = str("friends.showGame.desc"),
+                        checked = showGame,
+                        onCheckedChange = { DiscordPresence.showGameInStatus = it },
+                    )
+                }
             }
 
             GlassPanel(Modifier.fillMaxWidth()) {

@@ -40,7 +40,7 @@ class AboutViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val details = withContext(Dispatchers.Default) { collectDeviceDetails(getApplication()) }
             state.value = state.value.copy(
-                coreVersion = runCatching { NativeApp.getBuildVersion() }.getOrDefault("—"),
+                coreVersion = runCatching { NativeApp.getBuildVersion() }.getOrDefault("-"),
                 soc = details.soc,
                 gpu = details.gpu,
                 cpu = details.cpu,
@@ -73,12 +73,12 @@ class AboutViewModel(application: Application) : AndroidViewModel(application) {
             Build.HARDWARE
         }
         return DeviceDetails(
-            soc = soc.ifBlank { "—" },
-            gpu = queryGpuRenderer().ifBlank { "—" },
+            soc = soc.ifBlank { "-" },
+            gpu = queryGpuRenderer().ifBlank { "-" },
             cpu = Runtime.getRuntime().availableProcessors().toString(),
             memory = String.format(Locale.US, "%.1f GB", memoryInfo.totalMem / 1_073_741_824.0),
             display = "${metrics.widthPixels} × ${metrics.heightPixels} · ${metrics.densityDpi} dpi",
-            architecture = Build.SUPPORTED_ABIS.joinToString(", ").ifBlank { "—" },
+            architecture = Build.SUPPORTED_ABIS.joinToString(", ").ifBlank { "-" },
             pageSize = if (pageBytes >= 16_384L) "${pageBytes / 1024L} KB (16K)" else "${pageBytes / 1024L} KB",
         )
     }

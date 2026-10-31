@@ -232,6 +232,27 @@ internal object SettingsControllerNav {
         registry[id] = Item(id, onConfirm, onLeft, onRight, layer, menuMoveTarget)
         if (selectedId.value == id)
             selectedIndex.intValue = orderedIds().indexOf(id)
+        lateFocus?.let { late ->
+            when {
+                // The pad has moved since, or another layer is on top: that selection stands
+                late.layer != activeLayer.value || selectedId.value != late.fallback -> lateFocus = null
+                id == late.id && layer == late.layer -> {
+                    lateFocus = null
+                    selectById(id)
+                }
+            }
+        }
+    }
+
+    /** A control to select once it registers, for a screen whose controls compose a frame after it asks: the
+     *  in-game menu reopening on the control it was left on (MenuPlace). [fallback] is what was selected when
+     *  it was asked for; if the pad has moved off it by then, that selection stands. Ported from ARMSX3. */
+    private class LateFocus(val layer: String?, val id: String, val fallback: String?)
+    private var lateFocus: LateFocus? = null
+
+    /** Select [id] in [layer] (null for the base screen) as soon as it registers, unless the pad moves first. */
+    fun focusWhenRegistered(layer: String?, id: String) {
+        lateFocus = LateFocus(layer, id, selectedId.value)
     }
 
     fun unregister(id: String) {
@@ -671,6 +692,7 @@ fun ToggleRow(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
+                ChangedSettingMarker(label)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     // Which layer this row's value comes from. Draws nothing outside the PS1
@@ -754,6 +776,7 @@ fun IntSliderRow(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
+                    ChangedSettingMarker(label)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                         PerGameMarker(label)
@@ -1069,6 +1092,7 @@ fun SegmentedRow(
         contentAlignment = Alignment.CenterStart,
     ) {
         Column {
+            ChangedSettingMarker(label, Modifier.padding(horizontal = 16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1163,6 +1187,7 @@ fun SegmentedGridRow(
         contentAlignment = Alignment.CenterStart,
     ) {
         Column {
+            ChangedSettingMarker(label)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 PerGameMarker(label)

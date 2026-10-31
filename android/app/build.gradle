@@ -9,6 +9,14 @@ plugins {
 // buildscript classpath in root build.gradle). This mirrors the ARMSX2 source.
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 
+// Allow-list for packaged native libraries (see jniLibs.srcDirs in sourceSets.main). Only the
+// Discord helper is copied out of build.sh's src/main/jniLibs output; the stale old core next to it
+// never is.
+def discordJniStage = layout.buildDirectory.dir("discordJniLibs").get().asFile
+def stageDiscordJniLib = tasks.register("stageDiscordJniLib", Copy) {
+    from("src/main/jniLibs") { include "*/libarmsx_discord.so" }
+    into(discordJniStage)
+}
 def repoDebugKeystore = file("debug.keystore")
 def hasRepoDebugKeystore = repoDebugKeystore.exists()
 def diagnosticBuild = providers.gradleProperty('armsx.diagnostics').map { it.toBoolean() }.getOrElse(false)
@@ -268,8 +276,14 @@ android {
             // resource error, and our definitions are the ones we want.
             java.srcDirs += ['../../third_party/SDL/android-project/app/src/main/java']
             assets.srcDirs += ['src/main/assets']
-            // Never package stale old-core/SDL/ANGLE binaries from src/main/jniLibs.
-            jniLibs.srcDirs = []
+            // Never package stale old-core/SDL/ANGLE binaries from src/main/jniLibs. That
+            // directory is build.sh's output and still receives libarmsx.so, libSDL2.so and the
+            // rest, so it must not be packaged wholesale. But emptying the list ALSO dropped
+            // libarmsx_discord.so, which is not old core: it is the :discord helper process's own
+            // library. DiscordNative.load() catches the missing library and reports unavailable,
+            // so Discord was silently dead in every build since. Package an ALLOW-LIST instead,
+            // staged by stageDiscordJniLib below: only that one file can reach the APK.
+            jniLibs.srcDirs = [discordJniStage]
             assets.exclude 'discord_creds.env'
         }
     }
@@ -497,3 +511,6 @@ tasks.register("verifyPlayFlavorClean") {
     dependsOn(playVerifyTasks)
     android.buildTypes.all { bt -> dependsOn("assemblePlay${bt.name.capitalize()}") }
 }
+
+// The staged allow-list must exist before the jniLibs merge reads it.
+tasks.matching { it.name ==~ /merge.*JniLibFolders/ }.configureEach { dependsOn stageDiscordJniLib }

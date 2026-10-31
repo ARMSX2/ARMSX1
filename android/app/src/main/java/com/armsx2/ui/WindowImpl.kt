@@ -128,7 +128,14 @@ object WindowImpl {
             }
 
             if (overlayVisible.value) {
-                com.armsx2.ui.emulation.EmulationMenuScreen()
+                // Always dark, whatever the system/Material You light-dark state is: this panel
+                // is drawn over the running game, and in light mode it came out white with
+                // grey-on-white body text sitting on top of gameplay. ARMSX2/ARMSX3 quick menus
+                // are dark unconditionally; this matches them. The chosen palette is kept --
+                // Material You still derives from the wallpaper, just its dark variant.
+                com.armsx2.ui.theme.Armsx2Theme(forceDark = true) {
+                    com.armsx2.ui.emulation.EmulationMenuScreen()
+                }
             }
 
             // Full manager screen over the paused game; dismiss (back or the screen's

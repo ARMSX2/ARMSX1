@@ -83,11 +83,13 @@ data class Ps1Settings(
     val reduceInputLatency: Boolean = false,
     val frameTimeBufferMs: Int = 2,
     val maxQueuedFrames: Int = 2,
-    // SDL software presentation by default. GPU presentation is opt-in so the deterministic,
-    // portable path remains the default on every platform and does not depend on an adopted
-    // native window or a particular GLES/Vulkan driver.
-    // MUST match config.c's cfg->gpu_backend default (0 = software).
-    val gpuBackend: String = GPU_SOFTWARE,       // software | sdl-accelerated | opengl | angle | vulkan
+    // Vulkan presentation by default, matching ARMSX2/ARMSX3. Software present does a
+    // full-resolution CPU blit every frame and is the slowest path we ship. The SDL software
+    // path stays as the fallback for any surface the GPU backends decline, so a device without
+    // a usable Vulkan surface still presents.
+    // MUST match config.c's cfg->gpu_backend default (3 = vulkan). A Kotlin default that
+    // disagrees with the core's is how a renderer ends up showing one thing and running another.
+    val gpuBackend: String = GPU_VULKAN,         // software | sdl-accelerated | opengl | angle | vulkan
     val textureScaleMode: Boolean = false,       // bilinear filtering
     val debugPanel: Boolean = false,
     val stretchMode: Boolean = false,
@@ -255,16 +257,24 @@ data class Ps1Settings(
          *  in-game pause menu → Display). Same set, same order, same labels in both — they
          *  used to disagree, and the in-game one was a lifted PCSX2 control that never
          *  reached this core at all. */
-        val GPU_BACKENDS = listOf(GPU_SOFTWARE, GPU_ACCELERATED, GPU_OPENGL, GPU_ANGLE, GPU_VULKAN)
+        //
+        // Fastest first, matching ARMSX2/ARMSX3: Vulkan (the default), then OpenGL, then SDL, then
+        // software. Vulkan used to sit LAST, so in the quick menu's horizontal chip row the active
+        // default was scrolled off the right-hand edge -- "Active: Vulkan" with no Vulkan chip in
+        // sight. Selection and storage are by token, never index, so the order is free to change.
+        //
+        // ★ GPU_BACKENDS and GPU_BACKEND_LABELS are matched BY POSITION (the quick menu zips them,
+        // the settings tab indexes both). Reorder them together or a chip selects the wrong backend.
+        val GPU_BACKENDS = listOf(GPU_VULKAN, GPU_OPENGL, GPU_ANGLE, GPU_ACCELERATED, GPU_SOFTWARE)
         /** Localized. A `get()` rather than a stored list so a live language switch re-reads it —
          *  a `val` would freeze whatever language was current when this class first loaded. */
         val GPU_BACKEND_LABELS: List<String>
             get() = listOf(
-                I18n.get("renderer.gpuBackend.software"),
-                I18n.get("renderer.gpuBackend.sdlAccel"),
+                I18n.get("renderer.gpuBackend.vulkan"),
                 I18n.get("renderer.gpuBackend.systemGl"),
                 I18n.get("renderer.gpuBackend.angle"),
-                I18n.get("renderer.gpuBackend.vulkan"),
+                I18n.get("renderer.gpuBackend.sdlAccel"),
+                I18n.get("renderer.gpuBackend.software"),
             )
 
         const val ASPECT_CLASSIC = "classic"

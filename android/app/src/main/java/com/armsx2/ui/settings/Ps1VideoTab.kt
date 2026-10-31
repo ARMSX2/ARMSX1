@@ -85,9 +85,11 @@ fun Ps1VideoTab() {
         // ONLY from the in-game pause menu, so choosing Vulkan here offered no way to install or
         // pick a driver pack — the same screen, two different answers depending on how you got to
         // it. Same components as the pause menu uses, so the two cannot drift apart.
-        Ps1GpuPerformanceOptions(editor)
-        Ps1FramePacingOptions(editor)
-
+        //
+        // Directly under the backend picker, as in ARMSX2/ARMSX3. They used to come AFTER the GPU
+        // performance and frame-pacing groups -- about twenty controls further down -- so picking
+        // Vulkan appeared to offer no driver manager at all: it was there, several screens below
+        // the choice it depends on.
         if (s.gpuBackend == Ps1Settings.GPU_VULKAN) {
             com.armsx2.ui.common.DriverManagerSection()
             SettingsDivider()
@@ -99,6 +101,9 @@ fun Ps1VideoTab() {
             }
             SettingsDivider()
         }
+
+        Ps1GpuPerformanceOptions(editor)
+        Ps1FramePacingOptions(editor)
 
         // Display scale is NOT shown. It reaches applyWindowMetrics() -> SDL_SetWindowSize, which
         // is gated behind SupportsManagedWindowSizing() — false on Android, where the surface is
@@ -334,9 +339,10 @@ fun Ps1VideoTab() {
             }
         IntSliderRow(
             label = str("renderer.internalRes.label"),
-            value = if (s.hwRasterizer) s.internalScale.coerceIn(1, 8) else 1,
+            // 5x is the most PSX Lab renders; 6x-8x were accepted and drawn at 5x.
+            value = if (s.hwRasterizer) s.internalScale.coerceIn(1, 5) else 1,
             min = 1,
-            max = 8,
+            max = 5,
             description = str("renderer.internalRes.description"),
             valueFormatter = { if (it == 1) "Native" else "${it}x" },
             onReset = resetScaleInternal,

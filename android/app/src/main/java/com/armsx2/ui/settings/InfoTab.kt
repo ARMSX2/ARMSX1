@@ -115,12 +115,12 @@ fun InfoTab(game: GameInfo?) {
             SectionTitle(game.title, str("scope.game"))
             Spacer(Modifier.height(10.dp))
             InfoRow(str("info.title"), game.title, clipboard)
-            InfoRow(str("info.serial"), serial ?: "—", clipboard)
+            InfoRow(str("info.serial"), serial ?: "-", clipboard)
             // Always present, so the row does not appear mid-identification and shove the rows
             // below it down. This is the value that goes in the PNACH filename.
-            InfoRow(str("info.crc"), crc ?: "—", clipboard)
+            InfoRow(str("info.crc"), crc ?: "-", clipboard)
             InfoRow(str("info.region"), regionName(game.serial), clipboard)
-            InfoRow(str("info.container"), game.extension.takeIf { it.isNotBlank() } ?: "—", clipboard)
+            InfoRow(str("info.container"), game.extension.takeIf { it.isNotBlank() } ?: "-", clipboard)
             InfoRow(str("info.platform"), game.platform.name, clipboard)
             // Play time replaces the compatibility rating here. Compatibility is blank for most
             // of the library (it only has a value where the GameDB carries one) so the row was
@@ -131,12 +131,12 @@ fun InfoTab(game: GameInfo?) {
             // rebuild, so existing users already have hours waiting here.
             InfoRow(
                 str("info.playTime"),
-                PlayTime.formatPlayed(PlayTime.playedSeconds(serial)).ifEmpty { "—" },
+                PlayTime.formatPlayed(PlayTime.playedSeconds(serial)).ifEmpty { "-" },
                 clipboard,
             )
             InfoRow(
                 str("info.lastPlayed"),
-                PlayTime.formatLastPlayed(PlayTime.lastPlayedMillis(serial)).ifEmpty { "—" },
+                PlayTime.formatLastPlayed(PlayTime.lastPlayedMillis(serial)).ifEmpty { "-" },
                 clipboard,
             )
             InfoRow(str("info.path"), game.uri.toString(), clipboard)
@@ -220,7 +220,7 @@ private fun InfoRow(label: String, value: String, clipboard: ClipboardManager) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(value, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        if (value != "—") {
+        if (value != "-") {
             Text(
                 "⧉",
                 modifier = Modifier
@@ -234,12 +234,12 @@ private fun InfoRow(label: String, value: String, clipboard: ClipboardManager) {
 
 /** Coarse region from the serial prefix — enough for an at-a-glance info tab. */
 private fun regionName(serial: String?): String {
-    val s = serial?.uppercase()?.replace("-", "") ?: return "—"
+    val s = serial?.uppercase()?.replace("-", "") ?: return "-"
     return when {
         s.startsWith("SLUS") || s.startsWith("SCUS") || s.startsWith("PUPX") -> "NTSC-U (USA)"
         s.startsWith("SLES") || s.startsWith("SCES") || s.startsWith("SLED") -> "PAL (Europe)"
         s.startsWith("SLPS") || s.startsWith("SLPM") || s.startsWith("SCPS") || s.startsWith("PSXC") -> "NTSC-J (Japan)"
         s.startsWith("SLKA") || s.startsWith("SCKA") -> "NTSC-K (Korea)"
-        else -> "—"
+        else -> "-"
     }
 }

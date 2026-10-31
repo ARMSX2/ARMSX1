@@ -18,8 +18,6 @@ sealed interface AppRoute {
     data object GameManager : AppRoute
     data object ControllerManager : AppRoute
     data object PatchManager : AppRoute
-    data object Customisation : AppRoute
-    data object AppHotkeys : AppRoute
     data object Achievements : AppRoute
     data object Language : AppRoute
     data object Friends : AppRoute

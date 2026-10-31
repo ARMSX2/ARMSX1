@@ -1235,8 +1235,8 @@ open class MainActivityRuntime : ComponentActivity() {
                             instance?.runOnUiThread {
                                 android.widget.Toast.makeText(
                                     driverCtx,
-                                    "GPU driver \"$bad\" crashed on the last launch — " +
-                                        "reverted to the system driver.",
+                                    "GPU driver \"$bad\" crashed on the last launch. " +
+                                        "Reverted to the system driver.",
                                     android.widget.Toast.LENGTH_LONG,
                                 ).show()
                             }
@@ -1428,44 +1428,89 @@ open class MainActivityRuntime : ComponentActivity() {
             // while the same title launched from our own library applied them correctly.
             // Build a GameInfo for the incoming URI so the external path keys off the same
             // settingsKey the library path does (serial for discs, filename stem otherwise).
-            launchGame(queued, externalGameInfo(queued), external = true)
+            // Identifying it reads the disc (a few sectors, through the frontend's grant for a
+            // content URI), so that happens off the main thread and the launch comes back to it.
+            Thread({
+                val info = externalGameInfo(queued)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    launchGame(queued, info, external = true)
+                }
+            }, "armsx-external-launch").start()
         }
 
         /**
-         * Minimal [GameInfo] for a URI arriving from outside the app. The serial is probed
-         * off the image the same way the library scan does (SYSTEM.CNF via
-         * NativeApp.getGameSerialFromFd) so per-game settings stored under the serial are
-         * found. A failed probe is fine and expected for ELF/homebrew — settingsKey then
-         * falls back to the filename stem, matching issue #253's behaviour.
+         * The [GameInfo] for a URI arriving from outside the app (ES-DE, Daijisho, Beacon and the
+         * like), as ARMSX3 builds it.
+         *
+         * The library's entry when it has the same file, or the same disc under another address:
+         * a frontend hands over its own form of a path, and the library's entry carries the
+         * serial, title, cover and memory-card identity a launch from the library would have.
+         * Otherwise the serial comes off the disc itself, read the way the library scan reads it
+         * ([com.armsx2.core.Ps1Covers]). This used to ask NativeApp.getGameSerialFromFd, which
+         * PSX Lab does not implement, so every frontend launch came up with no serial: per-game
+         * settings keyed by the file name, no cover, and Discord with nothing to show. With no
+         * serial (ELF, homebrew) settingsKey still falls back to the filename stem, as in #253.
+         *
+         * Blocking: reads the disc. Call off the main thread.
          */
         private fun externalGameInfo(uriString: String): GameInfo? = runCatching {
             val uri = uriString.toUri()
             val name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':').orEmpty()
             val stem = name.substringBeforeLast('.').ifBlank { name }
-            val serial = runCatching {
-                val ctx = instance ?: return@runCatching null
-                // detachFd() hands ownership of the fd to native, which closes it — same
-                // contract GameLibraryRepository.probeDocument/probeRaw use. Do NOT wrap in
-                // use{}: closing an already-detached descriptor is not ours to do.
-                val raw = if (uri.scheme == "content") {
-                    val pfd = ctx.contentResolver.openFileDescriptor(uri, "r") ?: return@runCatching null
-                    NativeApp.getGameSerialFromFd(pfd.detachFd())
-                } else {
-                    val f = java.io.File(uri.path ?: return@runCatching null)
-                    if (!f.isFile) return@runCatching null
-                    val pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-                    NativeApp.getGameSerialFromFd(pfd.detachFd())
+            val ctx = instance?.applicationContext
+            val library = ctx?.let {
+                runCatching { com.armsx2.data.library.GameLibraryRepository(it).loadCached().games }.getOrNull()
+            }.orEmpty()
+            libraryGameAt(library, uri)?.let {
+                android.util.Log.i("ARMSX-Launch", "external launch: '$name' is the library's '${it.title}'")
+                return@runCatching it
+            }
+            val path = if (uri.scheme == null || uri.scheme == "file") uri.path?.takeIf { it.isNotBlank() } else null
+            val probe = when {
+                path != null -> runCatching { com.armsx2.core.Ps1Covers.probeForPath(path) }.getOrNull()
+                uri.scheme == "content" && ctx != null ->
+                    runCatching { com.armsx2.core.Ps1Covers.probeForDocument(ctx, uriString) }.getOrNull()
+                else -> null
+            }
+            val serial = probe?.serial?.takeIf { it.isNotBlank() }
+            // The same disc the library scanned under another address. A playlist entry carries
+            // its first disc's serial, so a single disc is preferred when both match.
+            serial?.let { s ->
+                val matches = library.filter { it.serial.equals(s, ignoreCase = true) }
+                (matches.firstOrNull { it.extension != "M3U" } ?: matches.firstOrNull())?.let {
+                    android.util.Log.i("ARMSX-Launch", "external launch: '$name' is $s, the library's '${it.title}'")
+                    return@runCatching it
                 }
-                // The probe tags its result "<platform>:<serial>" when SYSTEM.CNF parsed.
-                raw?.takeIf { it.isNotBlank() }?.substringAfterLast(':')?.takeIf { it.isNotBlank() }
-            }.getOrNull()
+            }
+            android.util.Log.i("ARMSX-Launch", "external launch: '$name' is ${serial ?: "a disc with no serial"}")
+            val (fileTitle, fileSerial) = com.armsx2.FilenameParser.parse(name)
             GameInfo(
                 uri = uri,
-                title = stem,
-                serial = serial,
+                title = fileTitle.ifBlank { stem },
+                serial = serial ?: fileSerial,
                 extension = name.substringAfterLast('.', "").uppercase(),
             )
         }.getOrNull()
+
+        /** The library entry for the very file [uri] names: the same URI, the same file path
+         *  (symlinks such as /sdcard resolved), or the same document under another grant. */
+        private fun libraryGameAt(library: List<GameInfo>, uri: Uri): GameInfo? {
+            library.firstOrNull { it.uri == uri }?.let { return it }
+            if (uri.scheme == null || uri.scheme == "file") {
+                val wanted = uri.path?.let { p -> runCatching { java.io.File(p).canonicalPath }.getOrDefault(p) }
+                    ?: return null
+                return library.firstOrNull { game ->
+                    game.uri.scheme == "file" && game.uri.path?.let { p ->
+                        runCatching { java.io.File(p).canonicalPath }.getOrDefault(p)
+                    } == wanted
+                }
+            }
+            fun documentKey(u: Uri): String? = runCatching {
+                u.authority + "\u0000" + android.provider.DocumentsContract.getDocumentId(u)
+            }.getOrNull()
+            val wanted = documentKey(uri) ?: return null
+            return library.firstOrNull { it.uri.scheme == "content" && documentKey(it.uri) == wanted }
+        }
 
         /**
          * Boot to BIOS (no game disc). Unlike `start()` this does NOT
@@ -2277,6 +2322,55 @@ open class MainActivityRuntime : ComponentActivity() {
             }
         }
 
+        /**
+         * Treat an install a launcher has already prepared as set up, without making anyone walk
+         * the wizard to say so. Ported from ARMSX2 (#847) and ARMSX3 (#114, #205), requested by
+         * carter-lilley.
+         *
+         * A launcher that installs ARMSX1, puts a BIOS in its BIOS folder and starts a game by
+         * path has done everything setup asks for, and setup still stood in front of it. Worse,
+         * an external launch waits for setupComplete, so the game it was asked to start never
+         * booted.
+         *
+         * Checked against the files rather than any flag a caller could set: a PS1 BIOS the
+         * wizard itself would accept ([com.armsx2.core.Ps1BiosProbe]), in the folder the core
+         * boots from, plus a game, either a ROMs folder already configured or the one this launch
+         * hands over. If placement failed, setup runs and the user can fix it, which is the
+         * failure a skip flag would have hidden. Persisted once decided, matching [finishSetup].
+         */
+        private fun adoptPreparedSetup(context: Context, launchHasGame: Boolean) {
+            if (setupComplete.value) return
+            if (romsDirs.value.isEmpty() && !launchHasGame) return
+
+            fun ps1Bios(file: File): Boolean = file.isFile && !file.name.startsWith(".") &&
+                file.length() == com.armsx2.core.Ps1BiosProbe.IMAGE_SIZE.toLong() && runCatching {
+                    file.inputStream().use { com.armsx2.core.Ps1BiosProbe.probe(it) } != null
+                }.getOrDefault(false)
+            val chosen = bios.value?.takeIf { it.isNotEmpty() }?.let(::File)
+            val found = chosen?.takeIf(::ps1Bios)
+                ?: internalBiosDir(context).listFiles()?.sortedBy { it.name.lowercase() }?.firstOrNull(::ps1Bios)
+                ?: return
+
+            android.util.Log.i("ARMSX", "setup: a BIOS and a game are already in place, skipping the wizard")
+            bios.value = found.absolutePath
+            biosDir.value = null
+            prefs.edit(commit = true) {
+                putString("bios", found.absolutePath)
+                remove("biosDir")
+                putBoolean("setupComplete", true)
+            }
+            // What the wizard's own BIOS pick records as well, so the core looks where the BIOS is.
+            runCatching {
+                com.armsx2.config.Ps1SettingsStore.update(context, null) {
+                    it.copy(
+                        preferredModel = com.armsx2.core.Ps1Config.modelForBios(found) ?: it.preferredModel,
+                        biosSearchPath = found.parent ?: it.biosSearchPath,
+                    )
+                }
+            }
+            setupComplete.value = true
+        }
+
         fun finishSetup() {
             prefs.edit { putBoolean("setupComplete", true) }
             setupComplete.value = true
@@ -2285,6 +2379,22 @@ open class MainActivityRuntime : ComponentActivity() {
 
         fun reopenSetup() {
             setupEditorVisible.value = true
+        }
+
+        /**
+         * Open a file picker and boot whatever is chosen, without adding it to the library: the
+         * drawer's Launch Game, as in ARMSX2/ARMSX3. [bootDiscAction], the result handler, was
+         * already here and fully working -- it just had nothing left to open it, so the feature
+         * existed with no way in.
+         */
+        fun promptLaunchGame() {
+            val activity = instance ?: return
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { activity.bootDiscAction.launch(intent) }
         }
 
         /** The data root that NativeApp.initialize() was actually handed
@@ -3101,13 +3211,17 @@ open class MainActivityRuntime : ComponentActivity() {
                 if (legacy != null) listOf(legacy) else emptyList()
             }
         }
+        adoptPreparedSetup(applicationContext, launchHasGame = extractLaunchUri(intent) != null)
         // Setup recovery. Auto Backup can restore our prefs (incl. setupComplete + the
         // ROMs URIs) on reinstall, but SAF/all-files PERMISSIONS are never backed up — so
         // a restored setup can point at a folder we can no longer read, which would strand
         // the user in an empty library with the wizard skipped. If no configured ROMs
         // folder is actually reachable, drop setupComplete for this session so the wizard
         // re-runs (and re-requests the permission); finishSetup re-arms it.
-        if (setupComplete.value && !romsAccessible(this, romsDirs.value)) {
+        // Only when there IS a ROMs folder to lose. A launcher-prepared install has none (see
+        // adoptPreparedSetup), and romsAccessible counts an empty list as lost, which would put
+        // the wizard straight back after the skip.
+        if (setupComplete.value && romsDirs.value.isNotEmpty() && !romsAccessible(this, romsDirs.value)) {
             setupComplete.value = false
             setupRecoveryNeeded.value = true
         }
@@ -3264,7 +3378,7 @@ open class MainActivityRuntime : ComponentActivity() {
                 if (setupRecoveryNeeded.value) {
                     android.widget.Toast.makeText(
                         applicationContext,
-                        "Couldn't open your saved game folder — this can happen after reinstalling or restoring a backup. Please re-select it.",
+                        "Couldn't open your saved game folder. This can happen after reinstalling or restoring a backup. Please re-select it.",
                         android.widget.Toast.LENGTH_LONG,
                     ).show()
                     setupRecoveryNeeded.value = false
@@ -4067,10 +4181,15 @@ open class MainActivityRuntime : ComponentActivity() {
                         com.armsx2.ui.home.HomeInputController.openSelectedSettings()
                     return true
                 }
-                // #267: Y (Triangle) opens the library SEARCH — the requested
-                // single-button access. While the panel is open Y is swallowed
-                // (the panel owns nav; B closes it).
-                if (kc == KeyEvent.KEYCODE_BUTTON_Y) return true
+                // Y (Triangle) opens the highlighted game's long-press menu, the controller
+                // equivalent of long-press (play, settings, cheats, add to home screen...). It used
+                // to be swallowed here and do nothing: the library search it once opened (#267) is
+                // reached from the Search row instead. Matches ARMSX2/ARMSX3.
+                if (kc == KeyEvent.KEYCODE_BUTTON_Y) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
+                        com.armsx2.ui.home.HomeInputController.openSelectedMenu()
+                    return true
+                }
                 // Shoulder buttons drive the touch-only toolbar toggles so the
                 // whole library is controller-reachable: R1 cycles the view mode
                 // (Grid → List → Shelf — "all 3 modes"), L1 cycles the sort order.
@@ -4296,7 +4415,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     if (down && !vmStopInProgress && event.repeatCount == 0) {
                         if (!com.armsx2.config.Ps1SettingsStore.active(applicationContext).rewind) {
                             com.armsx2.ui.WelcomeBanner.show(
-                                "Rewind is off — turn it on in Settings › Emulation"
+                                "Rewind is off. Turn it on in Settings › Emulation"
                             )
                             return true
                         }
@@ -6076,6 +6195,9 @@ open class MainActivityRuntime : ComponentActivity() {
         // before a VM existed) would otherwise leave it running behind the lock screen.
         // setAudioSuspended is idempotent request-parking, so this is a no-op when onPause won.
         suspendEmulatorAudio(true)
+        // Out of sight: the Discord helper drains once a second instead of twenty times and the
+        // snapshot poll waits, rather than both running on behind a locked screen for hours.
+        com.armsx2.DiscordPresence.setForeground(false)
         super.onStop()
     }
 
@@ -6097,6 +6219,9 @@ open class MainActivityRuntime : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         ctrCompanion.resume()
+        // Back in sight: the Discord helper returns to draining at full rate and the friends
+        // snapshot poll resumes. Paired with setForeground(false) in onStop.
+        com.armsx2.DiscordPresence.setForeground(true)
         // Restart the platform audio stream FIRST, before anything below can ask the core for a
         // frame. Un-suspending is what actually undoes onPause/onStop — the VM's own resume still
         // belongs to the pause overlay's Resume button, which is where it has always been — and

@@ -104,6 +104,20 @@ object Ps1Covers {
     fun cachedProbe(key: String): Ps1DiscId.Probe? = probeCache[key]
 
     /**
+     * [probeForPath] for a game in a picked folder, keyed by its content URI string. Only a found
+     * serial is memoised: a provider that was still waking up fails once and then reads fine, and
+     * remembering that failure would make it permanent for the process (see [reprobeForPath]).
+     *
+     * **Blocking.** Call from an IO dispatcher.
+     */
+    fun probeForDocument(context: android.content.Context, uri: String): Ps1DiscId.Probe {
+        probeCache[uri]?.let { return it }
+        val probe = Ps1SafAccess.probeDocument(context, uri)
+        if (!probe.serial.isNullOrBlank()) probeCache[uri] = probe
+        return probe
+    }
+
+    /**
      * Absolute path of a user-supplied cover sitting next to the ROM (`<name>.jpg/png/webp`), or
      * null. Memoised so the cover getter — which runs during composition — costs at most one stat
      * sweep per game for the life of the process. The library scan warms this on its IO thread.

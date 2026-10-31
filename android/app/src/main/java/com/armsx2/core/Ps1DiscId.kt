@@ -2,6 +2,8 @@ package com.armsx2.core
 
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.util.Locale
 
 /**
@@ -44,6 +46,11 @@ import java.util.Locale
  * The serial is normalised to psx-covers' filename form: `SLUS_005.94` → `SLUS-00594`. The native
  * reader normalises to the same shape, on purpose — the two are alternative routes to one
  * identity, and a disagreement would split a game's settings in half.
+ *
+ * **A game from a picked folder is read the same way.** A library folder granted through the
+ * system picker hands out descriptors, not paths, so every read below is positional over a
+ * [FileChannel]: [probe] opens one on a file, and [probeOpenImage] takes one a DocumentsProvider
+ * opened ([Ps1SafAccess.probeDocument]). Same handful of 2 KB reads either way; nothing is copied.
  */
 object Ps1DiscId {
 
@@ -114,60 +121,58 @@ object Ps1DiscId {
      * and the achievements identity all hang off, exactly as for a multi-disc .m3u.
      */
     private fun probePbp(rom: File): Probe? = runCatching {
-        java.io.RandomAccessFile(rom, "r").use { f ->
-            fun u32(at: Long): Long {
-                f.seek(at)
-                val b = ByteArray(4)
-                if (f.read(b) != 4) return -1
-                return (b[0].toLong() and 0xff) or ((b[1].toLong() and 0xff) shl 8) or
-                    ((b[2].toLong() and 0xff) shl 16) or ((b[3].toLong() and 0xff) shl 24)
-            }
-
-            val magic = ByteArray(4)
-            f.seek(0)
-            if (f.read(magic) != 4) return@runCatching null
-            if (!(magic[0].toInt() == 0 && magic[1].toInt().toChar() == 'P' &&
-                    magic[2].toInt().toChar() == 'B' && magic[3].toInt().toChar() == 'P')) {
-                return@runCatching null
-            }
-
-            val psar = u32(0x24)
-            if (psar <= 0) return@runCatching null
-
-            val psarMagic = ByteArray(16)
-            f.seek(psar)
-            if (f.read(psarMagic) != 16) return@runCatching null
-            val tag = String(psarMagic, Charsets.US_ASCII)
-
-            val disc = when {
-                tag.startsWith("PSISOIMG0000") -> psar
-                tag.startsWith("PSTITLEIMG") -> {
-                    val rel = u32(psar + 0x200)
-                    if (rel <= 0) return@runCatching null
-                    psar + rel
-                }
-                else -> return@runCatching null
-            }
-
-            val raw = ByteArray(15)
-            f.seek(disc + 0x400)
-            if (f.read(raw) != raw.size) return@runCatching null
-
-            // "_SCES_02380" -> "SCES-02380". Stop at the first NUL.
-            val text = String(raw, Charsets.US_ASCII).substringBefore('\u0000')
-            val serial = text.trim('_', ' ').replace('_', '-').replace('.', '-').trim()
-            val normalised = NORMALISE.find(serial)?.let { m ->
-                "${m.groupValues[1].uppercase(Locale.US)}-${m.groupValues[2]}${m.groupValues[3]}"
-            }
-            if (normalised.isNullOrBlank()) return@runCatching null
-
-            Probe(
-                normalised, "pbp",
-                "${rom.name}: PBP ${if (tag.startsWith("PSTITLEIMG")) "multi-disc" else "single-disc"}; " +
-                    "disc serial @+0x400 = $text -> $normalised",
-            )
-        }
+        RandomAccessFile(rom, "r").use { f -> probePbp(rom.name, f.channel) }
     }.getOrNull()
+
+    private fun probePbp(name: String, f: FileChannel): Probe? {
+        fun u32(at: Long): Long {
+            val b = ByteArray(4)
+            if (readFully(f, at, b) != 4) return -1
+            return (b[0].toLong() and 0xff) or ((b[1].toLong() and 0xff) shl 8) or
+                ((b[2].toLong() and 0xff) shl 16) or ((b[3].toLong() and 0xff) shl 24)
+        }
+
+        val magic = ByteArray(4)
+        if (readFully(f, 0, magic) != 4) return null
+        if (!(magic[0].toInt() == 0 && magic[1].toInt().toChar() == 'P' &&
+                magic[2].toInt().toChar() == 'B' && magic[3].toInt().toChar() == 'P')) {
+            return null
+        }
+
+        val psar = u32(0x24)
+        if (psar <= 0) return null
+
+        val psarMagic = ByteArray(16)
+        if (readFully(f, psar, psarMagic) != 16) return null
+        val tag = String(psarMagic, Charsets.US_ASCII)
+
+        val disc = when {
+            tag.startsWith("PSISOIMG0000") -> psar
+            tag.startsWith("PSTITLEIMG") -> {
+                val rel = u32(psar + 0x200)
+                if (rel <= 0) return null
+                psar + rel
+            }
+            else -> return null
+        }
+
+        val raw = ByteArray(15)
+        if (readFully(f, disc + 0x400, raw) != raw.size) return null
+
+        // "_SCES_02380" -> "SCES-02380". Stop at the first NUL.
+        val text = String(raw, Charsets.US_ASCII).substringBefore('\u0000')
+        val serial = text.trim('_', ' ').replace('_', '-').replace('.', '-').trim()
+        val normalised = NORMALISE.find(serial)?.let { m ->
+            "${m.groupValues[1].uppercase(Locale.US)}-${m.groupValues[2]}${m.groupValues[3]}"
+        }
+        if (normalised.isNullOrBlank()) return null
+
+        return Probe(
+            normalised, "pbp",
+            "$name: PBP ${if (tag.startsWith("PSTITLEIMG")) "multi-disc" else "single-disc"}; " +
+                "disc serial @+0x400 = $text -> $normalised",
+        )
+    }
 
     /** `SCES-02380` / `SCES02380` / `SCES-023.80` in any case -> the three capture groups. */
     private val NORMALISE = Regex("""(?i)^([A-Za-z]{4})[-_.]?(\d{3})[-_.]?(\d{2})""")
@@ -319,31 +324,62 @@ object Ps1DiscId {
 
     private fun probeFile(data: File, trace: StringBuilder): Pair<String, String>? {
         val length = runCatching { data.length() }.getOrDefault(0L)
-        trace.append(data.name).append(" [").append(length).append(" bytes]")
-        try {
-            RandomAccessFile(data, "r").use { raf ->
-                val buf = ByteArray(USER_BYTES)
-                val layout = detectLayout(raf, length, buf)
-                if (layout == null) {
-                    trace.append(": no ISO9660 volume descriptor in the first ")
-                        .append(VD_SEARCH_SECTORS).append(" sectors")
-                } else {
-                    trace.append(": ISO9660 sector=").append(layout.sectorBytes)
-                        .append("+").append(layout.userOffset)
-                    if (layout.isoBase != 0) trace.append(" base=").append(layout.isoBase)
-                    val serial = serialFromFilesystem(raf, length, layout, buf, trace)
-                    if (serial != null) {
-                        trace.append('\n')
-                        return serial to "iso9660"
-                    }
-                }
-                // Last resort: the old byte scan. Only reached when the image has no filesystem we
-                // can walk, so the megabytes it reads are no longer on the common path.
-                val raw = rawScan(raf, length)
-                trace.append(if (raw != null) "; raw scan found $raw" else "; raw scan found nothing")
-                trace.append('\n')
-                if (raw != null) return raw to "rawscan"
+        return try {
+            RandomAccessFile(data, "r").use { raf -> probeImage(data.name, raf.channel, length, trace) }
+        } catch (e: Exception) {
+            // Could not even open it. Same trace shape as a failed read inside probeImage.
+            trace.append(data.name).append(" [").append(length).append(" bytes]")
+                .append(": read failed (").append(e.javaClass.simpleName)
+                .append(": ").append(e.message).append(")\n")
+            null
+        }
+    }
+
+    /**
+     * [probe] for one disc image that is already open: a game in a folder granted through the
+     * system picker has no path a [File] can open, only the descriptor its DocumentsProvider
+     * hands out. [name] is the document's display name (it tells a PBP from a raw image) and
+     * [length] its size. Appends to [trace] exactly as [probe] does and returns (serial, method),
+     * or null. No native fallback here: the core's reader only opens paths. Never throws.
+     */
+    fun probeOpenImage(name: String, channel: FileChannel, length: Long, trace: StringBuilder): Pair<String, String>? {
+        if (name.substringAfterLast('.', "").lowercase(Locale.US) == "pbp") {
+            val pbp = runCatching { probePbp(name, channel) }.getOrNull()
+            if (pbp?.serial != null) {
+                trace.append(pbp.detail).append('\n')
+                return pbp.serial to pbp.method
             }
+            trace.append(name).append(": PBP container carried no readable disc serial\n")
+            return null
+        }
+        return probeImage(name, channel, length, trace)
+    }
+
+    /** The ISO9660 walk, then the byte scan, over an open image. Never throws. */
+    private fun probeImage(name: String, channel: FileChannel, length: Long, trace: StringBuilder): Pair<String, String>? {
+        trace.append(name).append(" [").append(length).append(" bytes]")
+        try {
+            val buf = ByteArray(USER_BYTES)
+            val layout = detectLayout(channel, length, buf)
+            if (layout == null) {
+                trace.append(": no ISO9660 volume descriptor in the first ")
+                    .append(VD_SEARCH_SECTORS).append(" sectors")
+            } else {
+                trace.append(": ISO9660 sector=").append(layout.sectorBytes)
+                    .append("+").append(layout.userOffset)
+                if (layout.isoBase != 0) trace.append(" base=").append(layout.isoBase)
+                val serial = serialFromFilesystem(channel, length, layout, buf, trace)
+                if (serial != null) {
+                    trace.append('\n')
+                    return serial to "iso9660"
+                }
+            }
+            // Last resort: the old byte scan. Only reached when the image has no filesystem we
+            // can walk, so the megabytes it reads are no longer on the common path.
+            val raw = rawScan(channel, length)
+            trace.append(if (raw != null) "; raw scan found $raw" else "; raw scan found nothing")
+            trace.append('\n')
+            if (raw != null) return raw to "rawscan"
         } catch (e: Exception) {
             trace.append(": read failed (").append(e.javaClass.simpleName)
                 .append(": ").append(e.message).append(")\n")
@@ -352,12 +388,12 @@ object Ps1DiscId {
     }
 
     /** First geometry whose leading sectors contain a primary volume descriptor. */
-    private fun detectLayout(raf: RandomAccessFile, length: Long, buf: ByteArray): Layout? {
+    private fun detectLayout(image: FileChannel, length: Long, buf: ByteArray): Layout? {
         for ((sectorBytes, userOffset) in LAYOUTS) {
             for (sector in 0 until VD_SEARCH_SECTORS) {
                 val at = sector.toLong() * sectorBytes + userOffset
                 if (at + USER_BYTES > length) break
-                if (!readAt(raf, at, buf)) break
+                if (!readAt(image, at, buf)) break
                 // Type 1 + "CD001" is the primary volume descriptor. Requiring both is what stops
                 // a non-ISO image from being walked as if its bytes were directory records.
                 if (buf[0].toInt() == 1 && matchesAscii(buf, 1, "CD001")) {
@@ -373,13 +409,13 @@ object Ps1DiscId {
      * Appends what it found (or how far it got) to [trace].
      */
     private fun serialFromFilesystem(
-        raf: RandomAccessFile,
+        image: FileChannel,
         length: Long,
         layout: Layout,
         buf: ByteArray,
         trace: StringBuilder,
     ): String? {
-        if (!readIso(raf, length, layout, PVD_SECTOR.toLong(), buf)) {
+        if (!readIso(image, length, layout, PVD_SECTOR.toLong(), buf)) {
             trace.append("; volume descriptor unreadable")
             return null
         }
@@ -391,7 +427,7 @@ object Ps1DiscId {
             return null
         }
 
-        val found = findInRoot(raf, length, layout, rootExtent, rootSize, "SYSTEM.CNF", buf)
+        val found = findInRoot(image, length, layout, rootExtent, rootSize, "SYSTEM.CNF", buf)
         if (found == null) {
             trace.append("; SYSTEM.CNF not in the root directory")
             return null
@@ -403,7 +439,7 @@ object Ps1DiscId {
         trace.append("; SYSTEM.CNF extent=").append(extent).append(" size=").append(size)
             .append(" @").append(byteOffset).append("B")
 
-        if (!readIso(raf, length, layout, extent, buf)) {
+        if (!readIso(image, length, layout, extent, buf)) {
             trace.append("; SYSTEM.CNF unreadable")
             return null
         }
@@ -430,7 +466,7 @@ object Ps1DiscId {
 
     /** Directory-record search, case-insensitive and ignoring ISO9660's `;1` version suffix. */
     private fun findInRoot(
-        raf: RandomAccessFile,
+        image: FileChannel,
         length: Long,
         layout: Layout,
         extent: Long,
@@ -440,7 +476,7 @@ object Ps1DiscId {
     ): Pair<Long, Long>? {
         val sectors = ((size + USER_BYTES - 1) / USER_BYTES).toInt()
         for (i in 0 until sectors) {
-            if (!readIso(raf, length, layout, extent + i, buf)) return null
+            if (!readIso(image, length, layout, extent + i, buf)) return null
             var offset = 0
             while (offset < USER_BYTES) {
                 val recordLength = buf[offset].toInt() and 0xFF
@@ -516,15 +552,14 @@ object Ps1DiscId {
 
     // ---- raw byte scan (fallback) ------------------------------------------------------------
 
-    private fun rawScan(raf: RandomAccessFile, length: Long): String? {
+    private fun rawScan(image: FileChannel, length: Long): String? {
         val limit = minOf(length, SCAN_BYTES.toLong())
         var pos = 0L
         val buf = ByteArray(CHUNK + OVERLAP)
         var carry = ByteArray(0)
         while (pos < limit) {
-            raf.seek(pos)
             val toRead = minOf(CHUNK.toLong(), limit - pos).toInt()
-            val read = raf.read(buf, 0, toRead)
+            val read = readFully(image, pos, buf, toRead)
             if (read <= 0) break
             // Prepend carry-over so a token spanning the boundary is still found.
             val window = if (carry.isEmpty()) String(buf, 0, read, Charsets.ISO_8859_1)
@@ -542,7 +577,7 @@ object Ps1DiscId {
 
     /** Reads one ISO logical sector's 2048 user bytes. */
     private fun readIso(
-        raf: RandomAccessFile,
+        image: FileChannel,
         length: Long,
         layout: Layout,
         isoSector: Long,
@@ -552,15 +587,27 @@ object Ps1DiscId {
         if (fileSector < 0) return false
         val at = fileSector * layout.sectorBytes + layout.userOffset
         if (at < 0 || at + USER_BYTES > length) return false
-        return readAt(raf, at, out)
+        return readAt(image, at, out)
     }
 
-    private fun readAt(raf: RandomAccessFile, offset: Long, out: ByteArray): Boolean = try {
-        raf.seek(offset)
-        raf.readFully(out)
-        true
+    private fun readAt(image: FileChannel, offset: Long, out: ByteArray): Boolean = try {
+        readFully(image, offset, out) == out.size
     } catch (_: Exception) {
         false
+    }
+
+    /**
+     * Fill the first [len] bytes of [out] from [offset], stopping early only at end of file.
+     * Returns how many bytes it got. Positional, so the channel's own position never moves and a
+     * descriptor shared with nothing else needs no seek bookkeeping.
+     */
+    private fun readFully(image: FileChannel, offset: Long, out: ByteArray, len: Int = out.size): Int {
+        val target = ByteBuffer.wrap(out, 0, len)
+        while (target.hasRemaining()) {
+            // 0 cannot happen on a blocking channel with room left, but must not spin if it does.
+            if (image.read(target, offset + target.position()) <= 0) break
+        }
+        return target.position()
     }
 
     private fun le32(buf: ByteArray, at: Int): Long =

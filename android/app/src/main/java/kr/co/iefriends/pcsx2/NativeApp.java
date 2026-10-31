@@ -1062,8 +1062,8 @@ public class NativeApp {
 		int motors = Math.max(vmCount, legacy ? 1 : 0);
 		return "Player " + (port + 1) + ": " + name
 				+ (mapped ? "" : " (not active in-game yet)")
-				+ (hasRumble ? " — rumble OK (" + motors + " motor" + (motors == 1 ? "" : "s") + ")"
-						: " — NO rumble exposed by Android");
+				+ (hasRumble ? ", rumble OK (" + motors + " motor" + (motors == 1 ? "" : "s") + ")"
+						: ", NO rumble exposed by Android");
 	}
 
 	public static void setAspectRatio(int type) {  }
@@ -1236,6 +1236,9 @@ public class NativeApp {
 	public static void setPresentationSuspended(boolean suspended) { if (lab == null) { return; } lab.suspendPresentation(suspended); return; }
 	/** Implemented natively: hard reset of the running game. */
 	public static void resetGame() { if (lab == null) { return; } lab.reset(); return; }
+	/** Rebuild the running game's video at the current internal resolution and rasterizer, carrying on from the
+	 *  same moment. Blocking (the engine snapshots and restores the machine): call off the UI thread. */
+	public static boolean reloadVideo() { return lab != null && lab.reloadVideo(); }
 	/** Implemented natively: absolute fast-forward on/off. The speed it runs at comes from
 	 *  {@link #setSpeedLimits}. */
 	public static void setFastForward(boolean enabled) { if (lab == null) { return; } lab.fastForward(enabled); return; }
@@ -1398,6 +1401,10 @@ public class NativeApp {
 	/** PNG preview for [slot], or an empty array when that state has none (states written
 	 *  before previews existed simply have no THUMB section — not an error). Never null. */
 	public static byte[] getImageSlot(int slot) { if (lab == null) { return new byte[0]; } return lab.preview(slot);  }
+	/** When the state in [slot] ({@link #AUTOSAVE_SLOT} for the autosave) was written, in ms since the
+	 *  epoch, or 0 when there is none. The picker shows it under each tile, as ARMSX2 and ARMSX3 do;
+	 *  {@link #getGamePathSlot} names the game, not the state file, so this asks the backend for it. */
+	public static long getStateTimeSlot(int slot) { if (lab == null) { return 0; } try { File state = lab.stateFile(slot); return state.isFile() ? state.lastModified() : 0; } catch (RuntimeException e) { return 0; } }
 	/** PNG preview read straight from a state file. Empty array when it has none. Never null. */
 	public static byte[] getSaveStateImage(String path) { if (lab == null) { return new byte[0]; } try { return path.endsWith(".psxlabstate") ? java.nio.file.Files.readAllBytes(new File(path + ".png").toPath()) : new byte[0]; } catch (java.io.IOException e) { return new byte[0]; }  }
 

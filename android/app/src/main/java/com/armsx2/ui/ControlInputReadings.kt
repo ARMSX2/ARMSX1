@@ -19,5 +19,5 @@ internal object ControlInputReadings {
         }
         val inputs = pressed + sticks
         if (inputs.isEmpty()) null else "P${port + 1}  ${inputs.joinToString(" ")}"
-    }.ifEmpty { listOf("P1  —") }
+    }.ifEmpty { listOf("P1  -") }
 }

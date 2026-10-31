@@ -73,6 +73,23 @@ fun AppTab() {
             MainActivityRuntime::reopenSetup,
             controllerId = "segmented:${str("games.overflow.setup")}",
         )
+        // Appearance: interface style, UI colours, and the library background (waves, RGB
+        // cycling, custom image and the fallbacks), as in ARMSX2/ARMSX3. This is their only home:
+        // the sidebar Customisation page that duplicated them is gone, and controller skins have
+        // their own Skins tab.
+        CollapsibleSection(str("app.interface.style")) {
+            InterfaceStyleSection(showTitle = false)
+        }
+        // PS one style ships a fixed palette, so the colour picker would be inert under it.
+        if (!com.armsx2.ui.theme.InterfacePreferences.psOne) {
+            CollapsibleSection(str("app.theme")) {
+                ThemeAppearanceSection(showTitle = false)
+            }
+        }
+        CollapsibleSection(str("app.bg.style")) {
+            LibraryAppearanceSection()
+        }
+
         Surface(
             onClick = { UiNavigator.navigate(AppRoute.Language) },
             modifier = Modifier.fillMaxWidth()
@@ -360,6 +377,13 @@ fun AppTab() {
             value = LibraryChromePreferences.showRecents.value,
             description = str("app.library.recents.desc"),
             onChange = LibraryChromePreferences::setShowRecents,
+        )
+
+        ToggleRow(
+            label = str("app.library.collections"),
+            value = LibraryChromePreferences.showCollections.value,
+            description = str("app.library.collections.desc"),
+            onChange = LibraryChromePreferences::setShowCollections,
         )
 
         // Moved off the library overflow menu, where it was the odd one out: every other

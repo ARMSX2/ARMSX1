@@ -10,30 +10,39 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.armsx2.R
 import com.armsx2.ShaderParam
+import com.armsx2.ShaderIndex
 import com.armsx2.ShaderRepo
 import com.armsx2.i18n.str
 import com.armsx2.ui.settings.HelpText
 import com.armsx2.ui.settings.IntSliderRow
+import com.armsx2.ui.settings.SettingsControllerNav
 import com.armsx2.ui.settings.SettingsDivider
 import com.armsx2.ui.settings.ToggleRow
 import com.armsx2.ui.settings.controllerFocusable
@@ -43,10 +52,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** One `.slangp` on disk. [label] is the bare filename (the folder it came from is on its
- *  group header); [path] is the absolute filesystem path stored in
+/** One `.slangp` on disk. [label] is the bare filename shown inside its directory;
+ *  [path] is the absolute filesystem path stored in
  *  EmuCore/GS/ShaderChainPreset; [passes] is the resolved pass count — null when the file
- *  never yields one (see [resolvePasses]).
+ *  never yields one (see [ShaderIndex]).
  *
  *  [passes] is reported as a FACT on the row, never used to rank or classify. Pass count is
  *  not a cost proxy and we're not going to pretend it is: xBRZ does enormous per-pixel
@@ -58,75 +67,41 @@ import java.io.File
  *  because they wanted cheap. */
 private data class ShaderPreset(val label: String, val path: String, val passes: Int?)
 
-/** One collapsible sub-folder inside a family.
- *
- *  [key] is the folder's path relative to the shaders ROOT, which is what makes it unique
- *  across the whole tree — the expansion map and controller ids key on it, and a
- *  relative-to-family key would collide ("Presets" exists under both Mega Bezel and
- *  scanline-classic) and make the two copies toggle as one. [label] is the same path
- *  relative to its FAMILY, so the family name isn't repeated on every row inside it
- *  ("Presets/Base_CRT_Presets", not "bezel/Mega_Bezel/Presets/Base_CRT_Presets").
- *
- *  Why sub-folders at all, and not presets straight under the family? Because a family
- *  alone is not bounded: Mega Bezel is 660 presets and scanline-classic 602, and a plain
- *  Column composes every row it is given — 660 rows would stall the frame and hand the
- *  D-pad 660 stops, the exact blocker this grouping exists to kill. Splitting each family
- *  by its own sub-folders caps the largest leaf at 115 (measured on the stock pack). */
-private data class ShaderGroup(val key: String, val label: String, val presets: List<ShaderPreset>)
-
-/** One shader family — a human-meaningful pack or category, and the top level of the
- *  picker: "Mega Bezel", "koko-aio", "CRT", "Handheld".
- *
- *  [direct] is the presets sitting in the family's OWN folder; [groups] is its sub-folders.
- *  A family has one, the other, or both: `crt` is 100 loose presets plus 6 sub-folders,
- *  Mega Bezel is 25 sub-folders and nothing loose, `misc` is 36 loose presets and no
- *  sub-folders at all — so a family without sub-folders lists its presets directly rather
- *  than burying them under a pointless "Uncategorised" row. */
-private data class ShaderFamily(
+/** One directory in the on-disk shader tree. Only this directory's immediate [folders] and
+ *  [presets] are composed at a time; navigating into a child replaces the visible rows
+ *  instead of adding another expanded section to an ever-growing list. */
+private data class ShaderDirectory(
     val key: String,
     val label: String,
     val count: Int,
-    val direct: List<ShaderPreset>,
-    val groups: List<ShaderGroup>,
+    val folders: List<ShaderDirectory>,
+    val presets: List<ShaderPreset>,
 )
 
-/** Result of one scan: the folder we looked in (so the empty state can name it) plus every
- *  preset found under it, already costed, grouped into families and sorted — all of it done
- *  on the scan's IO thread, never in composition. */
-private data class ShaderScan(val dir: String, val families: List<ShaderFamily>)
+/** Result of one scan, including the filesystem path used by the empty-state message. */
+private data class ShaderScan(val dir: String, val root: ShaderDirectory)
 
-/** A preset plus the path segments of its folder, relative to the shaders root. */
-private class FoundPreset(val preset: ShaderPreset, val segments: List<String>)
+/** Mutable construction node used only on the scan's IO thread, then frozen for Compose. */
+private class ShaderDirectoryBuilder(val key: String, val name: String) {
+    val folders = linkedMapOf<String, ShaderDirectoryBuilder>()
+    val presets = mutableListOf<ShaderPreset>()
+}
 
-/** Depth cap for #reference chains. The deepest real chain in the stock pack is 7 hops
- *  (bezel/koko-aio/Presets-4.1/FXAA-bloom-immersive.slangp), so this is pure headroom for a
- *  future pack; the actual loop guard is the visited set in [resolvePasses]. */
-private const val MAX_REFERENCE_DEPTH = 16
+/** Download directory used by ShaderRepo's standard RetroArch pack. It is an installation
+ *  wrapper, not a useful category, so [promoteDefaultPackContents] hides this one level
+ *  while preserving the real paths stored in every preset. */
+private const val DEFAULT_SHADER_PACK_DIR = "shaders_slang"
 
-/** How big a top-level folder must be before we will treat it as a mere CONTAINER of
- *  families rather than a family itself. See [containerDirs] — this gate is what separates
- *  `bezel/` (1490 presets across four unrelated packs) from `edge-smoothing/` (113 presets
- *  across 20 sibling variants of one idea). */
-private const val FAMILY_CONTAINER_MIN = 200
-
-/** `shaders = 12` or `shaders = "12"` — 423 presets in the stock pack quote the value, so
- *  the quotes are not optional to handle. */
-private val SHADERS_RE = Regex("""^\s*shaders\s*=\s*"?(\d+)"?""", RegexOption.IGNORE_CASE)
-
-/** `#reference "../../Root_Presets/MBZ__3__STD__GDV.slangp"` — a preset that inherits its
- *  whole chain from another file and only overrides parameters. */
-private val REFERENCE_RE = Regex("""^\s*#reference\s+(.+?)\s*$""", RegexOption.IGNORE_CASE)
-
-/** Folder-name tokens that are initialisms, so [familyLabel] renders "CRT" not "Crt". */
-private val FAMILY_ACRONYMS = setOf(
+/** Folder-name tokens that are initialisms, so [folderLabel] renders "CRT" not "Crt". */
+private val FOLDER_ACRONYMS = setOf(
     "crt", "gpu", "hdr", "ntsc", "pal", "vhs", "nes", "bfi", "fsr", "lcd", "nis", "3d",
 )
 
 /** Folder names whose own branding is lowercase, where the mechanical title-casing in
- *  [familyLabel] would be wrong. Deliberately tiny: everything else in the stock pack
+ *  [folderLabel] would be wrong. Deliberately tiny: everything else in the stock pack
  *  humanises correctly by rule, and a hand-written table of all 39 names would rot the
  *  moment someone installs a pack we have never seen. */
-private val FAMILY_NAME_OVERRIDES = mapOf("koko-aio" to "koko-aio", "uborder" to "uborder")
+private val FOLDER_NAME_OVERRIDES = mapOf("koko-aio" to "koko-aio", "uborder" to "uborder")
 
 /** Renders a caption parameter's description as a group heading: "[ --- BLACK TINT --- ]:"
  *  reads "BLACK TINT". Cosmetic only — a parameter is identified as a caption by the fact
@@ -248,11 +223,11 @@ private fun ShaderParamPicker(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             Column(Modifier.weight(1f)) {
+                com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.params.label"))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(str("renderer.shaderChain.params.label"), color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f))
-                    com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.params.label"))
                 }
                 Spacer(Modifier.height(3.dp))
                 Text(
@@ -282,19 +257,22 @@ private fun ShaderParamPicker(
     // The editor is a surface that owns the pad, so it can do both.
 }
 
+/**
+ * The preset picker as a folder browser: one directory's folders and presets at a time, with an Up
+ * row, in place of the old accordions that grew into one enormous list. Contributed to ARMSX2 by
+ * Starlightbotanist (ARMSX2 7c39516f6a); the presets come from the one-time [ShaderIndex] and the
+ * scanning row was added by bmdhacks (ARMSX2 2281106f0d, b7aded0669). Ported from ARMSX2.
+ */
 @Composable
 private fun ShaderPresetPicker(preset: String, onPresetChange: (String) -> Unit) {
     val context = LocalContext.current
     val expanded = remember { mutableStateOf(false) }
     val scan = remember { mutableStateOf<ShaderScan?>(null) }
     val scanning = remember { mutableStateOf(false) }
-    // Which families / folders are open. Collapsed by default — that's the whole point: a
-    // full pack is ~2.5k presets, and composing them all would both stall the frame and
-    // give the D-pad 2.5k stops to walk through. Fully collapsed this picker composes 40
-    // rows: None + 39 family headers.
-    val expandedFamilies = remember { mutableStateMapOf<String, Boolean>() }
-    // Keyed on the folder's path relative to the shaders root, which is unique tree-wide.
-    val expandedGroups = remember { mutableStateMapOf<String, Boolean>() }
+    val pickerBringIntoView = remember { BringIntoViewRequester() }
+    // The path relative to the shader root. An empty key is the root itself. Keeping one
+    // current location is what makes this a browser rather than a set of nested accordions.
+    val currentFolderKey = remember { mutableStateOf("") }
 
     // Rescan on every open: packs get dropped in with a file manager (or the Shader Packs
     // downloader) while the app is alive, so a one-shot scan at first composition goes
@@ -304,36 +282,46 @@ private fun ShaderPresetPicker(preset: String, onPresetChange: (String) -> Unit)
     LaunchedEffect(expanded.value) {
         if (!expanded.value) return@LaunchedEffect
         scanning.value = true
-        val result = withContext(Dispatchers.IO) { scanShaderPresets(context) }
-        scan.value = result
-        // Open the family AND folder holding the active preset so reopening the picker
-        // SHOWS the current selection instead of making the user hunt for it. Seeded per
-        // scan, so a user collapsing it afterwards stays collapsed until the next rescan.
-        result.families.forEach { family ->
-            val group = family.groups.firstOrNull { g -> g.presets.any { it.path == preset } }
-            if (group != null) {
-                expandedFamilies[family.key] = true
-                expandedGroups[group.key] = true
-            } else if (family.direct.any { it.path == preset }) {
-                expandedFamilies[family.key] = true
-            }
+        try {
+            val result = withContext(Dispatchers.IO) { scanShaderPresets(context) }
+            scan.value = result
+            // Always reopen at the root. This gives both hosts a predictable first screen:
+            // top-level shader packs only, regardless of where the last preset lives.
+            currentFolderKey.value = ""
+        } finally {
+            // Files can disappear while a pack manager extracts/deletes them. Never leave
+            // the picker permanently reporting a scan merely because traversal threw.
+            scanning.value = false
         }
-        scanning.value = false
     }
 
-    val families = scan.value?.families.orEmpty()
-    // Where the active preset lives, resolved ONCE per (scan, preset) rather than by
-    // re-walking 2.5k presets from every header on every recomposition. Second element is
-    // the folder key, or null when the preset sits directly in its family's own folder.
-    val activeAt: Pair<String, String?>? = remember(scan.value, preset) {
-        if (preset.isBlank()) null
-        else scan.value?.families?.firstNotNullOfOrNull { f ->
-            val group = f.groups.firstOrNull { g -> g.presets.any { it.path == preset } }
-            when {
-                group != null -> f.key to group.key
-                f.direct.any { it.path == preset } -> f.key to null
-                else -> null
-            }
+    val root = scan.value?.root
+    val currentFolder = remember(root, currentFolderKey.value) {
+        root?.findDirectory(currentFolderKey.value) ?: root
+    }
+    // A folder is marked Active when it is the selected preset's directory or one of its
+    // ancestors. Users can therefore follow the marker down without expanding everything.
+    val activeFolderKey = remember(root, preset) { root?.findPresetDirectory(preset) }
+
+    fun navigateTo(folderKey: String) {
+        // A controller-confirmed folder is about to dispose its own selected row. ARMSX2's
+        // registry otherwise falls back to the FIRST control in the whole tab, which also
+        // scrolls the pause menu to its top. Move controller selection to this stable header
+        // first. A touch click has no selected folder, so it does not gain a focus ring.
+        if (SettingsControllerNav.currentSelectedId()?.startsWith("shaderChain:folder:") == true) {
+            SettingsControllerNav.selectById("shaderChain:preset")
+        }
+        currentFolderKey.value = folderKey
+    }
+
+    // Replacing a long directory with a short child can clamp the HOST scroll position to
+    // its new maximum, leaving this picker above the viewport. Wait for the shorter tree to
+    // be measured, then ask whichever host owns the scroll (settings or pause menu) to show
+    // the picker header again. This stays host-agnostic and works with both verticalScrolls.
+    LaunchedEffect(currentFolderKey.value) {
+        if (expanded.value && scan.value != null) {
+            withFrameNanos { }
+            runCatching { pickerBringIntoView.bringIntoView() }
         }
     }
 
@@ -356,14 +344,19 @@ private fun ShaderPresetPicker(preset: String, onPresetChange: (String) -> Unit)
             modifier = Modifier
                 .fillMaxWidth()
                 .defaultMinSize(minHeight = 78.dp)
+                // Keep the folder-navigation reveal anchor off the outer Surface: that
+                // Surface's controllerFocusable modifier owns a separate requester. Two
+                // relocation anchors on the same node made the pause pane reveal the whole
+                // tab instead of this header, while this inner row has one unambiguous bound.
+                .bringIntoViewRequester(pickerBringIntoView)
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
             Column(Modifier.weight(1f)) {
+                com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.preset.label"))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(str("renderer.shaderChain.preset.label"), color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 18.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.weight(1f))
-                    com.armsx2.ui.settings.ChangedSettingMarker(str("renderer.shaderChain.preset.label"))
                 }
                 Spacer(Modifier.height(3.dp))
                 Text(
@@ -402,42 +395,52 @@ private fun ShaderPresetPicker(preset: String, onPresetChange: (String) -> Unit)
                 selected = preset.isBlank(),
                 onClick = { onPresetChange("") },
             )
-            val uncategorised = str("renderer.shaderChain.uncategorised")
-            families.forEach { family ->
-                val familyOpen = expandedFamilies[family.key] ?: false
-                ShaderFamilyRow(
-                    controllerId = "shaderChain:family:${family.key}",
-                    // "" = presets sitting loose at the shaders root; they get a real home
-                    // rather than being dropped on the floor.
-                    label = family.label.ifEmpty { uncategorised },
-                    count = family.count,
-                    expanded = familyOpen,
-                    holdsActive = activeAt?.first == family.key,
-                    onToggle = { expandedFamilies[family.key] = !familyOpen },
-                ) {
-                    // Sub-folders first, then the family's own loose presets: the folder
-                    // rows are compact and navigational, and putting them last would strand
-                    // them under a 100-row wall in families like CRT.
-                    family.groups.forEach { group ->
-                        val groupOpen = expandedGroups[group.key] ?: false
-                        ShaderGroupRow(
-                            controllerId = "shaderChain:group:${group.key}",
-                            label = group.label,
-                            count = group.presets.size,
-                            expanded = groupOpen,
-                            holdsActive = activeAt?.second == group.key,
-                            onToggle = { expandedGroups[group.key] = !groupOpen },
-                        ) {
-                            group.presets.forEach { p -> PresetRow(p, preset, onPresetChange) }
-                        }
-                    }
-                    family.direct.forEach { p -> PresetRow(p, preset, onPresetChange) }
-                }
+            if (currentFolder?.key?.isNotEmpty() == true) {
+                ShaderFolderRow(
+                    controllerId = "shaderChain:folder:up:${currentFolder.key}",
+                    label = str("renderer.shaderChain.folder.up"),
+                    count = null,
+                    holdsActive = false,
+                    isFolder = false,
+                    onClick = { navigateTo(currentFolder.parentKeyWithin(root)) },
+                )
             }
-            if (families.isEmpty() && !scanning.value) {
+            currentFolder?.folders.orEmpty().forEach { folder ->
+                ShaderFolderRow(
+                    controllerId = "shaderChain:folder:${folder.key}",
+                    label = folder.label,
+                    count = folder.count,
+                    holdsActive = activeFolderKey == folder.key ||
+                        activeFolderKey?.startsWith("${folder.key}/") == true,
+                    isFolder = true,
+                    onClick = { navigateTo(folder.key) },
+                )
+            }
+            currentFolder?.presets.orEmpty().forEach { p -> PresetRow(p, preset, onPresetChange) }
+            // Without this the list is just the None row until the scan returns, which reads
+            // as "the list is broken". A first scan (no index yet) walks the whole tree.
+            if (scanning.value && scan.value == null) ScanningRow()
+            if (root?.count == 0 && !scanning.value) {
                 HelpText(str("renderer.shaderChain.empty") + "\n\n" + scan.value?.dir.orEmpty())
             }
         }
+    }
+}
+
+/** Not controller-focusable: there is nothing to do with it but wait. */
+@Composable
+private fun ScanningRow() {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            str("renderer.shaderChain.scanning"),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -456,139 +459,67 @@ private fun PresetRow(p: ShaderPreset, preset: String, onPresetChange: (String) 
     )
 }
 
-/**
- * One collapsible shader family — the top level of the picker. Same ▸/▾ affordance and
- * controller-focusable header as [ShaderGroupRow], drawn a step louder because it heads the
- * list rather than sitting in it. Only the expanded family composes its [content], which is
- * what keeps the collapsed picker 40 rows instead of 2542.
- */
 @Composable
-private fun ShaderFamilyRow(
+private fun ShaderFolderRow(
     controllerId: String,
     label: String,
-    count: Int,
-    expanded: Boolean,
+    count: Int?,
     holdsActive: Boolean,
-    onToggle: () -> Unit,
-    content: @Composable () -> Unit,
+    isFolder: Boolean,
+    onClick: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Surface(
-            onClick = onToggle,
-            modifier = Modifier
-                .fillMaxWidth()
-                .controllerFocusable(controllerId, RoundedCornerShape(18.dp), onConfirm = onToggle),
-            shape = RoundedCornerShape(18.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f),
-            border = BorderStroke(
-                1.dp,
-                if (holdsActive) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-            ),
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth()
+            .controllerFocusable(controllerId, RoundedCornerShape(18.dp), onConfirm = onClick),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f),
+        border = BorderStroke(
+            1.dp,
+            if (holdsActive) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+        ),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    if (expanded) "▾" else "▸",
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold,
+            if (isFolder) {
+                // A vector resource, not a Unicode/emoji glyph: Android's text fonts do not
+                // reliably contain folder symbols, which otherwise render as a tofu square.
+                Icon(
+                    painter = painterResource(R.drawable.ic_folder),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
                 )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    label,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 16.sp,
-                    lineHeight = 21.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            } else {
+                Text("←", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                label,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 16.sp,
+                lineHeight = 21.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (holdsActive) {
+                StatusChip(str("backend.driver.active"), Success)
                 Spacer(Modifier.width(8.dp))
-                // Marks the family holding the current preset even while collapsed, so the
-                // selection is findable without opening all 39.
-                if (holdsActive) {
-                    StatusChip(str("backend.driver.active"), Success)
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(
-                    "$count",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            }
+            count?.let {
+                Text("$it", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (isFolder) {
+                Spacer(Modifier.width(8.dp))
+                Text("›", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
             }
         }
-        if (expanded) content()
-    }
-}
-
-/**
- * One collapsible sub-folder inside a family. Mirrors DriverManagerSection's
- * DriverSourceGroup — same shape, same ▸/▾ affordance, same controller-focusable header —
- * rather than calling it: that one is file-private (Kotlin `private` at top level is FILE
- * scope, not package), and this needs the extra active-marker the driver list has no use
- * for. Only the expanded group composes its [content], which is what keeps the collapsed
- * family cheap.
- */
-@Composable
-private fun ShaderGroupRow(
-    controllerId: String,
-    label: String,
-    count: Int,
-    expanded: Boolean,
-    holdsActive: Boolean,
-    onToggle: () -> Unit,
-    /** Chip text for [holdsActive]. Defaults to the preset picker's "Active", which is what
-     *  a folder holding the current preset means; the parameter list reuses this row to say
-     *  "Modified" instead. */
-    activeLabel: String = str("backend.driver.active"),
-    content: @Composable () -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Surface(
-            onClick = onToggle,
-            modifier = Modifier
-                .fillMaxWidth()
-                .controllerFocusable(controllerId, RoundedCornerShape(14.dp), onConfirm = onToggle),
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            border = BorderStroke(
-                1.dp,
-                if (holdsActive) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
-            ),
-        ) {
-            Row(
-                Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(if (expanded) "▾" else "▸", color = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    label,
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    // Folder paths are long and it's the TAIL that distinguishes them
-                    // (…/Base_CRT_Presets vs …/Base_CRT_Presets_DREZ), so drop the head.
-                    overflow = TextOverflow.StartEllipsis,
-                )
-                // Marks the folder holding the current preset even while collapsed, so the
-                // selection is findable without opening all of them.
-                if (holdsActive) {
-                    StatusChip(activeLabel, Success)
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(
-                    "$count",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        if (expanded) content()
     }
 }
 
@@ -625,7 +556,9 @@ private fun ShaderPresetRow(
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = 15.sp,
                 lineHeight = 20.sp,
-                fontWeight = FontWeight.SemiBold,
+                // Folder names are the strong navigational labels. Presets stay regular
+                // weight so a mixed directory is immediately scannable as folders vs files.
+                fontWeight = FontWeight.Normal,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -650,208 +583,113 @@ private fun ShaderPresetRow(
     }
 }
 
-/** Scan `<DataRoot>/shaders/` recursively for `*.slangp`. The folder is
+/** The presets under `<DataRoot>/shaders/`, as a folder tree. The folder is
  *  [ShaderRepo.shadersRoot] — the same one the Shader Packs downloader extracts into (and
  *  it creates the dir on demand, so the empty state can name a folder the user will
  *  actually find in a file manager). That helper resolves through assetCopyRoot, like the
  *  texture / cache / memcard folders, so this follows a moved data folder.
  *
- *  Blocking I/O — call it off the UI thread. It READS every preset (and follows the
- *  #reference chains between them) rather than just listing names, so the one memo cache is
- *  load-bearing: 691 of the stock pack's 2542 presets are thin wrappers pointing at a
- *  handful of shared roots, and without memoising those roots would be re-parsed hundreds
- *  of times each. */
+ *  Blocking I/O — call it off the UI thread. Usually one small file read: the list and the
+ *  pass counts come from [ShaderIndex], which only walks and reads the whole tree when its
+ *  index is missing or out of date. */
 private fun scanShaderPresets(context: Context): ShaderScan {
     // Put the bundled CRT pack on disk before looking, so the picker is never empty on a
     // fresh install — shaders work out of the box rather than only after a 51 MB download.
     // Costs one stat once the stamp is written, and this already runs on Dispatchers.IO.
     ShaderRepo.installBundled(context)
     val root = ShaderRepo.shadersRoot(context)
-    if (!root.isDirectory) return ShaderScan(root.absolutePath, emptyList())
-    val cache = HashMap<String, Int?>()
-    val found = root.walkTopDown()
-        .filter { it.isFile && it.extension.equals("slangp", ignoreCase = true) }
-        .map { file ->
-            val dir = file.parentFile?.relativeToOrNull(root)?.invariantSeparatorsPath.orEmpty()
-                .let { if (it == ".") "" else it }
-            FoundPreset(
-                preset = ShaderPreset(
-                    label = file.nameWithoutExtension,
-                    path = file.absolutePath,
-                    passes = resolvePasses(file, cache, HashSet(), 0),
-                ),
-                segments = if (dir.isEmpty()) emptyList() else dir.split('/'),
-            )
+    if (!root.isDirectory) return ShaderScan(root.absolutePath, emptyShaderDirectory())
+    val builder = ShaderDirectoryBuilder("", "")
+    ShaderIndex.load(root).forEach { entry ->
+        val segments = entry.relPath.split('/')
+        var directory = builder
+        segments.dropLast(1).forEach { segment ->
+            val childKey = if (directory.key.isEmpty()) segment else "${directory.key}/$segment"
+            directory = directory.folders.getOrPut(segment) {
+                ShaderDirectoryBuilder(childKey, segment)
+            }
         }
-        .toList()
+        directory.presets += ShaderPreset(
+            label = segments.last().substringBeforeLast('.'),
+            path = File(root, entry.relPath).absolutePath,
+            passes = entry.passes,
+        )
+    }
+    return ShaderScan(root.absolutePath, builder.freeze().promoteDefaultPackContents())
+}
 
-    val containers = containerDirs(found)
-    val families = found.groupBy { familyKeyOf(it.segments, containers) }
-        .map { (key, entries) ->
-            val depth = if (key.isEmpty()) 0 else key.count { it == '/' } + 1
-            ShaderFamily(
-                key = key,
-                label = familyLabel(key),
-                count = entries.size,
-                // Alphabetical, case-insensitive — the pass count is on every row, so
-                // findability beats any other ordering, and we deliberately do NOT rank by
-                // cost (see [ShaderPreset]). lowercase() rather than a plain lexicographic
-                // sort, which would scatter mixed-case names by ASCII (every `Bezel` above
-                // every `bezel`); sortedBy is stable, so names differing only in case keep
-                // a deterministic order.
-                direct = entries.filter { it.segments.size == depth }
-                    .map { it.preset }
-                    .sortedBy { it.label.lowercase() },
-                groups = entries.filter { it.segments.size > depth }
-                    .groupBy { it.segments.joinToString("/") }
-                    .map { (dirKey, es) ->
-                        ShaderGroup(
-                            key = dirKey,
-                            // Path relative to the family, so "Mega Bezel" isn't repeated
-                            // on every folder row inside the Mega Bezel section.
-                            label = if (key.isEmpty()) dirKey else dirKey.removePrefix("$key/"),
-                            presets = es.map { it.preset }.sortedBy { it.label.lowercase() },
-                        )
-                    }
-                    .sortedBy { it.label.lowercase() },
-            )
-        }
-        // Named families first, the loose-at-the-root bucket last — it's a couple of strays
-        // and shouldn't head the list.
-        .sortedWith(compareBy({ it.key.isEmpty() }, { it.label.lowercase() }))
-    return ShaderScan(root.absolutePath, families)
+private fun emptyShaderDirectory() = ShaderDirectory("", "", 0, emptyList(), emptyList())
+
+/** Convert the scan-only builder into a stable, alphabetically sorted UI tree. */
+private fun ShaderDirectoryBuilder.freeze(): ShaderDirectory {
+    val children = folders.values.map { it.freeze() }.sortedBy { it.label.lowercase() }
+    val directPresets = presets.sortedBy { it.label.lowercase() }
+    return ShaderDirectory(
+        key = key,
+        label = folderLabel(name),
+        count = directPresets.size + children.sumOf { it.count },
+        folders = children,
+        presets = directPresets,
+    )
 }
 
 /**
- * Top-level folders that are just CONTAINERS of distinct families, and so should be
- * descended one level instead of becoming a family themselves.
- *
- * Derived, not hardcoded. A container is a folder that (a) holds no presets of its own —
- * everything in it belongs to a sub-pack, (b) has at least two sub-packs to tell apart, and
- * (c) is big enough that those sub-packs are separate works rather than variants of one.
- *
- * All three clauses earn their place against the real tree. `bezel/` passes: 1490 presets,
- * zero loose, four genuinely unrelated packs (Mega Bezel 660, scanline-classic 602,
- * koko-aio 179, uborder 49) that users name individually — exactly the split wanted.
- * `presets/` fails (a): its 18 loose files make it a category that merely also has
- * sub-folders, and descending it would shatter a coherent group into 17 fragments like
- * "tvout" and "fsr". `edge-smoothing/` fails only (c): it has no loose presets and 20
- * sub-folders, but at 113 presets those are sibling variants of one idea (xbr, hqx,
- * scalenx…) and promoting them would bury a coherent category under 20 near-empty
- * sections. Size is the only thing separating those last two cases, which is precisely why
- * [FAMILY_CONTAINER_MIN] exists. On the stock pack this returns exactly {bezel}.
+ * Make the standard pack's categories the browser root instead of displaying the redundant
+ * `shaders_slang` installation folder first. Other root-level folders are kept alongside
+ * them — notably `My Presets` and manually installed packs — so simplifying the common path
+ * does not make less-common content unreachable.
  */
-private fun containerDirs(found: List<FoundPreset>): Set<String> =
-    found.filter { it.segments.isNotEmpty() }
-        .groupBy { it.segments[0] }
-        .filterValues { entries ->
-            entries.none { it.segments.size == 1 } &&
-                entries.mapNotNull { it.segments.getOrNull(1) }.distinct().size >= 2 &&
-                entries.size > FAMILY_CONTAINER_MIN
-        }
-        .keys
+private fun ShaderDirectory.promoteDefaultPackContents(): ShaderDirectory {
+    val defaultPack = folders.firstOrNull { it.key == DEFAULT_SHADER_PACK_DIR } ?: return this
+    val otherFolders = folders.filterNot { it.key == defaultPack.key }
+    val promotedFolders = (defaultPack.folders + otherFolders).sortedBy { it.label.lowercase() }
+    val promotedPresets = (defaultPack.presets + presets).sortedBy { it.label.lowercase() }
+    return copy(
+        count = promotedPresets.size + promotedFolders.sumOf { it.count },
+        folders = promotedFolders,
+        presets = promotedPresets,
+    )
+}
 
-/** The family a preset belongs to: its top-level folder, or one level deeper when that
- *  folder is a mere [containerDirs] container. "" = loose at the shaders root.
- *
- *  Keeps the container segment in the key ("bezel/Mega_Bezel", not "Mega_Bezel") so two
- *  containers holding a like-named pack can't collide into one section; [familyLabel]
- *  drops it again for display. */
-private fun familyKeyOf(segments: List<String>, containers: Set<String>): String = when {
-    segments.isEmpty() -> ""
-    segments[0] in containers && segments.size >= 2 -> "${segments[0]}/${segments[1]}"
-    else -> segments[0]
+private fun ShaderDirectory.findDirectory(targetKey: String): ShaderDirectory? {
+    if (key == targetKey) return this
+    return folders.firstNotNullOfOrNull { it.findDirectory(targetKey) }
+}
+
+private fun ShaderDirectory.findPresetDirectory(presetPath: String): String? {
+    if (presetPath.isBlank()) return null
+    if (presets.any { it.path == presetPath }) return key
+    return folders.firstNotNullOfOrNull { it.findPresetDirectory(presetPath) }
+}
+
+/** Parent inside the PRESENTED tree. The promoted pack wrapper is absent, so a category
+ *  such as `shaders_slang/crt` returns the visible root instead of that hidden wrapper. */
+private fun ShaderDirectory.parentKeyWithin(root: ShaderDirectory?): String {
+    if (root == null) return ""
+    val parent = key.substringBeforeLast('/', "")
+    return if (root.findDirectory(parent) != null) parent else root.key
 }
 
 /**
- * Human display name for a family folder: "Mega_Bezel" → "Mega Bezel", "crt" → "CRT",
+ * Human display name for a shader folder: "Mega_Bezel" → "Mega Bezel", "crt" → "CRT",
  * "edge-smoothing" → "Edge Smoothing", "nes_raw_palette" → "NES Raw Palette".
  *
  * Mechanical (split the leaf on _ and -, title-case, uppercase known initialisms) plus a
  * two-entry override map, rather than a hand-written table of all 39 names: the rule gets
  * every folder in the stock pack right except the two packs whose branding is deliberately
  * lowercase, and unlike a table it still does something sensible for a pack nobody has seen
- * yet. Returns "" for the root bucket, which the caller renders as "Uncategorised".
+ * yet.
  *
  * NOT routed through str(): these are folder names read off the user's disk — data, not UI
- * chrome — and the picker already renders sub-folder paths raw for the same reason. Only
- * the fixed label for the root bucket is translated.
+ * chrome — only fixed interface labels such as the Up row are translated.
  */
-private fun familyLabel(key: String): String {
-    if (key.isEmpty()) return ""
-    val leaf = key.substringAfterLast('/')
-    FAMILY_NAME_OVERRIDES[leaf.lowercase()]?.let { return it }
+private fun folderLabel(leaf: String): String {
+    FOLDER_NAME_OVERRIDES[leaf.lowercase()]?.let { return it }
     return leaf.split('_', '-', ' ')
         .filter { it.isNotEmpty() }
         .joinToString(" ") { token ->
-            if (token.lowercase() in FAMILY_ACRONYMS) token.uppercase()
+            if (token.lowercase() in FOLDER_ACRONYMS) token.uppercase()
             else token.replaceFirstChar { it.uppercase() }
         }
         .ifEmpty { leaf }
-}
-
-/** What one `.slangp` says about its own cost: its pass count, or the presets it inherits
- *  one from. Never both in the stock pack — a `#reference` preset overrides parameters
- *  only — but [resolvePasses] prefers a local count anyway, which is the RetroArch rule. */
-private class PresetFacts(val shaders: Int?, val references: List<String>)
-
-private fun readPreset(file: File): PresetFacts {
-    var shaders: Int? = null
-    val references = ArrayList<String>(2)
-    try {
-        file.bufferedReader().useLines { lines ->
-            for (line in lines) {
-                val hit = SHADERS_RE.find(line)
-                if (hit != null) {
-                    shaders = hit.groupValues[1].toIntOrNull()
-                    // A local count wins outright, so the references can't change the
-                    // answer — stop reading. Bails on line 1 for most of the pack.
-                    if (shaders != null) return@useLines
-                }
-                REFERENCE_RE.find(line)?.let {
-                    references.add(it.groupValues[1].trim().trim('"', '\''))
-                }
-            }
-        }
-    } catch (_: Exception) {
-        // Unreadable / vanished mid-scan: the row says "cost unknown" rather than
-        // inventing a number.
-    }
-    return PresetFacts(shaders, references)
-}
-
-/**
- * The preset's pass count, following `#reference` chains. null = undeterminable, which the
- * row reports honestly as "cost unknown".
- *
- * The reference hop is the whole reason this function exists rather than a one-line regex.
- * 691 of the stock pack's 2542 presets — essentially all of Mega Bezel and koko-aio — carry
- * no `shaders` key at all; they are thin files whose entire body is `#reference
- * "../some/root.slangp"` plus parameter overrides. Reading `shaders` naively finds nothing
- * for exactly those files, so without this the headline number would be blank on precisely
- * the biggest chains in the pack.
- *
- * Targets resolve against the REFERENCING file's directory (they are written `../../…`).
- * [seen] is the loop guard (canonical paths, so a symlinked pack can't dodge it); [cache]
- * memoises across the whole scan.
- */
-private fun resolvePasses(
-    file: File,
-    cache: MutableMap<String, Int?>,
-    seen: MutableSet<String>,
-    depth: Int,
-): Int? {
-    val canonical = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
-    if (depth > MAX_REFERENCE_DEPTH || !seen.add(canonical)) return null
-    if (cache.containsKey(canonical)) return cache[canonical]
-    val facts = readPreset(file)
-    val result = facts.shaders ?: facts.references.firstNotNullOfOrNull { ref ->
-        val target = File(file.parentFile, ref)
-        // Multi-reference presets (324 of them) list the .slangp first and .params after;
-        // taking the first target that actually yields a count skips the parameter files
-        // without having to sniff extensions.
-        if (target.isFile) resolvePasses(target, cache, seen, depth + 1) else null
-    }
-    cache[canonical] = result
-    return result
 }
