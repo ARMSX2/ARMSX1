@@ -208,7 +208,7 @@ fun HotkeyBindings(showHeader: Boolean = true) {
                         when {
                             capturing -> if (ControllerMappings.captureButtons.value.isEmpty()) str("hotkeys.capturePrompt")
                                 else ControllerMappings.captureButtons.value.joinToString(" + ", transform = ControllerMappings::labelForKey) +
-                                    " — " + str("hotkeys.releasePrompt")
+                                    ": " + str("hotkeys.releasePrompt")
                             unset -> str("hotkeys.notSet")
                             else -> binding
                         },

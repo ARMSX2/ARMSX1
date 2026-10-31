@@ -951,7 +951,7 @@ fun HomeScreen(
                     game.serial?.takeIf { it.isNotBlank() }?.let(::add)
                     add("CRC " + when (menuCRC) {
                         null -> "…"   // still identifying
-                        "" -> "—"     // identified as unknown
+                        "" -> "-"     // identified as unknown
                         else -> menuCRC
                     })
                 }.joinToString("  ·  ")

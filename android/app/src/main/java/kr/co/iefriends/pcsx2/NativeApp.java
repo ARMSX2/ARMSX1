@@ -1062,8 +1062,8 @@ public class NativeApp {
 		int motors = Math.max(vmCount, legacy ? 1 : 0);
 		return "Player " + (port + 1) + ": " + name
 				+ (mapped ? "" : " (not active in-game yet)")
-				+ (hasRumble ? " — rumble OK (" + motors + " motor" + (motors == 1 ? "" : "s") + ")"
-						: " — NO rumble exposed by Android");
+				+ (hasRumble ? ", rumble OK (" + motors + " motor" + (motors == 1 ? "" : "s") + ")"
+						: ", NO rumble exposed by Android");
 	}
 
 	public static void setAspectRatio(int type) {  }

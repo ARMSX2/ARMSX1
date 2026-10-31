@@ -164,7 +164,7 @@ internal fun Ps1InfoRow(label: String, value: String, description: String? = nul
             PerGameMarker(label)
             Spacer(Modifier.width(12.dp))
             Text(
-                value.ifBlank { "—" },
+                value.ifBlank { "-" },
                 color = MaterialTheme.colorScheme.primary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,

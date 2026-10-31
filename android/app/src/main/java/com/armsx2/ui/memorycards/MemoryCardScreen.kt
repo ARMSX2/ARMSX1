@@ -330,7 +330,7 @@ private fun MemoryCardSlotRow(
                 Column(Modifier.weight(1f)) {
                     Text(slotLabel, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        item.file?.name ?: "—",
+                        item.file?.name ?: "-",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -390,14 +390,14 @@ private fun MemoryCardSlotRow(
 
 /** One line of detail under a slot: size and, when the file is odd, why the core will reject it. */
 private fun slotDetail(item: MemoryCardSlot): String = when {
-    !item.canManage -> "—"
+    !item.canManage -> "-"
     item.isValidSize ->
         "${Ps1MemoryCards.describeSize(item.sizeBytes)} · last written ${formatTimestamp(item.modifiedAt)}"
     item.exists ->
-        "${Ps1MemoryCards.describeSize(item.sizeBytes)} — a memory card must be exactly 128 KiB. " +
+        "${Ps1MemoryCards.describeSize(item.sizeBytes)}. A memory card must be exactly 128 KiB. " +
             "Erase it and let the emulator rebuild it, or import a valid card."
     else ->
-        "No card yet. Create one, import a .mcd, or just start a game — the emulator makes a blank " +
+        "No card yet. Create one, import a .mcd, or just start a game: the emulator makes a blank " +
             "128 KiB card on boot."
 }
 

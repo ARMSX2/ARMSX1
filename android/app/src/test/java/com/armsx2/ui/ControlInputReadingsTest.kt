@@ -13,11 +13,11 @@ class ControlInputReadingsTest {
     @Test fun showsSignedSticksAndIgnoresCenterNoise() {
         val values = IntArray(20)
         values[16] = 100
-        assertEquals(listOf("P1  —"), ControlInputReadings.lines(values))
+        assertEquals(listOf("P1  -"), ControlInputReadings.lines(values))
         values[16] = 32767; values[17] = -32768
         assertEquals(listOf("P1  LS(+1.00,-1.00)"), ControlInputReadings.lines(values))
     }
     @Test fun incompleteSnapshotIsSafe() {
-        assertEquals(listOf("P1  —"), ControlInputReadings.lines(intArrayOf(1, 1)))
+        assertEquals(listOf("P1  -"), ControlInputReadings.lines(intArrayOf(1, 1)))
     }
 }

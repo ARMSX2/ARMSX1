@@ -1235,8 +1235,8 @@ open class MainActivityRuntime : ComponentActivity() {
                             instance?.runOnUiThread {
                                 android.widget.Toast.makeText(
                                     driverCtx,
-                                    "GPU driver \"$bad\" crashed on the last launch — " +
-                                        "reverted to the system driver.",
+                                    "GPU driver \"$bad\" crashed on the last launch. " +
+                                        "Reverted to the system driver.",
                                     android.widget.Toast.LENGTH_LONG,
                                 ).show()
                             }
@@ -3378,7 +3378,7 @@ open class MainActivityRuntime : ComponentActivity() {
                 if (setupRecoveryNeeded.value) {
                     android.widget.Toast.makeText(
                         applicationContext,
-                        "Couldn't open your saved game folder — this can happen after reinstalling or restoring a backup. Please re-select it.",
+                        "Couldn't open your saved game folder. This can happen after reinstalling or restoring a backup. Please re-select it.",
                         android.widget.Toast.LENGTH_LONG,
                     ).show()
                     setupRecoveryNeeded.value = false
@@ -4415,7 +4415,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     if (down && !vmStopInProgress && event.repeatCount == 0) {
                         if (!com.armsx2.config.Ps1SettingsStore.active(applicationContext).rewind) {
                             com.armsx2.ui.WelcomeBanner.show(
-                                "Rewind is off — turn it on in Settings › Emulation"
+                                "Rewind is off. Turn it on in Settings › Emulation"
                             )
                             return true
                         }

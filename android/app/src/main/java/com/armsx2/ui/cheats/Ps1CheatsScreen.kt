@@ -479,7 +479,7 @@ fun Ps1CheatsPanel(gameKey: String?, gameTitle: String?, gameUri: String? = null
                 description = str("cheats.action.reload.description"),
             ) { revision++ }
             Ps1InfoRow(str("cheats.info.file"), file.absolutePath)
-            if (running) Ps1InfoRow(str("cheats.info.armed"), if (armed >= 0) armed.toString() else "—",
+            if (running) Ps1InfoRow(str("cheats.info.armed"), if (armed >= 0) armed.toString() else "-",
                 str("cheats.info.armed.description"))
             Ps1InfoRow(str("cheats.database.source"), "Libretro contributors · CC BY-SA 4.0",
                 "https://github.com/libretro/libretro-database · https://creativecommons.org/licenses/by-sa/4.0/")

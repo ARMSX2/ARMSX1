@@ -513,9 +513,9 @@ internal fun Ps1PerGamePanel(category: SettingsCategory) {
                                         .append(')')
                                 }
                                 if (!known) {
-                                    append("   — ").append(str("scope.overrides.unused"))
+                                    append("   · ").append(str("scope.overrides.unused"))
                                 } else if (rowLabel == null) {
-                                    append("   — ").append(str("scope.overrides.noBadge"))
+                                    append("   · ").append(str("scope.overrides.noBadge"))
                                 }
                             },
                             color = if (known && rowLabel != null) {
