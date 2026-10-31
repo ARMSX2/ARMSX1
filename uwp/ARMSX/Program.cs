@@ -13,7 +13,9 @@ namespace ARMSX
 {
     class Program
     {
-        [DllImport("libarmsx.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "external_main")]
+        // external_main is the 2-arg main-shaped symbol; external_main_ex is the 4-arg form
+        // for hosts that own the SDL_Window/SDL_Renderer.
+        [DllImport("libarmsx.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "external_main_ex")]
         private static extern int external_main(int argc, IntPtr argv, IntPtr external_window, IntPtr external_renderer);
 
         [DllImport("libarmsx.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "psxe_enqueue_launch_argument")]

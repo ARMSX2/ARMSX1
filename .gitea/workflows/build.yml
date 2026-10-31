@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
           token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
           if [ -z "$token" ]; then
-            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fuse-lib submodule." >&2
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
             exit 1
           fi
 
@@ -104,7 +104,7 @@ jobs:
           set -euo pipefail
           token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
           if [ -z "$token" ]; then
-            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fuse-lib submodule." >&2
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
             exit 1
           fi
 
@@ -183,7 +183,7 @@ jobs:
           set -euo pipefail
           token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
           if [ -z "$token" ]; then
-            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fuse-lib submodule." >&2
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
             exit 1
           fi
 
@@ -282,7 +282,7 @@ jobs:
           set -euo pipefail
           token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
           if [ -z "$token" ]; then
-            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fuse-lib submodule." >&2
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
             exit 1
           fi
 
@@ -349,7 +349,7 @@ jobs:
           set -euo pipefail
           token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
           if [ -z "$token" ]; then
-            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fuse-lib submodule." >&2
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
             exit 1
           fi
 
@@ -408,7 +408,7 @@ jobs:
           set -euo pipefail
           token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
           if [ -z "$token" ]; then
-            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fuse-lib submodule." >&2
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
             exit 1
           fi
 
@@ -479,10 +479,13 @@ jobs:
 
           ./scripts/ci/build-android-all.sh
 
+      # The "store" flavor dimension moved this: it is apk/<flavor>/<buildType>/app-<flavor>-<buildType>.apk
+      # now, never apk/debug/app-debug.apk. github = the sideload APK (with the in-app updater),
+      # which is what this job builds and publishes; play is the updater-free bundle flavor.
       - uses: actions/upload-artifact@v3
         with:
-          name: armsx-android-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: armsx-android-github-debug
+          path: android/app/build/outputs/apk/github/debug/app-github-debug.apk
 
   wasm:
     name: WASM
@@ -501,7 +504,7 @@ jobs:
           set -euo pipefail
           token="${GIT_TOKEN:-${FSUI_SUBMODULE_TOKEN:-}}"
           if [ -z "$token" ]; then
-            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fuse-lib submodule." >&2
+            echo "GIT_TOKEN (or FSUI_SUBMODULE_TOKEN) is required to fetch the private fsui-lib submodule." >&2
             exit 1
           fi
 

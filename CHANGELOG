@@ -1,0 +1,349 @@
+ARMSX1 — Changelog
+==================
+
+Unreleased
+----------
+
+Instruction manual
+  * Add a searchable offline Instruction Manual near the bottom of the sidebar, with
+    topic-based sections for setup, storage, library, all settings categories, controls,
+    saves, cheats, achievements, texture/shader packs, updates and troubleshooting.
+    Support touch/controller reading, readable wrapping text and return-to-contents navigation.
+  * Move persistent how-to/navigation instructions for tab rearranging, button binding,
+    hotkey capture, mapping profiles, skin import, shader activation, sound-effect packs
+    and API-key setup into the manual. Keep settings'
+    what-it-does descriptions, active input prompts, scope/status information and safety warnings.
+
+OpenGL presentation edges
+  * Correct the bottom-origin VRAM offset for OpenGL's interleaved display fields.
+    The old calculation sampled one texel below the intended image, exposing font/data
+    fragments at the BIOS bottom edge. Preserve both fields and valid image rows;
+    leave separate-field and progressive scanout unchanged. Apply a verified build-copy
+    hook without changing the pinned upstream checkout or cropping the image.
+  * Use high-precision texture coordinates and clamp the final sampling footprint to the
+    current frame's first/last texel centers, not the full backing allocation. Prevent stray
+    edge pixels during scaled BIOS/game output in OpenGL, ANGLE and the Software presenter's
+    flipped upload path. Cover plain and shader-filtered output without cropping, zooming or
+    changing Vulkan presentation.
+
+RetroAchievements library and testing
+  * Show cached achievement availability/progress over grid and shelf covers, including
+    PS one styling and recent games. Unplayed matched games show 0/total; distinguish
+    hardcore progress/mastery from softcore completion. Keep badges visible with titles
+    hidden, without extra network requests or badges on shelf reflections.
+  * Add a persistent Enable RetroAchievements switch at the top of the achievements
+    screen. Off unloads the active set, stops evaluation/submissions and clears indicators
+    without signing out or deleting synced library progress. Re-enabling during testing
+    waits for a fresh game launch so test-state memory cannot earn retroactive credit.
+    Reject queued game submissions from an earlier tracking generation; requests already
+    transmitted cannot be recalled. Hardcore support is unchanged.
+
+Audio synchronization
+  * Bound the SwanStation host audio queue relative to the selected startup reserve,
+    instead of retaining up to about 1.49 seconds of stale PCM in its backing ring.
+    Drop excess old audio after queue overruns with a short cross-fade and preserve
+    complete stereo frames, including oversized batches. Keep the existing startup
+    crackle protection and user buffer choice; discard muted/paused PCM before resume.
+  * Include queue depth, latency bound, trimmed frames, underruns and Android device
+    buffer size in session reports to distinguish host backlog from output/recording delay.
+
+Performance overlay persistence
+  * Restore the saved OSD mode at app startup and on the normal PS1 launch path (which
+    bypasses legacy renderer setup). Render from the saved global/per-game mode rather
+    than an in-memory Off default. Preserve Custom flags and explicit game overrides;
+    fresh installs still default to Off.
+
+In-game menu navigation
+  * Match controller directions to the responsive menu layout. Compact horizontal tabs use
+    Left/Right and Down enters their options; wide vertical tabs retain Up/Down and Left.
+    Content uses Up/Down in both layouts. D-pad keys and analog/HAT navigation share this
+    policy; gameplay mappings are unchanged.
+
+Independent launcher and gameplay orientation
+  * Restore Emulation Screen Orientation in Video settings: Device, Landscape, Portrait,
+    and Auto-Rotate, with a separate per-game choice and Use global option. Landscape games
+    work even with Android locked to portrait; the library keeps its independently selected
+    orientation, including landscape. Image rotation remains a separate control.
+    Claim gameplay orientation on the normal PS1 launch path, not only legacy renderer setup.
+
+Memory cards and save states
+  * Keep Slot 1 and Slot 2 visible even when a game's card path is not yet available.
+    Show a minimal status without extra UI instructions; never redirect an unresolved card
+    operation to another game's save file.
+  * Track each game's actual mounted cards and add a game selector to the memory-card manager.
+    Never redirect a selected game's Slot 1 import to the last game booted; unidentified games
+    ask for one normal boot first. Preserve a backup of an existing card before import.
+  * Automatic/cold state loads check for changed cards and keep the current card instead of
+    silently restoring an older card image over imported/in-game saves. Manual loads retain
+    their confirmation. Prevent repeated picker requests and cancel queued state mutations
+    after timeout or session shutdown rather than applying them after reporting failure.
+  * Preserve memory-card import/export destinations across Android picker screen recreation;
+    show an error instead of silently ignoring a returned file. Refuse to redirect a pending
+    operation if the active card or data folder changes. Existing cards remain session-locked.
+  * Restore Save/Load State touch buttons hidden by a retired-core check and add visible
+    Save/Load actions immediately after Resume in the quick menu. Controller actions share
+    stable IDs, and existing custom menu orders gain the new actions without being reset.
+
+0.3.6
+-----
+
+Performance overlay
+  * Replace the disconnected Video debug-panel switch with the real Off/Minimal/Full/
+    Custom OSD controls, also available in Interface settings. Restore Custom reading
+    selection and keep game-specific settings separate from the all-games default.
+  * Open quick-menu OSD controls in This game scope when that game already has an
+    override, so changing the displayed mode is not silently masked by its Off setting.
+    Fresh installs remain Off by default; the overlay is hidden while menus are open.
+
+Touch controls
+  * Save changes directly into an explicitly selected touch profile; add Update profile
+    to the profile picker. No new-profile/delete workaround is needed. Selected profiles
+    no longer get silently replaced by older game-only layouts on resume or rotation.
+    Keep portrait/landscape independent, preserve old game-only edits, distinguish shared
+    profile saves from game-only saves, and keep the global selection separate.
+  * Add optional Compact shoulder touch areas in Pad settings and the touch-layout
+    editor. L1/L2/R1/R2 use artwork-fitted rectangular targets rather than the larger
+    circular/square areas, including multi-touch, gliding and tap-to-hold controls.
+    Button artwork, positions, sizes and existing defaults are unchanged.
+
+SBI files
+  * Keep matching SBI subchannel files beside Android document-folder discs after
+    staging and renaming, including CUE/CHD launches, playlist discs and disc swaps.
+    Preserve numbered _1 through _5 SBI files for embedded multi-disc PBPs.
+  * Match sidecar names case-insensitively and reject malformed/incomplete SBI files
+    with a preparation error rather than silently handing unusable data to the core.
+    Achievement hash-only scans do not need or copy SBI files.
+
+RetroAchievements
+  * Open a matched game's achievements directly in the menu without booting it:
+    badge/game artwork, full descriptions, points, unlock status, search and filters.
+    Details are fetched only on selection and cached per account for offline viewing.
+  * Add a searchable, paginated Library games view inside RetroAchievements for
+    verified matched games and softcore/hardcore progress, separate from Current game.
+    Already-synced results appear without another API/ROM scan, including unplayed games.
+  * Manual sync reloads the saved library and current account when needed; readiness
+    messages identify a missing API key, account, library or emulator initialization.
+  * Preserve sign-in progress and errors across the periodic account refresh, prevent
+    duplicate login requests, and report client/network failures instead of silently resetting.
+  * Library sync includes unlaunched games without a detected serial and safely prepares
+    Android document-folder images to calculate their real PlayStation achievement hash.
+  * Match and display web progress by library URI, without guessing identities from
+    filenames. Cache hashes per image/revision rather than sharing by serial.
+  * Show disc-check progress; distinguish unreadable images from unsupported hashes.
+    Reject incomplete/error API pages instead of overwriting earned counts with zero.
+  * Failed/incomplete scans no longer suppress automatic retries for a full day;
+    automatic syncs do not stage uncached document-folder ROMs.
+
+Cover art
+  * Retry temporary image/network failures and reload failed tiles when refreshing
+    the library or downloading covers, even when the game list has not changed.
+  * Normalise artwork serials and common filename serial/revision tags.
+  * Try verified same-title/region pressings and disc-one artwork when a later
+    disc has no image, without changing game/save/cheat identities or custom covers.
+
+Online updates
+  * Restore update checks for the normal GitHub app; private builds remain isolated
+    and Play builds still exclude the updater.
+  * Compare stable versions and dated nightly builds separately, and search a
+    paginated release history rather than trusting GitHub's first result.
+  * Verify downloaded APK size/checksum, package, signing certificate, version code
+    and SwanStation engine before handing an update to Android's installer.
+  * Show download/install preparation failures instead of silently dismissing them.
+
+Library and controller menus
+  * Custom collections can appear as Home tiles and in the in-game Swap Game library.
+    Collection folders expand horizontally on Home and can use custom images.
+  * Hold A to arrange Home folder tiles with Left/Right, or hold and drag on touch.
+    Saved tile positions survive restarting the app; short presses open folders.
+  * In-game menu tabs and options can be reordered with controller holds or touch.
+    Selection outlines follow the active control, and controller scrolling reaches
+    the ends of menus. Discord has its own entry below Screenshot.
+  * Swap Game shows the library and search while the current game stays paused.
+    Controller hotkeys support single buttons and two-button combinations.
+  * Closing Discord restores menu controls, and launching a game preserves the
+    library background colour during the transition.
+
+Android performance
+  * Fastest-core placement detects the highest CPU tier even when Android gives
+    the emulation thread a restricted initial affinity mask. It rechecks placement
+    periodically and restores its original priority when that mode is disabled.
+  * Mali software drawing skips unused shading and clips scaled triangle spans
+    without changing pixel coverage. These drawing optimizations remain Mali-only.
+  * Automatic Mali work reports sample briefly at intervals, reducing diagnostic
+    overhead while retaining rasterizer details for investigating frame dips.
+
+0.2.6
+-----
+
+PS one interface and session fixes
+  * Settings > App > Interface style now offers Original ARMSX1 and PS one.
+    PS one adds light-grey console panels, circular controls, blue highlights
+    and memory-card-style game tiles in grid, list, shelf and recent views.
+  * Switching back restores the existing colour theme and background choices.
+    Existing installations keep Original ARMSX1 unless PS one is selected.
+  * BIOS/startup and resume audio prebuffers before playback to reduce dropouts.
+  * Close & Exit finishes after session shutdown instead of returning to the library.
+    External launches respect the return-to-launcher preference.
+
+0.1.3
+-----
+
+PSP EBOOT (.PBP) games now boot
+  * A .pbp listed in the library but refused to start. It was rejected before the disc
+    was ever opened, and two bugs in the reader would have stopped it anyway: sectors
+    were reported the wrong way round, and the disc was read 150 sectors off. Single
+    and multi-disc EBOOTs now boot, with their cover art, serial and per-game settings.
+  * A .pbp inside a .zip is picked as the game to launch.
+
+Crashes
+  * Fixed the app dying silently when a game was started after another game failed to
+    boot. A failed boot left the emulator in a state that corrupted the next launch.
+  * Fixed a game closed and reopened quickly starting up and then immediately quitting
+    to the library, and a crash in the same window when the previous game was still
+    shutting down.
+
+Library
+  * A game called "patches" no longer appears out of nowhere. ARMSX1 ships a patch
+    archive with its own files, and the library was listing it as a game — so even an
+    empty game folder showed one entry. The app's own folders are skipped now.
+
+In-game
+  * Restart in the pause menu closes the menu again, so the reboot is visible instead of
+    looking like nothing happened.
+  * Picking a game while another one is still closing now starts the game you picked
+    instead of restarting the previous one.
+
+Diagnostics
+  * New: Settings > App > "Generate log file" writes one report — emulator, interpreter
+    and renderer logs, crashes, and Android's own crash records with function names —
+    to a file you choose, refreshed every time the app starts. Send that file with a bug
+    report and the problem can be diagnosed without the device.
+
+0.1.2
+-----
+
+Game folders now really use Android's own folder picker
+  * Folders added through the system picker are scanned directly through Android's
+    DocumentsProvider, so the library fills without "All files access" — including on
+    Android 14+ devices (Oppo/Samsung) where even granting it left the library empty.
+  * Games in those folders launch through a per-session file descriptor instead of a
+    guessed /storage path, so folders on SD cards and USB drives work under scoped
+    storage.
+  * Games in those folders are identified off the disc itself at scan time, so they show
+    their real cover art and keep per-game settings, play-time tracking and
+    RetroAchievements identity — .chd, .pbp, cue+bin and multi-disc playlists included.
+  * "Download cover art" no longer silently skips games living in picker-added folders,
+    and fetches exactly the art the library grid shows.
+  * A game that failed to identify once is retried on a later start instead of keeping a
+    blank tile forever.
+  * "All files access" is now only about the optional custom data folder; the Play build
+    does not request it at all.
+
+Rendering
+  * Fixed rendering breaking when the emulator surface is recreated (rotation, leaving
+    and re-entering a game): surface callbacks carry an ownership token, so a stale
+    surface can no longer be presented into.
+  * The in-game renderer indicator no longer sticks on "Unknown" when it is read before
+    the renderer finishes starting.
+  * GPU identification also reads the board properties Android itself reports, which
+    matters on MediaTek devices whose GL strings omit the model.
+
+Audio
+  * The default audio buffer is one PAL frame (20 ms) instead of 13 ms, matching the
+    core's cadence; a hand-edited value that is not on the settings list now falls back
+    to the native default instead of 5 ms.
+
+0.1.1
+-----
+
+Cover art for .chd games
+  * CHD games now show their real cover art. ARMSX1 could not read the disc's serial
+    number out of a compressed .chd, and the serial is what cover art is looked up by,
+    so most CHD libraries showed blank placeholder tiles. The serial is now read using
+    the same disc reader that plays the game, so a .chd identifies itself exactly like
+    a .bin or .cue does.
+  * The same fix gives CHD games everything else the serial unlocks: RetroAchievements
+    identification, play-time tracking, and per-game settings.
+  * Use Settings > App > "Download cover art" to fetch art for your whole library at
+    once, now that CHDs can be matched.
+
+Note for existing CHD users
+  * A CHD that had no serial in its filename used to store its per-game settings under
+    that filename. Now that the disc reports its real serial, those settings are stored
+    under the serial instead, so per-game settings, cheats, custom names, per-game BIOS
+    and the per-game memory card choice go back to their global values once for those
+    games. Save states and memory card files are not affected.
+
+0.1.0 — first public release
+----------------------------
+
+ARMSX1 is a PlayStation 1 emulator for Android, built on allkern's psxe core with a
+completely new Android frontend.
+
+Interface
+  * Brand-new interface built in Jetpack Compose — fast, modern, and made for phones
+    and handhelds rather than ported from a desktop menu.
+  * Library with grid and shelf views, automatic cover art, and folder support.
+  * Themes, accent colours and custom backgrounds.
+  * Guided first-run setup for BIOS and game folders.
+  * On-screen touch layout editor — move, resize and restyle every control.
+  * Memory card manager, and an in-app keyboard for text entry.
+  * Live language switching — change language without restarting.
+  * Detailed on-screen display: FPS, CPU/GPU load, frame timing, DMA, SPU and more.
+
+Graphics
+  * Hardware rasteriser with internal resolution upscaling up to 8x.
+  * OpenGL ES and Vulkan presentation paths. GLES is the default.
+  * PGXP (experimental) to reduce the PlayStation's characteristic polygon wobble.
+  * Aspect ratio options including a fully custom mode, plus a widescreen hack.
+  * Texture replacement — load your own upscaled textures.
+  * Fixed visible seams along polygon edges when upscaling.
+
+Custom GPU drivers
+  * Load custom Vulkan drivers (Turnip and friends) through adrenotools, for better
+    performance and compatibility on supported devices.
+
+Shaders
+  * librashader support — run RetroArch shader presets, including CRT filters.
+  * Full shader parameter editing with save and load of your own presets.
+
+RetroAchievements
+  * Sign in and earn achievements, with your profile, stats and unlock notifications
+    shown in game.
+
+Extras
+  * Save states with thumbnails, plus a warning when a save state and memory card
+    have drifted out of sync.
+  * Cheats (GameShark .cht), per game.
+  * Full physical controller support with remappable buttons and analogue sticks.
+  * Skip BIOS for faster boots.
+  * Fast-forward with its own audio and speed settings.
+  * Discord Rich Presence.
+
+Emulation accuracy
+  Many games were fixed by getting the hardware details right:
+  * Audio now runs on the correct clock — fixes missing or broken sound in Metal Gear
+    Solid, including the alert and sentry effects.
+  * Corrected the GPU's drawing-offset readback — fixes clipped and cut-off graphics
+    in Xenogears battles.
+  * Five CD-ROM fixes covering seeking, streaming audio and read timing.
+  * Fixed controller and memory card input dropping out on shared-bus reads
+    (Spyro and others).
+  * Corrected unaligned stores, GPU status and GPU register readbacks, video mode
+    reporting, DMA interrupt handling, and SPU register widths.
+  * Whole-program optimisation (PGO) for better performance across the board.
+
+Known issues
+  * The widescreen hack changes the 3D projection, so some games (notably Crash
+    Bandicoot) stop drawing scenery at the edges of the screen. Turn it off if you
+    see missing geometry at the left and right edges. It is off by default.
+
+Licence
+  Moon-owned ARMSX1 material is proprietary. Upstream, contributor-owned and
+  third-party material retains its existing licenses. See LICENSE and NOTICE.
+
+Credits
+  allkern (Lisandro Alarcon)  Original PlayStation 1 emulator core, psxe.
+                              https://github.com/allkern/psxe
+  Moonpower                   Cached interpreter and cross-platform compatibility.
+  jpolo1224                   Everything else.

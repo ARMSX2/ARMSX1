@@ -186,7 +186,7 @@ esac
 rm -rf "$fsui_build_dir" "$artifact_root"
 mkdir -p "$artifact_root"
 
-cmake -S "$repo_root/third_party/fuse-lib" -B "$fsui_build_dir" \
+cmake -S "$repo_root/third_party/fsui-lib" -B "$fsui_build_dir" \
     -DCMAKE_TOOLCHAIN_FILE="$toolchain_file" \
     -DCMAKE_BUILD_TYPE=Release \
     -DFSUI_BUILD_SAMPLES=OFF \

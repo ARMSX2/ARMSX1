@@ -6,7 +6,7 @@
 #include <stdlib.h>
 
 psx_ram_t* psx_ram_create(void) {
-    return (psx_ram_t*)malloc(sizeof(psx_ram_t));
+    return (psx_ram_t*)calloc(1, sizeof(psx_ram_t));
 }
 
 void psx_ram_init(psx_ram_t* ram, psx_mc2_t* mc2, int size) {
@@ -72,6 +72,27 @@ void psx_ram_write8(psx_ram_t* ram, uint32_t offset, uint8_t value) {
     offset &= ram->size - 1;
 
     ram->buf[offset] = value;
+}
+
+void psx_ram_save_state(psx_ram_t* ram, psx_state_writer_t* w) {
+    psx_sw_u32(w, (uint32_t)ram->size);
+    psx_sw_bytes(w, ram->buf, ram->size);
+}
+
+int psx_ram_load_state(psx_ram_t* ram, psx_state_reader_t* r) {
+    uint32_t size = psx_sr_u32(r);
+
+    if (r->error)
+        return PSX_STATE_ERR_TRUNCATED;
+
+    /* Restore into the existing allocation. Reallocating would invalidate any
+       reference the front-end (or a debugger view) holds. */
+    if (size != (uint32_t)ram->size)
+        return PSX_STATE_ERR_GEOMETRY;
+
+    psx_sr_bytes(r, ram->buf, ram->size);
+
+    return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
 }
 
 void psx_ram_destroy(psx_ram_t* ram) {

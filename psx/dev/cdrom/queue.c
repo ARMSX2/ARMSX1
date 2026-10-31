@@ -70,6 +70,11 @@ int queue_max_size(queue_t* queue) {
 }
 
 void queue_destroy(queue_t* queue) {
+    /* A cdrom whose init never ran (psx_init bailed on the BIOS) has NULL queues;
+       psx_cdrom_destroy still walks them. */
+    if (!queue)
+        return;
+
     free(queue->buf);
     free(queue);
 }

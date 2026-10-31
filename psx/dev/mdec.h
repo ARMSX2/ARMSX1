@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../log.h"
+#include "../state.h"
 
 #define PSX_MDEC_SIZE    0x8
 #define PSX_MDEC_BEGIN   0x1f801820
@@ -93,6 +94,11 @@ uint8_t psx_mdec_read8(psx_mdec_t*, uint32_t);
 void psx_mdec_write32(psx_mdec_t*, uint32_t, uint32_t);
 void psx_mdec_write16(psx_mdec_t*, uint32_t, uint16_t);
 void psx_mdec_write8(psx_mdec_t*, uint32_t, uint8_t);
+/* Command/decoder state, the quant + scale tables, the three coefficient
+   blocks, and the live portions of the heap-allocated input/output FIFOs (see
+   the long comment in mdec.c — neither buffer tracks its own size). */
+void psx_mdec_save_state(psx_mdec_t*, psx_state_writer_t*);
+int psx_mdec_load_state(psx_mdec_t*, psx_state_reader_t*);
 void psx_mdec_destroy(psx_mdec_t*);
 
 typedef void (*mdec_fn_t)(psx_mdec_t*);

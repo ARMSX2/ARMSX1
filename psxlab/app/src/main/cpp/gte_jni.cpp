@@ -1,0 +1,3 @@
+#include <jni.h>
+#include "gte_core.h"
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeGte_executeNative(JNIEnv* env,jclass,jintArray registers,jint instruction,jboolean widescreen){if(env->GetArrayLength(registers)!=64){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid GTE state");return;}auto* state=static_cast<jint*>(env->GetPrimitiveArrayCritical(registers,nullptr));if(!state)return;GteCore core{state,state+32,0,false,bool(widescreen)};bool ok=core.execute(instruction);env->ReleasePrimitiveArrayCritical(registers,state,0);if(!ok)env->ThrowNew(env->FindClass("java/lang/UnsupportedOperationException"),"Unsupported GTE command");}

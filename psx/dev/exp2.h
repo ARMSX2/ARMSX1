@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "../state.h"
+
 #define PSX_EXP2_BEGIN 0x1f802000
 #define PSX_EXP2_SIZE  0x1fe000
 #define PSX_EXP2_END   0x1f9fffff
@@ -43,6 +45,10 @@ uint8_t psx_exp2_read8(psx_exp2_t*, uint32_t);
 void psx_exp2_write32(psx_exp2_t*, uint32_t, uint32_t);
 void psx_exp2_write16(psx_exp2_t*, uint32_t, uint16_t);
 void psx_exp2_write8(psx_exp2_t*, uint32_t, uint8_t);
+/* The two ATCONS latches. duart_tx / atcons_tx / *_udata are host callbacks
+   and are left in place across a load. */
+void psx_exp2_save_state(psx_exp2_t*, psx_state_writer_t*);
+int psx_exp2_load_state(psx_exp2_t*, psx_state_reader_t*);
 void psx_exp2_destroy(psx_exp2_t*);
 
 #endif

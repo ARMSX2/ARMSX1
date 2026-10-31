@@ -8,6 +8,7 @@
 #define SDA_H
 
 #include "../dev/input.h"
+#include "../state.h"
 
 // Controller/Input IDs
 #define SDA_MODEL_DIGITAL       0x41
@@ -65,11 +66,42 @@ typedef struct {
     uint8_t adc1;
     uint8_t adc2;
     uint8_t adc3;
+    uint8_t config_mode;
+    uint8_t analog_locked;
+    uint8_t dualshock_enabled;
+    uint8_t status;
+    uint8_t command;
+    uint8_t parameter;
+    uint8_t response_length;
+    uint8_t response[9];
+    uint8_t rumble_map[6];
+    uint8_t motor[2];
 } psxi_sda_t;
 
 psxi_sda_t* psxi_sda_create(void);
 void psxi_sda_init(psxi_sda_t*, uint16_t);
+/* Set (not toggle) the analog/digital mode, so a front-end can decide which mode the pad
+   reports when a game boots. Same state change the pad's ANALOG button performs, minus the
+   flip — the button keeps working afterwards. Call after psxi_sda_init(). */
+void psxi_sda_set_analog_mode(psxi_sda_t*, int enabled);
+uint16_t psxi_sda_button_state(const psxi_sda_t*);
+void psxi_sda_reset_transfer(psxi_sda_t*);
 void psxi_sda_init_input(psxi_sda_t*, psx_input_t*);
+/* The vtable entry points, declared so a container device can drive a pad it
+   owns directly. The multitap (psx/input/multitap.c) holds four of these and has
+   to address them by index, which the void*-udata vtable cannot express. Same
+   signatures as the psx_input_t function pointers: the first argument is the
+   psxi_sda_t*. */
+void psxi_sda_on_button_press(void*, uint32_t);
+void psxi_sda_on_button_release(void*, uint32_t);
+void psxi_sda_on_analog_change(void*, uint32_t, uint16_t);
+/* The pad's serial transfer state machine, model/mode latches, button word and
+   the four ADC bytes. Saved as part of the PAD section so a state taken
+   mid-poll resumes mid-poll instead of feeding the game a garbage byte. */
+void psxi_sda_save_state(psxi_sda_t*, psx_state_writer_t*);
+int psxi_sda_load_state(psxi_sda_t*, psx_state_reader_t*);
+void psxi_sda_save_extended_state(const psxi_sda_t*, psx_state_writer_t*);
+int psxi_sda_load_extended_state(psxi_sda_t*, psx_state_reader_t*);
 void psxi_sda_destroy(psxi_sda_t*);
 
 #endif

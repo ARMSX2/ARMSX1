@@ -1,0 +1,8 @@
+SoundTouch upstream: https://codeberg.org/soundtouch/soundtouch
+Pinned revision: f738b1132ec1fd56efc90367898244cf52d9e6a5
+Version reported by upstream CMake: 2.4.1
+License: LGPL-2.1-or-later (see COPYING.TXT and file headers).
+Unmodified include/ and source/SoundTouch/ compilation sources are supplied here.
+The independent JNI bridge is ../../tempo_jni.cpp and the build is ../../CMakeLists.txt.
+Android module: libpsxtempo.so (replaceable shared module, ARM64 and x86_64).
+Build the full app with the Gradle wrapper and Android NDK 28.2, as documented in README.md.

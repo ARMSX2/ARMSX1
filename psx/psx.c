@@ -1,37 +1,157 @@
 #include "psx.h"
+#include "state.h"
+#include "perf.h"
+#include "pgxp.h"
+#include "rewind.h"
+#include "cheats.h"
 
 psx_t* psx_create(void) {
-    return (psx_t*)malloc(sizeof(psx_t));
+    return (psx_t*)calloc(1, sizeof(psx_t));
 }
 
 int psx_load_bios(psx_t* psx, const char* path) {
     return psx_bios_load(psx->bios, path);
 }
 
-void psx_load_state(psx_t* psx, const char* path) {
-    log_fatal("State saving/loading is not yet supported");
-
-    exit(1);
-}
-
-void psx_save_state(psx_t* psx, const char* path) {
-    log_fatal("State saving/loading is not yet supported");
-
-    exit(1);
-}
+/* psx_save_state / psx_load_state live in psx/state.c. */
 
 void psx_load_exe(psx_t* psx, const char* path) {
     psx_exe_load(psx->cpu, path);
 }
 
-void psx_update(psx_t* psx) {
-    psx_cpu_cycle(psx->cpu);
+/*
+    CPU overclock.
 
-    psx_cdrom_update(psx->cdrom, psx->cpu->last_cycles);
-    psx_gpu_update(psx->gpu, psx->cpu->last_cycles);
-    psx_pad_update(psx->pad, psx->cpu->last_cycles);
-    psx_timer_update(psx->timer, psx->cpu->last_cycles);
-    psx_dma_update(psx->dma, psx->cpu->last_cycles);
+    There is no clock to turn up — the R3000A's speed is only ever expressed as how much the REST
+    of the machine advances per instruction executed. So overclocking is done by charging the
+    devices FEWER cycles for the same work: at 200%, the GPU, timers, CD-ROM, pad and DMA each
+    advance half as far per instruction, which is indistinguishable from a CPU running twice as
+    fast.
+
+    The division is fractional and the remainder is carried, not discarded. Dropping it would lose
+    a fraction of a cycle on every instruction — half a million times a frame — and the timers
+    would drift steadily out of step with the GPU, which shows up as audio pitch and frame pacing
+    slowly going wrong rather than as anything that looks like a clock bug.
+
+    Games that poll a hardware counter to time themselves can misbehave at anything but 100%.
+    That is inherent to the technique, not a defect here: it is why this ships default-off.
+*/
+static unsigned g_overclock_percent = 100;
+static uint32_t g_overclock_carry = 0;
+
+void psx_set_cpu_overclock(unsigned percent) {
+    if (percent < 10)
+        percent = 10;
+    if (percent > 1000)
+        percent = 1000;
+
+    g_overclock_percent = percent;
+    g_overclock_carry = 0;
+}
+
+unsigned psx_get_cpu_overclock(void) {
+    return g_overclock_percent;
+}
+
+static inline uint32_t psx_overclock_device_cycles(uint32_t cycles) {
+    uint64_t scaled;
+
+    if (g_overclock_percent == 100)
+        return cycles;
+
+    scaled = (uint64_t)cycles * 100u + g_overclock_carry;
+    g_overclock_carry = (uint32_t)(scaled % g_overclock_percent);
+
+    return (uint32_t)(scaled / g_overclock_percent);
+}
+
+__attribute__((always_inline)) void psx_update(psx_t* psx) {
+    /* Instruction boundary, emulation thread: the one place it is safe to
+       swap the whole machine out from under the front-end. Costs a single
+       atomic load when nothing is parked. */
+    psx_state_service_requests();
+
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+    if (g_psx_work_diag_enabled && ++g_psx_work_diag.cpu_sample_phase >= 4093) {
+        g_psx_work_diag.cpu_sample_phase = 0;
+        const uint64_t start = psx_work_diag_start();
+        psx_cpu_cycle(psx->cpu);
+        psx_work_diag_end(PSX_WORK_CPU_SAMPLE, start);
+    } else {
+        psx_cpu_cycle(psx->cpu);
+    }
+#else
+    /* Keep instruction-frequency sampling out of ordinary builds, including
+       when automatic Mali frame-level diagnostics are active. */
+    psx_cpu_cycle(psx->cpu);
+#endif
+
+    /* Computed ONCE and shared: every device must be charged the identical amount, or the
+       carry would be applied five times over and they would drift apart from each other
+       rather than together. */
+    const uint32_t device_cycles = psx_overclock_device_cycles(psx->cpu->last_cycles);
+
+    psx_cdrom_update(psx->cdrom, device_cycles);
+    psx_gpu_update(psx->gpu, device_cycles);
+    psx_pad_update(psx->pad, device_cycles);
+    psx_timer_update(psx->timer, device_cycles);
+    psx_dma_update(psx->dma, device_cycles);
+
+    /* The SPU is charged here like every other peripheral so that the Sound RAM interrupt
+       fires at the emulated instant the voice reaches the watched address, with the CPU
+       still running and able to service it. It used to be advanced only by the front-end,
+       after this loop had finished the whole frame, which capped the SPU interrupt rate at
+       the video frame rate and starved every game that clocks a streaming refill off it.
+       Generates nothing unless the front-end has granted a budget for this frame — see
+       psx_spu_begin_frame() and the block comment above psx_spu_tick(). */
+    psx_spu_tick(psx->spu, device_cycles);
+}
+
+void psx_update_profiled(psx_t* psx) {
+    /* Keep this separate from psx_update: ordinary GPUs do not gain an
+       instruction-frequency branch or clock read. Update order and the
+       overclock remainder must remain identical to the ordinary path. */
+    psx_state_service_requests();
+    uint64_t start = psx_work_diag_start();
+    psx_cpu_cycle(psx->cpu);
+    const uint64_t cpu_ticks = g_psx_work_diag_enabled ? g_psx_work_clock() - start : 0;
+    if (g_psx_work_diag_enabled) {
+        psx_work_diag_t* d = &g_psx_work_diag;
+        d->ticks[PSX_WORK_CPU_SAMPLE] += cpu_ticks;
+        ++d->calls[PSX_WORK_CPU_SAMPLE];
+        if (cpu_ticks > d->max_ticks[PSX_WORK_CPU_SAMPLE])
+            d->max_ticks[PSX_WORK_CPU_SAMPLE] = cpu_ticks;
+        psx_cpu_probe_t* p = &g_psx_cpu_probe;
+        const uint32_t pc = psx->cpu->saved_pc & 0x1fffffffu;
+        const unsigned op = psx->cpu->opcode >> 26;
+        const unsigned region = pc < 0x00800000u ? 0 :
+            (pc >= 0x1fc00000u && pc < 0x1fc80000u) ? 1 :
+            (pc >= 0x1f800000u && pc < 0x1f800400u) ? 2 :
+            (pc >= 0x1f801000u && pc < 0x1f803000u) ? 3 : 4;
+        ++p->samples;
+        ++p->regions[region];
+        ++p->opcode_calls[op];
+        p->opcode_ticks[op] += cpu_ticks;
+        p->sampled_cycles += psx->cpu->last_cycles;
+        if (cpu_ticks > p->slowest_ticks) {
+            p->slowest_ticks = cpu_ticks;
+            p->slowest_pc = psx->cpu->saved_pc;
+            p->slowest_opcode = psx->cpu->opcode;
+        }
+    }
+    const uint32_t cycles = psx_overclock_device_cycles(psx->cpu->last_cycles);
+#define PSX_PROBE_UPDATE(category, call) do { \
+    start = psx_work_diag_start(); \
+    call; \
+    psx_work_diag_end(category, start); \
+} while (0)
+    PSX_PROBE_UPDATE(PSX_WORK_CDROM_UPDATE, psx_cdrom_update(psx->cdrom, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_GPU_UPDATE, psx_gpu_update(psx->gpu, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_PAD_UPDATE, psx_pad_update(psx->pad, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_TIMER_UPDATE, psx_timer_update(psx->timer, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_DMA_UPDATE, psx_dma_update(psx->dma, cycles));
+    PSX_PROBE_UPDATE(PSX_WORK_SPU_TICK, psx_spu_tick(psx->spu, cycles));
+#undef PSX_PROBE_UPDATE
 }
 
 void psx_run_frame(psx_t* psx) {
@@ -39,8 +159,32 @@ void psx_run_frame(psx_t* psx) {
 
     unsigned int counter = (float)PSX_CPU_CPS / framerate;
 
+    /* R3000A work for the frame, derived rather than instrumented: the step count IS the
+       instruction count, and the CPU already sums executed clocks into total_cycles. That
+       keeps psx_cpu_cycle() — which runs half a million times per frame — free of any
+       counter at all, while still giving the overlay a real per-frame CPI. */
+    const unsigned int steps = counter;
+    const uint32_t cycles_before = psx->cpu->total_cycles;
+
     while (counter--) {
         psx_update(psx);
+    }
+
+    /* [cheats] — GameShark codes, once per frame (psx/cheats.h). A branch and one atomic load
+       when nothing is armed, which is why it sits here and not inside the loop above.
+
+       The SDL front-end does NOT reach this: it drives psx_update() itself and calls
+       psx_cheats_apply() from its own frame boundary (ArmsxSession::runFrame in
+       frontend/main.cpp), because only that loop knows where the vblank actually fell. This
+       call is for any host that uses the core's own frame loop, so cheats are not something a
+       future front-end has to remember to wire up. No host calls both, so nothing double-applies. */
+    psx_cheats_apply(psx);
+
+    if (g_psx_perf_enabled) {
+        g_psx_perf.cpu_instructions += steps;
+        /* total_cycles is a wrapping uint32; the unsigned difference is still exact over
+           any single frame. */
+        g_psx_perf.cpu_cycles += (uint32_t)(psx->cpu->total_cycles - cycles_before);
     }
 }
 
@@ -82,18 +226,18 @@ uint32_t psx_get_dmode_width(psx_t* psx) {
 }
 
 uint32_t psx_get_dmode_height(psx_t* psx) {
-    if (psx->gpu->display_mode & 0x4)
-        return 480;
-
-    int disp = psx->gpu->disp_y2 - psx->gpu->disp_y1;
-
-    if (disp < (255-16))
-        return disp;
-
-    return 240;
+    return psx_gpu_display_height(psx->gpu);
 }
 
 double psx_get_display_aspect(psx_t* psx) {
+    /* Second service point for parked save/load requests, and the only one that
+       runs while the front-end has the VM paused: psx_update() stops being
+       called then, but the host still presents a frame every tick and this is
+       the core call it makes on that path (frontend/main.cpp Session::draw).
+       A paused machine is quiescent, so applying a state here is as safe as an
+       instruction boundary. No-op (one atomic load) when nothing is parked. */
+    psx_state_service_requests();
+
     double width = psx_get_dmode_width(psx);
     double height = psx_get_dmode_height(psx);
 
@@ -179,6 +323,10 @@ int psx_init(psx_t* psx, const char* bios_path, const char* exp_path) {
     psx_mdec_init(psx->mdec);
     psx_cpu_init(psx->cpu, psx->bus);
 
+    /* Lets a host that only has a JNI entry point (no psx_t handle) park save
+       state requests. Cleared in psx_destroy(). */
+    psx_state_set_machine(psx);
+
     return 0;
 }
 
@@ -194,6 +342,14 @@ void psx_hard_reset(psx_t* psx) {
 
 void psx_soft_reset(psx_t* psx) {
     psx_cpu_init(psx->cpu, psx->bus);
+
+    /* PGXP shadows are derived from GTE/RAM state that just went away. */
+    psx_pgxp_reset();
+
+    /* So is every rewind snapshot and the runahead slot: they describe a
+       timeline this machine is no longer on, and putting one back after a reset
+       would resume a session the user just ended. */
+    psx_rewind_reset();
 }
 
 uint32_t* psx_take_screenshot(psx_t* psx) {
@@ -203,18 +359,50 @@ uint32_t* psx_take_screenshot(psx_t* psx) {
 }
 
 int psx_swap_disc(psx_t* psx, const char* path) {
+    if (!psx || !path || !*path) return 0;
+    // Validate before releasing the old drive; a failed swap must leave it mounted.
+    psx_cdrom_t* replacement = psx_cdrom_create();
+    if (!replacement) return 0;
+    psx_cdrom_init(replacement, psx->ic);
+    if (!psx_cdrom_open(replacement, path)) {
+        psx_cdrom_destroy(replacement);
+        return 0;
+    }
+    // Tray changes do not power-cycle the controller or clear its IRQ configuration.
+    if (psx->cdrom) {
+        replacement->ier = psx->cdrom->ier;
+        replacement->index = psx->cdrom->index;
+        replacement->mode = psx->cdrom->mode;
+        replacement->version = psx->cdrom->version;
+        replacement->region = psx->cdrom->region;
+        replacement->mute = psx->cdrom->mute;
+        replacement->xa_mute = psx->cdrom->xa_mute;
+        replacement->xa_file = psx->cdrom->xa_file;
+        replacement->xa_channel = psx->cdrom->xa_channel;
+        memcpy(replacement->vol, psx->cdrom->vol, sizeof(replacement->vol));
+        memcpy(replacement->vol_pending, psx->cdrom->vol_pending, sizeof(replacement->vol_pending));
+    }
+    replacement->shell_open_latched = 1;
+    /* Same reasoning as the soft reset: a snapshot taken against the previous
+       disc would be refused by the state loader's disc fingerprint anyway. */
+    psx_rewind_reset();
+
     psx_cdrom_destroy(psx->cdrom);
 
-    psx->cdrom = psx_cdrom_create();
+    psx->cdrom = replacement;
 
     psx_bus_init_cdrom(psx->bus, psx->cdrom);
 
-    psx_cdrom_init(psx->cdrom, psx->ic);
-
-    return psx_cdrom_open(psx->cdrom, path);
+    return 1;
 }
 
 void psx_destroy(psx_t* psx) {
+    psx_state_set_machine(NULL);
+
+    /* Frees the rewind ring, which is by far the largest thing the core holds
+       that is not the machine itself. */
+    psx_rewind_shutdown();
+
     psx_cpu_destroy(psx->cpu);
     psx_bios_destroy(psx->bios);
     psx_bus_destroy(psx->bus);

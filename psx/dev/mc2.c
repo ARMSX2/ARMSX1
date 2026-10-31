@@ -6,7 +6,7 @@
 #include "../log.h"
 
 psx_mc2_t* psx_mc2_create(void) {
-    return (psx_mc2_t*)malloc(sizeof(psx_mc2_t));
+    return (psx_mc2_t*)calloc(1, sizeof(psx_mc2_t));
 }
 
 /*
@@ -59,6 +59,16 @@ void psx_mc2_write16(psx_mc2_t* mc2, uint32_t offset, uint16_t value) {
 
 void psx_mc2_write8(psx_mc2_t* mc2, uint32_t offset, uint8_t value) {
     log_warn("Unhandled 8-bit MC2 write at offset %08x (%02x)", offset, value);
+}
+
+void psx_mc2_save_state(psx_mc2_t* mc2, psx_state_writer_t* w) {
+    psx_sw_u32(w, mc2->ram_size);
+}
+
+int psx_mc2_load_state(psx_mc2_t* mc2, psx_state_reader_t* r) {
+    mc2->ram_size = psx_sr_u32(r);
+
+    return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
 }
 
 void psx_mc2_destroy(psx_mc2_t* mc2) {

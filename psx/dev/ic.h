@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../cpu.h"
+#include "../state.h"
 
 #define PSX_IC_BEGIN 0x1f801070
 #define PSX_IC_SIZE  0x8
@@ -62,6 +63,9 @@ void psx_ic_write32(psx_ic_t*, uint32_t, uint32_t);
 void psx_ic_write16(psx_ic_t*, uint32_t, uint16_t);
 void psx_ic_write8(psx_ic_t*, uint32_t, uint8_t);
 void psx_ic_irq(psx_ic_t*, int);
+/* I_STAT / I_MASK. ic->cpu is a pointer and is not saved. */
+void psx_ic_save_state(psx_ic_t*, psx_state_writer_t*);
+int psx_ic_load_state(psx_ic_t*, psx_state_reader_t*);
 void psx_ic_destroy(psx_ic_t*);
 
 #endif

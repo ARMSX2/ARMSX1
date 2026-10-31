@@ -32,6 +32,8 @@ enum {
 #ifdef USE_CHD
     CD_EXT_CHD,
 #endif
+    CD_EXT_PBP,
+    CD_EXT_IMG,
     CD_EXT_UNSUPPORTED
 };
 

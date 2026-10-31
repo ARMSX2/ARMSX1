@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "../state.h"
+
 #define PSX_MC1_BEGIN 0x1f801000
 #define PSX_MC1_SIZE  0x24
 #define PSX_MC1_END   0x1f801023
@@ -35,6 +37,9 @@ uint8_t psx_mc1_read8(psx_mc1_t*, uint32_t);
 void psx_mc1_write32(psx_mc1_t*, uint32_t, uint32_t);
 void psx_mc1_write16(psx_mc1_t*, uint32_t, uint16_t);
 void psx_mc1_write8(psx_mc1_t*, uint32_t, uint8_t);
+/* The nine memory-control latches. */
+void psx_mc1_save_state(psx_mc1_t*, psx_state_writer_t*);
+int psx_mc1_load_state(psx_mc1_t*, psx_state_reader_t*);
 void psx_mc1_destroy(psx_mc1_t*);
 uint32_t psx_mc1_get_bios_read_delay(psx_mc1_t*);
 uint32_t psx_mc1_get_ram_read_delay(psx_mc1_t*);

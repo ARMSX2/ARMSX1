@@ -123,7 +123,7 @@
 
             argv.push_back(nullptr);
 
-            external_main((int)argvStorage.size(), argv.data(), NULL, NULL);
+            external_main((int)argvStorage.size(), argv.data());
         }
     });
 }

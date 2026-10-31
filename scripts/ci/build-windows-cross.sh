@@ -56,7 +56,7 @@ if [ -z "$sdl_dll" ]; then
     exit 1
 fi
 
-cmake -S "$repo_root/third_party/fuse-lib" -B "$fsui_build_dir" \
+cmake -S "$repo_root/third_party/fsui-lib" -B "$fsui_build_dir" \
     -DCMAKE_TOOLCHAIN_FILE="$toolchain_file" \
     -DFSUI_BUILD_SAMPLES=OFF \
     -DFSUI_PLATFORM_BACKEND=SDL2 \

@@ -39,6 +39,12 @@ void psxi_guncon_init(psxi_guncon_t* guncon) {
     guncon->sy = 240;
 }
 
+void psxi_guncon_reset_transfer(psxi_guncon_t* guncon) {
+    guncon->state = GUNCON_STATE_TX_HIZ;
+    guncon->tx_data = 0xff;
+    guncon->tx_data_ready = 0;
+}
+
 uint32_t psxi_guncon_read(void* udata) {
     psxi_guncon_t* guncon = (psxi_guncon_t*)udata;
 
@@ -123,8 +129,39 @@ int psxi_guncon_query_fifo(void* udata) {
     return guncon->tx_data_ready;
 }
 
+void psxi_guncon_save_state(psxi_guncon_t* guncon, psx_state_writer_t* w) {
+    psx_sw_i32(w, guncon->state);
+    psx_sw_u16(w, guncon->sw);
+    psx_sw_u8(w, guncon->tx_data);
+    psx_sw_i32(w, guncon->tx_data_ready);
+    psx_sw_u16(w, guncon->x);
+    psx_sw_u16(w, guncon->y);
+    psx_sw_u16(w, guncon->sx);
+    psx_sw_u16(w, guncon->sy);
+}
+
+int psxi_guncon_load_state(psxi_guncon_t* guncon, psx_state_reader_t* r) {
+    guncon->state = psx_sr_i32(r);
+    guncon->sw = psx_sr_u16(r);
+    guncon->tx_data = psx_sr_u8(r);
+    guncon->tx_data_ready = psx_sr_i32(r);
+    guncon->x = psx_sr_u16(r);
+    guncon->y = psx_sr_u16(r);
+    guncon->sx = psx_sr_u16(r);
+    guncon->sy = psx_sr_u16(r);
+
+    if (r->error)
+        return PSX_STATE_ERR_TRUNCATED;
+
+    if (guncon->state < GUNCON_STATE_TX_HIZ || guncon->state > GUNCON_STATE_TX_YPH)
+        return PSX_STATE_ERR_TRUNCATED;
+
+    return PSX_STATE_OK;
+}
+
 void psxi_guncon_init_input(psxi_guncon_t* guncon, psx_input_t* input) {
     input->udata = guncon;
+    input->kind = PSX_INPUT_KIND_GUNCON;
     input->write_func = psxi_guncon_write;
     input->read_func = psxi_guncon_read;
     input->on_button_press_func = psxi_guncon_on_button_press;

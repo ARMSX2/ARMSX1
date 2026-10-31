@@ -8,6 +8,7 @@
 #define PSX_DMAR_END   0x1f8010ff
 
 #include "../bus.h"
+#include "../state.h"
 #include "ic.h"
 
 typedef struct {
@@ -58,6 +59,10 @@ uint8_t psx_dma_read8(psx_dma_t*, uint32_t);
 void psx_dma_write32(psx_dma_t*, uint32_t, uint32_t);
 void psx_dma_write16(psx_dma_t*, uint32_t, uint16_t);
 void psx_dma_write8(psx_dma_t*, uint32_t, uint8_t);
+/* All seven channels, the pending completion-IRQ countdowns, DPCR and DICR.
+   dma->bus / dma->ic are pointers and are not saved. */
+void psx_dma_save_state(psx_dma_t*, psx_state_writer_t*);
+int psx_dma_load_state(psx_dma_t*, psx_state_reader_t*);
 void psx_dma_destroy(psx_dma_t*);
 void psx_dma_update(psx_dma_t*, int);
 

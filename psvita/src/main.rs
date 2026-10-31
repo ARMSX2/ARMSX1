@@ -3,7 +3,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 
 unsafe extern "C" {
-    fn external_main(argc: c_int, argv: *const *const c_char, external_window: *mut c_void, external_renderer: *mut c_void) -> c_int;
+    // The Vita host owns the SDL_Window/SDL_Renderer, so it uses the 4-arg entry.
+    // Plain `external_main` is the 2-arg main-shaped symbol SDL's Android glue calls.
+    fn external_main_ex(argc: c_int, argv: *const *const c_char, external_window: *mut c_void, external_renderer: *mut c_void) -> c_int;
     fn SDL_Init(flags: u32) -> c_int;
     #[cfg(not(vita_target))]
     fn SDL_Quit();
@@ -75,14 +77,14 @@ fn main() -> Result<(), String> {
     let mut ptrs: Vec<*const c_char> = cstrings.iter().map(|s| s.as_ptr()).collect();
     ptrs.push(std::ptr::null());
 
-    let ret = unsafe { external_main((ptrs.len() - 1) as c_int, ptrs.as_ptr(), raw_window, raw_renderer) };
+    let ret = unsafe { external_main_ex((ptrs.len() - 1) as c_int, ptrs.as_ptr(), raw_window, raw_renderer) };
 
     unsafe {
         cleanup_sdl(raw_window, raw_renderer);
     }
 
     if ret != 0 {
-        return Err(format!("external_main returned non-zero: {}", ret));
+        return Err(format!("external_main_ex returned non-zero: {}", ret));
     }
 
     Ok(())

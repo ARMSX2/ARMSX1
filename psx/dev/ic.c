@@ -7,7 +7,7 @@
 #include "../log.h"
 
 psx_ic_t* psx_ic_create(void) {
-    return (psx_ic_t*)malloc(sizeof(psx_ic_t));
+    return (psx_ic_t*)calloc(1, sizeof(psx_ic_t));
 }
 
 void psx_ic_init(psx_ic_t* ic, psx_cpu_t* cpu) {
@@ -118,6 +118,24 @@ void psx_ic_irq(psx_ic_t* ic, int id) {
 
     if (ic->mask & ic->stat)
         psx_cpu_set_irq_pending(ic->cpu);
+}
+
+void psx_ic_save_state(psx_ic_t* ic, psx_state_writer_t* w) {
+    psx_sw_u16(w, ic->stat);
+    psx_sw_u16(w, ic->mask);
+}
+
+int psx_ic_load_state(psx_ic_t* ic, psx_state_reader_t* r) {
+    ic->stat = psx_sr_u16(r);
+    ic->mask = psx_sr_u16(r);
+
+    if (r->error)
+        return PSX_STATE_ERR_TRUNCATED;
+
+    /* ic->cpu is host wiring and stays as it is. The CPU's own Cause.IP bits
+       were restored from the CPU section, so the pending-IRQ line is already
+       consistent with (stat & mask). */
+    return PSX_STATE_OK;
 }
 
 void psx_ic_destroy(psx_ic_t* ic) {

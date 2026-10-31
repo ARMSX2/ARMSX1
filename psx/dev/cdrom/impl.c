@@ -114,6 +114,7 @@ void cdrom_pause(psx_cdrom_t* cdrom) {
     cdrom->busy = 0;
     cdrom->cdda_playing = 0;
     cdrom->xa_playing = 0;
+    cdrom->xa_start_phase = 0;
     cdrom->read_ongoing = 0;
 }
 
@@ -131,6 +132,8 @@ void cdrom_cmd_getstat(psx_cdrom_t* cdrom) {
     cdrom_set_int(cdrom, 3);
 
     queue_push(cdrom->response, cdrom_get_stat(cdrom));
+    // Getstat reports the tray-change latch once, then acknowledges the closed tray.
+    if (cdrom->disc) cdrom->shell_open_latched = 0;
 
     cdrom_restore_state(cdrom);
 }
@@ -227,6 +230,9 @@ void cdrom_cmd_readn(psx_cdrom_t* cdrom) {
 
     if (cdrom->mode & MODE_XA_ADPCM) {
         cdrom->xa_playing = 1;
+        cdrom->xa_start_phase = -1;
+        cdrom->xa_start_age_cycles = 0;
+        cdrom->xa_prefetch_state = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;
         cdrom->xa_lba = cdrom->lba;
@@ -360,7 +366,32 @@ void cdrom_cmd_setmode(psx_cdrom_t* cdrom) {
     if (prev_speed != (cdrom->mode & MODE_SPEED))
         cdrom->pending_speed_switch_delay = 650 * CD_DELAY_1MS;
 
-    cdrom_pause(cdrom);
+    /*
+        Setmode has NO transport effect. It used to call cdrom_pause(), which clears
+        xa_playing, cdda_playing, read_ongoing, busy AND prev_state — so an in-progress read
+        was not merely stopped, it became unrecoverable, because prev_state is the only thing
+        cdrom_restore_state() can resume from.
+
+        This silenced XA-ADPCM audio in every game that reconfigures the drive mid-stream,
+        which is the normal way to do it. Captured in Silent Hill 1's opening cutscene:
+
+            cmd 0e CdlSetmode params=[80] mode_before=e0 xa=1 read=1 state=3   <- the kill
+            cmd 0e CdlSetmode params=[a0] mode_before=80 xa=0 read=0 state=0   <- the aftermath
+
+        mode_before=e0 has bit6 (XA-ADPCM) set and the drive was actively streaming; one
+        Setmode later everything is zero. Same symptom in Metal Gear Solid's codec calls.
+
+        cdrom_restore_state() is what the other 18 non-transport commands use — including
+        Setfilter, the immediately adjacent opcode. It is sufficient on its own precisely
+        because it CLEARS nothing: xa_playing / read_ongoing / cdda_playing simply keep their
+        values, and state is restored from prev_state, after which cdrom_handle_resp1()'s
+        caller sees CD_STATE_READ and reschedules the read with CD_DELAY_ONGOING_READ.
+
+        Spec: `Command 0Eh - Setmode(mode)` returns INT3(stat) and nothing else; DuckStation's
+        CommandSetmode sets the mode bits and acks. The genuine speed-change cost is already
+        handled above by pending_speed_switch_delay.
+    */
+    cdrom_restore_state(cdrom);
 }
 
 void cdrom_cmd_getparam(psx_cdrom_t* cdrom) {
@@ -416,12 +447,13 @@ void cdrom_cmd_getlocl(psx_cdrom_t* cdrom) {
 }
 
 void cdrom_cmd_getlocp(psx_cdrom_t* cdrom) {
-    int lba = cdrom->lba;
+    /* The HEAD's position, not the transport's — see the reported-position block in cdrom.c.
+       This used to read cdrom->lba and subtract 25 in place after a CdlSeekP, which reported
+       the target minus 25 for as long as the drive stayed parked. The undershoot is now
+       applied once, by cdrom_cmd_seekp(), and walks off on its own. */
+    int lba = (int)cdrom->report_lba;
     int track = psx_disc_get_track_number(cdrom->disc, lba);
     int track_lba = psx_disc_get_track_lba(cdrom->disc, track);
-
-    if (!cdrom->seek_precision)
-        lba -= 25;
 
     uint8_t subq[12];
     if (lba >= 0 && psx_disc_read_subchannel_q(cdrom->disc, (uint32_t)lba, subq)) {
@@ -598,6 +630,15 @@ void cdrom_cmd_seekp(psx_cdrom_t* cdrom) {
         cdrom_process_setloc(cdrom);
         cdrom->seek_precision = 0;
 
+        /* CdlSeekP is the coarse seek: the head lands short of the target and reads its way
+           onto it. Apply the undershoot ONCE, here, and let psx_cdrom_update() close the gap
+           at the drive's sector rate. Reporting target-25 for as long as the drive stayed
+           parked — which is what subtracting it inside CdlGetlocP did — is a poll loop that
+           can never finish. Never below the first addressable sector. */
+        cdrom_anchor_report_position(cdrom,
+            (cdrom->lba > (150u + CD_SEEKP_UNDERSHOOT)) ? (cdrom->lba - CD_SEEKP_UNDERSHOOT)
+                                                        : 150u);
+
         cdrom_restore_state(cdrom);
     }
 }
@@ -695,6 +736,9 @@ void cdrom_cmd_reads(psx_cdrom_t* cdrom) {
 
     if (cdrom->mode & MODE_XA_ADPCM) {
         cdrom->xa_playing = 1;
+        cdrom->xa_start_phase = -1;
+        cdrom->xa_start_age_cycles = 0;
+        cdrom->xa_prefetch_state = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;
         cdrom->xa_lba = cdrom->lba;

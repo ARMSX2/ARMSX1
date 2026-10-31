@@ -7,7 +7,7 @@
 #include <stdlib.h>
 
 psx_input_t* psx_input_create(void) {
-    return (psx_input_t*)malloc(sizeof(psx_input_t));
+    return (psx_input_t*)calloc(1, sizeof(psx_input_t));
 }
 
 void psx_input_init(psx_input_t* input) {

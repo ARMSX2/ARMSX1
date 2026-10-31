@@ -1,12 +1,16 @@
+#include "runahead_prediction.h"
+#include "mali_frame_pacing.h"
+#include "honor_software_profile.h"
+#include "runahead_sequence.h"
 #include <SDL.h>
 #include <SDL_gamecontroller.h>
 #include <SDL_render.h>
-#include <SDL_system.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <csignal>
+#include <cstdarg>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -26,10 +30,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#if defined(__ANDROID__)
-#include <unistd.h>
-#endif
+#include "host_run_gate.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -58,38 +59,90 @@
 
 #if defined(__ANDROID__)
 #include <jni.h>
+#include <android/log.h>
+#include <sys/system_properties.h>
+// Boot-path tracing. The core's own diagnostics are file-backed and off by default
+// (quiet=true / logging_enabled=false in settings.toml), so a silent early return in
+// ArmsxApp::run() left no trace anywhere. These go straight to logcat under the same tag
+// frontend/android_jni.cpp uses, unconditionally.
+#define ARMSX_BOOTLOG(...) __android_log_print(ANDROID_LOG_INFO, "ARMSX-JNI", __VA_ARGS__)
+#define ARMSX_BOOTERR(...) __android_log_print(ANDROID_LOG_ERROR, "ARMSX-JNI", __VA_ARGS__)
+#else
+#define ARMSX_BOOTLOG(...) ((void)0)
+#define ARMSX_BOOTERR(...) ((void)0)
+#endif
+
+#if defined(__ANDROID__)
+static bool HonorDeferredShadingDevice() {
+    static const bool matched = [] {
+        char manufacturer[PROP_VALUE_MAX] = {};
+        char model[PROP_VALUE_MAX] = {};
+        char device[PROP_VALUE_MAX] = {};
+        __system_property_get("ro.product.manufacturer", manufacturer);
+        __system_property_get("ro.product.model", model);
+        __system_property_get("ro.product.device", device);
+        return armsx_honor_deferred_shading_device(manufacturer, model, device) != 0;
+    }();
+    return matched;
+}
 #endif
 
 extern "C" {
 #include "../psx/psx.h"
+#include "../psx/perf.h"
+#include "../psx/pgxp.h"
+/* psx_cpu_set_widescreen_hack() — the GTE X-projection scale behind [video] widescreen_hack. */
+#include "../psx/cpu.h"
+#include "../psx/rewind.h"
+#include "../psx/state.h"
+#include "../psx/texrep.h"
+/* [cheats] — the GameShark engine. Read psx/cheats.h before touching any of the four call
+   sites here: the format choice, where enablement is stored and why, and the per-frame cost
+   contract are all argued there. */
+#include "../psx/cheats.h"
 #include "../psx/dev/cdrom/cdrom.h"
 #include "../psx/dev/gpu.h"
+/* audioDiagSnapshot() reads SPUCNT, the mixer volumes and the reverb work-area pointers
+   directly; the mixer only ever needed the handle. */
+#include "../psx/dev/spu.h"
 #include "../psx/dev/input.h"
 #include "../psx/dev/pad.h"
 #include "../psx/dev/timer.h"
+#include "../psx/input/multitap.h"
 #include "../psx/input/sda.h"
 #include "common.h"
 #include "config.h"
 #include "toml.h"
 }
 
+#include "achievements.h"
 #include "archive.h"
-#include "IconsFontAwesome5.h"
-#include "platform_file.h"
+#include "audio_queue_policy.h"
+#include "audio_time_stretcher.h"
+#include "host_stats.h"
+#include "host_usage.h"
+// ADPF CPU clock hint + emulation-thread affinity. Both are host scheduling levers, both are
+// default-off, and both compile to empty bodies off Android — see frontend/perf_hint.h.
+#include "perf_hint.h"
+#include "pgo.h"
+#include "render.h"
+#include "sdl_subsystem_lease.h"
+// IconsFontAwesome5.h (from fsui-lib's imgui) removed with the FSUI cut — the ICON_FA_* glyphs were
+// used only by the deleted native menus.
 #ifdef USE_HARDWARE
 #include "gpu_hw.h"
+#include "gpu_hw_gl.h"
+#include "gpu_hw_rt.h"
 #endif
-#include "fsui/backend_sdl.hpp"
-#include "fsui/fsui.hpp"
-#include "fsui/imgui_fullscreen.hpp"
-#include "imgui.h"
 
 #undef main
 
 namespace {
 
 constexpr Uint32 kPauseChordGraceMs = 120;
-constexpr std::string_view kCustomFsuiAppIconPath = "icons/FsuiAppIcon.png";
+// One PAL frame is ~20 ms.  OpenSL ES periods below this cadence are prone to draining the
+// queue between frame pushes on Android; callers may request more, never less.
+constexpr int kAudioMinimumBufferMs = 20;
 
 constexpr bool SupportsManagedWindowSizing() {
 #if defined(__ANDROID__) || defined(IOS_TARGET) || defined(__EMSCRIPTEN__) || defined(UWP_TARGET) || defined(PSVITA_TARGET)
@@ -107,18 +160,15 @@ constexpr bool DefaultVsyncEnabled() {
 #endif
 }
 
-constexpr bool DefaultMobileControlsEnabled() {
-#if defined(__ANDROID__) || defined(IOS_TARGET)
-    return true;
-#else
-    return false;
-#endif
-}
-
 #ifdef USE_HARDWARE
+// Kept numerically compatible with armsx_render_backend_t (frontend/render.h) so the two
+// never drift; the settings layer speaks GpuBackend, the presentation layer speaks
+// armsx_render_backend_t, and RenderBackendFor() is the single conversion point.
 enum class GpuBackend {
     Software = 0,
     SDLAccelerated = 1,
+    OpenGL = 2,
+    Vulkan = 3,
 };
 #endif
 
@@ -130,33 +180,282 @@ std::mutex g_pending_launch_lock;
 std::vector<std::string> g_pending_launch_arguments;
 std::vector<std::string> g_pending_web_errors;
 
-struct PlatformLibraryRoot {
-    std::string path;
-    std::string label;
-    bool recursive = true;
+// ---------------------------------------------------------------------------
+// Embedded-host control surface.
+//
+// When the core is hosted *in-process* by another UI (the Android Jetpack Compose
+// front-end via frontend/android_jni.cpp, or any other embedder), that UI runs on its
+// own thread and needs to poke the emulation loop: pause, reset, screenshot, pad input.
+// Every one of those requests is parked here under g_host_control_lock and drained by
+// ArmsxApp::applyHostControlRequests() on the emulation thread — exactly the same
+// mutex-guarded hand-off the pending-launch-argument queue already uses. Nothing below
+// touches SDL or the psx_t from the caller's thread.
+// ---------------------------------------------------------------------------
+
+// Pad command kinds parked by the host.
+enum class HostPadCommandKind {
+    Digital = 0,
+    Analog = 1,
 };
 
-struct PlatformLibraryGame {
-    std::string path;
-    std::string label;
-    std::uint64_t size = 0;
-    std::time_t modified = 0;
+// Players an embedded host may address. Four, because a Multitap in port 1 carries four
+// pads (PSXI_MULTITAP_SLOTS); with no tap only player 0 has anywhere to go and the rest are
+// dropped by psx_pad_*_player().
+constexpr int kHostMaxPlayers = 4;
+
+struct HostPadCommand {
+    HostPadCommandKind kind = HostPadCommandKind::Digital;
+    uint32_t mask = 0;   // Digital: PSXI_SW_SDA_* bit.
+    bool pressed = false; // Digital.
+    int stick = 0;        // Analog: 0 = left, 1 = right.
+    int x = 0x80;         // Analog: 0x00..0xFF centred on 0x80.
+    int y = 0x80;
+    // Which player behind the port-1 multitap this is for (0..3). Always 0 without a tap,
+    // and psx_pad_*_player() drops anything above 0 in that case, so a routing mistake shows
+    // up as a dead player rather than two players sharing one pad.
+    int player = 0;
 };
 
-using PlatformDirectoryPickerCallback = void (*)(int recursive, void* userdata);
-using PlatformDirectoryRemovedCallback = void (*)(const char* path, void* userdata);
+// Presentation-only live overrides. Unlike everything else the host parks below, these need
+// no VM cooperation at all — the emulation thread just reads them on its way into present() —
+// so they are plain atomics rather than queued requests. -1 means "no override, use
+// settings.toml".
+std::atomic<int> g_host_display_aspect{-1};
 
-std::mutex g_platform_library_lock;
-std::vector<PlatformLibraryRoot> g_platform_library_roots;
-std::vector<PlatformLibraryGame> g_platform_library_games;
-std::uint64_t g_platform_library_version = 0;
-PlatformDirectoryPickerCallback g_platform_directory_picker_callback = nullptr;
-void* g_platform_directory_picker_userdata = nullptr;
-PlatformDirectoryRemovedCallback g_platform_directory_removed_callback = nullptr;
-void* g_platform_directory_removed_userdata = nullptr;
+/* Custom display aspect (width/height) for display_aspect == 3. Stored as a float rather
+   than a ratio pair because that is all compute_dst consumes; <= 0 means "no live override,
+   use settings.toml". */
+std::atomic<float> g_host_display_aspect_custom{0.0f};
+
+/* Live integer-scaling override. -1 = no override, use settings.toml. */
+std::atomic<int> g_host_integer_scaling{-1};
+/* Portrait layout. -1 on portrait_top means "follow settings"; there is no settings key today,
+   so it resolves to ON — top-aligning is what the touch overlay assumes. */
+std::atomic<int> g_host_portrait_top{-1};
+std::atomic<int> g_host_portrait_top_inset{0};
+
+/* Sanity bounds for a user-entered ratio. Wide enough for anything anyone would want
+   (1:2 through 4:1) and narrow enough that a typo cannot produce a degenerate dst rect. */
+constexpr float kMinCustomAspect = 0.5f;
+constexpr float kMaxCustomAspect = 4.0f;
+
+// App is off-screen: skip the whole draw+post. A plain atomic rather than a parked request,
+// because the loop reads it every tick and there is nothing to sequence against the
+// emulation thread — it only gates presentation, never machine state.
+std::atomic<bool> g_host_presentation_suspended{false};
+std::atomic<int> g_host_stretch_mode{-1};
+
+/* Rewind ENGAGEMENT, as opposed to its configuration above. Plain atomics rather than queued
+   requests, and deliberately: a hold-to-rewind button is read once per frame by the emulation
+   thread on its way into ArmsxSession::runFrame(), exactly like the presentation flags. Going
+   through the request lock would put the input path behind the same mutex as disc swaps.
+     active — the button is held; every frame steps one snapshot back.
+     steps  — one-shot steps (a menu row / a tap), drained in the same place. */
+std::atomic<bool> g_host_rewind_active{false};
+std::atomic<int> g_host_rewind_step_requests{0};
+
+/* ---- [video] display features the PRESENT path consumes, as live overrides ----------------
+   Same contract as g_host_stretch_mode above: -1 means "no host has spoken, defer to
+   settings.toml", anything else is the host's choice and outranks the file. The Android
+   front-end pushes all three through JNI before the core ever opens settings.toml, so a
+   file-derived value must never overwrite them — that is the per-game-INI-shadows-the-UI
+   failure in another shape. Read on the presenting thread once per frame. */
+/* Texture dumping / replacement (psx/texrep.h), requested from the UI thread and applied on
+   the EMULATION thread once per frame (ArmsxApp::updateTexture). psx_texrep_configure() frees
+   every decoded replacement, so calling it from the JNI thread while the rasterizers hold
+   psx_gpu_t::texrep_bind.img would be a use-after-free. -1 on the two ints means "no request
+   pending"; the string is guarded by its own mutex because it is not trivially atomic. */
+std::mutex g_host_texture_lock;
+std::string g_host_texture_dir;
+std::atomic<int> g_host_texture_dump{-1};
+std::atomic<int> g_host_texture_replace{-1};
+std::atomic<bool> g_host_texture_pending{false};
+
+std::atomic<int> g_host_deinterlace{-1};      // 0 weave, 1 bob, 2 adaptive
+std::atomic<int> g_host_overscan_crop{-1};    // 0 none, 1 small, 2 full
+std::atomic<int> g_host_display_rotation{-1}; // quarter turns clockwise 0..3
+
+std::mutex g_host_control_lock;
+HostRunGate g_host_run_gate;
+bool g_host_embedded = false;
+bool g_host_pause_pending = false;
+bool g_host_pause_value = false;
+bool g_host_audio_suspend_pending = false;
+bool g_host_audio_suspend_value = false;
+bool g_host_shutdown_pending = false;
+bool g_host_reset_pending = false;
+bool g_host_fast_forward_pending = false;
+bool g_host_fast_forward_value = false;
+bool g_host_speed_limits_pending = false;
+bool g_host_speed_limit_frame_limit = true;
+int g_host_speed_limit_percent = 100;
+int g_host_speed_limit_fps = 0;
+double g_host_speed_limit_fast_forward = 2.0;
+int g_host_speed_limit_frame_skip = 0;
+bool g_host_screenshot_pending = false;
+std::string g_host_screenshot_path;
+/* Disc swap. Parked here rather than performed on the calling (UI) thread: psx_swap_disc()
+   reopens the image under the running machine, and doing that while the emulation thread is
+   mid-instruction is a use-after-free waiting to happen. Drained at the same instruction
+   boundary as every other host request. */
+bool g_host_disc_swap_pending = false;
+std::string g_host_disc_swap_path;
+std::vector<HostPadCommand> g_host_pad_queue;
+/* [input] multitap, live. Parked like every other request that touches the machine: the
+   toggle destroys and rebuilds the device the SIO reads through, which is not something to
+   do from the UI thread mid-instruction. */
+bool g_host_multitap_pending = false;
+bool g_host_multitap_value = false;
+/* [emulation] rewind / runahead configuration, same reasoning: psx_rewind_configure() frees
+   and allocates the snapshot ring. */
+bool g_host_rewind_config_pending = false;
+bool g_host_rewind_config_enabled = false;
+int g_host_rewind_config_seconds = PSX_REWIND_DEFAULT_SECONDS;
+int g_host_rewind_config_frequency = PSX_REWIND_DEFAULT_FREQUENCY;
+bool g_host_runahead_pending = false;
+int g_host_runahead_value = 0;
+void (*g_host_present_callback)(void*) = nullptr;
+void* g_host_present_user = nullptr;
+
+std::atomic_bool g_host_vm_active{false};
+std::atomic_bool g_host_loop_running{false};
+// Set by an embedded host that has wired up everything SDL's non-OpenSL-ES Android audio
+// backends need (SDLAudioManager's JNI glue AND its static Context). Until it is, the
+// [audio] driver setting is clamped to openslES — see ArmsxApp::applyAudioDriverSetting().
+std::atomic_bool g_host_audio_backends_ready{false};
+
+// Read-only session telemetry for an embedded host. The Android front-end draws its OSD in
+// Compose (there is no imgui/FSUI left to draw one natively), so the numbers the core used to
+// print for itself have to be published instead. Plain atomics rather than the request lock:
+// they are written once per frame here and polled from the UI thread, and a torn read of a
+// frame rate is worth less than making the OSD contend with the emulation loop.
+std::atomic<float> g_host_measured_fps{0.0f};
+std::atomic<float> g_host_nominal_fps{0.0f};
+std::atomic<unsigned int> g_host_presented_frames{0u};
+
+// The full performance overlay (per-subsystem work counters + host phase timing) is opt-in
+// and OFF here, so a player who never opens it pays for none of it: this flag also arms the
+// core-side counters through psx_perf_set_enabled(), and the phase timers below are skipped
+// entirely while it is clear. PSXE_HOST_STAT_* indices, frontend/host_stats.h.
+std::atomic_bool g_host_stats_enabled{false};
+std::mutex g_host_stats_lock;
+double g_host_stats[PSXE_HOST_STAT_COUNT] = {};
+// Has a window ever closed and published into g_host_stats since the overlay was last armed?
+// psxe_host_stats() is documented to write nothing until it has, and the UI needs that: an
+// unpublished snapshot is all zeroes, and a screenful of zeroes reads as a measurement ("your
+// CPU is doing nothing") rather than as no data. Guarded by g_host_stats_lock.
+bool g_host_stats_published = false;
+
+// `perf_log`, a marker file next to the diag log (the same mechanism frontend/gpu_hw_gl.c
+// uses for its A/B switches — `adb shell run-as com.nanodata.armsx touch files/logs/perf_log`).
+// When it is present the overlay is armed from here and its snapshot is written to the diag
+// log every window, which is what makes a measurement a number in a file rather than a
+// screenshot to be read by eye. Absent — the shipping default — nothing below runs at all.
+// Evaluated once, on first use, so it is read after psxe_diag_initialize() has a path.
+bool perfLogEnabled() {
+    static const bool enabled = [] {
+        const char* log_path = psxe_diag_log_path();
+        if (!log_path || !log_path[0]) {
+            return false;
+        }
+        const char* slash = std::strrchr(log_path, '/');
+        if (!slash) {
+            return false;
+        }
+        std::string path(log_path, static_cast<size_t>(slash - log_path) + 1u);
+        path += "perf_log";
+        FILE* file = std::fopen(path.c_str(), "rb");
+        if (!file) {
+            return false;
+        }
+        std::fclose(file);
+        return true;
+    }();
+
+    return enabled;
+}
+
+/*
+    `resume_probe` — the marker that settles "which side came back empty" after a task switch.
+
+    A black picture after returning from the background has two candidate causes that look
+    identical from the outside, and reading the code cannot separate them:
+
+      * the SOURCE is empty — the GLES rasterizer's render target (or the software framebuffer)
+        lost its contents, so a correct present layer is faithfully presenting nothing;
+      * the PRESENT side is empty — the source is intact and the window / swapchain / presented
+        image is what came back dead.
+
+    Armed, the first few frames the frontend uploads after presentation resumes are scanned for
+    a single non-zero byte and the answer is written to the diag log:
+
+        nonzero=0    the source came back empty  -> the rasterizer side
+        nonzero>0    the source is intact        -> the present side
+
+    `touch files/logs/resume_probe` to arm; absent (the shipping default) this costs one integer
+    compare per frame and nothing else. Same marker mechanism as `perf_log` above and as
+    frontend/gpu_hw_gl.c's gl_debug_marker().
+*/
+bool resumeProbeEnabled() {
+    static const bool enabled = [] {
+        const char* log_path = psxe_diag_log_path();
+        if (!log_path || !log_path[0]) {
+            return false;
+        }
+        const char* slash = std::strrchr(log_path, '/');
+        if (!slash) {
+            return false;
+        }
+        std::string path(log_path, static_cast<size_t>(slash - log_path) + 1u);
+        path += "resume_probe";
+        FILE* file = std::fopen(path.c_str(), "rb");
+        if (!file) {
+            return false;
+        }
+        std::fclose(file);
+        return true;
+    }();
+
+    return enabled;
+}
+
+// Frames still to be sampled by the probe above. Set on the suspended -> resumed edge by the
+// main loop, consumed in ArmsxSession::updateTexture(). Emulation thread only.
+int g_resume_probe_frames = 0;
+// Previous value of g_host_presentation_suspended as the loop last saw it, so the edge can be
+// detected without another atomic.
+bool g_presentation_was_suspended = false;
+
+// Invoked on the emulation thread once per frame, right after the frame has been
+// presented into the (external) renderer. The Android host uses it to push the software
+// framebuffer into its ANativeWindow.
+void HostNotifyFramePresented() {
+    void (*callback)(void*) = nullptr;
+    void* user = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_host_control_lock);
+        callback = g_host_present_callback;
+        user = g_host_present_user;
+    }
+
+    if (callback) {
+        callback(user);
+    }
+}
 
 constexpr double kUiFrameRate = 60.0;
-constexpr Uint32 kMobileControlsAutoHideMs = 3000;
+
+// Frame skip ([runtime] frame_skip). Presentation only — see ArmsxApp::shouldSkipPresent().
+//
+// kMaxFrameSkip caps the fixed modes at "present 1 of every 6", which is ~10 fps on screen for
+// a 60 Hz game: past that the picture stops being usable and the remaining saving is small,
+// because what is left in the frame is emulation, not presentation.
+//
+// kAdaptiveFrameSkipRun is the FLOOR the adaptive mode may never go below: at most two dropped
+// presents in a row, i.e. never worse than 1-in-3 (~20 fps at 60). Adaptive reacts to lateness,
+// and a device that is late every single frame would otherwise stop drawing entirely.
+constexpr int kMaxFrameSkip = 5;
+constexpr int kAdaptiveFrameSkipRun = 2;
 
 const char* LogLevelTitle(int level) {
     switch (level) {
@@ -171,7 +470,16 @@ const char* LogLevelTitle(int level) {
 }
 
 void StructuredLogCallback(log_Event* ev) {
-    if (!ev) {
+    if (!ev || !psxe_diag_is_enabled()) {
+        return;
+    }
+
+    // log_log() gates only its own stderr path on the level (psx/log.c); extra callbacks are
+    // filtered by the level they were registered with, and this one is registered at LOG_TRACE
+    // because it is installed before settings are loaded. Without this check log_set_level()
+    // does nothing for the diag file, and the per-frame register traces in dma.c/gpu.c/cpu.c
+    // land in armsx.log at ~850 lines/s on the emulation thread whatever log_level says.
+    if (ev->level < log_get_level()) {
         return;
     }
 
@@ -337,191 +645,28 @@ std::vector<std::string> DrainWebErrors() {
     return pending;
 }
 
-bool IsAndroidVirtualPath(std::string_view path) {
-    return path.rfind("armsx-android:///", 0) == 0;
-}
+// Local replacement for fsui::UiState after the FSUI cut. Holds only the fields the non-menu
+// code still reads (library scan paths + sort/view prefs persisted in settings.toml, and the two
+// overlay flags a couple of call sites poke). Menus are owned by the Jetpack Compose front-end now.
+struct ArmsxUiState {
+    int default_game_view = 0;
+    int game_sort = 2;
+    bool game_sort_reverse = false;
+    std::vector<std::filesystem::path> game_list_paths;
+    std::vector<std::filesystem::path> game_list_recursive_paths;
+    std::filesystem::path covers_path;
+    bool show_settings_overlay = false;
+    bool show_performance_overlay = false;
+};
 
-bool PlatformPathBelongsToRoot(std::string_view path, std::string_view root, bool recursive) {
-    if (path.size() <= root.size() || path.substr(0, root.size()) != root || path[root.size()] != '/') {
-        return false;
-    }
-
-    const std::string_view relative = path.substr(root.size() + 1);
-    return recursive || relative.find('/') == std::string_view::npos;
-}
-
-void SetPlatformLibrarySnapshot(
-    std::vector<PlatformLibraryRoot> roots,
-    std::vector<PlatformLibraryGame> games
-) {
-    std::lock_guard<std::mutex> lock(g_platform_library_lock);
-    g_platform_library_roots = std::move(roots);
-    g_platform_library_games = std::move(games);
-    g_platform_library_version++;
-}
-
-void RegisterPlatformLibraryRoot(std::string path, std::string label, bool recursive) {
-    if (path.empty()) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(g_platform_library_lock);
-    const auto found = std::find_if(g_platform_library_roots.begin(), g_platform_library_roots.end(), [&](const auto& root) {
-        return root.path == path;
-    });
-    if (found == g_platform_library_roots.end()) {
-        g_platform_library_roots.push_back(PlatformLibraryRoot{
-            .path = std::move(path),
-            .label = std::move(label),
-            .recursive = recursive,
-        });
-    } else {
-        found->label = std::move(label);
-        found->recursive = recursive;
-    }
-    g_platform_library_version++;
-}
-
-std::uint64_t CopyPlatformLibrarySnapshot(
-    std::vector<PlatformLibraryRoot>& roots,
-    std::vector<PlatformLibraryGame>& games
-) {
-    std::lock_guard<std::mutex> lock(g_platform_library_lock);
-    roots = g_platform_library_roots;
-    games = g_platform_library_games;
-    return g_platform_library_version;
-}
-
-#if defined(__ANDROID__)
-bool CallAndroidActivityVoidMethod(const char* name, const char* signature, jvalue* args = nullptr) {
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
-    if (!env || !activity) {
-        return false;
-    }
-
-    jclass cls = env->GetObjectClass(activity);
-    if (!cls) {
-        env->DeleteLocalRef(activity);
-        return false;
-    }
-
-    jmethodID method = env->GetMethodID(cls, name, signature);
-    if (!method) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(cls);
-        env->DeleteLocalRef(activity);
-        return false;
-    }
-
-    env->CallVoidMethodA(activity, method, args);
-    const bool succeeded = !env->ExceptionCheck();
-    if (!succeeded) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-    }
-    env->DeleteLocalRef(cls);
-    env->DeleteLocalRef(activity);
-    return succeeded;
-}
-
-bool RequestAndroidLibraryDirectory(bool recursive) {
-    jvalue args[1]{};
-    args[0].z = recursive ? JNI_TRUE : JNI_FALSE;
-    return CallAndroidActivityVoidMethod("openLibraryDirectoryPicker", "(Z)V", args);
-}
-
-void RemoveAndroidLibraryDirectory(std::string_view path) {
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
-    if (!env || !activity) {
-        return;
-    }
-
-    jclass cls = env->GetObjectClass(activity);
-    jmethodID method = cls ? env->GetMethodID(cls, "removeLibraryDirectory", "(Ljava/lang/String;)V") : nullptr;
-    if (method) {
-        jstring value = env->NewStringUTF(std::string(path).c_str());
-        env->CallVoidMethod(activity, method, value);
-        env->DeleteLocalRef(value);
-    } else {
-        env->ExceptionClear();
-    }
-    if (cls) {
-        env->DeleteLocalRef(cls);
-    }
-    env->DeleteLocalRef(activity);
-}
-
-FILE* AndroidPlatformFopen(const char* path, const char* mode, void*) {
-    if (!path || !mode || !IsAndroidVirtualPath(path)) {
-        return fopen(path, mode);
-    }
-    if (mode[0] != 'r') {
-        return nullptr;
-    }
-
-    JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-    jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
-    if (!env || !activity) {
-        return nullptr;
-    }
-
-    int fd = -1;
-    jclass cls = env->GetObjectClass(activity);
-    jmethodID method = cls ? env->GetMethodID(cls, "openVirtualFileDescriptor", "(Ljava/lang/String;)I") : nullptr;
-    if (method) {
-        jstring value = env->NewStringUTF(path);
-        fd = env->CallIntMethod(activity, method, value);
-        env->DeleteLocalRef(value);
-    } else {
-        env->ExceptionClear();
-    }
-    if (env->ExceptionCheck()) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-        fd = -1;
-    }
-    if (cls) {
-        env->DeleteLocalRef(cls);
-    }
-    env->DeleteLocalRef(activity);
-
-    if (fd < 0) {
-        return nullptr;
-    }
-
-    FILE* file = fdopen(fd, mode);
-    if (!file) {
-        close(fd);
-    }
-    return file;
-}
-#endif
-
-bool RequestPlatformLibraryDirectory(bool recursive) {
-#if defined(__ANDROID__)
-    if (RequestAndroidLibraryDirectory(recursive)) {
-        return true;
-    }
-#endif
-    if (g_platform_directory_picker_callback) {
-        g_platform_directory_picker_callback(recursive ? 1 : 0, g_platform_directory_picker_userdata);
-        return true;
-    }
-    return false;
-}
-
-void NotifyPlatformLibraryDirectoryRemoved(std::string_view path) {
-#if defined(__ANDROID__)
-    if (IsAndroidVirtualPath(path)) {
-        RemoveAndroidLibraryDirectory(path);
-    }
-#endif
-    if (g_platform_directory_removed_callback) {
-        g_platform_directory_removed_callback(std::string(path).c_str(), g_platform_directory_removed_userdata);
-    }
-}
+// Local replacement for fsui::CurrentGameInfo after the FSUI cut (used only by crash-context logging).
+struct ArmsxGameInfo {
+    bool has_game = false;
+    std::string title;
+    std::string subtitle;
+    std::string title_id;
+    std::filesystem::path path;
+};
 
 struct FrontendSettings {
     std::string settings_path;
@@ -539,28 +684,106 @@ struct FrontendSettings {
     psx_cpu_execution_mode_t cpu_engine = PSX_CPU_CACHED_INTERPRETER;
 #ifdef USE_HARDWARE
     GpuBackend gpu_backend = GpuBackend::Software;
+    // Rasterizer, orthogonal to gpu_backend above (which is the *presentation* path).
+    // false keeps psx/dev/gpu.c's software rasterizer, which is the default.
+    bool hw_rasterizer = false;
+    // 1 = auto (GLES when a GL context exists, CPU otherwise), 2 = force CPU, 3 = force
+    // GLES. See config.h; the UI only ever writes 0 or 1.
+    int rasterizer_mode = 0;
+    int internal_scale = 1;
 #endif
+    // Opt-in GPU accuracy fixes. Both change how games look relative to every previous
+    // release, so both default off and both apply to the software path and any backend
+    // alike (psx_gpu_set_accuracy_flags) so the 1x parity gate holds either way.
+    bool accurate_mask_bit = false;
+    bool accurate_dither = false;
+    // Hardware's polygon size cull (1023x511). See psx_gpu_prim_oversize().
+    bool accurate_prim_size = false;
+    // Hardware's truncating texture blend. See psx_gpu_modulate_channel().
+    bool accurate_tex_modulate = false;
+    // PGXP (psx/pgxp.c): sub-pixel vertex precision. Core-global and default off;
+    // only the hardware rasterizer backends consume the precise coordinates.
+    bool pgxp = false;
+    /* ---- [video] display/video feature set. All default OFF/neutral; the native gates below
+       are only reachable because these defaults match frontend/config.c's exactly. */
+    bool widescreen_hack = false;
+    int texture_filter = 0;    // 0 nearest, 1 bilinear, 2 xBR-style (GLES rasterizer)
+    /* Texture dumping / replacement (psx/texrep.h). Both default OFF and the subsystem
+       allocates nothing until one is on. texture_dir is the BASE folder; empty means
+       "<prefs>/textures", which ResolveTextureDir() below fills in. */
+    bool texture_dump = false;
+    bool texture_replacements = false;
+    std::string texture_dir;
+    int downsample = 0;        // 0 off, 2..8 box factor (GLES rasterizer, above 1x)
+    int deinterlace = 0;       // 0 weave, 1 bob, 2 adaptive (480-line modes only)
+    int overscan_crop = 0;     // 0 none, 1 small, 2 full
+    int display_rotation = 0;  // quarter turns clockwise, 0..3
+    int line_detect = 0;       // 0 disabled, 1 quads, 2 basic (GLES rasterizer)
     bool texture_scale_mode = false;
     bool debug_panel = false;
     bool stretch_mode = false;
     int display_aspect = 0;
+    // Width/height for display_aspect == 3. 16:9 as the starting point because that is what
+    // a user reaching for "custom" on a widescreen handheld most often wants.
+    float display_aspect_custom = 16.0f / 9.0f;
+    // Snap the output to a whole multiple of the source. Off by default: it shrinks the
+    // picture (a 1920x1080 window fits only 4x of a 240-line frame = 960 tall), which is
+    // a deliberate trade the user opts into, not something to impose.
+    bool integer_scaling = false;
     int upscale_height = 480;
-    int presentation_upscale = 1;
-    bool mobile_controls = DefaultMobileControlsEnabled();
-    fsui::UiState ui_state{
-        .theme = "Dark",
-        .prompt_icon_pack = fsui::PromptIconPack::Auto,
-        .background_image_path = {},
-        .default_game_view = 0,
-        .game_sort = 2,
-        .game_sort_reverse = false,
-        .game_list_paths = {},
-        .game_list_recursive_paths = {},
-        .covers_path = {},
-        .show_inputs_overlay = false,
-        .show_settings_overlay = false,
-        .show_performance_overlay = false,
-    };
+    // [runtime] frame pacing. frame_limit gates the limiter, speed_percent scales the game's
+    // own rate, fps_limit is an optional absolute ceiling on top (0 = none), and
+    // fast_forward_speed replaces speed_percent while fast-forward is engaged. A 0 multiplier
+    // (or frame_limit = false) means uncapped: the pacer stops waiting entirely.
+    bool frame_limit = true;
+    int speed_percent = 100;
+    int fps_limit = 0;
+    double fast_forward_speed = 2.0;
+    // [runtime] frame_skip. Orthogonal to the four above: they decide how fast the MACHINE
+    // runs, this decides how many of the frames it produces are actually put on screen.
+    // 0 = off, 1..5 = fixed (present one, skip N), -1 = adaptive. See ArmsxApp::shouldSkipPresent().
+    int frame_skip = 0;
+    // [runtime] host CPU scheduling levers, both EXPERIMENTAL and both off by default. Neither
+    // touches emulation: adpf_clock_hint reports per-frame work to Android's performance-hint
+    // service, affinity_mode pins the emulation thread to a core cluster. See perf_hint.h.
+    bool adpf_clock_hint = false;
+    int affinity_mode = 0;
+    // [audio]. Consumed by ArmsxSession's SDL device + mixer and by psx/dev/spu.c; see the
+    // per-field notes in frontend/config.h.
+    int audio_volume = 100;
+    int audio_ff_volume = 100;
+    bool audio_muted = false;
+    bool audio_mute_fast_forward = false;
+    bool audio_swap_channels = false;
+    bool audio_skip_reverb = false;
+    int audio_buffer_ms = 20;
+    int audio_driver = 1; // 0=SDL default, 1=openslES, 2=aaudio (Android only)
+    // Opt-in: keep emulating and playing while the app is off-screen. Off means the host's
+    // background notification parks the VM and stops the platform audio stream.
+    bool audio_background_playback = false;
+    // [input] analog_mode_default — which mode the emulated DualShock reports at boot.
+    // The pad's ANALOG button still toggles at runtime; this is only the starting state.
+    bool analog_mode_default = true;
+    // [input] multitap — a Multitap in port 1 (psx/input/multitap.c), four players on one
+    // port. Off by default: a tap answers the pad poll with its own ID, so a game that does
+    // not understand one sees NO controller at all.
+    bool multitap = false;
+    // [emulation] rewind / runahead. Both off by default and both documented in
+    // psx/rewind.h; rewind_seconds x rewind_frequency is a MEMORY figure (~3.5 MiB each).
+    bool rewind = false;
+    int rewind_seconds = PSX_REWIND_DEFAULT_SECONDS;
+    int rewind_frequency = PSX_REWIND_DEFAULT_FREQUENCY;
+    int runahead = 0;
+    // [cheats] — GameShark codes, applied once per frame by psx/cheats.c. `cheats_file` is a
+    // path to a `.cht` catalogue and `cheats_enabled_codes` names which of its entries are
+    // armed. Both are PER-GAME values written by the launcher, which is deliberate: an
+    // enablement list that could end up in a global layer is how the sibling PS2 project
+    // armed "Infinite Health" in every game a user owned. Empty by default, so a settings.toml
+    // written before this section existed arms nothing.
+    bool cheats_enabled = false;
+    std::string cheats_file;
+    std::vector<std::string> cheats_enabled_codes;
+    ArmsxUiState ui_state{};
 };
 
 struct PendingChordButton {
@@ -803,106 +1026,20 @@ std::string WithHiddenId(std::string_view label, std::string_view id) {
     return out;
 }
 
-bool ReadSdlFileBytes(std::string_view path, std::vector<unsigned char>& bytes) {
-    SDL_RWops* handle = SDL_RWFromFile(std::string(path).c_str(), "rb");
-    if (!handle) {
-        return false;
-    }
-
-    bytes.clear();
-    std::array<unsigned char, 16 * 1024> buffer{};
-    for (;;) {
-        const size_t read = SDL_RWread(handle, buffer.data(), 1, buffer.size());
-        if (read == 0) {
-            break;
-        }
-        bytes.insert(bytes.end(), buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(read));
-    }
-
-    SDL_RWclose(handle);
-    return !bytes.empty();
-}
-
-std::string MaterializeBundledFsuiAppIcon() {
-    const std::filesystem::path destination = DefaultBrowseDirectory() / kCustomFsuiAppIconPath;
-    std::error_code ec;
-
-    if (std::filesystem::exists(destination, ec) && std::filesystem::is_regular_file(destination, ec)) {
-        return destination.string();
-    }
-
-    std::vector<unsigned char> bytes;
-    if (!ReadSdlFileBytes(kCustomFsuiAppIconPath, bytes)) {
-        return {};
-    }
-
-    std::filesystem::create_directories(destination.parent_path(), ec);
-    if (ec) {
-        return {};
-    }
-
-    std::ofstream output(destination, std::ios::binary | std::ios::trunc);
-    if (!output.good()) {
-        return {};
-    }
-
-    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!output.good()) {
-        return {};
-    }
-
-    return destination.string();
-}
-
-std::string ResolveFsuiAppIconPath() {
-    const std::filesystem::path relative(kCustomFsuiAppIconPath);
-    std::error_code ec;
-
-    auto try_path = [&](const std::filesystem::path& candidate) -> std::string {
-        if (candidate.empty()) {
-            return {};
-        }
-        ec.clear();
-        if (std::filesystem::exists(candidate, ec) && std::filesystem::is_regular_file(candidate, ec)) {
-            return candidate.lexically_normal().string();
-        }
-        return {};
-    };
-
-#ifdef PSVITA_TARGET
-    const char* vita_base = "app0:/";
-    struct VitaBaseDeleter { void operator()(const char*) const {} };
-    std::unique_ptr<const char, VitaBaseDeleter> base_path(vita_base);
-#else
-    std::unique_ptr<char, decltype(&SDL_free)> base_path(SDL_GetBasePath(), &SDL_free);
-#endif
-    if (base_path) {
-        const std::filesystem::path base(base_path.get());
-
-        if (std::string resolved = try_path(base / relative); !resolved.empty()) {
-            return resolved;
-        }
-        if (std::string resolved = try_path((base / ".." / "Resources" / relative).lexically_normal()); !resolved.empty()) {
-            return resolved;
-        }
-    }
-
-    if (std::string resolved = try_path(relative); !resolved.empty()) {
-        return resolved;
-    }
-    if (std::string resolved = try_path(std::filesystem::current_path(ec) / relative); !resolved.empty()) {
-        return resolved;
-    }
-    if (std::string resolved = MaterializeBundledFsuiAppIcon(); !resolved.empty()) {
-        return resolved;
-    }
-
-    return std::string(kCustomFsuiAppIconPath);
-}
+// The FSUI app-icon lookup (ReadSdlFileBytes / MaterializeBundledFsuiAppIcon /
+// ResolveFsuiAppIconPath) was removed with the FSUI cut. It was dead code — nothing called
+// ResolveFsuiAppIconPath — but it was a landmine: ReadSdlFileBytes used SDL_RWFromFile with a
+// RELATIVE path, and on the in-process Android host SDL falls through to Android_JNI_FileOpen,
+// which aborts the process ("CallStaticObjectMethod received NULL jclass") because SDLActivity
+// glue is never registered when Compose owns the Activity. Use POSIX stat/fopen here, never SDL_RW*.
 
 bool IsDiscPath(const std::filesystem::path& path) {
     const std::string ext = ToLower(path.extension().string());
-    return ext == ".cue" || ext == ".bin" || ext == ".iso" || ext == ".img"
+    // .pbp is unconditional, matching the core's disc_cd_extensions[] — only CHD is
+    // build-gated. Omitting an extension here yields kind=none and "Invalid launch
+    // request." AFTER the library happily listed the game, so keep this in lockstep
+    // with psx/dev/cdrom/disc.c.
+    return ext == ".cue" || ext == ".bin" || ext == ".iso" || ext == ".img" || ext == ".pbp"
 #ifdef USE_CHD
         || ext == ".chd"
 #endif
@@ -930,6 +1067,23 @@ std::string StemToTitle(const std::filesystem::path& path) {
     return Trim(value);
 }
 
+/* Empty means "derive it": <prefs>/textures, beside the other per-user data. Android never
+   takes that branch — the app pushes an explicit per-game path, because only it knows the
+   disc serial and the core has no business guessing one. */
+std::string ResolveTextureDir(const std::string& configured) {
+    if (!configured.empty()) {
+        return configured;
+    }
+
+    const char* prefs = psxe_cfg_get_pref_path();
+
+    if (prefs && *prefs) {
+        return (std::filesystem::path(prefs) / "textures").string();
+    }
+
+    return "textures";
+}
+
 std::string EscapeTomlString(std::string_view value) {
     std::string out;
     out.reserve(value.size() + 8);
@@ -952,6 +1106,7 @@ const char* AspectToString(int aspect) {
     switch (aspect) {
         case 1: return "square";
         case 2: return "wide16x9";
+        case 3: return "custom";
         default: return "classic";
     }
 }
@@ -964,6 +1119,41 @@ const char* AspectTitle(int aspect) {
     }
 }
 
+/* ---- [video] display/video feature tokens. Must match frontend/config.c's parser exactly:
+   these are what SaveSettings() writes back, and an unrecognised token silently reverts the
+   setting to its default the next time the file is read. */
+const char* TextureFilterToString(int mode) {
+    switch (mode) {
+        case 1: return "bilinear";
+        case 2: return "xbr";
+        default: return "nearest";
+    }
+}
+
+const char* DeinterlaceToString(int mode) {
+    switch (mode) {
+        case 1: return "bob";
+        case 2: return "adaptive";
+        default: return "weave";
+    }
+}
+
+const char* OverscanToString(int mode) {
+    switch (mode) {
+        case 1: return "small";
+        case 2: return "full";
+        default: return "none";
+    }
+}
+
+const char* LineDetectToString(int mode) {
+    switch (mode) {
+        case 1: return "quads";
+        case 2: return "basic";
+        default: return "disabled";
+    }
+}
+
 const char* UpscaleToString(int height) {
     switch (height) {
         case 720: return "720p";
@@ -972,6 +1162,23 @@ const char* UpscaleToString(int height) {
         case 2160: return "2160p";
         default: return "480p";
     }
+}
+
+const char* AudioDriverToString(int driver) {
+    switch (driver) {
+        case 0: return "default";
+        case 2: return "aaudio";
+        default: return "opensles";
+    }
+}
+
+// Always written with a decimal point so the value round-trips as a TOML float. (The reader
+// takes a bare integer too, but the two writers of this file — SaveSettings here and
+// Ps1SettingsStore on the Kotlin side — should agree on one shape.)
+std::string FastForwardSpeedToString(double speed) {
+    char buffer[32] = {};
+    std::snprintf(buffer, sizeof(buffer), "%.2f", speed > 0.0 ? speed : 0.0);
+    return buffer;
 }
 
 std::string BoolTitle(bool value) {
@@ -995,25 +1202,44 @@ constexpr bool SupportsHardwareGpuBackend() {
     return true;
 }
 
-const char* GpuBackendTitle(GpuBackend backend) {
+armsx_render_backend_t RenderBackendFor(GpuBackend backend) {
     switch (backend) {
         case GpuBackend::SDLAccelerated:
-            return "SDL accelerated";
+            return ARMSX_RENDER_BACKEND_SDL_ACCELERATED;
+        case GpuBackend::OpenGL:
+            return ARMSX_RENDER_BACKEND_OPENGL;
+        case GpuBackend::Vulkan:
+            return ARMSX_RENDER_BACKEND_VULKAN;
         case GpuBackend::Software:
         default:
-            return "SDL software";
+            return ARMSX_RENDER_BACKEND_SDL_SOFTWARE;
     }
 }
 
+const char* GpuBackendTitle(GpuBackend backend) {
+    return armsx_render_backend_name(RenderBackendFor(backend));
+}
+
 const char* GpuBackendSettingToken(GpuBackend backend) {
-    switch (backend) {
-        case GpuBackend::SDLAccelerated:
-            return "sdl-accelerated";
-        case GpuBackend::Software:
-        default:
-            return "software";
+    return armsx_render_backend_token(RenderBackendFor(backend));
+}
+
+/* [video] renderer. "hardware" is the token the Compose UI writes and means AUTO; the two
+   explicit ones only ever arrive from a hand-edited settings.toml and are round-tripped so
+   an A/B choice is not silently collapsed the next time the UI saves. */
+#ifdef USE_HARDWARE
+const char* RendererSettingToken(const FrontendSettings& settings) {
+    if (!settings.hw_rasterizer) {
+        return "software";
+    }
+
+    switch (settings.rasterizer_mode) {
+        case 2:  return "hardware-cpu";
+        case 3:  return "hardware-gl";
+        default: return "hardware";
     }
 }
+#endif
 
 std::optional<GpuBackend> ParseGpuBackendOverride(const char* value) {
     if (!value || !value[0]) {
@@ -1023,6 +1249,19 @@ std::optional<GpuBackend> ParseGpuBackendOverride(const char* value) {
     const std::string lowered = ToLower(value);
     if (lowered == "sdl-accelerated" || lowered == "hardware" || lowered == "hardware (experimental)" || lowered == "hw" || lowered == "hw-renderer") {
         return GpuBackend::SDLAccelerated;
+    }
+
+    if (lowered == "opengl" || lowered == "gl" || lowered == "gles" || lowered == "gles3" ||
+        lowered == "opengl-es" || lowered == "angle") {
+        /* `angle` is the flat UI token for OpenGL presentation with the ANGLE provider.
+           config.c has already selected gl_driver=ANGLE for it. LoadExtraSettings() parses
+           the same file a second time, so treating the token as unknown here used to undo
+           that first pass and silently replace ANGLE with SDL software. */
+        return GpuBackend::OpenGL;
+    }
+
+    if (lowered == "vulkan" || lowered == "vk") {
+        return GpuBackend::Vulkan;
     }
 
     if (lowered == "software" || lowered == "sw" || lowered == "sw-renderer") {
@@ -1280,95 +1519,14 @@ LaunchRequest LaunchForArgument(std::string_view argument, std::optional<LaunchK
     return request;
 }
 
-std::vector<fsui::SettingsChoiceOption> BuildChoices(const std::vector<std::string>& titles, int selected_index) {
-    std::vector<fsui::SettingsChoiceOption> options;
-    options.reserve(titles.size());
 
-    for (size_t index = 0; index < titles.size(); index++) {
-        fsui::SettingsChoiceOption option;
-        option.title = titles[index];
-        option.selected = (static_cast<int>(index) == selected_index);
-        options.push_back(std::move(option));
-    }
-
-    return options;
-}
-
-std::vector<fsui::SettingsChoiceOption> BuildCpuEngineChoices(psx_cpu_execution_mode_t mode) {
-    return BuildChoices(
-        {"Cached interpreter", "Reference interpreter"},
-        mode == PSX_CPU_INTERPRETER ? 1 : 0
-    );
-}
 
 #ifdef USE_HARDWARE
-std::vector<fsui::SettingsChoiceOption> BuildGpuBackendChoices(GpuBackend current_backend) {
-    return BuildChoices(
-        {"SDL software", "SDL accelerated"},
-        static_cast<int>(current_backend == GpuBackend::SDLAccelerated ? 1 : 0)
-    );
-}
 #endif
 
-std::vector<fsui::SettingsChoiceOption> BuildAspectChoices(int current) {
-    return BuildChoices({"Classic", "Square", "Wide 16:9"}, current);
-}
 
-std::vector<fsui::SettingsChoiceOption> BuildUpscaleChoices(int current_height) {
-    const std::vector<int> heights = {480, 720, 1080, 1440, 2160};
-    const std::vector<std::string> labels = {"480p", "720p", "1080p", "1440p", "2160p"};
-    int selected = 0;
 
-    for (size_t index = 0; index < heights.size(); index++) {
-        if (heights[index] == current_height) {
-            selected = static_cast<int>(index);
-            break;
-        }
-    }
 
-    return BuildChoices(labels, selected);
-}
-
-std::vector<fsui::SettingsChoiceOption> BuildScaleChoices(int current_scale) {
-    const std::vector<int> scales = {1, 2, 3, 4, 5, 6};
-    std::vector<std::string> labels;
-    labels.reserve(scales.size());
-
-    int selected = 0;
-    for (size_t index = 0; index < scales.size(); index++) {
-        labels.push_back(std::to_string(scales[index]) + "x");
-        if (scales[index] == current_scale) {
-            selected = static_cast<int>(index);
-        }
-    }
-
-    return BuildChoices(labels, selected);
-}
-
-std::vector<fsui::SettingsChoiceOption> BuildPresentationUpscaleChoices(int current_scale) {
-    std::vector<std::string> labels;
-    labels.reserve(8);
-    for (int scale = 1; scale <= 8; scale++) {
-        labels.push_back(std::to_string(scale) + "x");
-    }
-    return BuildChoices(labels, std::clamp(current_scale, 1, 8) - 1);
-}
-
-std::vector<fsui::SettingsChoiceOption> BuildRegionChoices(const std::string& current_region) {
-    const std::vector<std::string> values = {"auto", "ntsc", "pal"};
-    const std::vector<std::string> labels = {"Auto", "NTSC", "PAL"};
-    const std::string current = ToLower(current_region);
-    int selected = 0;
-
-    for (size_t index = 0; index < values.size(); index++) {
-        if (values[index] == current) {
-            selected = static_cast<int>(index);
-            break;
-        }
-    }
-
-    return BuildChoices(labels, selected);
-}
 
 std::vector<std::string> ModelChoices() {
     return {
@@ -1378,26 +1536,7 @@ std::vector<std::string> ModelChoices() {
     };
 }
 
-std::vector<fsui::SettingsChoiceOption> BuildModelChoices(const std::string& current_model) {
-    const std::vector<std::string> models = ModelChoices();
-    const std::string current = NormalizeModel(current_model);
-    int selected = 0;
 
-    for (size_t index = 0; index < models.size(); index++) {
-        if (NormalizeModel(models[index]) == current) {
-            selected = static_cast<int>(index);
-            break;
-        }
-    }
-
-    return BuildChoices(models, selected);
-}
-
-std::vector<fsui::SettingsChoiceOption> BuildLogLevelChoices(int current_level) {
-    const std::vector<std::string> labels = {"Trace", "Debug", "Info", "Warn", "Error", "Fatal"};
-    const int clamped = std::clamp(current_level, static_cast<int>(LOG_TRACE), static_cast<int>(LOG_FATAL));
-    return BuildChoices(labels, clamped);
-}
 
 std::time_t FileTimeToTimeT(const std::filesystem::file_time_type& value) {
     using namespace std::chrono;
@@ -1443,6 +1582,31 @@ void CopyTomlArrayStrings(const toml_array_t* array, std::vector<std::filesystem
         }
 
         out.emplace_back(NormalizePathString(value.u.s));
+        free(value.u.s);
+    }
+}
+
+/* The plain-text sibling of the above, for lists that are NOT paths. `[cheats] enabled_codes`
+   holds cheat NAMES, so putting them through NormalizePathString() would quietly rewrite a
+   name containing a backslash or a double space and the entry would then match nothing. */
+void CopyTomlArrayPlainStrings(const toml_array_t* array, std::vector<std::string>& out) {
+    out.clear();
+
+    if (!array) {
+        return;
+    }
+
+    const int count = toml_array_nelem(array);
+    out.reserve(static_cast<size_t>(count));
+
+    for (int index = 0; index < count; index++) {
+        toml_datum_t value = toml_string_at(array, index);
+
+        if (!value.ok || !value.u.s) {
+            continue;
+        }
+
+        out.emplace_back(value.u.s);
         free(value.u.s);
     }
 }
@@ -1498,6 +1662,108 @@ CliFlags ScanCliFlags(int argc, const char* argv[]) {
     flags.has_boot_request = flags.cdrom || flags.exe;
 
     return flags;
+}
+
+/*
+    `[cheats]` out of an already-parsed settings.toml.
+
+    Split out of LoadExtraSettings() because SaveSettings() needs the same read: it rewrites
+    the whole file from the snapshot the session booted with, so a cheat the user switched on
+    from the settings screen mid-session would otherwise be written straight back out again.
+    That is the exact failure the comment above RefreshSessionStartSettingsFromDisk()
+    describes for the upscale rows, and there is no reason to learn it twice.
+*/
+void ReadCheatSettings(toml_table_t* root, FrontendSettings& settings) {
+    toml_table_t* cheats = root ? toml_table_in(root, "cheats") : nullptr;
+
+    if (!cheats) {
+        return;
+    }
+
+    toml_datum_t enabled = toml_bool_in(cheats, "enabled");
+
+    if (enabled.ok) {
+        settings.cheats_enabled = enabled.u.b != 0;
+    }
+
+    toml_datum_t file = toml_string_in(cheats, "file");
+
+    if (file.ok && file.u.s) {
+        settings.cheats_file = file.u.s;
+        free(file.u.s);
+    }
+
+    CopyTomlArrayPlainStrings(toml_array_in(cheats, "enabled_codes"), settings.cheats_enabled_codes);
+}
+
+/* Re-read `[cheats]` straight off disk. See ReadCheatSettings() for why. */
+void RefreshCheatSettingsFromDisk(FrontendSettings& settings) {
+    const std::filesystem::path target = settings.settings_path.empty()
+                                             ? std::filesystem::path(DefaultSettingsPath())
+                                             : std::filesystem::path(settings.settings_path);
+
+    FILE* file = fopen(target.string().c_str(), "rb");
+
+    if (!file) {
+        return;
+    }
+
+    char error[256] = {};
+    toml_table_t* root = toml_parse_file(file, error, sizeof(error));
+    fclose(file);
+
+    if (!root) {
+        return;
+    }
+
+    ReadCheatSettings(root, settings);
+    toml_free(root);
+}
+
+/*
+    Load the game's cheat catalogue and arm the selected entries.
+
+    Called once per boot, and again whenever the host asks for a live re-arm. The hardcore
+    interlock is applied FIRST so that a build where hardcore is ever switched on cannot arm
+    anything at all, rather than arming and relying on something further downstream to stop
+    it.
+*/
+void ApplyCheatSettings(const FrontendSettings& settings) {
+    psx_cheats_set_inhibited(armsx_ach_hardcore_active() ? 1 : 0);
+
+    if (!settings.cheats_enabled || settings.cheats_file.empty()) {
+        /* Clearing rather than leaving the previous game's catalogue in place: a list that
+           outlived its disc is how a cheat ends up armed in a game it was never meant for. */
+        psx_cheats_load_file("");
+        psx_cheats_arm(0, nullptr, 0, nullptr);
+        return;
+    }
+
+    if (psx_cheats_load_file(settings.cheats_file.c_str()) < 0) {
+        psx_cheats_arm(0, nullptr, 0, nullptr);
+        return;
+    }
+
+    std::vector<const char*> names;
+    names.reserve(settings.cheats_enabled_codes.size());
+
+    for (const std::string& name : settings.cheats_enabled_codes) {
+        names.push_back(name.c_str());
+    }
+
+    int missing = 0;
+    const int armed = psx_cheats_arm(1, names.empty() ? nullptr : names.data(),
+                                     static_cast<int>(names.size()), &missing);
+
+    if (missing > 0) {
+        /* Said out loud rather than ignored. A selection that no longer matches its file is
+           the most confusing way for this feature to fail — the switch is on and nothing
+           happens — and it is exactly what renaming an entry in the .cht produces. */
+        log_warn("cheats: %d selected entr%s not present in %s", missing, missing == 1 ? "y is" : "ies are",
+                 settings.cheats_file.c_str());
+    }
+
+    (void)armed;
 }
 
 void LoadExtraSettings(FrontendSettings& settings, const CliFlags& cli) {
@@ -1569,6 +1835,93 @@ void LoadExtraSettings(FrontendSettings& settings, const CliFlags& cli) {
                 settings.logging_enabled = !settings.quiet;
             }
         }
+
+        toml_datum_t frame_limit = toml_bool_in(runtime, "frame_limit");
+        if (frame_limit.ok) {
+            settings.frame_limit = frame_limit.u.b != 0;
+        }
+
+        toml_datum_t speed_percent = toml_int_in(runtime, "speed_percent");
+        if (speed_percent.ok) {
+            settings.speed_percent = static_cast<int>(speed_percent.u.i);
+        }
+
+        toml_datum_t fps_limit = toml_int_in(runtime, "fps_limit");
+        if (fps_limit.ok) {
+            settings.fps_limit = static_cast<int>(fps_limit.u.i);
+        }
+
+        // Written as a float by the UI, but a hand-edited file may hold a bare integer and
+        // toml_double_in only matches floats — try both rather than silently falling back to 2x.
+        toml_datum_t ff_speed = toml_double_in(runtime, "fast_forward_speed");
+        if (ff_speed.ok) {
+            settings.fast_forward_speed = ff_speed.u.d;
+        } else {
+            toml_datum_t ff_speed_int = toml_int_in(runtime, "fast_forward_speed");
+            if (ff_speed_int.ok) {
+                settings.fast_forward_speed = static_cast<double>(ff_speed_int.u.i);
+            }
+        }
+
+        toml_datum_t frame_skip = toml_int_in(runtime, "frame_skip");
+        if (frame_skip.ok) {
+            settings.frame_skip = static_cast<int>(frame_skip.u.i);
+        }
+    }
+
+    if (toml_table_t* audio = toml_table_in(root, "audio")) {
+        toml_datum_t volume = toml_int_in(audio, "volume");
+        if (volume.ok) {
+            settings.audio_volume = static_cast<int>(volume.u.i);
+        }
+
+        toml_datum_t ff_volume = toml_int_in(audio, "fast_forward_volume");
+        if (ff_volume.ok) {
+            settings.audio_ff_volume = static_cast<int>(ff_volume.u.i);
+        }
+
+        toml_datum_t muted = toml_bool_in(audio, "muted");
+        if (muted.ok) {
+            settings.audio_muted = muted.u.b != 0;
+        }
+
+        toml_datum_t mute_ff = toml_bool_in(audio, "mute_fast_forward");
+        if (mute_ff.ok) {
+            settings.audio_mute_fast_forward = mute_ff.u.b != 0;
+        }
+
+        toml_datum_t swap_channels = toml_bool_in(audio, "swap_channels");
+        if (swap_channels.ok) {
+            settings.audio_swap_channels = swap_channels.u.b != 0;
+        }
+
+        toml_datum_t skip_reverb = toml_bool_in(audio, "skip_reverb");
+        if (skip_reverb.ok) {
+            settings.audio_skip_reverb = skip_reverb.u.b != 0;
+        }
+
+        toml_datum_t buffer_ms = toml_int_in(audio, "buffer_ms");
+        if (buffer_ms.ok) {
+            settings.audio_buffer_ms = static_cast<int>(buffer_ms.u.i);
+        }
+
+        toml_datum_t driver = toml_string_in(audio, "driver");
+        if (driver.ok && driver.u.s) {
+            const std::string value = ToLower(driver.u.s);
+            if (value == "aaudio") {
+                settings.audio_driver = 2;
+            } else if (value == "default" || value == "auto") {
+                settings.audio_driver = 0;
+            } else {
+                settings.audio_driver = 1;
+            }
+            free(driver.u.s);
+        }
+
+        toml_datum_t background_playback = toml_bool_in(audio, "background_playback");
+        if (background_playback.ok) {
+            settings.audio_background_playback = background_playback.u.b != 0;
+        }
     }
 
     if (toml_table_t* paths = toml_table_in(root, "paths")) {
@@ -1604,11 +1957,6 @@ void LoadExtraSettings(FrontendSettings& settings, const CliFlags& cli) {
             settings.texture_scale_mode = texture_scale_mode.u.b != 0;
         }
 
-        toml_datum_t presentation_upscale = toml_int_in(video, "presentation_upscale");
-        if (presentation_upscale.ok) {
-            settings.presentation_upscale = std::clamp(static_cast<int>(presentation_upscale.u.i), 1, 8);
-        }
-
         toml_datum_t debug_panel = toml_bool_in(video, "debug_panel");
         if (debug_panel.ok) {
             settings.debug_panel = debug_panel.u.b != 0;
@@ -1626,10 +1974,27 @@ void LoadExtraSettings(FrontendSettings& settings, const CliFlags& cli) {
                 settings.display_aspect = 1;
             } else if (value == "wide16x9") {
                 settings.display_aspect = 2;
+            } else if (value == "custom") {
+                settings.display_aspect = 3;
             } else {
                 settings.display_aspect = 0;
             }
             free(display_aspect.u.s);
+        }
+
+        toml_datum_t integer_scaling = toml_bool_in(video, "integer_scaling");
+        if (integer_scaling.ok) {
+            settings.integer_scaling = integer_scaling.u.b;
+        }
+
+        toml_datum_t display_aspect_custom = toml_double_in(video, "display_aspect_custom");
+        if (display_aspect_custom.ok) {
+            const float ratio = static_cast<float>(display_aspect_custom.u.d);
+            // Ignore an out-of-range value rather than clamping it: a clamp would silently
+            // present something the user did not ask for, which reads as "custom is broken".
+            if (ratio >= kMinCustomAspect && ratio <= kMaxCustomAspect) {
+                settings.display_aspect_custom = ratio;
+            }
         }
 
         toml_datum_t wide_upscale = toml_string_in(video, "wide_upscale");
@@ -1645,9 +2010,38 @@ void LoadExtraSettings(FrontendSettings& settings, const CliFlags& cli) {
     }
 
     if (toml_table_t* input = toml_table_in(root, "input")) {
-        toml_datum_t mobile_controls = toml_bool_in(input, "mobile_controls");
-        if (mobile_controls.ok) {
-            settings.mobile_controls = mobile_controls.u.b != 0;
+        toml_datum_t analog_mode_default = toml_bool_in(input, "analog_mode_default");
+        if (analog_mode_default.ok) {
+            settings.analog_mode_default = analog_mode_default.u.b != 0;
+        }
+
+        toml_datum_t multitap = toml_bool_in(input, "multitap");
+        if (multitap.ok) {
+            settings.multitap = multitap.u.b != 0;
+        }
+    }
+
+    // [emulation]. An ABSENT table leaves every field at the struct default, which is what a
+    // settings.toml written before these keys existed must resolve to.
+    if (toml_table_t* emulation = toml_table_in(root, "emulation")) {
+        toml_datum_t rewind = toml_bool_in(emulation, "rewind");
+        if (rewind.ok) {
+            settings.rewind = rewind.u.b != 0;
+        }
+
+        toml_datum_t rewind_seconds = toml_int_in(emulation, "rewind_seconds");
+        if (rewind_seconds.ok) {
+            settings.rewind_seconds = static_cast<int>(rewind_seconds.u.i);
+        }
+
+        toml_datum_t rewind_frequency = toml_int_in(emulation, "rewind_frequency");
+        if (rewind_frequency.ok) {
+            settings.rewind_frequency = static_cast<int>(rewind_frequency.u.i);
+        }
+
+        toml_datum_t runahead = toml_int_in(emulation, "runahead");
+        if (runahead.ok) {
+            settings.runahead = static_cast<int>(runahead.u.i);
         }
     }
 
@@ -1655,6 +2049,8 @@ void LoadExtraSettings(FrontendSettings& settings, const CliFlags& cli) {
         CopyTomlArrayStrings(toml_array_in(library, "folders"), settings.ui_state.game_list_paths);
         CopyTomlArrayStrings(toml_array_in(library, "recursive_folders"), settings.ui_state.game_list_recursive_paths);
     }
+
+    ReadCheatSettings(root, settings);
 
     if (toml_table_t* fsui_state = toml_table_in(root, "fsui")) {
         toml_datum_t default_view = toml_int_in(fsui_state, "default_game_view");
@@ -1700,18 +2096,68 @@ FrontendSettings BuildSettings(const psxe_config_t* cfg, const CliFlags& cli) {
         }
     }
 #if defined(USE_HARDWARE)
-    settings.gpu_backend = cfg && cfg->gpu_backend ? GpuBackend::SDLAccelerated : GpuBackend::Software;
+    // psxe_config_t::gpu_backend is the same 0..3 encoding as GpuBackend (frontend/config.c).
+    switch (cfg ? cfg->gpu_backend : 0) {
+        case 1: settings.gpu_backend = GpuBackend::SDLAccelerated; break;
+        case 2: settings.gpu_backend = GpuBackend::OpenGL; break;
+        case 3: settings.gpu_backend = GpuBackend::Vulkan; break;
+        default: settings.gpu_backend = GpuBackend::Software; break;
+    }
     if (const char* env_backend = std::getenv("ARMSX_GPU_BACKEND")) {
         env_gpu_backend = ParseGpuBackendOverride(env_backend);
+    }
+    settings.accurate_mask_bit = cfg ? (cfg->accurate_mask_bit != 0) : false;
+    settings.accurate_dither = cfg ? (cfg->accurate_dither != 0) : false;
+    settings.accurate_prim_size = cfg ? (cfg->accurate_prim_size != 0) : false;
+    settings.accurate_tex_modulate = cfg ? (cfg->accurate_tex_modulate != 0) : false;
+    settings.pgxp = cfg ? (cfg->pgxp != 0) : false;
+    settings.widescreen_hack = cfg ? (cfg->widescreen_hack != 0) : false;
+    settings.texture_filter = cfg ? cfg->texture_filter : 0;
+    settings.texture_dump = cfg ? (cfg->texture_dump != 0) : false;
+    settings.texture_replacements = cfg ? (cfg->texture_replacements != 0) : false;
+    settings.texture_dir = (cfg && cfg->texture_dir) ? cfg->texture_dir : "";
+    settings.downsample = cfg ? cfg->downsample : 0;
+    settings.deinterlace = cfg ? cfg->deinterlace : 0;
+    settings.overscan_crop = cfg ? cfg->overscan_crop : 0;
+    settings.display_rotation = cfg ? cfg->display_rotation : 0;
+    settings.line_detect = cfg ? cfg->line_detect : 0;
+    settings.hw_rasterizer = cfg ? (cfg->renderer != 0) : false;
+    settings.rasterizer_mode = cfg ? cfg->renderer : 0;
+    settings.internal_scale = cfg ? cfg->internal_scale : 1;
+    if (settings.internal_scale < 1) {
+        settings.internal_scale = 1;
     }
 #endif
     settings.texture_scale_mode = cfg ? (cfg->texture_scale_mode != 0) : false;
     settings.debug_panel = cfg ? (cfg->debug_panel != 0) : false;
     settings.stretch_mode = cfg ? (cfg->stretch_mode != 0) : false;
     settings.display_aspect = cfg ? cfg->display_aspect : 0;
+    if (cfg && cfg->display_aspect_custom > 0.0f)
+        settings.display_aspect_custom = cfg->display_aspect_custom;
+    settings.integer_scaling = cfg ? cfg->integer_scaling != 0 : false;
     settings.upscale_height = cfg ? cfg->upscale_height : 480;
-    settings.presentation_upscale = 1;
-    settings.mobile_controls = DefaultMobileControlsEnabled();
+    settings.analog_mode_default = cfg ? (cfg->analog_mode_default != 0) : true;
+    settings.multitap = cfg ? (cfg->multitap != 0) : false;
+    settings.rewind = cfg ? (cfg->rewind != 0) : false;
+    settings.rewind_seconds = cfg ? cfg->rewind_seconds : PSX_REWIND_DEFAULT_SECONDS;
+    settings.rewind_frequency = cfg ? cfg->rewind_frequency : PSX_REWIND_DEFAULT_FREQUENCY;
+    settings.runahead = cfg ? cfg->runahead : 0;
+    settings.frame_limit = cfg ? (cfg->frame_limit != 0) : true;
+    settings.speed_percent = cfg ? cfg->speed_percent : 100;
+    settings.fps_limit = cfg ? cfg->fps_limit : 0;
+    settings.fast_forward_speed = cfg ? cfg->fast_forward_speed : 2.0;
+    settings.frame_skip = cfg ? cfg->frame_skip : 0;
+    settings.adpf_clock_hint = cfg ? (cfg->adpf_clock_hint != 0) : false;
+    settings.affinity_mode = cfg ? cfg->affinity_mode : 0;
+    settings.audio_volume = cfg ? cfg->audio_volume : 100;
+    settings.audio_ff_volume = cfg ? cfg->audio_ff_volume : 100;
+    settings.audio_muted = cfg ? (cfg->audio_muted != 0) : false;
+    settings.audio_mute_fast_forward = cfg ? (cfg->audio_mute_fast_forward != 0) : false;
+    settings.audio_swap_channels = cfg ? (cfg->audio_swap_channels != 0) : false;
+    settings.audio_skip_reverb = cfg ? (cfg->audio_skip_reverb != 0) : false;
+    settings.audio_buffer_ms = cfg ? cfg->audio_buffer_ms : 20;
+    settings.audio_driver = cfg ? cfg->audio_driver : 1;
+    settings.audio_background_playback = cfg ? (cfg->audio_background_playback != 0) : false;
     settings.ui_state.show_settings_overlay = settings.debug_panel;
     settings.ui_state.show_performance_overlay = settings.debug_panel;
 
@@ -1729,22 +2175,27 @@ FrontendSettings BuildSettings(const psxe_config_t* cfg, const CliFlags& cli) {
         settings.gpu_backend = *env_gpu_backend;
     }
 #endif
-    if (const char* env_upscale = std::getenv("ARMSX_PRESENTATION_UPSCALE")) {
-        char* end = nullptr;
-        const long scale = std::strtol(env_upscale, &end, 10);
-        if (end && *end == '\0') {
-            settings.presentation_upscale = std::clamp(static_cast<int>(scale), 1, 8);
-        }
-    }
-    if (const char* env_mobile_controls = std::getenv("ARMSX_MOBILE_CONTROLS")) {
-        const std::string value = ToLower(env_mobile_controls);
-        settings.mobile_controls = value == "1" || value == "true" || value == "on" || value == "yes";
-    }
 
     settings.scale = std::max(1, settings.scale);
-    settings.presentation_upscale = std::clamp(settings.presentation_upscale, 1, 8);
     settings.log_level = std::clamp(settings.log_level, static_cast<int>(LOG_TRACE), static_cast<int>(LOG_FATAL));
     settings.logging_enabled = !settings.quiet;
+    // LoadExtraSettings re-reads the same file straight from TOML, so clamp AFTER it rather
+    // than only in config.c: a hand-edited fast_forward_speed = 0.01 would otherwise reach the
+    // frame pacer. 0 is preserved as the "uncapped" sentinel.
+    if (settings.fast_forward_speed > 0.0) {
+        settings.fast_forward_speed = std::clamp(settings.fast_forward_speed, 1.0, 16.0);
+    } else {
+        settings.fast_forward_speed = 0.0;
+    }
+    settings.speed_percent = std::clamp(settings.speed_percent, 10, 1000);
+    settings.fps_limit = std::clamp(settings.fps_limit, 0, 1000);
+    // -1 is the adaptive sentinel, so the floor is -1 and not 0. Clamped here as well as in
+    // config.c because LoadExtraSettings re-reads the raw TOML over the top of cfg.
+    settings.frame_skip = std::clamp(settings.frame_skip, -1, kMaxFrameSkip);
+    settings.audio_volume = std::clamp(settings.audio_volume, 0, 200);
+    settings.audio_ff_volume = std::clamp(settings.audio_ff_volume, 0, 200);
+    settings.audio_buffer_ms = std::clamp(settings.audio_buffer_ms, kAudioMinimumBufferMs, 100);
+    settings.audio_driver = std::clamp(settings.audio_driver, 0, 2);
     settings.ui_state.show_settings_overlay = settings.debug_panel;
     settings.ui_state.show_performance_overlay = settings.debug_panel;
 
@@ -1755,7 +2206,84 @@ FrontendSettings BuildSettings(const psxe_config_t* cfg, const CliFlags& cli) {
     return settings;
 }
 
-bool SaveSettings(const FrontendSettings& settings) {
+/*
+    Re-reads the SESSION-START keys from the file on disk.
+
+    SaveSettings() regenerates the whole settings.toml from the core's in-memory snapshot, which
+    was loaded when the session started. The launcher writes the same file while that session is
+    running — that is how the pause menu's Upscale row works — so anything the user changed
+    mid-session was silently written back to its old value the next time the core saved.
+
+    That is exactly the reported "upscale buttons do nothing": the UI wrote internal_scale = 4,
+    the core still held 1, and the core's own save put 1 back before the restart could read it.
+
+    The core is authoritative for what it changes at RUNTIME (vsync). It is NOT authoritative for
+    the keys it merely read at boot, so those are taken from disk at write time.
+*/
+void RefreshSessionStartSettingsFromDisk(FrontendSettings& settings) {
+    const std::filesystem::path target = settings.settings_path.empty()
+                                             ? std::filesystem::path(DefaultSettingsPath())
+                                             : std::filesystem::path(settings.settings_path);
+
+    std::ifstream in(target, std::ios::binary);
+
+    if (!in) {
+        return; /* No file yet: the in-memory values ARE the truth. */
+    }
+
+    std::string line;
+
+    while (std::getline(in, line)) {
+        const auto eq = line.find('=');
+
+        if (eq == std::string::npos) {
+            continue;
+        }
+
+        std::string key = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+
+        const auto trim = [](std::string& text) {
+            const auto first = text.find_first_not_of(" \t\r\n\"");
+            const auto last = text.find_last_not_of(" \t\r\n\"");
+            text = (first == std::string::npos) ? std::string() : text.substr(first, last - first + 1);
+        };
+
+        trim(key);
+        trim(value);
+
+        if (key == "internal_scale") {
+            const int parsed = std::atoi(value.c_str());
+
+            if (parsed >= 1) {
+                settings.internal_scale = parsed;
+            }
+        } else if (key == "renderer") {
+            if (value == "hardware-gl" || value == "opengl" || value == "gl") {
+                settings.rasterizer_mode = 3;
+                settings.hw_rasterizer = true;
+            } else if (value == "hardware-cpu" || value == "cpu") {
+                settings.rasterizer_mode = 2;
+                settings.hw_rasterizer = true;
+            } else if (value == "hardware" || value == "hw" || value == "internal" ||
+                       value == "upscale") {
+                settings.rasterizer_mode = 1;
+                settings.hw_rasterizer = true;
+            } else if (value == "software") {
+                settings.rasterizer_mode = 0;
+                settings.hw_rasterizer = false;
+            }
+        }
+    }
+}
+
+bool SaveSettings(const FrontendSettings& settings_in) {
+    /* Copy so the caller's snapshot is untouched; only what goes to DISK is refreshed. */
+    FrontendSettings settings = settings_in;
+    RefreshSessionStartSettingsFromDisk(settings);
+    /* Same reasoning, section-aware: the launcher writes [cheats] while this session runs. */
+    RefreshCheatSettingsFromDisk(settings);
+
     const std::filesystem::path target = settings.settings_path.empty() ? std::filesystem::path(DefaultSettingsPath()) : std::filesystem::path(settings.settings_path);
     std::filesystem::path temp = target;
     temp += ".tmp";
@@ -1785,6 +2313,18 @@ bool SaveSettings(const FrontendSettings& settings) {
         out << "]";
     };
 
+    /* Plain strings, not paths: `[cheats] enabled_codes` holds cheat NAMES. */
+    auto write_string_array = [&](const std::vector<std::string>& values) {
+        out << "[";
+        for (size_t index = 0; index < values.size(); index++) {
+            if (index) {
+                out << ", ";
+            }
+            out << "\"" << EscapeTomlString(values[index]) << "\"";
+        }
+        out << "]";
+    };
+
     out
         << "# Settings file generated by ARMSX\n\n"
         << "psxe_version = \"" << STR(REP_VERSION) << "\"\n\n"
@@ -1800,7 +2340,14 @@ bool SaveSettings(const FrontendSettings& settings) {
         << "    display_scale = " << settings.scale << "\n"
         << "    logging_enabled = " << (settings.logging_enabled ? "true" : "false") << "\n"
         << "    log_level = " << settings.log_level << "\n"
-        << "    quiet = " << (settings.logging_enabled ? "false" : "true") << "\n\n"
+        << "    quiet = " << (settings.logging_enabled ? "false" : "true") << "\n"
+        << "    frame_limit = " << (settings.frame_limit ? "true" : "false") << "\n"
+        << "    speed_percent = " << settings.speed_percent << "\n"
+        << "    fps_limit = " << settings.fps_limit << "\n"
+        << "    fast_forward_speed = " << FastForwardSpeedToString(settings.fast_forward_speed) << "\n"
+        << "    frame_skip = " << settings.frame_skip << "\n"
+        << "    adpf_clock_hint = " << (settings.adpf_clock_hint ? "true" : "false") << "\n"
+        << "    affinity_mode = " << settings.affinity_mode << "\n\n"
         << "[paths]\n"
         << "    expansion_rom = \"" << EscapeTomlString(settings.exp_path) << "\"\n"
         << "    default_psx_exe = \"" << EscapeTomlString(settings.default_exe_path) << "\"\n\n"
@@ -1808,15 +2355,67 @@ bool SaveSettings(const FrontendSettings& settings) {
         << "    vsync = " << (settings.vsync_enabled ? "true" : "false") << "\n"
 #ifdef USE_HARDWARE
         << "    gpu_backend = \"" << GpuBackendSettingToken(settings.gpu_backend) << "\"\n"
+        // Round-trips the explicit hardware-cpu / hardware-gl tokens rather than collapsing
+        // them back to "hardware", so an A/B choice made in settings.toml survives the next
+        // save from the UI.
+        << "    renderer = \"" << RendererSettingToken(settings) << "\"\n"
+        << "    internal_scale = " << settings.internal_scale << "\n"
 #endif
+        << "    accurate_mask_bit = " << (settings.accurate_mask_bit ? "true" : "false") << "\n"
+        << "    accurate_dither = " << (settings.accurate_dither ? "true" : "false") << "\n"
+        << "    accurate_prim_size = " << (settings.accurate_prim_size ? "true" : "false") << "\n"
+        << "    accurate_tex_modulate = " << (settings.accurate_tex_modulate ? "true" : "false") << "\n"
+        << "    pgxp = " << (settings.pgxp ? "true" : "false") << "\n"
+        // Every one of these MUST be written. [video] is rewritten wholesale from this
+        // explicit list, so a key with no line here is dropped from settings.toml the first
+        // time anything saves — the setting appears to work and then silently reverts.
+        << "    widescreen_hack = " << (settings.widescreen_hack ? "true" : "false") << "\n"
+        << "    texture_filter = \"" << TextureFilterToString(settings.texture_filter) << "\"\n"
+        << "    texture_dump = " << (settings.texture_dump ? "true" : "false") << "\n"
+        << "    texture_replacements = " << (settings.texture_replacements ? "true" : "false") << "\n"
+        << "    texture_dir = \"" << EscapeTomlString(settings.texture_dir) << "\"\n"
+        << "    downsample = " << settings.downsample << "\n"
+        << "    deinterlace = \"" << DeinterlaceToString(settings.deinterlace) << "\"\n"
+        << "    overscan_crop = \"" << OverscanToString(settings.overscan_crop) << "\"\n"
+        << "    display_rotation = " << (settings.display_rotation & 3) * 90 << "\n"
+        << "    line_detect = \"" << LineDetectToString(settings.line_detect) << "\"\n"
         << "    texture_scale_mode = " << (settings.texture_scale_mode ? "true" : "false") << "\n"
-        << "    presentation_upscale = " << settings.presentation_upscale << "\n"
         << "    debug_panel = " << (settings.debug_panel ? "true" : "false") << "\n"
         << "    stretch_mode = " << (settings.stretch_mode ? "true" : "false") << "\n"
         << "    display_aspect = \"" << AspectToString(settings.display_aspect) << "\"\n"
+        << "    display_aspect_custom = " << settings.display_aspect_custom << "\n"
+        << "    integer_scaling = " << (settings.integer_scaling ? "true" : "false") << "\n"
         << "    wide_upscale = \"" << UpscaleToString(settings.upscale_height) << "\"\n\n"
         << "[input]\n"
-        << "    mobile_controls = " << (settings.mobile_controls ? "true" : "false") << "\n\n"
+        << "    analog_mode_default = " << (settings.analog_mode_default ? "true" : "false") << "\n"
+        << "    multitap = " << (settings.multitap ? "true" : "false") << "\n\n"
+        << "[emulation]\n"
+        << "    rewind = " << (settings.rewind ? "true" : "false") << "\n"
+        << "    rewind_seconds = " << settings.rewind_seconds << "\n"
+        << "    rewind_frequency = " << settings.rewind_frequency << "\n"
+        << "    runahead = " << settings.runahead << "\n\n"
+        // [cheats]. MUST be written for the same reason as every other section: this rewrites
+        // settings.toml wholesale from an explicit list, so a key with no line here is erased
+        // the first time the core saves and the user's cheat selection silently disappears.
+        // The values come from RefreshCheatSettingsFromDisk() above, not from the boot
+        // snapshot, so a selection made while the game is running survives this save.
+        << "[cheats]\n"
+        << "    enabled = " << (settings.cheats_enabled ? "true" : "false") << "\n"
+        << "    file = \"" << EscapeTomlString(settings.cheats_file) << "\"\n"
+        << "    enabled_codes = ";
+    write_string_array(settings.cheats_enabled_codes);
+    out
+        << "\n\n"
+        << "[audio]\n"
+        << "    volume = " << settings.audio_volume << "\n"
+        << "    fast_forward_volume = " << settings.audio_ff_volume << "\n"
+        << "    muted = " << (settings.audio_muted ? "true" : "false") << "\n"
+        << "    mute_fast_forward = " << (settings.audio_mute_fast_forward ? "true" : "false") << "\n"
+        << "    swap_channels = " << (settings.audio_swap_channels ? "true" : "false") << "\n"
+        << "    skip_reverb = " << (settings.audio_skip_reverb ? "true" : "false") << "\n"
+        << "    buffer_ms = " << settings.audio_buffer_ms << "\n"
+        << "    driver = \"" << AudioDriverToString(settings.audio_driver) << "\"\n"
+        << "    background_playback = " << (settings.audio_background_playback ? "true" : "false") << "\n\n"
         << "[library]\n"
         << "    folders = ";
     write_path_array(settings.ui_state.game_list_paths);
@@ -1871,15 +2470,63 @@ void MixPsxAudio(psx_t* psx, uint8_t* buffer, int size) {
     std::memset(buffer, 0, static_cast<size_t>(size));
 
     psx_cdrom_get_audio_samples(cdrom, buffer, size);
-    psx_spu_update_cdda_buffer(spu, cdrom->cdda_buf);
+    if (g_psx_audio_pcm_probe)
+        g_psx_audio_pcm_probe(g_psx_audio_pcm_probe_context, 0,
+                             reinterpret_cast<const int16_t*>(buffer), static_cast<size_t>(size) / 4u);
+    psx_spu_capture_cd_audio(spu, buffer, (size_t)size / 4u);
 
     for (int sample = 0; sample < (size >> 2); sample++) {
-        const uint32_t value = psx_spu_get_sample(spu);
+        // Drain first, generate only as a fallback. psx_spu_tick() has already produced this
+        // frame's samples spread across the frame, from psx_update(), which is the ONLY way an
+        // SPU interrupt raised mid-frame can reach a running CPU. Generating here instead
+        // stops the machine, and every interrupt raised in the lump collapses into one at the
+        // frame boundary — the starvation described above psx_spu_tick() in psx/dev/spu.c.
+        //
+        // The fallback is not dead code: a frame that reaches vblank in fewer cycles than its
+        // sample budget covers leaves a genuine shortfall, and so does the frame a state load
+        // lands in. Filling it here keeps the per-frame sample count exactly what the queueing
+        // and resampling below have always been handed.
+        uint32_t value = 0;
+
+        if (!psx_spu_pop_sample(spu, &value)) {
+            value = psx_spu_get_sample(spu);
+
+            if (g_psx_audio_diag_enabled) {
+                g_psx_audio_diag.spu_gen_inline++;
+            }
+        }
+
         const int16_t left = static_cast<int16_t>(value & 0xffff);
         const int16_t right = static_cast<int16_t>(value >> 16);
 
-        *reinterpret_cast<int16_t*>(&buffer[(sample << 2) + 0]) += left;
-        *reinterpret_cast<int16_t*>(&buffer[(sample << 2) + 2]) += right;
+        // This is the ONE place CD/XA and the SPU meet. The add used to be a bare 16-bit +=
+        // with no saturation, so a loud disc track under a loud sound effect wrapped from full
+        // positive to full negative — heard as a hard buzz, not as distortion.
+        //
+        // It measured wrap=0 in all three MGS captures, so on its own it was not worth
+        // touching. It is saturated now because the SPU main-volume fix (spu_main_gain, 6 dB)
+        // doubles what the SPU contributes here: the dry sum already reached 30016 of 32767
+        // during an alert, so post-fix the SPU alone lands near full scale and ANY CD audio
+        // added on top would wrap. Saturating cannot alter a sample that was not going to
+        // wrap, so this is a no-op everywhere the old behaviour was already correct.
+        auto* out_l = reinterpret_cast<int16_t*>(&buffer[(sample << 2) + 0]);
+        auto* out_r = reinterpret_cast<int16_t*>(&buffer[(sample << 2) + 2]);
+
+        const int sum_l = *out_l + left;
+        const int sum_r = *out_r + right;
+
+        if (g_psx_audio_diag_enabled) {
+            if (sum_l > INT16_MAX || sum_l < INT16_MIN || sum_r > INT16_MAX || sum_r < INT16_MIN) {
+                g_psx_audio_diag.mix_wrap++;
+                g_psx_audio_diag.mix_sat++;
+            }
+
+            PSX_AUDIO_DIAG_PEAK(g_psx_audio_diag.mix_peak_l, sum_l);
+            PSX_AUDIO_DIAG_PEAK(g_psx_audio_diag.mix_peak_r, sum_r);
+        }
+
+        *out_l = static_cast<int16_t>(std::clamp(sum_l, -32768, 32767));
+        *out_r = static_cast<int16_t>(std::clamp(sum_r, -32768, 32767));
     }
 }
 
@@ -1889,7 +2536,7 @@ class ArmsxSession {
         destroy();
     }
 
-    bool create(SDL_Renderer* renderer, const FrontendSettings& settings, const LaunchRequest& request, std::string& error) {
+    bool create(armsx_renderer_t* renderer, const FrontendSettings& settings, const LaunchRequest& request, std::string& error) {
         destroy();
 
         if (!renderer) {
@@ -1897,7 +2544,7 @@ class ArmsxSession {
             return false;
         }
 
-        renderer_ = renderer;
+        render_ = renderer;
         vblank_counter_ = 0;
 
         psxe_config_t cfg{};
@@ -1928,10 +2575,194 @@ class ArmsxSession {
             return false;
         }
 
+#if defined(__ANDROID__)
+        const unsigned cpu_base_cycles = armsx_gpu_profile_cpu_base_cycles();
+#else
+        const unsigned cpu_base_cycles = 1;
+#endif
+        psx_cpu_set_base_instruction_cycles(psx_get_cpu(psx_), cpu_base_cycles);
+        const armsx_gpu_profile_t* cpu_gpu_profile = armsx_gpu_profile_get();
+        const char* cpu_timing_path = cpu_base_cycles == 2
+            ? (cpu_gpu_profile->vendor == ARMSX_GPU_VENDOR_MALI
+                ? "mali-compat" : (cpu_gpu_profile->model == 720
+                    ? "adreno-720-compat" : "adreno-710-compat"))
+            : "standard";
+        psxe_diag_logf("cpu", "base_instruction_cycles=%u timing_path=%s gpu_vendor=%s gpu_model=%d",
+            cpu_base_cycles, cpu_timing_path,
+            armsx_gpu_profile_vendor_name(cpu_gpu_profile->vendor), cpu_gpu_profile->model);
         psx_cpu_set_execution_mode(psx_get_cpu(psx_), settings.cpu_engine);
         psxe_diag_logf("cpu", "execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
+        ARMSX_BOOTLOG("core: CPU execution engine=%s", CpuEngineSettingToken(settings.cpu_engine));
 
         psx_gpu_t* gpu = psx_get_gpu(psx_);
+#ifdef __ANDROID__
+        gpu->defer_software_shading = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI
+            || HonorDeferredShadingDevice();
+        if (HonorDeferredShadingDevice()) {
+            psxe_diag_logf("gpu", "HONOR ELI-NX9 software profile: deferred shading enabled; CPU timing unchanged");
+            psxe_diag_pacingf("device_profile=honor-eli-nx9 deferred_software_shading=1 cpu_timing_unchanged=yes");
+        }
+#endif
+
+        {
+            uint32_t accuracy = 0;
+
+            if (settings.accurate_mask_bit) {
+                accuracy |= PSX_GPU_ACCURACY_MASK_BIT;
+            }
+
+            if (settings.accurate_dither) {
+                accuracy |= PSX_GPU_ACCURACY_DITHER_GATE;
+            }
+
+            if (settings.accurate_prim_size) {
+                accuracy |= PSX_GPU_ACCURACY_PRIM_SIZE;
+            }
+
+            if (settings.accurate_tex_modulate) {
+                accuracy |= PSX_GPU_ACCURACY_TEX_MODULATE;
+            }
+
+            psx_gpu_set_accuracy_flags(gpu, accuracy);
+            psx_gpu_set_texture_filter(gpu, settings.texture_filter);
+
+            /* Texture dumping / replacement (psx/texrep.h). Applied at boot from
+               settings.toml; Android re-pushes a per-game directory through
+               setPs1TextureOptions once it knows the disc serial. Both off is the shipping
+               default and allocates nothing. */
+            {
+                const std::string dir = ResolveTextureDir(settings.texture_dir);
+
+                psx_texrep_configure(gpu,
+                                     settings.texture_dump ? 1 : 0,
+                                     settings.texture_replacements ? 1 : 0,
+                                     dir.c_str());
+
+                if (settings.texture_dump || settings.texture_replacements) {
+                    log_info("Texture %s%s%s from %s",
+                             settings.texture_dump ? "dumping" : "",
+                             (settings.texture_dump && settings.texture_replacements) ? " + " : "",
+                             settings.texture_replacements ? "replacement" : "",
+                             dir.c_str());
+                }
+            }
+
+            if (accuracy) {
+                log_info("GPU accuracy fixes: mask_bit=%s dither_gate=%s prim_size=%s tex_modulate=%s",
+                         settings.accurate_mask_bit ? "on" : "off",
+                         settings.accurate_dither ? "on" : "off",
+                         settings.accurate_prim_size ? "on" : "off",
+                         settings.accurate_tex_modulate ? "on" : "off");
+            }
+        }
+
+        // Marker-armed one-shot GP0 primitive dump (psx/dev/gpu.c). The directory is PUSHED
+        // in rather than pulled because psx/ must not link frontend/diagnostics.c — both GPU
+        // test harnesses compile gpu.c without it. Completely inert until someone creates
+        // files/logs/gpu_prim_dump, exactly like gpu_hw_gl.c's gl_debug_marker() switches.
+        {
+            const char* diag_log_path = psxe_diag_log_path();
+            const char* diag_slash = diag_log_path ? std::strrchr(diag_log_path, '/') : nullptr;
+
+            if (diag_slash) {
+                const std::string diag_dir(
+                    diag_log_path, static_cast<size_t>(diag_slash - diag_log_path) + 1u);
+                psx_gpu_debug_set_log_dir(gpu, diag_dir.c_str());
+            }
+        }
+
+        psx_pgxp_set_enabled(0);
+
+        // Widescreen hack (psx/cpu.c GTE). Same reasoning as PGXP: core-global, applied
+        // unconditionally so a change between runs always lands, and idempotent.
+        psx_cpu_set_widescreen_hack(settings.widescreen_hack ? 1 : 0);
+
+        // GLES rasterizer video options. Pushed BEFORE the backend is created below, and
+        // deliberately not a create() argument: the backend is recreated behind our back on
+        // any GL failure and these have to survive that. Harmless when the GLES backend is
+        // not built or not selected.
+#ifdef USE_HARDWARE
+        armsx_hw_gl_set_video_options(settings.texture_filter, settings.downsample,
+                                      settings.line_detect);
+#endif
+
+        // Host CPU scheduling levers from [runtime]. DEFAULTS, not assignments: the Android
+        // front-end pushes both through JNI before the core ever opens settings.toml, and a
+        // file that predates these keys carries the off value for both. Applying it here as if
+        // it were a user choice would silently un-toggle whatever the UI just set — the exact
+        // shape of the "per-game INI shadows the higher layer" bug. perf_hint.c drops these on
+        // the floor once a host has spoken.
+        armsx_perf_hint_adpf_set_default(settings.adpf_clock_hint ? 1 : 0);
+        armsx_affinity_set_default_mode(settings.affinity_mode);
+
+#ifdef USE_HARDWARE
+        // Internal-resolution rasterizer. Entirely opt-in: with [video] renderer =
+        // "software" (the default) no backend is installed and psx/dev/gpu.c behaves
+        // exactly as it always has. See frontend/gpu_hw_rt.h.
+        if (settings.hw_rasterizer || settings.pgxp) {
+            // Two implementations of one ABI. The GLES one rasterizes on the GPU, so its
+            // CPU cost does not grow with the internal scale at all; the CPU one is
+            // graphics-API-independent and is the fallback when there is no GL context (a
+            // Vulkan or SDL presentation backend). See frontend/gpu_hw_gl.h.
+            const int mode = settings.rasterizer_mode;
+
+            rasterizer_mode_ = mode;
+            internal_scale_ = settings.internal_scale;
+
+            if (mode != 2) {
+                hw_rt_backend_ = armsx_hw_gl_create(gpu, settings.internal_scale);
+                hw_rt_is_gl_ = (hw_rt_backend_ != nullptr);
+
+                if (!hw_rt_backend_) {
+                    // Never silent: armsx_hw_gl_status() says which of the availability
+                    // gates rejected it.
+                    log_info("GLES rasterizer not used: %s", armsx_hw_gl_status());
+                    psxe_diag_logf("renderer", "GLES rasterizer not used: %s",
+                                   armsx_hw_gl_status());
+                    ARMSX_BOOTLOG("core: GLES rasterizer not used: %s", armsx_hw_gl_status());
+                }
+            }
+
+            if (!hw_rt_backend_ && ((settings.pgxp && mode != 3) ||
+                armsx_hw_gl_use_cpu_fallback(mode, settings.internal_scale))) {
+                hw_rt_backend_ = armsx_hw_rt_create(gpu, settings.internal_scale);
+                hw_rt_is_gl_ = false;
+#ifdef __ANDROID__
+                const bool mali_cpu_spans = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+                armsx_hw_rt_set_span_clipping(hw_rt_backend_, mali_cpu_spans);
+                if (hw_rt_backend_ && mali_cpu_spans)
+                    psxe_diag_logf("renderer", "Mali CPU fallback: exact triangle span clipping active");
+#endif
+            }
+
+            if (hw_rt_backend_) {
+                psx_gpu_set_backend(gpu, hw_rt_backend_);
+                log_info("Rasterizer: %s at %dx internal resolution",
+                         hw_rt_is_gl_ ? "GLES (GPU)" : "internal-resolution (CPU)",
+                         psx_gpu_resolution_scale(gpu));
+                psxe_diag_logf("renderer", "Rasterizer selected=%s scale=%dx",
+                               hw_rt_is_gl_ ? "GLES3 GPU" : "internal-resolution CPU",
+                               psx_gpu_resolution_scale(gpu));
+                ARMSX_BOOTLOG("core: rasterizer selected=%s scale=%dx",
+                              hw_rt_is_gl_ ? "GLES3 GPU" : "internal-resolution CPU",
+                              psx_gpu_resolution_scale(gpu));
+            } else {
+                log_error("Hardware rasterizer unavailable at %dx; staying on the software path",
+                          settings.internal_scale);
+                psxe_diag_logf("renderer",
+                               "Hardware rasterizer unavailable at %dx; using software",
+                               settings.internal_scale);
+                ARMSX_BOOTLOG("core: hardware rasterizer unavailable at %dx; using software",
+                              settings.internal_scale);
+            }
+        }
+        psx_pgxp_set_enabled(settings.pgxp && hw_rt_backend_ ? 1 : 0);
+        psxe_diag_logf("renderer", "PGXP requested=%s active=%s rasterizer=%s",
+                       settings.pgxp ? "true" : "false",
+                       psx_pgxp_enabled() ? "true" : "false",
+                       hw_rt_backend_ ? (hw_rt_is_gl_ ? "GLES3" : "CPU") : "software");
+#endif
+
         psx_gpu_set_event_callback(gpu, GPU_EVENT_DMODE, nullptr);
         psx_gpu_set_event_callback(gpu, GPU_EVENT_VBLANK, SessionVblankEvent);
         psx_gpu_set_event_callback(gpu, GPU_EVENT_HBLANK, psxe_gpu_hblank_event_cb);
@@ -1942,46 +2773,72 @@ class ArmsxSession {
         psx_gpu_set_udata(gpu, 2, nullptr);
 
 #ifdef USE_HARDWARE
-        hardware_backend_active_ = settings.gpu_backend == GpuBackend::SDLAccelerated;
-        if (hardware_backend_active_) {
-            SDL_RendererInfo renderer_info{};
-            if (SDL_GetRendererInfo(renderer_, &renderer_info) != 0 ||
-                !(renderer_info.flags & SDL_RENDERER_ACCELERATED)) {
-                psxe_diag_logf("renderer", "SDL acceleration requested but unavailable; using SDL software presentation.");
-                hardware_backend_active_ = false;
-            } else {
-                psxe_diag_logf(
-                    "renderer",
-                    "SDL accelerated presentation enabled driver=%s; PlayStation VRAM remains software-authoritative.",
-                    renderer_info.name ? renderer_info.name : "(unknown)"
-                );
-            }
+        // "Hardware backend active" now means "presentation is GPU-accelerated", whichever
+        // backend provided it. The PlayStation rasterizer itself is unaffected either way.
+        hardware_backend_active_ = armsx_renderer_is_accelerated(render_);
+        if (settings.gpu_backend != GpuBackend::Software && !hardware_backend_active_) {
+            psxe_diag_logf("renderer", "GPU presentation requested but unavailable; using software presentation.");
+        } else if (hardware_backend_active_) {
+            psxe_diag_logf(
+                "renderer",
+                "Accelerated presentation enabled backend=%s driver=%s; PlayStation VRAM remains software-authoritative.",
+                armsx_render_backend_name(armsx_renderer_backend(render_)),
+                armsx_renderer_driver_name(render_)
+            );
         }
 #endif
 
         psx_cdrom_set_region(psx_get_cdrom(psx_), RegionFromSettings(settings));
 
-        input_ = psx_input_create();
-        if (input_) {
-            psx_input_init(input_);
-        }
-        pad_device_ = psxi_sda_create();
+        // [input] analog_mode_default. Default OFF = digital, matching real hardware. It was
+        // briefly defaulted ON so the sticks were discoverable (the ANALOG button has no
+        // standard Android keycode), and that broke input outright in pre-DualShock titles:
+        // Crash Bandicoot (1996) mis-handles a pad reporting model 0x73 at boot, leaving BOTH
+        // the touch overlay and a physical pad dead. Pad code 200 still toggles live either way.
+        //
+        // [input] multitap decides WHICH device goes in the port — one pad, or a tap carrying
+        // four of them. Both paths go through attachPadDevice() so the live toggle below
+        // cannot drift from what a launch builds.
+        analog_mode_default_ = settings.analog_mode_default;
 
-        if (!input_ || !pad_device_) {
+        if (!attachPadDevice(settings.multitap, settings.analog_mode_default)) {
             error = "Failed to create the controller input bridge.";
             destroy();
             return false;
         }
 
-        psxi_sda_init(pad_device_, SDA_MODEL_DIGITAL);
-        psxi_sda_init_input(pad_device_, input_);
-        psx_pad_attach_joy(psx_->pad, 0, input_);
-        pad_device_ = nullptr;
+        ARMSX_BOOTLOG("core: pad boot mode=%s (analog_mode_default=%s) multitap=%s",
+            settings.analog_mode_default ? "analog" : "digital",
+            settings.analog_mode_default ? "true" : "false",
+            settings.multitap ? "true" : "false");
+
+        // Rewind + runahead (psx/rewind.h). Applied here rather than at process start so a
+        // relaunch with changed settings picks them up, and so nothing is allocated until a
+        // machine actually exists to snapshot.
+        psx_rewind_configure(settings.rewind ? 1 : 0, settings.rewind_seconds,
+                             settings.rewind_frequency);
+        psx_runahead_configure(settings.runahead);
+        runahead_restore_ms_ = 0.0;
+        runahead_restore_pending_ = false;
+
+        // [cheats]. Armed here, at the same point and for the same reason as rewind above: a
+        // relaunch with a changed selection has to pick it up, and there is no machine to
+        // patch until one exists. Costs a file read of a few KB when the game has cheats and
+        // literally nothing when it does not.
+        ApplyCheatSettings(settings);
 
         const std::string slot1 = std::string(psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "") + "slot1.mcd";
         const std::string slot2 = std::string(psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "") + "slot2.mcd";
-        psx_pad_attach_mcd(psx_->pad, 0, slot1.c_str());
-        psx_pad_attach_mcd(psx_->pad, 1, slot2.c_str());
+        const int card1 = psx_pad_attach_mcd(psx_->pad, 0, slot1.c_str());
+        const int card2 = psx_pad_attach_mcd(psx_->pad, 1, slot2.c_str());
+        psxe_diag_logf("memory-card", "attach slot1=%d slot2=%d directory=%s",
+                       card1, card2, psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "");
+        if (card1 || card2) {
+            error = "Unable to open memory card slot " + std::string(card1 ? "1" : "2") +
+                    ". Export the existing card from Settings > Memory Cards before replacing it.";
+            destroy();
+            return false;
+        }
 
         switch (request.kind) {
             case LaunchKind::Disc:
@@ -1995,15 +2852,31 @@ class ArmsxSession {
                 title_ = request.label.empty() ? StemToTitle(request.path) : request.label;
                 break;
 
-            case LaunchKind::Exe:
+            case LaunchKind::Exe: {
+                const Uint64 boot_started = SDL_GetTicks64();
+                unsigned boot_steps = 0;
                 while (psx_->cpu->pc != 0x80030000) {
                     psx_update(psx_);
+                    if ((++boot_steps & 0xffffu) == 0) {
+                        bool cancelled;
+                        {
+                            std::lock_guard<std::mutex> lock(g_host_control_lock);
+                            cancelled = g_host_shutdown_pending;
+                        }
+                        if (cancelled || SDL_GetTicks64() - boot_started >= 30'000) {
+                            error = cancelled ? "Executable boot cancelled." :
+                                    "The BIOS did not reach executable boot within 30 seconds. Check the BIOS image.";
+                            destroy();
+                            return false;
+                        }
+                    }
                 }
                 psx_load_exe(psx_, request.path.string().c_str());
                 exe_path_ = request.path;
                 disc_path_.clear();
                 title_ = request.label.empty() ? StemToTitle(request.path) : request.label;
                 break;
+            }
 
             case LaunchKind::Bios:
                 disc_path_.clear();
@@ -2024,13 +2897,13 @@ class ArmsxSession {
         if (hardware_backend_active_ && psx_ && psx_->gpu) {
             int output_width = 0;
             int output_height = 0;
-            SDL_GetRendererOutputSize(renderer_, &output_width, &output_height);
+            armsx_renderer_output_size(render_, &output_width, &output_height);
             psxe_diag_logf(
                 "hw",
                 "session-create kind=%s title=%s renderer=%p output=%dx%d texture=%dx%d timing=%s target_fps=%.3f display_mode=0x%08x gpustat=0x%08x",
                 LaunchKindTitle(request.kind),
                 title_.c_str(),
-                (void*)renderer_,
+                (void*)render_,
                 output_width,
                 output_height,
                 texture_width_,
@@ -2053,42 +2926,171 @@ class ArmsxSession {
             settings.region.c_str()
         );
 
-        SDL_AudioSpec desired{};
-        SDL_AudioSpec obtained{};
-        desired.freq = 44100;
-        desired.format = AUDIO_S16SYS;
-        desired.channels = 2;
-        desired.samples = 1024;
-        desired.callback = nullptr;
-        desired.userdata = nullptr;
+        applyAudioSettings(settings);
+        setSpeedLimits(settings.frame_limit, settings.speed_percent, settings.fps_limit,
+                       settings.fast_forward_speed, settings.frame_skip);
 
-        audio_dev_ = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
+        // A session being (re)initialised over a live device has to give the old one back first.
+        // openAudioDevice() below no-ops while one is open, and the previous code just overwrote
+        // audio_dev_ — which leaked the device and left buffer_ms stuck on the old value.
+        closeAudioDevice();
+
+        // Remembered so the device can be reopened byte-for-byte identically when the app comes
+        // back from the background — see setAudioSuspended(). allowed_changes = 0, so SDL always
+        // hands the callback exactly this format and `obtained` never differs.
+        audio_desired_ = SDL_AudioSpec{};
+        audio_desired_.freq = kAudioMixRate;
+        audio_desired_.format = AUDIO_S16SYS;
+        audio_desired_.channels = 2;
+        // [audio] buffer_ms. A PS1 PAL frame contributes about 20 ms of stereo samples. A smaller OpenSL ES
+        // callback period lets the device drain the queue between two emulated frames, which
+        // is audible as a crackle even when the mixer itself is perfectly healthy.  Keep the
+        // user setting, but never request a sub-frame period; the queue prebuffer below absorbs
+        // ordinary Android scheduler jitter on top of that cadence-safe floor.
+        audio_desired_.samples = static_cast<Uint16>(std::clamp(
+            (kAudioMixRate * std::clamp(settings.audio_buffer_ms, kAudioMinimumBufferMs, 100)) / 1000,
+            64, 8192));
+        audio_desired_.callback = AudioUpdate;
+        audio_desired_.userdata = this;
+
         paused_ = false;
+        // A fresh session owns a fresh device, so the background latch has to start clear or the
+        // first return from the background would be swallowed as a no-op.
+        audio_suspended_ = false;
         fast_forward_enabled_ = false;
         debug_view_ = false;
         texture_width_ = 0;
         texture_height_ = 0;
         texture_format_ = SDL_PIXELFORMAT_UNKNOWN;
-        if (audio_dev_) {
-            audio_sample_accumulator_ = 0.0;
-            audio_playback_started_ = false;
-            psxe_diag_logf(
-                "audio",
-                "SDL queued audio opened frequency=%d channels=%u samples=%u prime_bytes=%zu max_bytes=%zu",
-                obtained.freq,
-                static_cast<unsigned>(obtained.channels),
-                static_cast<unsigned>(obtained.samples),
-                kAudioPrimeBytes,
-                kMaxQueuedAudioBytes
-            );
-            updateAudioPlaybackState();
-        }
+        openAudioDevice();
         updateTexture(settings);
 
         return true;
     }
 
+    // Open (or reopen) the SDL device from the remembered spec and reset everything the queue
+    // and the rate converter carry across it. No-op if a device is already open.
+    void openAudioDevice() {
+        if (audio_dev_) {
+            return;
+        }
+
+        audio_dev_ = SDL_OpenAudioDevice(nullptr, 0, &audio_desired_, nullptr, 0);
+        if (!audio_dev_) {
+            // Only worth shouting about once per failure run; ensureAudioDevice() retries.
+            if (!audio_reopen_failed_) {
+                audio_reopen_failed_ = true;
+                psxe_diag_logf("audio", "open failed: %s", SDL_GetError());
+            }
+            return;
+        }
+
+        audio_reopen_failed_ = false;
+        audio_device_ever_opened_ = true;
+        audio_playback_started_ = false;
+        audio_rebuffer_requested_ = false;
+        audio_sample_accumulator_ = 0.0;
+        audio_queue_.clear();
+        audio_queue_read_offset_ = 0;
+        audio_consumed_bytes_ = 0;
+        resetAudioRateConverter();
+        updateAudioPlaybackState();
+    }
+
+    /**
+     * Retry a reopen that did not take.
+     *
+     * The whole point of closing the device on background is that it can be given back — and the
+     * one way this fix could be WORSE than the bug is a return from the background whose
+     * SDL_OpenAudioDevice() fails (the output can be momentarily unavailable while another app is
+     * still tearing its own stream down), leaving the game silent for the rest of the session
+     * with nothing to retry it. Called once per frame from ArmsxApp::runFrame().
+     *
+     * Only ever retries a device that HAS worked in this session: a boot where audio never came
+     * up at all is a different problem (no driver, dummy driver) and must not spin here.
+     */
+    void ensureAudioDevice() {
+        if (audio_dev_ || audio_suspended_ || !audio_device_ever_opened_) {
+            return;
+        }
+
+        const Uint64 now = SDL_GetTicks64();
+        if (audio_reopen_next_attempt_ != 0 && now < audio_reopen_next_attempt_) {
+            return;
+        }
+        audio_reopen_next_attempt_ = now + 1000;
+        openAudioDevice();
+    }
+
+    // Tear the SDL device down completely.
+    //
+    // ★ Closing is the ONLY way to actually stop the stream on Android. SDL_PauseAudioDevice()
+    // does not: SDL's audio thread keeps running and keeps handing the backend buffers, it just
+    // fills them with silence, and the OpenSL ES player stays PLAYING. AudioFlinger therefore
+    // keeps our track Active, the output thread never reaches standby, and audioserver holds a
+    // PARTIAL_WAKE_LOCK ('AudioMix', charged to this app's uid) for as long as we are in the
+    // background — measured on a sleeping Retroid Pocket 6, where it was the only wake lock left
+    // on the device. SDL's own openslES_PauseDevices() would park the player properly, but it is
+    // NOT exported from libSDL2.so (935 exported symbols, none of them openslES_*), so linking
+    // against it produces a library that will not load.
+    //
+    // SDL_CloseAudioDevice() reaches openslES_DestroyPCMPlayer(), which SetPlayState(STOPPED)s
+    // and Destroy()s the player object. The audio thread is joined first, and it cannot wedge:
+    // the player is still playing while SDL waits, so the buffer-queue callback keeps posting the
+    // semaphore the thread is parked on until it notices the shutdown flag.
+    void closeAudioDevice() {
+        if (!audio_dev_) {
+            audio_playback_started_ = false;
+            return;
+        }
+
+        SDL_LockAudioDevice(audio_dev_);
+        resetAudioQueueLocked();
+        audio_rebuffer_requested_ = false;
+        SDL_UnlockAudioDevice(audio_dev_);
+        SDL_PauseAudioDevice(audio_dev_, 1);
+        SDL_CloseAudioDevice(audio_dev_);
+        audio_dev_ = 0;
+        audio_playback_started_ = false;
+    }
+
+    // Push the [audio] table at the live session. Called at create() and again whenever the
+    // host re-applies settings, so volume/mute/swap/skip-reverb take effect without a relaunch.
+    // buffer_ms and driver are NOT live: both are properties of an already-open SDL device.
+    void applyAudioSettings(const FrontendSettings& settings) {
+        audio_volume_ = std::clamp(settings.audio_volume, 0, 200);
+        audio_ff_volume_ = std::clamp(settings.audio_ff_volume, 0, 200);
+        audio_muted_ = settings.audio_muted;
+        audio_mute_fast_forward_ = settings.audio_mute_fast_forward;
+        audio_swap_channels_ = settings.audio_swap_channels;
+
+        if (psx_ && psx_->spu) {
+            psx_spu_set_reverb_disabled(psx_->spu, settings.audio_skip_reverb ? 1 : 0);
+        }
+
+        if (audio_dev_) {
+            updateAudioPlaybackState();
+        }
+    }
+
     void destroy() {
+        runahead_prediction_.clear();
+        runahead_sequence_.clear();
+        runahead_reused_frames_ = 0;
+        g_psx_work_diag_enabled = 0;
+        work_frames_ = work_window_frames_ = work_elapsed_frames_ = 0;
+        probe720_start_ = probe720_snapshot_ = probe720_steps_ = 0;
+        probe720_cpu_unavailable_ = probe720_instruction_phase_ = 0;
+        probe720_finished_ = false;
+        armsx_gpu_profile_set_720_probe_active(0);
+        for (unsigned i = 0; i < 2; ++i) {
+            probe720_frames_[i] = 0; probe720_wall_[i] = probe720_cpu_[i] = 0;
+        }
+        work_totals_ = {}; work_worst_ = {}; work_worst_core_ = 0;
+        // A capture still open here would leak its FILE* and lose its tail; closing it also
+        // clears g_psx_audio_diag_enabled so a fresh session starts unarmed.
+        audioDiagEnd();
+
         if (psx_) {
             psxe_diag_breadcrumbf(
                 "Session destroyed kind=%s title=%s path=%s",
@@ -2098,19 +3100,24 @@ class ArmsxSession {
             );
         }
 
-        if (audio_dev_) {
-            SDL_PauseAudioDevice(audio_dev_, 1);
-            SDL_ClearQueuedAudio(audio_dev_);
-            SDL_CloseAudioDevice(audio_dev_);
-            audio_dev_ = 0;
-        }
+        // Already closed when the app is being torn down straight out of the background; the
+        // latches are cleared so a session that gets rebuilt reopens normally and does not
+        // inherit the last session's reopen-retry state.
+        closeAudioDevice();
+        audio_suspended_ = false;
+        audio_device_ever_opened_ = false;
+        audio_reopen_failed_ = false;
+        audio_reopen_next_attempt_ = 0;
 
-        if (texture_) {
-            SDL_DestroyTexture(texture_);
-            texture_ = nullptr;
-        }
-        destroyPresentationTexture();
+        resetAudioRateConverter();
+
+        // [cheats]. Drops the catalogue and the compiled program, so the next game starts with
+        // nothing armed instead of inheriting this disc's selection — and so the strings this
+        // module owns are freed rather than living for the process.
+        psx_cheats_shutdown();
+
         texture_snapshot_.clear();
+        frame_uploaded_ = false;
 
 #ifdef USE_HARDWARE
         if (hw_renderer_) {
@@ -2121,22 +3128,44 @@ class ArmsxSession {
 
         const bool input_attached = psx_ && psx_->pad && (psx_->pad->joy_slot[0] == input_);
 
+#ifdef USE_HARDWARE
+        // Detach before the GPU goes away: psx_gpu_t does not own the backend.
+        if (hw_rt_backend_) {
+            releaseAdoptedTexture();
+
+            if (psx_) {
+                psx_gpu_set_backend(psx_get_gpu(psx_), nullptr);
+            }
+
+            if (hw_rt_is_gl_) {
+                armsx_hw_gl_destroy(hw_rt_backend_);
+            } else {
+                armsx_hw_rt_destroy(hw_rt_backend_);
+            }
+
+            hw_rt_backend_ = nullptr;
+            hw_rt_is_gl_ = false;
+        }
+#endif
+
         if (psx_) {
             psx_destroy(psx_);
             psx_ = nullptr;
         }
 
+        // The clean-shutdown PGO flush, riding the same teardown that just flushed the memory
+        // cards inside psx_destroy(). Covers Close Game and switching titles; the background
+        // flush in psxe_host_set_audio_suspended() covers everything else, including being
+        // killed. Both write-then-reset, so the two never double-count each other. No-op in a
+        // normal build (see frontend/pgo.c).
+        armsx_pgo_flush("session-teardown");
+
         if (input_ && !input_attached) {
             psx_input_destroy(input_);
         }
 
-        if (pad_device_) {
-            psxi_sda_destroy(pad_device_);
-            pad_device_ = nullptr;
-        }
-
         input_ = nullptr;
-        renderer_ = nullptr;
+        render_ = nullptr;
         disc_path_.clear();
         exe_path_.clear();
         title_.clear();
@@ -2162,22 +3191,19 @@ class ArmsxSession {
         return psx_ ? psx_->pad : nullptr;
     }
 
-    void rebindRenderer(SDL_Renderer* renderer, const FrontendSettings& settings) {
-        renderer_ = renderer;
+    void rebindRenderer(armsx_renderer_t* renderer, const FrontendSettings& settings) {
+        render_ = renderer;
 #ifdef USE_HARDWARE
         if (hw_renderer_) {
-            armsx_hw_renderer_set_renderer(hw_renderer_, renderer_);
+            armsx_hw_renderer_set_renderer(hw_renderer_, armsx_renderer_sdl(render_));
             if (texture_width_ > 0 && texture_height_ > 0) {
                 armsx_hw_renderer_set_output_size(hw_renderer_, texture_width_, texture_height_);
             }
         }
+        hardware_backend_active_ = armsx_renderer_is_accelerated(render_);
 #endif
-        if (texture_) {
-            SDL_DestroyTexture(texture_);
-            texture_ = nullptr;
-        }
-        destroyPresentationTexture();
         texture_snapshot_.clear();
+        frame_uploaded_ = false;
         texture_width_ = 0;
         texture_height_ = 0;
         texture_format_ = SDL_PIXELFORMAT_UNKNOWN;
@@ -2185,13 +3211,48 @@ class ArmsxSession {
     }
 
     void setPaused(bool paused) {
+        if (paused) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+        }
         paused_ = paused;
         if (audio_dev_) {
-            if (paused || fast_forward_enabled_) {
-                clearQueuedAudio();
+            if (paused) {
+                SDL_LockAudioDevice(audio_dev_);
+                resetAudioQueueLocked();
+                audio_rebuffer_requested_ = false;
+                SDL_UnlockAudioDevice(audio_dev_);
+                audio_playback_started_ = false;
             }
             updateAudioPlaybackState();
         }
+    }
+
+    /**
+     * Release the audio device entirely because the app went off-screen, and take it back when
+     * it returns.
+     *
+     * Kept SEPARATE from setPaused(): the in-game pause menu wants the emulation frozen with the
+     * device still open (that is the cheap, instant path, and the overlay is still on screen).
+     * This is the app-is-not-on-screen case, where holding the device costs a wake lock and
+     * leaks the tail of the mix out of a sleeping handheld. See closeAudioDevice() for why
+     * pausing the device is not enough and closing it is what actually works.
+     */
+    void setAudioSuspended(bool suspended) {
+        if (audio_suspended_ == suspended) {
+            return;
+        }
+        audio_suspended_ = suspended;
+
+        if (suspended) {
+            closeAudioDevice();
+        } else {
+            openAudioDevice();
+        }
+    }
+
+    bool audioSuspended() const {
+        return audio_suspended_;
     }
 
     bool paused() const {
@@ -2204,7 +3265,11 @@ class ArmsxSession {
         }
 
         fast_forward_enabled_ = enabled;
+        // Drop whatever is queued on BOTH edges. Entering fast-forward, the queue holds
+        // real-time audio the converter is about to start compressing; leaving it, the queue
+        // holds compressed audio. Either way the tail belongs to the old rate.
         clearQueuedAudio();
+        resetAudioRateConverter();
 
         if (audio_dev_) {
             updateAudioPlaybackState();
@@ -2215,7 +3280,513 @@ class ArmsxSession {
         return fast_forward_enabled_;
     }
 
+    // The whole speed policy in one call: frame_limit gates the limiter, speed_percent scales
+    // the game's own rate, fps_limit is an optional absolute ceiling and fast_forward_speed
+    // replaces speed_percent while fast-forward is engaged (0 = uncapped). Set from
+    // [runtime] at launch and by psxe_host_set_speed_limits() when the UI moves.
+    //
+    // frame_skip rides along because the host edits it from the same panel and pushes the whole
+    // policy at once — but it is NOT a speed control and nothing below reads it. It changes how
+    // many emulated frames reach the screen, never how fast they are produced, so it is
+    // deliberately kept out of targetFrameRate() and out of the audio converter's decision.
+    void setSpeedLimits(bool frame_limit, int speed_percent, int fps_limit, double fast_forward_speed,
+                        int frame_skip) {
+        const bool converter_was_active = audioRateConversionActive();
+
+        frame_limit_ = frame_limit;
+        speed_percent_ = std::clamp(speed_percent, 10, 1000);
+        fps_limit_ = std::clamp(fps_limit, 0, 1000);
+        fast_forward_speed_ = (fast_forward_speed > 0.0) ? std::clamp(fast_forward_speed, 1.0, 16.0) : 0.0;
+        frame_skip_ = std::clamp(frame_skip, -1, kMaxFrameSkip);
+
+        // A speed change re-aims the converter; leaving its phase and rate estimate behind
+        // would have it glide across the change instead of tracking it.
+        if (converter_was_active != audioRateConversionActive()) {
+            clearQueuedAudio();
+        }
+        resetAudioRateConverter();
+    }
+
+    double fastForwardSpeed() const {
+        return fast_forward_speed_;
+    }
+
+    // 0 = off, 1..kMaxFrameSkip = fixed, -1 = adaptive. Read once per frame by the app loop.
+    int frameSkip() const {
+        return frame_skip_;
+    }
+
+    // The sentinel targetFrameRate() hands back for "no cap". Exposed so the app loop can tell
+    // an unreachable target apart from a real one — adaptive frame skip must not treat a
+    // deliberately uncapped session as "running behind".
+    static constexpr double uncappedFrameRate() {
+        return kUncappedFrameRate;
+    }
+
+    /*
+        Build controller port 1's device and plug it in.
+
+        ONE builder for both the launch path and the live Multitap toggle, so the two cannot
+        drift — a tap that behaves differently depending on whether it was switched on before
+        or after the game booted is exactly the sort of half-wiring this project keeps hitting.
+
+        psx_pad_attach_joy() destroys whatever was in the slot first, so this is also the
+        detach. The SIO destination is cleared afterwards because the swap can land in the
+        middle of a transfer; the game simply re-polls on its next frame.
+    */
+    bool attachPadDevice(bool multitap, bool analog_default) {
+        if (!psx_ || !psx_->pad) {
+            return false;
+        }
+
+        psx_input_t* input = psx_input_create();
+
+        if (!input) {
+            return false;
+        }
+
+        psx_input_init(input);
+
+        if (multitap) {
+            psxi_multitap_t* tap = psxi_multitap_create();
+
+            if (!tap) {
+                psx_input_destroy(input);
+                return false;
+            }
+
+            psxi_multitap_init(tap);
+            psxi_multitap_set_analog_mode(tap, analog_default ? 1 : 0);
+            psxi_multitap_init_input(tap, input);
+        } else {
+            psxi_sda_t* sda = psxi_sda_create();
+
+            if (!sda) {
+                psx_input_destroy(input);
+                return false;
+            }
+
+            psxi_sda_init(sda, SDA_MODEL_DIGITAL);
+            psxi_sda_set_analog_mode(sda, analog_default ? 1 : 0);
+            psxi_sda_init_input(sda, input);
+        }
+
+        psx_pad_attach_joy(psx_->pad, 0, input);
+        psx_->pad->dest[0] = 0;
+
+        input_ = input;
+        multitap_attached_ = multitap;
+
+        return true;
+    }
+
+    bool multitapAttached() const {
+        return multitap_attached_;
+    }
+
+    /* Live Multitap toggle. Emulation thread only — it destroys the device the SIO reads
+       through. Everything the old device was holding down goes with it, which is correct:
+       the guest is being told a different controller was plugged in. */
+    bool setMultitapEnabled(bool enabled) {
+        if (!psx_ || !psx_->pad || enabled == multitap_attached_) {
+            return false;
+        }
+
+        if (!attachPadDevice(enabled, analog_mode_default_)) {
+            log_error("multitap: could not rebuild the port %s a tap", enabled ? "with" : "without");
+            return false;
+        }
+
+        /* A snapshot taken with the other device in the port would be refused on load
+           (pad_load_joy checks the device kind), so drop them rather than leave a rewind
+           buffer that silently fails on every step. */
+        psx_rewind_reset();
+        runahead_restore_pending_ = false;
+
+        log_info("multitap: port 1 now has %s", enabled ? "a multitap (4 players)" : "one pad");
+
+        return true;
+    }
+
+    /* Undo the previous frame's look-ahead.
+
+       MUST run before this frame's input is applied: a snapshot carries the pad's button
+       word, so restoring after an input pass would silently swallow every press that landed
+       in between — and the press edge is never re-sent, so the button would simply never
+       reach the game. Called from ArmsxApp::runFrame() as its first act. */
+    void runaheadRestore() {
+        if (!runahead_restore_pending_ || !psx_) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+            return;
+        }
+
+        runahead_restore_pending_ = false;
+
+        const uint64_t restore_start = SDL_GetPerformanceCounter();
+        const int result = psx_runahead_restore(psx_);
+        runahead_restore_ms_ = 1000.0 * (SDL_GetPerformanceCounter() - restore_start) / SDL_GetPerformanceFrequency();
+
+        if (result == PSX_STATE_ERR_MISSING) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+            /* The slot was deliberately dropped between the look-ahead and now — a reset, a
+               disc swap, a rewind step, or the user loading a state (all of which call
+               psx_rewind_reset). Putting a stale future back over any of those would undo
+               what the user just asked for, so this is the CORRECT outcome, not a failure. */
+            return;
+        }
+
+        if (result != PSX_STATE_OK) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+            /* Disarm rather than retry: a slot that will not apply now will not apply later,
+               and re-running the look-ahead on a machine that never got put back would
+               compound the drift. */
+            psx_runahead_configure(0);
+            log_error("runahead: could not restore the look-ahead snapshot (%s); runahead off",
+                      psx_state_strerror(result));
+        }
+    }
+
+    /* One emulated frame: step until the GPU raises the next vblank. Shared by the ordinary
+       advance and by runahead's re-simulated frames, so the two cannot diverge. Returns the
+       instruction count. */
+    std::uint32_t stepOneFrame() {
+        const uint64_t loop_begin = core_split_enabled_ ? SDL_GetPerformanceCounter() : 0;
+        // Select once per frame. Separate, non-inlined loops keep the optional
+        // Adreno 720 probe from changing register allocation/code layout in the
+        // ordinary instruction loop (including Thor and runahead frames).
+        const std::uint32_t steps = probe720Active() && g_psx_work_diag_enabled
+            ? stepOneFrameProfiled() : stepOneFrameNormal();
+
+        if (loop_begin) instruction_loop_ticks_ += SDL_GetPerformanceCounter() - loop_begin;
+        return steps;
+    }
+
+    __attribute__((noinline)) std::uint32_t stepOneFrameNormal() {
+        const std::uint64_t start_vblank = vblank_counter_;
+        std::uint32_t steps = 0;
+
+        while (vblank_counter_ == start_vblank) {
+            psx_update(psx_);
+            steps++;
+
+            if (steps >= kMaxFrameSteps) {
+                psxe_diag_logf("timing", "Session frame advance exceeded vblank step budget title=%s",
+                               title_.empty() ? "(none)" : title_.c_str());
+                break;
+            }
+        }
+
+        return steps;
+    }
+
+    __attribute__((noinline)) std::uint32_t stepOneFrameProfiled() {
+        const std::uint64_t start_vblank = vblank_counter_;
+        std::uint32_t steps = 0;
+        unsigned countdown = 16381 - probe720_instruction_phase_;
+        while (vblank_counter_ == start_vblank) {
+            if (--countdown == 0) {
+                psx_update_profiled(psx_);
+                countdown = 16381;
+            } else {
+                psx_update(psx_);
+            }
+            if (++steps >= kMaxFrameSteps) break;
+        }
+        probe720_instruction_phase_ = 16381 - countdown;
+        return steps;
+    }
+
+    /* Hold-to-rewind / one-shot step back. Returns true when the machine was moved BACKWARDS,
+       in which case the caller must not also advance it. Returns true (without moving) when
+       rewind is engaged but the ring is empty — holding rewind at the end of the buffer
+       freezes rather than resuming forward play, which is what every other emulator does and
+       what the button visibly promises. */
+    bool rewindFrameIfRequested() {
+        int steps = g_host_rewind_step_requests.exchange(0, std::memory_order_acq_rel);
+        const bool active = g_host_rewind_active.load(std::memory_order_acquire);
+
+        if (active) {
+            steps++;
+        }
+
+        if (steps <= 0) {
+            return false;
+        }
+
+        if (!psx_rewind_enabled()) {
+            return false;
+        }
+
+        bool moved = false;
+
+        for (int i = 0; i < steps; i++) {
+            if (psx_rewind_step_back(psx_) != PSX_STATE_OK) {
+                break;
+            }
+
+            moved = true;
+        }
+
+        if (moved) {
+            /* The look-ahead described a future of the timeline we just left. */
+            runahead_restore_pending_ = false;
+        }
+
+        return true;
+    }
+
+    bool probe720Active() const {
+        return armsx_gpu_profile_needs_720_probe() &&
+            (!probe720_start_ || SDL_GetTicks64() - probe720_start_ < 120000);
+    }
+
+    // Called with the core's thread CPU time, separate from elapsed wall time.
+    // This does not reset the queue/mixer counters or enable the full PCM probe.
+    void record720Core(uint64_t wall_ticks, uint64_t cpu_ns, uint32_t steps, bool work_sampled) {
+        if (!probe720Active()) return;
+        const unsigned sampled = work_sampled ? 1 : 0;
+        ++probe720_frames_[sampled];
+        probe720_wall_[sampled] += wall_ticks;
+        probe720_cpu_[sampled] += cpu_ns;
+        probe720_steps_ += steps;
+        if (!cpu_ns) ++probe720_cpu_unavailable_;
+        const uint64_t now = SDL_GetTicks64();
+        if (!probe720_snapshot_) probe720_snapshot_ = now;
+        if (now - probe720_snapshot_ < 2000) return;
+        const uint64_t capture_begin = SDL_GetPerformanceCounter();
+        const auto average = [this](unsigned bucket) {
+            return probe720_frames_[bucket] ?
+                CounterTicksToMilliseconds(probe720_wall_[bucket]) / probe720_frames_[bucket] : 0.0;
+        };
+        const auto cpu_average = [this](unsigned bucket) {
+            return probe720_frames_[bucket] ?
+                double(probe720_cpu_[bucket]) / 1e6 / probe720_frames_[bucket] : 0.0;
+        };
+        const auto cache = psx_cpu_get_cache_stats(psx_->cpu);
+        const auto& p = g_psx_cpu_probe;
+        unsigned hot_op = 0;
+        for (unsigned i = 1; i < 64; ++i)
+            if (p.opcode_ticks[i] > p.opcode_ticks[hot_op]) hot_op = i;
+        psxe_diag_pacingf("probe720_core schema=1 elapsed_ms=%llu interval_ms=%llu "
+            "frames_plain=%u frames_sampled=%u core_wall_ms_plain=%.3f core_cpu_ms_plain=%.3f "
+            "core_wall_ms_sampled=%.3f core_cpu_ms_sampled=%.3f cpu_clock_unavailable_frames=%u "
+            "steps=%llu cache_hits=%llu cache_misses=%llu cache_invalidations=%llu "
+            "cpu_samples=%u sample_cycles=%u pc_ram_bios_scratch_mmio_other=%u/%u/%u/%u/%u "
+            "slowest_pc=%08x slowest_opcode=%08x slowest_cpu_us=%.3f hot_opcode=%02x hot_calls=%u hot_us=%.3f",
+            (unsigned long long)(now - probe720_start_), (unsigned long long)(now - probe720_snapshot_),
+            probe720_frames_[0], probe720_frames_[1], average(0), cpu_average(0), average(1), cpu_average(1),
+            probe720_cpu_unavailable_, (unsigned long long)probe720_steps_,
+            (unsigned long long)cache.hits, (unsigned long long)cache.misses, (unsigned long long)cache.invalidations,
+            p.samples, p.sampled_cycles, p.regions[0], p.regions[1], p.regions[2], p.regions[3], p.regions[4],
+            p.slowest_pc, p.slowest_opcode, CounterTicksToMilliseconds(p.slowest_ticks) * 1000.0,
+            hot_op, p.opcode_calls[hot_op], CounterTicksToMilliseconds(p.opcode_ticks[hot_op]) * 1000.0);
+        // All opcode buckets allow a later comparison without guessing a hotspot.
+        std::string histogram;
+        for (unsigned i = 0; i < 64; ++i) if (p.opcode_calls[i]) {
+            char entry[80];
+            std::snprintf(entry, sizeof(entry), "%02x:%u:%.3f,", i, p.opcode_calls[i],
+                CounterTicksToMilliseconds(p.opcode_ticks[i]) * 1000.0);
+            histogram += entry;
+        }
+        psxe_diag_pacingf("probe720_opcodes buckets=opcode:calls:total_us values=%s", histogram.c_str());
+        char host[4096];
+        armsx_host_diagnostic_snapshot(host, sizeof(host));
+        armsx_host_usage_t usage;
+        armsx_host_usage_sample(&usage);
+        psxe_diag_pacingf("probe720_host %s ram_mb=%.1f available_mb=%.1f gpu_busy_percent=%.1f "
+            "process_percent_of_device=%.1f unavailable=-1_or_unavailable cumulative_counters=yes",
+            host, usage.ram_mb, usage.ram_available_mb, usage.gpu_percent, usage.cpu_percent);
+        size_t queued = 0;
+        uint32_t underruns, rebuffers, trims;
+        uint64_t missing;
+        SDL_LockAudioDevice(audio_dev_);
+        queued = audio_queue_.size() - audio_queue_read_offset_;
+        underruns = audio_underruns_; missing = audio_underrun_bytes_;
+        rebuffers = audio_rebuffer_events_; trims = audio_overflow_trims_;
+        SDL_UnlockAudioDevice(audio_dev_);
+        psxe_diag_pacingf("probe720_audio driver=%s output_hz=%d callback_samples=%u queued_bytes=%zu "
+            "queued_ms=%.3f underruns=%u missing_bytes=%llu rebuffers=%u overflow_trims=%u "
+            "rate_ratio=%.6f playback_started=%d audio_device=%u spu_control=%04x "
+            "cd_mode=%02x cd_state=%u cd_reading=%u xa_playing=%u counters_since_audio_open=yes",
+            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "unavailable",
+            audio_desired_.freq, (unsigned)audio_desired_.samples, queued,
+            double(queued) * 1000.0 / (kAudioBytesPerSample * kAudioMixRate), underruns,
+            (unsigned long long)missing, rebuffers, trims, audio_rate_ratio_, audio_playback_started_ ? 1 : 0,
+            (unsigned)audio_dev_, psx_->spu->spucnt, psx_->cdrom->mode, psx_->cdrom->state,
+            psx_->cdrom->read_ongoing, psx_->cdrom->xa_playing);
+        probe720_snapshot_ = now;
+        probe720_steps_ = 0; probe720_cpu_unavailable_ = 0;
+        for (unsigned i = 0; i < 2; ++i) {
+            probe720_frames_[i] = 0; probe720_wall_[i] = 0; probe720_cpu_[i] = 0;
+        }
+        g_psx_cpu_probe = {};
+        psxe_diag_pacingf("probe720_capture snapshot_wall_ms=%.3f overhead_in_next_loop_interval=yes",
+            CounterTicksToMilliseconds(SDL_GetPerformanceCounter() - capture_begin));
+    }
+
+    // Automatic bounded work breakdown. CPU samples include memory-mapped
+    // device calls; audio queue may include SPU/disc work. Never sum categories.
+    void beginMaliWorkProbe() {
+        ++work_elapsed_frames_;
+        const bool gpu720 = armsx_gpu_profile_needs_720_probe();
+        if (gpu720 && !probe720_start_) {
+            probe720_start_ = SDL_GetTicks64();
+            g_psx_cpu_probe = {};
+            psxe_diag_pacingf("probe720_begin schema=1 test=adreno720-timing-diagnostics-v1 "
+                "title=%s gpu=%s model=%d duration_ms=120000 work_frame_stride=16 cpu_sample_stride=16381 "
+                "base_instruction_cycles=%u overclock_percent=%u instruction_time_inclusive=yes "
+                "sampling_is_statistical=yes no_display_timestamps=yes",
+                title_.c_str(), armsx_gpu_profile_get()->name, armsx_gpu_profile_get()->model,
+                armsx_gpu_profile_cpu_base_cycles(), psx_get_cpu_overclock());
+        }
+        if (gpu720 && !probe720Active() && !probe720_finished_) {
+            probe720_finished_ = true;
+            psxe_diag_pacingf("probe720_end reason=120-second-budget capture_disabled=yes");
+        }
+        // Ordinary Mali builds sample two seconds per thirty seconds from the
+        // start. Per-primitive clock reads should not run throughout gameplay.
+        // Full diagnostic builds retain their larger sample budget.
+        bool sparse_mali = false;
+#if !defined(ARMSX_DIAGNOSTIC_BUILD)
+        sparse_mali = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+#endif
+        const unsigned initial_budget = sparse_mali ? 120 : 10800;
+        const bool periodic = sparse_mali
+            ? ((work_elapsed_frames_ - 1) % 1800) < 120
+            : work_elapsed_frames_ > initial_budget &&
+                ((work_elapsed_frames_ - initial_budget - 1) % 1800) < 120;
+        const bool probe_gpu = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI;
+        const bool enabled = (probe_gpu && (work_elapsed_frames_ <= initial_budget || periodic)) ||
+            (gpu720 && probe720Active() && ((work_elapsed_frames_ - 1) % 16 == 0));
+        psx_work_diag_begin(enabled ? SDL_GetPerformanceCounter : nullptr);
+        if (enabled && work_frames_ == 0 && !gpu720) {
+            psxe_diag_pacingf("work_begin schema=5 source=%s title=%s frame_limit=%u "
+                "periodic_sample_frames=120 periodic_interval_frames=1800 "
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+                "cpu_sample_stride=4093 instruction_sampling=enabled inclusive_categories=yes",
+#else
+                "cpu_sample_stride=0 instruction_sampling=disabled inclusive_categories=yes",
+#endif
+                workSourceId(), title_.c_str(), initial_budget);
+        }
+    }
+
+    void finishMaliWorkProbe(uint64_t core_ticks) {
+        if (!g_psx_work_diag_enabled) return;
+        g_psx_work_diag_enabled = 0;
+        ++work_frames_;
+        ++work_window_frames_;
+        const auto& frame = g_psx_work_diag;
+        for (unsigned i = 0; i < PSX_WORK_COUNT; ++i) {
+            work_totals_.ticks[i] += frame.ticks[i];
+            work_totals_.calls[i] += frame.calls[i];
+            if (frame.max_ticks[i] > work_totals_.max_ticks[i]) {
+                work_totals_.max_ticks[i] = frame.max_ticks[i];
+                if (i == PSX_WORK_DISC) work_totals_.slowest_lba = frame.slowest_lba;
+            }
+        }
+        if (core_ticks > work_worst_core_) {
+            work_worst_core_ = core_ticks;
+            work_worst_ = frame;
+            work_worst_frame_ = work_elapsed_frames_;
+        }
+        if (work_window_frames_ < (armsx_gpu_profile_needs_720_probe() ? 8u : 120u)
+            && work_elapsed_frames_ != 10800) return;
+        const auto avg = [this](unsigned i) {
+            return CounterTicksToMilliseconds(work_totals_.ticks[i]) / work_window_frames_;
+        };
+        const auto sample_us = [this](unsigned i) {
+            return work_totals_.calls[i] ?
+                CounterTicksToMilliseconds(work_totals_.ticks[i]) * 1000.0 /
+                    work_totals_.calls[i] : 0.0;
+        };
+        psxe_diag_pacingf("work_detail schema=4 source=%s frame=%u elapsed_frame=%u frames=%u "
+            "mdec_ms=%.3f spu_ms=%.3f disc_ms=%.3f audio_queue_ms=%.3f "
+            "mdec_calls=%u spu_calls=%u disc_reads=%u disc_max_ms=%.3f slowest_lba=%u "
+            "cpu_sample_calls=%u cpu_sample_mean_us=%.3f cpu_sample_max_us=%.3f "
+            "cdrom_update_us=%.3f gpu_update_us=%.3f pad_update_us=%.3f "
+            "timer_update_us=%.3f dma_update_us=%.3f spu_tick_us=%.3f "
+            "worst_frame=%u worst_core_ms=%.3f worst_mdec_ms=%.3f worst_spu_ms=%.3f "
+            "worst_disc_ms=%.3f worst_audio_queue_ms=%.3f gpu_raster_ms=%.3f gpu_raster_calls=%u worst_gpu_raster_ms=%.3f inclusive=yes",
+            workSourceId(), work_frames_, work_elapsed_frames_, work_window_frames_,
+            avg(PSX_WORK_MDEC), avg(PSX_WORK_SPU), avg(PSX_WORK_DISC), avg(PSX_WORK_AUDIO_QUEUE),
+            work_totals_.calls[PSX_WORK_MDEC], work_totals_.calls[PSX_WORK_SPU],
+            work_totals_.calls[PSX_WORK_DISC], CounterTicksToMilliseconds(work_totals_.max_ticks[PSX_WORK_DISC]),
+            work_totals_.slowest_lba, work_totals_.calls[PSX_WORK_CPU_SAMPLE],
+            sample_us(PSX_WORK_CPU_SAMPLE),
+            CounterTicksToMilliseconds(work_totals_.max_ticks[PSX_WORK_CPU_SAMPLE]) * 1000.0,
+            sample_us(PSX_WORK_CDROM_UPDATE), sample_us(PSX_WORK_GPU_UPDATE),
+            sample_us(PSX_WORK_PAD_UPDATE), sample_us(PSX_WORK_TIMER_UPDATE),
+            sample_us(PSX_WORK_DMA_UPDATE), sample_us(PSX_WORK_SPU_TICK),
+            work_worst_frame_, CounterTicksToMilliseconds(work_worst_core_),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_MDEC]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_SPU]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_DISC]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_AUDIO_QUEUE]),
+            avg(PSX_WORK_GPU_RASTER), work_totals_.calls[PSX_WORK_GPU_RASTER],
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_GPU_RASTER]));
+        psxe_diag_pacingf("raster_detail schema=1 source=%s elapsed_frame=%u frames=%u "
+            "textured_ms=%.3f shaded_textured_ms=%.3f plain_ms=%.3f rect_ms=%.3f "
+            "textured_calls=%u shaded_textured_calls=%u plain_calls=%u rect_calls=%u "
+            "worst_frame=%u worst_core_ms=%.3f worst_textured_ms=%.3f "
+            "worst_shaded_textured_ms=%.3f worst_plain_ms=%.3f worst_rect_ms=%.3f",
+            workSourceId(), work_elapsed_frames_, work_window_frames_,
+            avg(PSX_WORK_RASTER_TEXTURED), avg(PSX_WORK_RASTER_SHADED_TEXTURED),
+            avg(PSX_WORK_RASTER_PLAIN), avg(PSX_WORK_RASTER_RECT),
+            work_totals_.calls[PSX_WORK_RASTER_TEXTURED], work_totals_.calls[PSX_WORK_RASTER_SHADED_TEXTURED],
+            work_totals_.calls[PSX_WORK_RASTER_PLAIN], work_totals_.calls[PSX_WORK_RASTER_RECT],
+            work_worst_frame_, CounterTicksToMilliseconds(work_worst_core_),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_TEXTURED]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_SHADED_TEXTURED]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_PLAIN]),
+            CounterTicksToMilliseconds(work_worst_.ticks[PSX_WORK_RASTER_RECT]));
+        work_totals_ = {};
+        work_worst_ = {};
+        work_window_frames_ = 0;
+        work_worst_core_ = 0;
+        if (work_elapsed_frames_ == 10800)
+            psxe_diag_pacingf("work_periodic source=%s sample_frames=120 interval_frames=1800",
+                workSourceId());
+    }
+
+    static const char* workSourceId() {
+#ifdef ARMSX_SOURCE_ID
+        return ARMSX_SOURCE_ID;
+#else
+        return "unavailable";
+#endif
+    }
+
+    void recordStallTiming(uint64_t start, uint64_t end, uint64_t core,
+                           uint64_t upload, uint64_t draw, uint64_t wait) {
+        if (!audio_diag_file_) return;
+        const double total = CounterTicksToMilliseconds(end - start);
+        const double interval = stall_last_start_ ? CounterTicksToMilliseconds(start - stall_last_start_) : total;
+        stall_last_start_ = start;
+        ++stall_frames_;
+        if (total < 33.0 && interval < 33.0 && (stall_frames_ % 60) != 0) return;
+        const uint64_t accounted = core + upload + draw + wait;
+        const uint64_t other = end - start > accounted ? end - start - accounted : 0;
+        audioDiagLine("frame_timing t=%.3f frame=%u total_ms=%.3f interval_ms=%.3f "
+                      "core_ms=%.3f audio_ms=%.3f upload_ms=%.3f draw_ms=%.3f wait_ms=%.3f other_ms=%.3f "
+                      "disc_reads=%u disc_ms=%.3f disc_max_ms=%.3f slow_lba=%u",
+                      CounterTicksToMilliseconds(start - stall_capture_start_) / 1000.0,
+                      stall_frames_, total, interval, CounterTicksToMilliseconds(core),
+                      CounterTicksToMilliseconds(stall_audio_ticks_), CounterTicksToMilliseconds(upload),
+                      CounterTicksToMilliseconds(draw), CounterTicksToMilliseconds(wait), CounterTicksToMilliseconds(other),
+                      g_psx_disc_timing.reads, g_psx_disc_timing.total_ns / 1e6,
+                      g_psx_disc_timing.max_ns / 1e6, g_psx_disc_timing.slowest_lba);
+    }
+
+    uint64_t instructionLoopTicks() const { return instruction_loop_ticks_; }
+
     std::uint32_t runFrame() {
+        core_split_enabled_ = armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || probe720Active();
+        instruction_loop_ticks_ = 0;
+        stall_audio_ticks_ = 0;
         if (!psx_ || paused_) {
             return 0;
         }
@@ -2230,23 +3801,203 @@ class ArmsxSession {
         }
 #endif
 
-        const std::uint64_t start_vblank = vblank_counter_;
-        std::uint32_t steps = 0;
-
-        while (vblank_counter_ == start_vblank) {
-            psx_update(psx_);
-            steps++;
-
-            if (steps >= kMaxFrameSteps) {
-                psxe_diag_logf("timing", "Session frame advance exceeded vblank step budget title=%s", title_.empty() ? "(none)" : title_.c_str());
-#if defined(HW_DEBUG)
-                traceHardwareFrameState("frame-budget-exceeded", steps);
-#endif
-                return steps;
-            }
+        // Rewind ([emulation] rewind). Checked before anything is stepped: stepping back IS
+        // this frame's work, so the machine must not also be advanced. The hardware frame that
+        // was just opened is still closed by the caller's finishHardwareFrame().
+        if (rewindFrameIfRequested()) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+            return 0;
         }
 
+        // Service paused-menu/JNI state requests even on frames whose execution
+        // can be reused. A load/reset drops the old runahead slot.
+        psx_state_service_requests();
+        if (!psx_runahead_has_snapshot()) {
+            runahead_prediction_.invalidate();
+            runahead_sequence_.invalidate();
+        }
+        const int selected_runahead = psx_runahead_frames();
+        const bool prediction_supported = audio_dev_ && RunaheadPrediction::supported(psx_);
+        const bool predictive_reuse = selected_runahead==1 && prediction_supported;
+        const bool sequence_reuse = selected_runahead>=2 && prediction_supported &&
+            runahead_sequence_.configure(selected_runahead,static_cast<double>(kAudioMixRate)/frameRate());
+        if (!predictive_reuse) runahead_prediction_.clear();
+        if (!sequence_reuse) runahead_sequence_.clear();
+
+        const uint64_t runahead_work_start = psx_runahead_frames() > 0 ? SDL_GetPerformanceCounter() : 0;
+        std::uint32_t steps = 0;
+
+        // R3000A accounting. The equivalent lives in psx_run_frame(), which this front-end
+        // never calls — it drives psx_update() itself, so the OSD's instruction and cycle
+        // rows read a flat zero while every other counter worked. Derived, not instrumented:
+        // the step count IS the instruction count, and the CPU already sums executed clocks
+        // into total_cycles, so psx_cpu_cycle() (half a million calls a frame) stays free of
+        // any counter.
+        const std::uint32_t cpu_cycles_before = psx_ ? psx_->cpu->total_cycles : 0;
+        const auto account_cpu = [&]() {
+            if (!g_psx_perf_enabled || !psx_) {
+                return;
+            }
+            g_psx_perf.cpu_instructions += steps;
+            // total_cycles is a wrapping uint32; the unsigned difference is exact over a frame.
+            g_psx_perf.cpu_cycles +=
+                static_cast<std::uint32_t>(psx_->cpu->total_cycles - cpu_cycles_before);
+        };
+
+        // Before the frame, not after: this is what grants the SPU its per-frame sample budget
+        // so psx_spu_tick() can spend it across the frame from psx_update(). See
+        // beginAudioFrame() and the block comment above psx_spu_tick() in psx/dev/spu.c.
+        beginAudioFrame();
+
+        const bool reused_prediction = predictive_reuse ? runahead_prediction_.reuse(psx_, steps) :
+            (sequence_reuse && runahead_sequence_.reuseReal(psx_,steps));
+        if (reused_prediction) {
+            // Timer/IRQ changes are already in the snapshot. Only the host's
+            // frame counter is outside it; don't fire the timer callback twice.
+            ++vblank_counter_;
+            ++runahead_reused_frames_;
+        } else {
+            steps = stepOneFrame();
+        }
+
+        account_cpu();
+
+        /*
+            [cheats]. THE application point: once per REAL emulated frame, at the vblank the
+            frame just reached.
+
+            Deliberately not inside stepOneFrame() — that also runs runahead's re-simulated
+            frames, whose whole timeline is thrown away and restored at the top of the next
+            frame, so patching them would be work nobody ever sees. And deliberately nowhere
+            near psx_update(), which runs half a million times a frame.
+
+            The hardcore interlock is re-asserted from the authoritative source every frame
+            rather than being set once at boot and trusted. It is one call returning a
+            compile-time false today; when hardcore is eventually switched on, cheats go off
+            on the very next frame with nothing left to remember to wire up.
+
+            Cost with no cheats armed: psx_cheats_apply() is a branch on a pointer plus one
+            atomic load, sixty times a second. See psx/cheats.h.
+        */
+        psx_cheats_set_inhibited(armsx_ach_hardcore_active() ? 1 : 0);
+        psx_cheats_apply(psx_);
+
+        const uint64_t audio_start = g_psx_audio_diag_enabled ? SDL_GetPerformanceCounter() : 0;
+        const uint64_t queue_work_start = psx_work_diag_start();
         queueAudioForFrame();
+        psx_work_diag_end(PSX_WORK_AUDIO_QUEUE, queue_work_start);
+        if (audio_start) stall_audio_ticks_ = SDL_GetPerformanceCounter() - audio_start;
+
+        // The grant ends with the frame it was made for. A frame that reached vblank in fewer
+        // cycles than its budget covered still has some left, and everything below this line —
+        // runahead's re-simulated frames above all — drives psx_update() outside any frame the
+        // host is going to pull. Revoking it here is what keeps "the SPU only ever produces the
+        // frames the audio device asked for" true by construction rather than by inspection.
+        if (psx_) {
+            psx_spu_begin_frame(psx_->spu, 0);
+        }
+
+        // Rewind snapshot for the frame that just happened. After the audio pull so the
+        // snapshot describes a whole frame, and before runahead so the ring records the real
+        // timeline rather than the look-ahead.
+        psx_rewind_notify_frame(psx_, frameRate());
+
+        /*
+            Runahead ([emulation] runahead).
+
+            The machine has advanced exactly one frame — that is the timeline. Snapshot it,
+            then run N MORE frames with the same held input and WITHOUT pulling audio, and
+            leave VRAM showing that Nth frame. What gets presented is therefore N frames into
+            the future, which is the whole point: the picture reacts to a press N frames
+            sooner. The snapshot is put back at the top of the next host frame
+            (runaheadRestore), before any new input, so the machine still only ever advances
+            one frame per frame.
+
+            Audio deliberately comes from the REAL frame only. Queueing the look-ahead frames
+            as well would play each frame's audio N+1 times.
+
+            Software runahead can reuse byte-identical predictions. Levels 2-5 also keep
+            a chain of future frames: verify the whole root state and its audio phase,
+            then retain that chain and compute one new frame. Changed input/state rebuilds
+            it. Future audio is mixed privately to advance the SPU/CD state correctly;
+            only the real frame's audio reaches the device.
+        */
+        const int runahead = psx_runahead_frames();
+
+        if (runahead > 0) {
+            const uint64_t save_start = SDL_GetPerformanceCounter();
+            if (psx_runahead_save(psx_) == PSX_STATE_OK) {
+                const uint64_t extra_start = SDL_GetPerformanceCounter();
+                int reused_future=0;
+                if (sequence_reuse && psx_runahead_restore(psx_)==PSX_STATE_OK) {
+                    // The real frame itself may have switched PAL/NTSC.
+                    runahead_sequence_.configure(runahead,static_cast<double>(kAudioMixRate)/frameRate());
+                    const uint64_t prediction_vblank_start=vblank_counter_;
+                    bool counted_reused_frames=false;
+                    const bool predicted=runahead_sequence_.predict(psx_,audio_sample_accumulator_,reused_future,
+                        [&]() -> uint32_t {
+                            if (!counted_reused_frames) {
+                                vblank_counter_+=reused_future;
+                                counted_reused_frames=true;
+                            }
+                            const uint32_t n=stepOneFrame();
+                            return n<kMaxFrameSteps ? n : 0;
+                        }, MixPsxAudio);
+                    if (!predicted) {
+                        runahead_sequence_.invalidate();
+                        if (psx_runahead_restore(psx_)!=PSX_STATE_OK) {
+                            psx_runahead_configure(0);
+                            log_error("runahead: could not restore after prediction failure; runahead off");
+                            return steps;
+                        }
+                        vblank_counter_=prediction_vblank_start;
+                        reused_future=0;
+                        for (int i=0;i<runahead;++i) stepOneFrame();
+                    }
+                } else if (predictive_reuse && psx_runahead_restore(psx_)==PSX_STATE_OK) {
+                    // Predict from exactly the canonical state next frame will
+                    // restore, with its actual audio budget. Do not advance the
+                    // host accumulator or queue the speculative audio.
+                    const int next_samples=static_cast<int>(audio_sample_accumulator_ +
+                        static_cast<double>(kAudioMixRate)/frameRate());
+                    psx_spu_begin_frame(psx_->spu,next_samples);
+                    runahead_prediction_.begin(psx_);
+                    const uint32_t predicted_steps=stepOneFrame();
+                    if (predicted_steps < kMaxFrameSteps)
+                        runahead_prediction_.finish(psx_,predicted_steps);
+                    else
+                        runahead_prediction_.invalidate();
+                    psx_spu_begin_frame(psx_->spu,0);
+                } else {
+                    runahead_prediction_.invalidate();
+                    runahead_sequence_.invalidate();
+                    for (int i = 0; i < runahead; i++) stepOneFrame();
+                }
+
+                runahead_restore_pending_ = true;
+                const uint64_t extra_end = SDL_GetPerformanceCounter();
+                const double to_ms = 1000.0 / SDL_GetPerformanceFrequency();
+                const double work_ms = runahead_restore_ms_ +
+                    to_ms * (extra_end - runahead_work_start);
+                // Timing is diagnostic only. Performance does not change the
+                // user's selected runahead level.
+                if ((runahead_profile_frames_++ % 60) == 0) {
+                    log_info("Runahead active=%d real=%.2f save=%.2f extra=%.2f restore=%.2f total=%.2f budget=%.2f ms reused=%d hits=%llu future_reused=%d",
+                             runahead, to_ms * (save_start - runahead_work_start),
+                             to_ms * (extra_start - save_start), to_ms * (extra_end - extra_start),
+                             runahead_restore_ms_, work_ms, 1000.0 / targetFrameRate(),
+                             reused_prediction ? 1 : 0,
+                             static_cast<unsigned long long>(runahead_reused_frames_), reused_future);
+                }
+                runahead_restore_ms_ = 0.0;
+            } else {
+                runahead_prediction_.clear();
+                runahead_sequence_.clear();
+                psx_runahead_configure(0);
+                log_error("runahead: snapshot failed; runahead off");
+            }
+        }
 
 #if defined(HW_DEBUG)
         traceHardwareFrameState("frame-end", steps);
@@ -2269,6 +4020,9 @@ class ArmsxSession {
 
         psxe_diag_breadcrumbf("Soft reset requested title=%s", title_.empty() ? "(none)" : title_.c_str());
         setFastForwardEnabled(false);
+        // psx_soft_reset() empties the rewind ring and the look-ahead slot; this clears the
+        // front-end's half of that handshake so the next frame does not try to restore one.
+        runahead_restore_pending_ = false;
         psx_soft_reset(psx_);
         return true;
     }
@@ -2283,16 +4037,18 @@ class ArmsxSession {
         }
 
         setFastForwardEnabled(false);
+        runahead_restore_pending_ = false;
         disc_path_ = path;
         launch_kind_ = LaunchKind::Disc;
         title_ = StemToTitle(path);
         psxe_diag_breadcrumbf("Disc swapped path=%s", path.string().c_str());
-        psx_soft_reset(psx_);
+        // A disc-change prompt belongs to the running game, not a new boot.
+        // Preserve CPU/RAM/BIOS so the game can detect the replacement disc.
         return true;
     }
 
-    fsui::CurrentGameInfo currentGameInfo() const {
-        fsui::CurrentGameInfo info;
+    ArmsxGameInfo currentGameInfo() const {
+        ArmsxGameInfo info;
 
         if (!psx_) {
             return info;
@@ -2306,53 +4062,308 @@ class ArmsxSession {
         return info;
     }
 
-    std::vector<fsui::OverlayTextLine> settingsOverlayLines(const FrontendSettings& settings) const {
-        std::vector<fsui::OverlayTextLine> lines;
-        lines.push_back(fsui::OverlayTextLine{.text = std::string("Aspect: ") + AspectTitle(settings.display_aspect)});
-        lines.push_back(fsui::OverlayTextLine{.text = std::string("Video: ") + RendererValueTitle(settings)});
-        lines.push_back(fsui::OverlayTextLine{.text = std::string("VSync: ") + BoolTitle(settings.vsync_enabled)});
-        lines.push_back(fsui::OverlayTextLine{.text = std::string("Debug View: ") + BoolTitle(debug_view_)});
-        lines.push_back(fsui::OverlayTextLine{.text = std::string("Fast Forward: ") + (fast_forward_enabled_ ? "2x" : "Off")});
-        return lines;
-    }
+    // settingsOverlayLines / performanceOverlayLines removed with the FSUI cut (imgui overlays).
 
-    std::vector<fsui::OverlayTextLine> performanceOverlayLines(const FrontendSettings& settings) const {
-        (void)settings;
-        std::vector<fsui::OverlayTextLine> lines;
-        char fps[64] = {};
-        char video[64] = {};
-        std::snprintf(fps, sizeof(fps), "FPS: %.1f", ImGui::GetIO().Framerate);
-        std::snprintf(video, sizeof(video), "Video: %dx%d", texture_width_, texture_height_);
-        lines.push_back(fsui::OverlayTextLine{.text = fps});
-        lines.push_back(fsui::OverlayTextLine{.text = video});
-        lines.push_back(fsui::OverlayTextLine{.text = std::string("State: ") + (paused_ ? "Paused" : "Running")});
-        if (fast_forward_enabled_) {
-            lines.push_back(fsui::OverlayTextLine{.text = "Speed: 2x"});
+#ifdef USE_HARDWARE
+    // the backend: where the GPU path cannot serve a game it falls back
+    // EXPLICITLY AND LOGGED, never silently. The GLES backend disables itself on a
+    // persistent GL error rather than presenting an empty render target that looks like a
+    // black screen with no clue attached; this is the frontend half of that contract.
+    // The present layer may be sourcing straight from the GL rasterizer's scanout texture
+    // (armsx_hw_gl_present_texture). That texture dies with the backend, and a deleted GL
+    // name can be recycled by any later object, so the adoption has to be dropped BEFORE the
+    // backend is torn down — otherwise present samples whatever now owns that name.
+    void releaseAdoptedTexture() {
+        if (render_ && hw_rt_is_gl_) {
+            armsx_renderer_adopt_gl_texture(render_, 0, 0, 0, SDL_PIXELFORMAT_UNKNOWN);
+            frame_uploaded_ = false;
         }
-        return lines;
     }
 
-    void updateTexture(const FrontendSettings& settings) {
-        if (!psx_ || !renderer_) {
+    void checkRasterizerHealth() {
+        if (!hw_rt_backend_ || !hw_rt_is_gl_ || !armsx_hw_gl_failed(hw_rt_backend_)) {
             return;
         }
 
+        psx_gpu_t* gpu = psx_ ? psx_get_gpu(psx_) : nullptr;
+
+        log_error("GLES rasterizer disabled itself: %s", armsx_hw_gl_status());
+        releaseAdoptedTexture();
+        psx_gpu_set_backend(gpu, nullptr);
+        armsx_hw_gl_destroy(hw_rt_backend_);
+        hw_rt_backend_ = nullptr;
+        hw_rt_is_gl_ = false;
+
+        if (gpu && ((psx_pgxp_enabled() && rasterizer_mode_ != 3) ||
+                    armsx_hw_gl_use_cpu_fallback(rasterizer_mode_, internal_scale_))) {
+            hw_rt_backend_ = armsx_hw_rt_create(gpu, internal_scale_);
+
+#ifdef __ANDROID__
+            armsx_hw_rt_set_span_clipping(hw_rt_backend_,
+                armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI);
+#endif
+
+            if (hw_rt_backend_) {
+                psx_gpu_set_backend(gpu, hw_rt_backend_);
+                log_info("Fell back to the CPU internal-resolution rasterizer at %dx",
+                         psx_gpu_resolution_scale(gpu));
+                return;
+            }
+        }
+
+        psx_pgxp_set_enabled(0);
+        log_info("Fell back to the software rasterizer.");
+        texture_snapshot_.clear();
+        frame_uploaded_ = false;
+    }
+#endif
+
+    /* ---- [video] deinterlace ---------------------------------------------------------
+       This core has no field concept at all: in a 480-line mode psx_get_dmode_height()
+       returns 480 and the frame is read as 480 consecutive VRAM rows, i.e. whatever the
+       game left there, which is a WEAVE of both fields. That is mode 0 and it is what has
+       always shipped.
+
+       bob      present field 0 only, each kept line repeated over the line it replaces.
+                Halves vertical detail and removes combing outright.
+       adaptive measure combing on this frame and bob only when it is actually there, so a
+                static or progressive-in-a-480-mode scene keeps full detail.
+
+       Geometry is deliberately PRESERVED (lines are repeated, not dropped): the texture keeps
+       its width, height and pitch, so the dirty-row scan, the snapshot, the crop rect and the
+       aspect all stay exactly as they were. The alternative — halving the height — would have
+       to be understood by four other pieces of code.
+
+       Costs nothing at all in weave, and nothing but a sparse read in adaptive-on-a-static
+       scene. */
+    static int deinterlaceLuma(uint16_t v) {
+        return (int)(v & 31u) + (int)((v >> 5) & 31u) + (int)((v >> 10) & 31u);
+    }
+
+    /* Sparse three-line comb detector: a combed pixel sits far from BOTH vertical neighbours
+       while those neighbours agree with each other, which is what a field mismatch looks like
+       and ordinary vertical detail does not. Sampled every other native row and every 4th
+       pixel — this runs per frame and the answer only has to be right in aggregate. */
+    bool frameIsCombed(const uint8_t* source, uint32_t stride, int native_w, int native_h,
+                       int scale) const {
+        if (native_h < 4 || native_w < 8) {
+            return false;
+        }
+
+        const int threshold = 6;   /* 5-bit channels summed: ~6/93 of full range */
+        long sampled = 0;
+        long combed = 0;
+
+        for (int n = 1; n + 1 < native_h; n += 2) {
+            const auto* above = reinterpret_cast<const uint16_t*>(
+                source + (size_t)((n - 1) * scale) * stride);
+            const auto* mid = reinterpret_cast<const uint16_t*>(
+                source + (size_t)(n * scale) * stride);
+            const auto* below = reinterpret_cast<const uint16_t*>(
+                source + (size_t)((n + 1) * scale) * stride);
+
+            for (int x = 0; x < native_w; x += 4) {
+                const int sx = x * scale;
+                const int a = deinterlaceLuma(above[sx]);
+                const int b = deinterlaceLuma(mid[sx]);
+                const int c = deinterlaceLuma(below[sx]);
+                const int da = a - b;
+                const int dc = c - b;
+
+                sampled++;
+
+                if (((da > threshold) && (dc > threshold)) ||
+                    ((da < -threshold) && (dc < -threshold))) {
+                    combed++;
+                }
+            }
+        }
+
+        /* 2% of sampled pixels. Below that it is film grain or dither, not a field split. */
+        return (sampled > 0) && ((combed * 50) > sampled);
+    }
+
+    const uint8_t* deinterlaceFrame(const uint8_t* source, uint32_t stride, int mode, int scale) {
+        if (scale < 1) {
+            scale = 1;
+        }
+
+        const int native_h = texture_height_ / scale;
+        const int native_w = texture_width_ / scale;
+
+        if ((native_h < 4) || (texture_height_ % scale) != 0) {
+            return source;
+        }
+
+        if (mode == 2 && !frameIsCombed(source, stride, native_w, native_h, scale)) {
+            return source;   /* adaptive, and this frame does not need it */
+        }
+
+        const size_t need = (size_t)stride * (size_t)texture_height_;
+
+        if (deint_buffer_.size() != need) {
+            deint_buffer_.assign(need, 0);
+        }
+
+        for (int row = 0; row < texture_height_; ++row) {
+            const int n = row / scale;
+            const int k = row % scale;
+            /* Field 0 is the even NATIVE lines; both lines of a pair come from the even one. */
+            const int src_row = (n & ~1) * scale + k;
+
+            std::memcpy(deint_buffer_.data() + (size_t)row * stride,
+                        source + (size_t)src_row * stride,
+                        (size_t)texture_width_ * (size_t)SDL_BYTESPERPIXEL(texture_format_));
+        }
+
+        return deint_buffer_.data();
+    }
+
+    /* Live override wins over settings.toml, matching every other display lever here. */
+    static int resolveDeinterlace(const FrontendSettings& settings) {
+        const int host = g_host_deinterlace.load(std::memory_order_acquire);
+        return host < 0 ? settings.deinterlace : host;
+    }
+
+    static int resolveOverscanCrop(const FrontendSettings& settings) {
+        const int host = g_host_overscan_crop.load(std::memory_order_acquire);
+        return host < 0 ? settings.overscan_crop : host;
+    }
+
+    static int resolveDisplayRotation(const FrontendSettings& settings) {
+        const int host = g_host_display_rotation.load(std::memory_order_acquire);
+        return (host < 0 ? settings.display_rotation : host) & 3;
+    }
+
+    /* True only for a frame this pass can actually act on: an interlaced (480-line) mode, a
+       16-bit frame, and not the whole-VRAM debug view. 24bpp playback is packed RGB888 whose
+       rows are not the console's scanlines in the first place. */
+    bool deinterlaceApplies(const FrontendSettings& settings) const {
+        return (resolveDeinterlace(settings) != 0) && !debug_view_ && psx_ && psx_->gpu &&
+               ((psx_->gpu->display_mode & 0x4) != 0) && psx_get_display_format(psx_) == 0;
+    }
+
+    /* Drains a setPs1TextureOptions() request onto the EMULATION thread. psx_texrep_configure
+       frees every decoded replacement and the rasterizers hold pointers into them, so this
+       cannot run on the caller's thread. One relaxed atomic load per frame when idle. */
+    void applyPendingTextureOptions() {
+        if (!g_host_texture_pending.load(std::memory_order_acquire) || !psx_) {
+            return;
+        }
+
+        g_host_texture_pending.store(false, std::memory_order_release);
+
+        const int dump = g_host_texture_dump.load(std::memory_order_acquire);
+        const int replace = g_host_texture_replace.load(std::memory_order_acquire);
+        std::string dir;
+
+        {
+            std::lock_guard<std::mutex> lock(g_host_texture_lock);
+            dir = g_host_texture_dir;
+        }
+
+        const std::string resolved = ResolveTextureDir(dir);
+
+        psx_texrep_configure(psx_get_gpu(psx_), dump > 0 ? 1 : 0, replace > 0 ? 1 : 0,
+                             resolved.c_str());
+        log_info("Texture options: dump=%s replace=%s dir=%s",
+                 dump > 0 ? "on" : "off", replace > 0 ? "on" : "off", resolved.c_str());
+    }
+
+    void updateTexture(const FrontendSettings& settings) {
+        if (!psx_ || !render_) {
+            return;
+        }
+
+#ifdef USE_HARDWARE
+        checkRasterizerHealth();
+#endif
+
+        applyPendingTextureOptions();
+
         int next_width = debug_view_ ? PSX_GPU_FB_WIDTH : static_cast<int>(psx_get_display_width(psx_));
         int next_height = debug_view_ ? PSX_GPU_FB_HEIGHT : static_cast<int>(psx_get_display_height(psx_));
+        // Falls back to the last NATIVE size, not texture_width_/height_, which may already
+        // carry an internal-resolution multiplier and would get scaled a second time below.
         if (next_width <= 0) {
-            next_width = texture_width_ > 0 ? texture_width_ : 320;
+            next_width = texture_native_width_ > 0 ? texture_native_width_ : 320;
         }
         if (next_height <= 0) {
-            next_height = texture_height_ > 0 ? texture_height_ : 240;
+            next_height = texture_native_height_ > 0 ? texture_native_height_ : 240;
         }
+        texture_native_width_ = next_width;
+        texture_native_height_ = next_height;
         const Uint32 next_format = debug_view_ || !psx_get_display_format(psx_) ? SDL_PIXELFORMAT_BGR555 : SDL_PIXELFORMAT_RGB24;
         const bool use_vram_source = debug_view_ || !psx_ || !psx_->gpu ? false : ((psx_->gpu->disp_y + next_height) > PSX_GPU_FB_HEIGHT);
+
+        // Internal-resolution scanout. The whole-VRAM debug view and 24bpp playback both
+        // have to stay native: 24bpp reinterprets VRAM bytes as packed RGB888, which the
+        // upscaled target does not contain (the backend). Everything else
+        // reads the backend's render target directly, so the upscaled pixels reach the
+        // present layer without a downsample.
+        int display_scale = 1;
+        Uint32 display_stride = PSX_GPU_FB_STRIDE;
+        const void* scaled_surface = nullptr;
+#ifdef USE_HARDWARE
+        const bool want_native_scanout = use_vram_source || (next_format != SDL_PIXELFORMAT_BGR555);
+
+        // The brokered seam (the backend). When the GLES rasterizer
+        // and the GL present backend share a context, the frame the rasterizer just produced
+        // is already a texture in the presenter's namespace: hand it over instead of reading
+        // it back and uploading it again. Both of those are S^2 in the internal scale, and on
+        // a tiler the readback is also a full pipeline sync — together they are the largest
+        // remaining cost in the upscaled path.
+        //
+        // Every condition here is a fallback to the readback path, not an error. The debug
+        // VRAM view and 24bpp playback need native pixels (), and armsx_hw_gl_present_texture()
+        // refuses on its own side whenever the texture would be meaningless to the presenter.
+        //
+        // Deinterlacing also declines the seam: it is a CPU pass over the finished frame, so
+        // the pixels have to come back to the host. It is opt-in and only fires in 480-line
+        // modes, so the fast path is untouched in every other case.
+        const bool adopted_gpu_texture =
+            !deinterlaceApplies(settings) &&
+            !want_native_scanout && !debug_view_ && psx_ && psx_->gpu && hw_rt_backend_ &&
+            hw_rt_is_gl_ &&
+            (armsx_renderer_backend(render_) == ARMSX_RENDER_BACKEND_OPENGL ||
+             (armsx_renderer_backend(render_) == ARMSX_RENDER_BACKEND_VULKAN &&
+              settings.internal_scale >= 3)) &&
+            (armsx_hw_gl_present_texture(hw_rt_backend_, render_) != 0);
+
+        if (adopted_gpu_texture) {
+            // The adopted texture is the render target at internal resolution, so the
+            // presentation size is the same one the upload path would have produced — and
+            // armsx_render_compute_dst() therefore letterboxes it identically.
+            display_scale = psx_gpu_resolution_scale(psx_->gpu);
+            next_width *= display_scale;
+            next_height *= display_scale;
+        } else if (!want_native_scanout && psx_ && psx_->gpu) {
+            uint32_t backend_stride = PSX_GPU_FB_STRIDE;
+            const bool backend_scanout = psx_gpu_backend_owns_display(psx_->gpu) != 0;
+            const void* surface =
+                psx_gpu_get_display_surface(psx_->gpu, 0, &display_scale, &backend_stride);
+
+            // Note the "|| backend_scanout": a GPU backend at 1x must still be the thing on
+            // screen. Gating on display_scale > 1 alone would leave the software shadow's
+            // (correct) image visible at 1x and hide a completely broken GPU path, which is
+            // exactly the scale the parity gate lives at.
+            if (surface && backend_stride && ((display_scale > 1) || backend_scanout)) {
+                scaled_surface = surface;
+                display_stride = static_cast<Uint32>(backend_stride);
+                next_width *= display_scale;
+                next_height *= display_scale;
+            } else {
+                // No backend, or it handed back the native surface (display disabled).
+                display_scale = 1;
+            }
+        }
+#endif
 
 #if defined(USE_HARDWARE) && defined(HW_DEBUG)
         if (hardware_backend_active_) {
             int output_width = 0;
             int output_height = 0;
-            SDL_GetRendererOutputSize(renderer_, &output_width, &output_height);
+            armsx_renderer_output_size(render_, &output_width, &output_height);
             psxe_diag_logf(
                 "hw",
                 "texture-select frame=%llu display_mode=0x%08x gpustat=0x%08x display_enable=%d dmode=%ux%u display=%ux%u aspect=%.3f disp_window=(%u,%u)-(%u,%u) disp_y=%u offset=(%d,%d) output=%dx%d next=%dx%d format=%s source=%s stretch=%s debug=%s timing=%s target_fps=%.3f",
@@ -2386,17 +4397,12 @@ class ArmsxSession {
         }
 #endif
 
-        if ((next_width != texture_width_) || (next_height != texture_height_) || (next_format != texture_format_) || !texture_) {
-            if (texture_) {
-                SDL_DestroyTexture(texture_);
-                texture_ = nullptr;
-            }
-
-            texture_ = SDL_CreateTexture(renderer_, next_format, SDL_TEXTUREACCESS_STREAMING, next_width, next_height);
+        if ((next_width != texture_width_) || (next_height != texture_height_) || (next_format != texture_format_)) {
             texture_width_ = next_width;
             texture_height_ = next_height;
             texture_format_ = next_format;
             texture_snapshot_.clear();
+            frame_uploaded_ = false;
 
 #ifdef USE_HARDWARE
             if (hw_renderer_) {
@@ -2405,33 +4411,58 @@ class ArmsxSession {
 #endif
         }
 
-        if (!texture_) {
+#ifdef USE_HARDWARE
+        if (adopted_gpu_texture) {
+            // There is no CPU frame this frame, so the snapshot the dirty-row scan compares
+            // against describes a frame the present layer is no longer showing. Dropping it
+            // costs nothing (the vector keeps its capacity) and makes whichever frame falls
+            // back to upload_frame() do a full upload, which is the only safe answer.
+            texture_snapshot_.clear();
+            frame_uploaded_ = true;
+
+            // Say so rather than going quiet: on the brokered seam the frame never becomes CPU
+            // pixels, so the probe below cannot look at it, and an armed run that logged nothing
+            // would read as "the probe is broken".
+            if (g_resume_probe_frames > 0) {
+                --g_resume_probe_frames;
+                psxe_diag_logf("hw",
+                               "resume-probe left=%d source=adopted-gl-texture %dx%d (no CPU frame "
+                               "to sample; the GL render target IS the presented image)",
+                               g_resume_probe_frames, texture_width_, texture_height_);
+            }
+
+            return;
+        }
+#endif
+
+        const void* display_buffer = scaled_surface
+                                         ? scaled_surface
+                                         : (use_vram_source ? psx_get_vram(psx_) : psx_get_display_buffer(psx_));
+        if (!display_buffer) {
             return;
         }
 
-        if (settings.texture_scale_mode) {
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-            SDL_SetTextureScaleMode(texture_, SDL_ScaleModeLinear);
-#endif
-        } else {
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-            SDL_SetTextureScaleMode(texture_, SDL_ScaleModeNearest);
-#endif
-        }
-
-        void* display_buffer = use_vram_source ? psx_get_vram(psx_) : psx_get_display_buffer(psx_);
         const int bytes_per_pixel = SDL_BYTESPERPIXEL(texture_format_);
         const size_t row_bytes = static_cast<size_t>(texture_width_) * static_cast<size_t>(bytes_per_pixel);
-        const size_t snapshot_size = static_cast<size_t>(PSX_GPU_FB_STRIDE) * static_cast<size_t>(texture_height_);
+        const size_t snapshot_size = static_cast<size_t>(display_stride) * static_cast<size_t>(texture_height_);
         const auto* source = static_cast<const uint8_t*>(display_buffer);
 
+        // [video] deinterlace. Substitutes an equally-shaped buffer, so everything below —
+        // the dirty scan, the snapshot and the upload — is unchanged and unaware.
+        if (deinterlaceApplies(settings)) {
+            source = deinterlaceFrame(source, display_stride, resolveDeinterlace(settings),
+                                      display_scale);
+        }
+
+        // Dirty-row scan: only the changed span of the framebuffer is handed to the backend.
+        // Unchanged from the pre-abstraction path; every backend gets the same row range.
         int first_dirty_row = 0;
         int last_dirty_row = texture_height_ - 1;
         if (texture_snapshot_.size() == snapshot_size) {
             first_dirty_row = texture_height_;
             last_dirty_row = -1;
             for (int row = 0; row < texture_height_; ++row) {
-                const size_t offset = static_cast<size_t>(row) * static_cast<size_t>(PSX_GPU_FB_STRIDE);
+                const size_t offset = static_cast<size_t>(row) * static_cast<size_t>(display_stride);
                 if (std::memcmp(source + offset, texture_snapshot_.data() + offset, row_bytes) != 0) {
                     first_dirty_row = std::min(first_dirty_row, row);
                     last_dirty_row = row;
@@ -2441,109 +4472,169 @@ class ArmsxSession {
             texture_snapshot_.assign(snapshot_size, 0);
         }
 
-        if (last_dirty_row >= first_dirty_row) {
-            SDL_Rect dirty_rect{
-                0,
-                first_dirty_row,
-                texture_width_,
-                last_dirty_row - first_dirty_row + 1,
-            };
-            const size_t first_offset = static_cast<size_t>(first_dirty_row) * static_cast<size_t>(PSX_GPU_FB_STRIDE);
-            SDL_UpdateTexture(texture_, &dirty_rect, source + first_offset, PSX_GPU_FB_STRIDE);
-            for (int row = first_dirty_row; row <= last_dirty_row; ++row) {
-                const size_t offset = static_cast<size_t>(row) * static_cast<size_t>(PSX_GPU_FB_STRIDE);
-                std::memcpy(texture_snapshot_.data() + offset, source + offset, row_bytes);
+        // `resume_probe`: is the picture we are about to hand the present layer actually there?
+        // See resumeProbeEnabled() for how to read the answer. Disarmed this is one compare.
+        if (g_resume_probe_frames > 0) {
+            --g_resume_probe_frames;
+
+            size_t nonzero = 0;
+            int first_nonzero_row = -1;
+            for (int row = 0; row < texture_height_; ++row) {
+                const uint8_t* line = source + (static_cast<size_t>(row) * static_cast<size_t>(display_stride));
+                for (size_t byte = 0; byte < row_bytes; ++byte) {
+                    if (line[byte]) {
+                        ++nonzero;
+                    }
+                }
+                if (nonzero && first_nonzero_row < 0) {
+                    first_nonzero_row = row;
+                }
             }
+
+            psxe_diag_logf("hw",
+                           "resume-probe left=%d source=%s %dx%d stride=%u format=%s nonzero=%zu "
+                           "first_row=%d dirty=[%d..%d] scale=%d",
+                           g_resume_probe_frames,
+                           scaled_surface ? "backend-readback"
+                                          : (use_vram_source ? "vram-shadow" : "software-display"),
+                           texture_width_, texture_height_, (unsigned)display_stride,
+                           SDL_GetPixelFormatName(texture_format_), nonzero, first_nonzero_row,
+                           first_dirty_row, last_dirty_row, display_scale);
         }
 
-        updatePresentationTexture(settings);
-    }
-
-    void draw(const FrontendSettings& settings) {
-        if (!texture_) {
+        if (!armsx_renderer_upload_frame(render_,
+                                         source,
+                                         texture_width_,
+                                         texture_height_,
+                                         static_cast<int>(display_stride),
+                                         texture_format_,
+                                         first_dirty_row,
+                                         last_dirty_row)) {
             return;
         }
 
-        const ImVec2 display = ImGui::GetIO().DisplaySize;
-        const ImVec2 framebuffer_scale = ImGui::GetIO().DisplayFramebufferScale;
-        const float display_width = std::max(display.x, 1.0f);
-        const float display_height = std::max(display.y, 1.0f);
+        frame_uploaded_ = true;
+
+        for (int row = first_dirty_row; row <= last_dirty_row; ++row) {
+            const size_t offset = static_cast<size_t>(row) * static_cast<size_t>(display_stride);
+            std::memcpy(texture_snapshot_.data() + offset, source + offset, row_bytes);
+        }
+    }
+
+    // Present the emulated framebuffer through the active presentation backend
+    // (frontend/render.h). The aspect decision stays here because it is a *settings* concern;
+    // the letterbox math itself is shared by every backend (armsx_render_compute_dst).
+    void draw(const FrontendSettings& settings) {
+        if (!render_) return;
+        // GP1(03h) blanks scanout while the BIOS or game rebuilds its display.
+        // Keep VRAM uploads running, but never expose that intermediate image.
+        // The whole-VRAM debug view intentionally bypasses console blanking.
+        if (!debug_view_ && psx_ && psx_->gpu && (psx_->gpu->gpustat & 0x00800000u)) {
+            armsx_renderer_present_blank(render_);
+            return;
+        }
+        if (!frame_uploaded_) {
+            return;
+        }
+
+        // Live overrides from the host UI (JNI). Aspect and stretch are pure presentation
+        // properties — nothing in the VM depends on them — so changing either from the
+        // in-game menu takes effect on the very next frame rather than at the next launch.
+        int display_aspect = settings.display_aspect;
+        bool stretch = settings.stretch_mode;
+        if (const int override_aspect = g_host_display_aspect.load(std::memory_order_acquire);
+            override_aspect >= 0) {
+            display_aspect = override_aspect;
+        }
+        if (const int override_stretch = g_host_stretch_mode.load(std::memory_order_acquire);
+            override_stretch >= 0) {
+            stretch = override_stretch != 0;
+        }
 
         float aspect = 4.0f / 3.0f;
         if (debug_view_) {
             aspect = static_cast<float>(texture_width_) / static_cast<float>(std::max(texture_height_, 1));
-        } else if (settings.display_aspect == 2) {
+        } else if (display_aspect == 3) {
+            /* Custom. The live override wins over the file so an in-game slider is immediate;
+               both are sanity-clamped because a zero or negative ratio would make
+               compute_dst produce a degenerate rect and the screen go black. */
+            const float live = g_host_display_aspect_custom.load(std::memory_order_acquire);
+            const float configured = settings.display_aspect_custom;
+            const float chosen = live > 0.0f ? live : configured;
+            aspect = (chosen >= kMinCustomAspect && chosen <= kMaxCustomAspect) ? chosen
+                                                                               : (4.0f / 3.0f);
+        } else if (display_aspect == 2) {
             aspect = 16.0f / 9.0f;
-        } else if (settings.display_aspect == 1) {
+        } else if (display_aspect == 1) {
             aspect = 1.0f;
         } else {
-            aspect = static_cast<float>(psx_get_display_aspect(psx_));
+            // Classic is a HARD 4:3 — the display aspect of a PlayStation on a CRT, which is
+            // what every mode from 256x240 to 640x480 was authored for. It is deliberately NOT
+            // psx_get_display_aspect(): that returns the framebuffer's own pixel ratio capped
+            // at 4:3, so a 256-wide game came out at 1.067 — visually identical to Square, and
+            // the reason "Classic" and "Square" looked like the same dead setting.
+            aspect = 4.0f / 3.0f;
         }
 
-        float target_width = display_width;
-        float target_height = display_height;
-        float offset_x = 0.0f;
-        float offset_y = 0.0f;
+        armsx_render_frame_params_t params{};
+        params.stretch = stretch;
+        params.linear_filter = settings.texture_scale_mode;
+        params.portrait_top = g_host_portrait_top.load(std::memory_order_acquire) != 0;
+        params.portrait_top_inset = g_host_portrait_top_inset.load(std::memory_order_acquire);
+        params.integer_scaling = g_host_integer_scaling.load(std::memory_order_acquire) < 0
+            ? settings.integer_scaling
+            : g_host_integer_scaling.load(std::memory_order_acquire) != 0;
+        params.aspect = aspect;
 
-        if (!settings.stretch_mode) {
-            target_width = display_width;
-            target_height = target_width / aspect;
+        /* ---- [video] overscan_crop -----------------------------------------------------
+           Trims the blanking border games leave around the picture and lets the kept region
+           fill the same destination rect — i.e. it zooms, which is what makes it worth
+           having. Expressed as a fraction of each edge rather than fixed pixel counts
+           because the horizontal resolution varies per game (256/320/368/512/640) and a
+           fixed 8px means something different in each.
 
-            if (target_height > display_height) {
-                target_height = display_height;
-                target_width = target_height * aspect;
-            }
+             small  1/32 of each edge (~3%)  — the usual garbage column/row
+             full   1/16 of each edge (~6%)  — the "all borders" setting
 
-            offset_x = (display_width - target_width) * 0.5f;
-            offset_y = (display_height - target_height) * 0.5f;
+           Skipped for the whole-VRAM debug view, where the border is the point. */
+        const int crop_mode = debug_view_ ? 0 : resolveOverscanCrop(settings);
+
+        if (crop_mode > 0 && texture_width_ > 16 && texture_height_ > 16) {
+            const int div = (crop_mode == 2) ? 16 : 32;
+            const int inset_x = texture_width_ / div;
+            const int inset_y = texture_height_ / div;
+
+            params.crop_x = inset_x;
+            params.crop_y = inset_y;
+            params.crop_w = texture_width_ - inset_x * 2;
+            params.crop_h = texture_height_ - inset_y * 2;
         }
 
-        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
-#if defined(USE_HARDWARE) && defined(HW_DEBUG)
-        psxe_diag_logf(
-            "ui",
-            "session-draw frame=%llu display=(%.1f,%.1f) fb_scale=(%.2f,%.2f) texture=%dx%d aspect=%.3f stretch=%s debug=%s target=(%.1f,%.1f) offset=(%.1f,%.1f) hardware=%s timing=%s",
-            static_cast<unsigned long long>(vblank_counter_),
-            display.x,
-            display.y,
-            framebuffer_scale.x,
-            framebuffer_scale.y,
-            texture_width_,
-            texture_height_,
-            aspect,
-            settings.stretch_mode ? "true" : "false",
-            debug_view_ ? "true" : "false",
-            target_width,
-            target_height,
-            offset_x,
-            offset_y,
-#ifdef USE_HARDWARE
-            hardware_backend_active_ ? "true" : "false",
-#else
-            "false",
-#endif
-            timingModeTitle()
-        );
-#endif
-        draw_list->AddRectFilled(ImVec2(0.0f, 0.0f), display, IM_COL32(0, 0, 0, 255));
-        SDL_Texture* presentation = presentation_texture_ ? presentation_texture_ : texture_;
-        draw_list->AddImage(
-            reinterpret_cast<ImTextureID>(presentation),
-            ImVec2(offset_x, offset_y),
-            ImVec2(offset_x + target_width, offset_y + target_height)
-        );
+        /* [video] display_rotation. Pure presentation: compute_dst transposes the rect and
+           each backend spins its own draw. The debug view rotates too — there is no reason
+           for it not to. */
+        params.rotation = resolveDisplayRotation(settings);
 
-#ifdef USE_HARDWARE
-        if (!debug_view_ && hw_renderer_) {
-            if (SDL_Texture* overlay = armsx_hw_renderer_overlay_texture(hw_renderer_)) {
-                draw_list->AddImage(
-                    reinterpret_cast<ImTextureID>(overlay),
-                    ImVec2(offset_x, offset_y),
-                    ImVec2(offset_x + target_width, offset_y + target_height)
-                );
-            }
+        if (aspect_traces_ < 3 || display_aspect != last_logged_aspect_mode_ ||
+            stretch != last_logged_stretch_) {
+            aspect_traces_++;
+            last_logged_aspect_mode_ = display_aspect;
+            last_logged_stretch_ = stretch;
+            psxe_diag_logf("renderer",
+                           "present mode=%s (%d) stretch=%s aspect=%.4f source=%dx%d",
+                           display_aspect == 3 ? "custom"
+                                               : (display_aspect == 2 ? "wide16x9"
+                                                  : (display_aspect == 1 ? "square1x1"
+                                                                        : "classic4x3")),
+                           display_aspect, stretch ? "true" : "false", aspect, texture_width_,
+                           texture_height_);
         }
-#endif
+
+        armsx_renderer_present(render_, &params);
+
+        // The old SDL path also composited armsx_hw_renderer_overlay_texture() here. That
+        // accessor is a compatibility stub that unconditionally returns NULL
+        // (frontend/gpu_hw.c), so the blit was dead code and is not reproduced.
     }
 
     void finishHardwareFrame() {
@@ -2589,7 +4680,7 @@ class ArmsxSession {
             gpu->off_y,
             texture_width_,
             texture_height_,
-            (void*)renderer_
+            (void*)render_
         );
 #else
         (void)stage;
@@ -2606,9 +4697,30 @@ class ArmsxSession {
         const int width = texture_width_;
         const int height = texture_height_;
         const Uint32 format = texture_format_;
-        void* source = debug_view_ ? psx_get_vram(psx_) : psx_get_display_buffer(psx_);
+        // texture_width_/height_ already carry the internal-resolution multiplier, so the
+        // source and its stride have to come from the same surface uploadFrame() used —
+        // reading the native buffer at a scaled height would run off the end of VRAM.
+        int shot_scale = 1;
+        Uint32 shot_stride = PSX_GPU_FB_STRIDE;
+        const void* source = debug_view_ ? psx_get_vram(psx_) : psx_get_display_buffer(psx_);
 
-        if (!debug_view_ && ((psx_->gpu->disp_y + texture_height_) > PSX_GPU_FB_HEIGHT)) {
+#ifdef USE_HARDWARE
+        if (!debug_view_ && (format == SDL_PIXELFORMAT_BGR555) && psx_->gpu) {
+            uint32_t backend_stride = PSX_GPU_FB_STRIDE;
+            const void* surface =
+                psx_gpu_get_display_surface(psx_->gpu, 0, &shot_scale, &backend_stride);
+
+            if (surface && (shot_scale > 1)) {
+                source = surface;
+                shot_stride = static_cast<Uint32>(backend_stride);
+            } else {
+                shot_scale = 1;
+            }
+        }
+#endif
+
+        if (!debug_view_ && (shot_scale == 1) &&
+            ((psx_->gpu->disp_y + texture_height_) > PSX_GPU_FB_HEIGHT)) {
             source = psx_get_vram(psx_);
         }
 
@@ -2623,7 +4735,7 @@ class ArmsxSession {
         uint8_t* dst = static_cast<uint8_t*>(surface->pixels);
 
         for (int row = 0; row < height; row++) {
-            std::memcpy(dst + (static_cast<size_t>(row) * static_cast<size_t>(surface->pitch)), src + (static_cast<size_t>(row) * static_cast<size_t>(PSX_GPU_FB_STRIDE)), row_size);
+            std::memcpy(dst + (static_cast<size_t>(row) * static_cast<size_t>(surface->pitch)), src + (static_cast<size_t>(row) * static_cast<size_t>(shot_stride)), row_size);
         }
 
         const int result = SDL_SaveBMP(surface, path.string().c_str());
@@ -2633,14 +4745,68 @@ class ArmsxSession {
 
     double frameRate() const {
         if (!psx_ || !psx_->gpu) {
-            return 59.29;
+            return psx_gpu_frame_rate(nullptr);
         }
 
         return static_cast<double>(psx_gpu_frame_rate(psx_->gpu));
     }
 
+    // The rate the frame pacer aims for. "Uncapped" returns a deliberately unreachable rate
+    // rather than 0: waitForFrameDeadline() then always finds the deadline already passed and
+    // never sleeps, which is exactly "run as fast as the device manages" — no special case in
+    // the pacer, and no divide-by-zero in updateFramePeriod().
     double targetFrameRate() const {
-        return frameRate() * (fast_forward_enabled_ ? 2.0 : 1.0);
+        if (fast_forward_enabled_) {
+            return (fast_forward_speed_ <= 0.0) ? kUncappedFrameRate : frameRate() * fast_forward_speed_;
+        }
+
+        if (!frame_limit_) {
+            return kUncappedFrameRate;
+        }
+
+        double target = frameRate() * (static_cast<double>(speed_percent_) / 100.0);
+
+        // The absolute cap only ever lowers the target — a 120 fps "cap" on a 59.94 Hz game
+        // must not make it run at double speed.
+        if (fps_limit_ > 0) {
+            target = std::min(target, static_cast<double>(fps_limit_));
+        }
+
+        return std::max(target, 1.0);
+    }
+
+    // Whether the emulated stream needs rate-converting to reach the device.
+    //
+    // This answers only whether the user DELIBERATELY requested a non-realtime rate:
+    // fast-forward, limiter off, speed percentage, or an fps cap. Plain 100% sessions use the
+    // separate wall-clock elasticity controller in queueAudioForFrame(); it stays at ratio 1.0
+    // while the core meets its deadline and stretches host output only after measured lateness.
+    bool audioRateConversionActive() const {
+        if (fast_forward_enabled_ || !frame_limit_) {
+            return true;
+        }
+
+        if (speed_percent_ != 100) {
+            return true;
+        }
+
+        return (fps_limit_ > 0) && (static_cast<double>(fps_limit_) < frameRate());
+    }
+
+    // What the converter should expect the emulation to run at, used only to seed its rate
+    // estimate. The closed loop finds the truth from there; this just avoids an audible
+    // sweep on the first tenth of a second.
+    double expectedSpeedMultiplier() const {
+        if (fast_forward_enabled_) {
+            return (fast_forward_speed_ > 0.0) ? fast_forward_speed_ : 2.0;
+        }
+
+        if (!frame_limit_) {
+            return 2.0;
+        }
+
+        const double nominal = frameRate();
+        return (nominal > 0.0) ? std::max(targetFrameRate() / nominal, 0.05) : 1.0;
     }
 
     std::uint64_t vblankCounter() const {
@@ -2674,135 +4840,6 @@ class ArmsxSession {
     }
 
   private:
-    void destroyPresentationTexture() {
-        if (presentation_texture_) {
-            SDL_DestroyTexture(presentation_texture_);
-            presentation_texture_ = nullptr;
-        }
-        presentation_width_ = 0;
-        presentation_height_ = 0;
-        presentation_scale_ = 1;
-    }
-
-    void updatePresentationTexture(const FrontendSettings& settings) {
-        const int requested_scale = std::clamp(settings.presentation_upscale, 1, 8);
-        if (!renderer_ || !texture_ || requested_scale == 1) {
-            destroyPresentationTexture();
-            return;
-        }
-
-        SDL_RendererInfo info{};
-        if (SDL_GetRendererInfo(renderer_, &info) != 0 || (info.flags & SDL_RENDERER_TARGETTEXTURE) == 0) {
-            destroyPresentationTexture();
-            return;
-        }
-
-        int actual_scale = requested_scale;
-        if (info.max_texture_width > 0) {
-            actual_scale = std::min(actual_scale, info.max_texture_width / std::max(texture_width_, 1));
-        }
-        if (info.max_texture_height > 0) {
-            actual_scale = std::min(actual_scale, info.max_texture_height / std::max(texture_height_, 1));
-        }
-        actual_scale = std::max(actual_scale, 1);
-        if (actual_scale == 1) {
-            destroyPresentationTexture();
-            return;
-        }
-
-        const int target_width = texture_width_ * actual_scale;
-        const int target_height = texture_height_ * actual_scale;
-        if (!presentation_texture_ || presentation_width_ != target_width ||
-            presentation_height_ != target_height || presentation_scale_ != actual_scale) {
-            destroyPresentationTexture();
-            presentation_texture_ = SDL_CreateTexture(
-                renderer_,
-                SDL_PIXELFORMAT_ARGB8888,
-                SDL_TEXTUREACCESS_TARGET,
-                target_width,
-                target_height
-            );
-            if (!presentation_texture_) {
-                psxe_diag_logf(
-                    "renderer",
-                    "SDL presentation upscale unavailable requested=%dx target=%dx%d error=%s",
-                    requested_scale,
-                    target_width,
-                    target_height,
-                    SDL_GetError()
-                );
-                return;
-            }
-            presentation_width_ = target_width;
-            presentation_height_ = target_height;
-            presentation_scale_ = actual_scale;
-            psxe_diag_logf(
-                "renderer",
-                "SDL presentation upscale created requested=%dx actual=%dx target=%dx%d",
-                requested_scale,
-                actual_scale,
-                target_width,
-                target_height
-            );
-            SDL_SetTextureBlendMode(presentation_texture_, SDL_BLENDMODE_NONE);
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-            SDL_SetTextureScaleMode(presentation_texture_, SDL_ScaleModeBest);
-#endif
-        }
-
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-        if (SDL_SetTextureScaleMode(texture_, SDL_ScaleModeBest) != 0) {
-            SDL_SetTextureScaleMode(texture_, SDL_ScaleModeLinear);
-        }
-#endif
-
-        SDL_Texture* previous_target = SDL_GetRenderTarget(renderer_);
-        SDL_Rect previous_viewport{};
-        SDL_Rect previous_clip{};
-        float previous_scale_x = 1.0f;
-        float previous_scale_y = 1.0f;
-        Uint8 previous_r = 0;
-        Uint8 previous_g = 0;
-        Uint8 previous_b = 0;
-        Uint8 previous_a = 0;
-        SDL_BlendMode previous_blend = SDL_BLENDMODE_NONE;
-        const SDL_bool clip_enabled = SDL_RenderIsClipEnabled(renderer_);
-        SDL_RenderGetViewport(renderer_, &previous_viewport);
-        SDL_RenderGetClipRect(renderer_, &previous_clip);
-        SDL_RenderGetScale(renderer_, &previous_scale_x, &previous_scale_y);
-        SDL_GetRenderDrawColor(renderer_, &previous_r, &previous_g, &previous_b, &previous_a);
-        SDL_GetRenderDrawBlendMode(renderer_, &previous_blend);
-
-        bool rendered = false;
-        if (SDL_SetRenderTarget(renderer_, presentation_texture_) == 0) {
-            SDL_RenderSetViewport(renderer_, nullptr);
-            SDL_RenderSetClipRect(renderer_, nullptr);
-            SDL_RenderSetScale(renderer_, 1.0f, 1.0f);
-            SDL_SetRenderDrawBlendMode(renderer_, SDL_BLENDMODE_NONE);
-            SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
-            rendered = SDL_RenderClear(renderer_) == 0 &&
-                SDL_RenderCopy(renderer_, texture_, nullptr, nullptr) == 0;
-        }
-
-        SDL_SetRenderTarget(renderer_, previous_target);
-        SDL_RenderSetViewport(renderer_, &previous_viewport);
-        SDL_RenderSetScale(renderer_, previous_scale_x, previous_scale_y);
-        SDL_RenderSetClipRect(renderer_, clip_enabled ? &previous_clip : nullptr);
-        SDL_SetRenderDrawBlendMode(renderer_, previous_blend);
-        SDL_SetRenderDrawColor(renderer_, previous_r, previous_g, previous_b, previous_a);
-
-        if (!rendered) {
-            psxe_diag_logf(
-                "renderer",
-                "SDL presentation upscale render failed requested=%dx actual=%dx error=%s",
-                requested_scale,
-                actual_scale,
-                SDL_GetError()
-            );
-            destroyPresentationTexture();
-        }
-    }
-
     static void SessionVblankEvent(psx_gpu_t* gpu) {
         if (gpu) {
             if (auto* session = static_cast<ArmsxSession*>(gpu->udata[0])) {
@@ -2813,20 +4850,603 @@ class ArmsxSession {
         }
     }
 
+    static void AudioUpdate(void* userdata, uint8_t* buffer, int size) {
+        if (!buffer || size <= 0) {
+            return;
+        }
+
+        std::memset(buffer, 0, static_cast<size_t>(size));
+
+        auto* session = static_cast<ArmsxSession*>(userdata);
+        if (!session) {
+            return;
+        }
+
+        session->consumeQueuedAudio(buffer, static_cast<size_t>(size));
+    }
+
     void updateAudioPlaybackState() {
         if (!audio_dev_) {
             return;
         }
 
-        const bool should_pause = paused_ || fast_forward_enabled_ || !audio_playback_started_;
-        SDL_PauseAudioDevice(audio_dev_, should_pause ? 1 : 0);
+        // Fast-forward no longer parks the device. The emulated stream is resampled down to
+        // the device rate in queueAudioForFrame() instead, so there is a continuous stream to
+        // play; only a paused VM stops the device, and a paused VM really has nothing to feed
+        // it. "Mute during fast-forward" is a gain of zero, not a stopped device — stopping
+        // and restarting an OpenSL ES stream on every fast-forward edge pops.
+        //
+        // audio_suspended_ is belt-and-braces: backgrounding closes the device outright, so this
+        // normally has no device to act on. It matters only if a future path leaves one open
+        // while the app is off-screen — a setPaused(false) landing then must not hand the
+        // callback back its real samples.
+        SDL_PauseAudioDevice(audio_dev_, (paused_ || audio_suspended_ || !audio_playback_started_) ? 1 : 0);
     }
 
-    void queueAudioForFrame() {
-        if (!psx_ || !audio_dev_ || fast_forward_enabled_) {
+    /*
+        `audio_diag` — ONE bounded audio capture, armed by a marker file.
+
+        Four things sound identical to a player and need opposite fixes: the emulation not
+        keeping up (host underruns), the XA decoder producing the wrong stream, the mix sitting
+        at the wrong level, and the SPU reverb feedback loop railing. Reading the code cannot
+        separate them, and two plausible fixes reasoned from a symptom description have already
+        been landed on this project and failed. So: measure first.
+
+        `touch files/logs/audio_diag` arms it. The marker is deleted the instant a capture
+        starts, so one touch buys one minute of emulated audio, sampled every 30 frames,
+        written to `audio_diag.txt` beside the marker. Sixteen windows per process, then the probe
+        stops for good.
+
+        Cost when idle: one fopen() every kAudioDiagPollFrames frames while budget remains, and
+        one predicted branch per generated sample everywhere psx/perf.h's counters are written.
+        Nothing here runs per CPU instruction or per pixel.
+
+        Written through its own FILE* rather than psxe_diag_logf() for the reasons gpu.c gives:
+        it has to work with diagnostics logging off, it would otherwise drown armsx.log, and a
+        player can send one small file instead of the whole log.
+    */
+    bool audioDiagPath(std::string& out, const char* name) const {
+        const char* log_path = psxe_diag_log_path();
+        if (!log_path || !log_path[0]) {
+            return false;
+        }
+
+        const char* slash = std::strrchr(log_path, '/');
+        if (!slash) {
+            return false;
+        }
+
+        out.assign(log_path, static_cast<size_t>(slash - log_path) + 1u);
+        out += name;
+        return true;
+    }
+
+    void audioDiagLine(const char* fmt, ...) {
+        if (!audio_diag_file_) {
             return;
         }
 
+        char line[1024];
+        va_list ap;
+        va_start(ap, fmt);
+        std::vsnprintf(line, sizeof(line), fmt, ap);
+        va_end(ap);
+
+        std::fputs(line, audio_diag_file_);
+        std::fputs("\n", audio_diag_file_);
+    }
+
+    // Everything the SPU, the CD-ROM and the host queue looked like over the last snapshot
+    // period, then the counters are zeroed so the next line describes the next period only.
+    void audioDiagSnapshot() {
+        psx_spu_t* spu = psx_->spu;
+        psx_cdrom_t* cdrom = psx_->cdrom;
+        psx_audio_diag_t& d = g_psx_audio_diag;
+
+        size_t queued = 0;
+        uint32_t underruns = 0;
+        uint64_t underrun_bytes = 0;
+        uint32_t rebuffers = 0;
+        uint32_t overflow_trims = 0;
+        SDL_LockAudioDevice(audio_dev_);
+        queued = audio_queue_.size() - audio_queue_read_offset_;
+        underruns = audio_underruns_;
+        underrun_bytes = audio_underrun_bytes_;
+        rebuffers = audio_rebuffer_events_;
+        overflow_trims = audio_overflow_trims_;
+        audio_underruns_ = 0;
+        audio_underrun_bytes_ = 0;
+        audio_rebuffer_events_ = 0;
+        audio_overflow_trims_ = 0;
+        SDL_UnlockAudioDevice(audio_dev_);
+
+        audio_diag_snapshots_++;
+
+        audioDiagLine("");
+        audioDiagLine("[t=%.1fs] host: fps_target=%.2f queued=%zu bytes (%.1f ms) "
+                      "underruns=%u short=%llu bytes rebuffer=%u overflow_resets=0 "
+                      "overflow_trims=%u rate_ratio=%.4f "
+                      "ff=%d paused=%d",
+            static_cast<double>(audio_diag_snapshots_) *
+                (static_cast<double>(kAudioDiagSnapshotFrames) / frameRate()),
+            frameRate(),
+            queued,
+            (static_cast<double>(queued) / static_cast<double>(kAudioBytesPerSample)) *
+                1000.0 / static_cast<double>(kAudioMixRate),
+            underruns,
+            static_cast<unsigned long long>(underrun_bytes),
+            rebuffers,
+            overflow_trims,
+            audio_rate_ratio_,
+            fast_forward_enabled_ ? 1 : 0,
+            paused_ ? 1 : 0);
+
+        // SPUCNT decoded in full: bit15 enable, bit7 reverb master, bit2 CD-audio reverb,
+        // bit0 CD-audio enable. Bits 0 and 2 are the ones nothing in this core consumes.
+        audioDiagLine("  spu: spucnt=%04x [enable=%d unmute=%d reverb=%d cd_reverb=%d cd_enable=%d] "
+                      "host_skip_reverb=%d mainvol=%04x/%04x(min %04x/%04x) vlout=%04x vrout=%04x "
+                      "cdaivol=%08x extivol=%08x eon=%06x mbase=%04x revbaddr=%05x",
+            spu->spucnt,
+            (spu->spucnt & 0x8000) ? 1 : 0,
+            (spu->spucnt & 0x4000) ? 1 : 0,
+            (spu->spucnt & 0x0080) ? 1 : 0,
+            (spu->spucnt & 0x0004) ? 1 : 0,
+            (spu->spucnt & 0x0001) ? 1 : 0,
+            spu->reverb_disabled,
+            spu->mainlvol, spu->mainrvol,
+            d.mainvol_min_l & 0xffffu, d.mainvol_min_r & 0xffffu,
+            spu->vlout, spu->vrout,
+            spu->cdaivol, spu->extivol,
+            spu->eon & 0xffffffu, spu->mbase, spu->revbaddr);
+
+        audioDiagLine("  spu levels: samples=%u silent=%u voices avg=%.2f peak=%u | "
+                      "dry_peak=%d/%d dry_clip=%u | revin_peak=%d/%d revin_clip=%u | "
+                      "revsum_clip=%u",
+            d.spu_samples, d.spu_silent,
+            d.spu_samples ? (static_cast<double>(d.spu_voices_sum) /
+                             static_cast<double>(d.spu_samples)) : 0.0,
+            d.spu_voices_peak,
+            d.dry_peak_l, d.dry_peak_r, d.dry_clip,
+            d.revin_peak_l, d.revin_peak_r, d.revin_clip,
+            d.revsum_clip);
+
+        // rev_calls == 0 with reverb=1 above means the network never ran. revfb_railed
+        // approaching rev_calls means the feedback line is pinned: a self-sustaining loop.
+        audioDiagLine("  reverb: calls=%u fb_railed=%u (%.1f%%) out_railed=%u out_peak=%d/%d",
+            d.rev_calls, d.revfb_railed,
+            d.rev_calls ? (100.0 * static_cast<double>(d.revfb_railed) /
+                           static_cast<double>(d.rev_calls)) : 0.0,
+            d.revout_railed, d.revout_peak_l, d.revout_peak_r);
+
+        audioDiagLine("  keyon: voices=%u negative_volume=%u sweep_mode=%u | "
+                      "spu_ram: writes=%u fifo_drop=%u range=%05x-%05x taddr=%05x xfer_mode=%d "
+                      "| irq9=%05x en=%d raised=%u (%.1f/s) | spu_gen: ticked=%u inline=%u",
+            d.kon_voices, d.kon_vol_negative, d.kon_vol_sweep,
+            d.spu_ram_writes, d.spu_fifo_drop,
+            (d.spu_ram_lo == 0xffffffffu) ? 0u : d.spu_ram_lo, d.spu_ram_hi,
+            spu->taddr, (spu->spucnt >> 4) & 3,
+            (unsigned)(spu->irq9addr << 3), (spu->spucnt & 0x40) ? 1 : 0, d.spu_irq_raised,
+            // Per second, because the number this has to be compared against is a rate: the
+            // metronome voice's own crossing rate. Landing at the frame rate is the tell that
+            // interrupts are being quantised to the frame instead of delivered on time.
+            static_cast<double>(d.spu_irq_raised) /
+                (static_cast<double>(kAudioDiagSnapshotFrames) / frameRate()),
+            d.spu_gen_ticked, d.spu_gen_inline);
+
+        // Live state of every sounding voice, sampled at snapshot time (no hot-path cost).
+        // phase 0..4 = attack/decay/sustain/release/end. A voice parked in SUSTAIN (2) at a
+        // high env with the level never falling is the signature of a note that was never
+        // keyed off — which is what "a sound that plays forever" looks like from in here.
+        {
+            char voices[4096];
+            size_t used = 0;
+            int listed = 0;
+
+            voices[0] = '\0';
+
+            for (int v = 0; v < 24 && used + 160u < sizeof(voices); v++) {
+                if (!spu->data[v].playing) {
+                    continue;
+                }
+
+                // Is the sample data this voice is reading actually there? 16 bytes at the
+                // current decode address; all-zero means the voice is looping over blank SPU
+                // RAM, which is what "keyed on, full envelope, no sound" looks like when the
+                // transfer never delivered. blank=1 with spu_ram_writes=0 is the whole story.
+                const uint32_t addr = spu->data[v].current_addr & (SPU_RAM_SIZE - 1u);
+                int blank = 1;
+                for (uint32_t b = 0; b < 16u; b++) {
+                    if (spu->ram[(addr + b) & (SPU_RAM_SIZE - 1u)] != 0) {
+                        blank = 0;
+                        break;
+                    }
+                }
+
+                // pitch: 1000h = 44100 Hz. Printed rather than inferred from how far ca moves,
+                // because ring position aliases: a rate of d and a rate of d+ring look the same.
+                const int written = std::snprintf(voices + used, sizeof(voices) - used,
+                    "%s%d:vol=%04x/%04x env=%04x ph=%d sa=%05x ra=%05x ca=%05x blank=%d "
+                    "pitch=%04x out=%d/%d flags=%02x le=%u st=%u ign=%d",
+                    listed ? " | " : "",
+                    v, spu->voice[v].volumel, spu->voice[v].volumer,
+                    spu->voice[v].envcvol, spu->data[v].adsr_phase,
+                    (unsigned)(spu->voice[v].adsaddr << 3),
+                    (unsigned)(spu->voice[v].adraddr << 3), addr, blank,
+                    spu->voice[v].adsampr,
+                    d.voice_peak_l[v], d.voice_peak_r[v],
+                    d.voice_flags[v], d.voice_loopend[v], d.voice_stop[v],
+                    spu->data[v].ignore_loop_addr);
+
+                if (written <= 0) {
+                    break;
+                }
+
+                used += static_cast<size_t>(written);
+                listed++;
+            }
+
+            audioDiagLine("  voices(%d): %s", listed, listed ? voices : "(none sounding)");
+        }
+
+        audioDiagLine("  cd: mode=%02x [xa_adpcm=%d xa_filter=%d report=%d autopause=%d cdda=%d] "
+                      "xa_playing=%d xa_mute=%d mute=%d filter=file %02x/chan %02x "
+                      "lba=%u xa_lba=%u atv=%02x/%02x/%02x/%02x",
+            cdrom->mode,
+            (cdrom->mode & 0x40) ? 1 : 0,
+            (cdrom->mode & 0x08) ? 1 : 0,
+            (cdrom->mode & 0x04) ? 1 : 0,
+            (cdrom->mode & 0x02) ? 1 : 0,
+            (cdrom->mode & 0x01) ? 1 : 0,
+            cdrom->xa_playing, cdrom->xa_mute, cdrom->mute,
+            cdrom->xa_file, cdrom->xa_channel,
+            cdrom->lba, cdrom->xa_lba,
+            cdrom->vol[0], cdrom->vol[1], cdrom->vol[2], cdrom->vol[3]);
+
+        // Every CD-ROM command issued in the period, oldest first. This is what separates
+        // "the game never asked for XA" from "it asked and we dropped it": look for
+        // CdlSetmode and read bit6 (0x40) of its parameter against mode_before. It also
+        // exposes the cdrom_cmd_setmode() -> cdrom_pause() interaction directly, because a
+        // Setmode arriving with read=1 or xa=1 is one that stopped a drive that was running.
+        const uint32_t cmds = std::min<uint32_t>(d.cd_cmd_seen, PSX_AUDIO_DIAG_CD_CMDS);
+        if (cmds > 0) {
+            audioDiagLine("  cd_cmds: %u this period", d.cd_cmd_seen);
+        }
+        for (uint32_t i = 0; i < cmds; i++) {
+            const uint32_t slot =
+                (d.cd_cmd_head + PSX_AUDIO_DIAG_CD_CMDS - cmds + i) % PSX_AUDIO_DIAG_CD_CMDS;
+            char params[32];
+            size_t used = 0;
+
+            params[0] = '\0';
+            for (uint8_t p = 0; p < d.cd_cmd[slot].nparams && used + 4u < sizeof(params); p++) {
+                const int written = std::snprintf(params + used, sizeof(params) - used,
+                                                  "%02x ", d.cd_cmd[slot].param[p]);
+                if (written <= 0) {
+                    break;
+                }
+                used += static_cast<size_t>(written);
+            }
+
+            audioDiagLine("    cmd %02x %-14s params=[%s] mode_before=%02x xa=%d read=%d state=%d",
+                d.cd_cmd[slot].cmd,
+                psx_cdrom_command_name(d.cd_cmd[slot].cmd),
+                used ? params : "-",
+                d.cd_cmd[slot].mode_before,
+                d.cd_cmd[slot].xa_playing,
+                d.cd_cmd[slot].read_ongoing,
+                d.cd_cmd[slot].state);
+        }
+
+        audioDiagLine("  xa: accepted=%u filter_rejects=%u nonaudio_skips=%u stop_eor=%u "
+                      "stop_far=%u starved=%u walk_peak=%u peak=%d/%d cdda_sectors=%u | "
+                      "mix: wrap=%u sat=%u peak=%d/%d",
+            d.xa_sectors, d.xa_filter_rejects, d.xa_skip_nonaudio, d.xa_stop_eor,
+            d.xa_stop_far, d.xa_starved, d.xa_walk_peak,
+            d.xa_peak_l, d.xa_peak_r, d.cdda_sectors,
+            d.mix_wrap, d.mix_sat, d.mix_peak_l, d.mix_peak_r);
+
+        // Every sector decision, oldest first, each with the filter that was in force when the
+        // fetcher decided. This is what settles "music plays, dialogue does not":
+        //   REJECT_FILTER entries whose file/chan is the dialogue stream -> the filter is wrong
+        //   no entry for the dialogue channel at all                     -> it never arrived
+        //   ACCEPT entries for it but silence                            -> the fault is downstream
+        //   STOP_EOR reached while walking (chan != filter_chan)         -> the walk was aborted
+        static const char* const kVerdict[PSX_XA_VERDICT_KINDS] = {
+            "ACCEPT(nofilter)", "ACCEPT(match)", "REJECT(filter)",
+            "SKIP(nonaudio)", "STOP(eor)"
+        };
+
+        const uint32_t ring = std::min<uint32_t>(d.xa_hdr_seen, PSX_AUDIO_DIAG_XA_HDRS);
+        for (uint32_t i = 0; i < ring; i++) {
+            const uint32_t slot =
+                (d.xa_hdr_head + PSX_AUDIO_DIAG_XA_HDRS - ring + i) % PSX_AUDIO_DIAG_XA_HDRS;
+            const uint8_t sm = d.xa_hdr[slot].submode;
+            const uint8_t ci = d.xa_hdr[slot].coding;
+            const uint8_t vd = d.xa_hdr[slot].verdict;
+
+            audioDiagLine("    xa lba=%u %-16s file=%02x chan=%02x vs filter=%02x/%02x(on=%d) "
+                          "submode=%02x[eor=%d video=%d audio=%d data=%d trig=%d form2=%d "
+                          "rt=%d eof=%d] coding=%02x[%s %s %s emphasis=%d]",
+                d.xa_hdr[slot].lba,
+                (vd < PSX_XA_VERDICT_KINDS) ? kVerdict[vd] : "?",
+                d.xa_hdr[slot].file, d.xa_hdr[slot].chan,
+                d.xa_hdr[slot].filter_file, d.xa_hdr[slot].filter_chan,
+                d.xa_hdr[slot].filter_on,
+                sm,
+                (sm & 0x01) ? 1 : 0, (sm & 0x02) ? 1 : 0, (sm & 0x04) ? 1 : 0,
+                (sm & 0x08) ? 1 : 0, (sm & 0x10) ? 1 : 0, (sm & 0x20) ? 1 : 0,
+                (sm & 0x40) ? 1 : 0, (sm & 0x80) ? 1 : 0,
+                ci,
+                (ci & 0x01) ? "stereo" : "mono",
+                (ci & 0x04) ? "18.9kHz" : "37.8kHz",
+                (ci & 0x10) ? "8bit" : "4bit",
+                (ci & 0x40) ? 1 : 0);
+        }
+
+        // Period counters only; the window totals come from the arithmetic on these lines.
+        // The minima have to be re-seeded past the memset or the next period reports 0000.
+        std::memset(&g_psx_audio_diag, 0, sizeof(g_psx_audio_diag));
+        g_psx_audio_diag.mainvol_min_l = 0xffffffffu;
+        g_psx_audio_diag.mainvol_min_r = 0xffffffffu;
+        g_psx_audio_diag.spu_ram_lo = 0xffffffffu;
+    }
+
+    // Keep the bounded probe in memory; never write PCM from the audio callback.
+    static constexpr size_t kAudioDiagPcmLimit = 44100u * 4u * 64u;
+
+    void audioDiagCapturePcm(std::vector<uint8_t>& destination,
+                             const std::vector<uint8_t>& samples) {
+        if (!audio_diag_file_) return;
+        const size_t count = std::min(samples.size(), kAudioDiagPcmLimit - destination.size());
+        destination.insert(destination.end(), samples.begin(), samples.begin() + count);
+    }
+
+    void audioDiagSavePcm(const char* name, std::vector<uint8_t>& samples,
+                          const char* format = "s16le/stereo/44100") {
+        std::string path;
+        if (!samples.empty() && audioDiagPath(path, name)) {
+            FILE* file = std::fopen(path.c_str(), "wb");
+            if (file) {
+                const size_t written = std::fwrite(samples.data(), 1, samples.size(), file);
+                const int close_status = std::fclose(file);
+                audioDiagLine("pcm: %s bytes=%zu expected=%zu close=%d format=%s",
+                              name, written, samples.size(), close_status, format);
+            } else {
+                audioDiagLine("pcm: failed to open %s", name);
+            }
+        }
+        samples.clear();
+    }
+
+    static void audioDiagStem(void* context, int source, const int16_t* samples, size_t frames) {
+        auto* session = static_cast<ArmsxSession*>(context);
+        if (source < 0 || source >= 3 || !session->audio_diag_file_) return;
+        auto& dst = session->audio_diag_stems_[source];
+        const size_t count = std::min(frames * 4u, kAudioDiagPcmLimit - dst.size());
+        const auto* bytes = reinterpret_cast<const uint8_t*>(samples);
+        dst.insert(dst.end(), bytes, bytes + count);
+    }
+
+    static void audioDiagXa(void* context, const psx_xa_probe_sector_t* sector) {
+        auto* session = static_cast<ArmsxSession*>(context);
+        if (!session->audio_diag_file_) return;
+        auto& dst = session->audio_diag_xa_;
+        const size_t bytes = 32u + CD_SECTOR_SIZE + sector->frames * 4u;
+        if (bytes > kAudioDiagXaLimit - dst.size()) {
+            ++session->audio_diag_xa_dropped_;
+            return;
+        }
+        auto u16 = [&dst](uint16_t x) {
+            dst.push_back(static_cast<uint8_t>(x)); dst.push_back(static_cast<uint8_t>(x >> 8));
+        };
+        auto u32 = [&u16](uint32_t x) { u16(static_cast<uint16_t>(x)); u16(static_cast<uint16_t>(x >> 16)); };
+        // XAR1: size, LBA, position in dialogue PCM, rate, frames, decoder
+        // history, original 2352-byte sector, decoded interleaved stereo PCM.
+        u32(0x31524158u); u32(static_cast<uint32_t>(bytes)); u32(sector->lba);
+        u32(static_cast<uint32_t>(session->audio_diag_stems_[0].size() / 4) + sector->output_offset);
+        u32(sector->rate); u32(sector->frames);
+        for (auto h : sector->history) u16(static_cast<uint16_t>(h));
+        dst.insert(dst.end(), sector->sector, sector->sector + CD_SECTOR_SIZE);
+        for (uint32_t i = 0; i < sector->frames; ++i) {
+            u16(static_cast<uint16_t>(sector->left[i]));
+            u16(static_cast<uint16_t>(sector->right[i]));
+        }
+    }
+
+    void audioDiagBegin() {
+        std::string path;
+        if (!audioDiagPath(path, "audio_diag.txt")) {
+            return;
+        }
+
+        std::error_code size_error;
+        const auto size = std::filesystem::file_size(path, size_error);
+        if (!size_error && size >= 2u * 1024u * 1024u) {
+            std::error_code rotate_error;
+            std::filesystem::rename(path, path + ".previous", rotate_error);
+            if (rotate_error) return;
+        }
+        audio_diag_file_ = std::fopen(path.c_str(), "a");
+        if (!audio_diag_file_) {
+            return;
+        }
+
+        audio_diag_core_pcm_.clear();
+        audio_diag_output_pcm_.clear();
+        audio_diag_core_pcm_.reserve(kAudioDiagPcmLimit);
+        audio_diag_output_pcm_.reserve(kAudioDiagPcmLimit);
+
+        for (auto& stem : audio_diag_stems_) {
+            stem.clear();
+            stem.reserve(kAudioDiagPcmLimit);
+        }
+        audio_diag_xa_.clear();
+        audio_diag_xa_.reserve(kAudioDiagXaLimit);
+        audio_diag_xa_dropped_ = 0;
+        g_psx_xa_probe = &ArmsxSession::audioDiagXa;
+        g_psx_audio_pcm_probe_context = this;
+        g_psx_audio_pcm_probe = &ArmsxSession::audioDiagStem;
+
+        stall_capture_start_ = SDL_GetPerformanceCounter();
+        stall_last_start_ = 0;
+        stall_frames_ = 0;
+        audio_diag_seq_++;
+        audio_diag_frames_left_ = std::max(1, static_cast<int>(frameRate() * kAudioDiagSeconds + 0.5));
+        audio_diag_snapshots_ = 0;
+
+        audioDiagLine("=== audio_diag capture #%d (%d frames, ~%.0f s) ===",
+                      audio_diag_seq_, audio_diag_frames_left_,
+                      static_cast<double>(audio_diag_frames_left_) / frameRate());
+
+        // Also breadcrumbed so "did it fire?" is answerable from armsx.log alone.
+        psxe_diag_logf("audio", "audio_diag: capture #%d armed, %d left this process",
+                       audio_diag_seq_, audio_diag_budget_);
+        audioDiagLine("title=%s disc=%s", title_.c_str(),
+                      disc_path_.empty() ? "(none)" : disc_path_.string().c_str());
+        audioDiagLine("device: mix_rate=%d buffer=%u frames (%.1f ms) volume=%d ff_volume=%d "
+                      "muted=%d swap=%d skip_reverb=%d",
+                      kAudioMixRate, audio_desired_.samples,
+                      (static_cast<double>(audio_desired_.samples) * 1000.0) /
+                          static_cast<double>(kAudioMixRate),
+                      audio_volume_, audio_ff_volume_,
+                      audio_muted_ ? 1 : 0, audio_swap_channels_ ? 1 : 0,
+                      psx_->spu->reverb_disabled);
+
+        SDL_LockAudioDevice(audio_dev_);
+        audio_underruns_ = 0;
+        audio_underrun_bytes_ = 0;
+        audio_rebuffer_events_ = 0;
+        audio_overflow_trims_ = 0;
+        SDL_UnlockAudioDevice(audio_dev_);
+
+        psx_audio_diag_set_enabled(1);
+    }
+
+    void audioDiagEnd() {
+        g_psx_xa_probe = nullptr;
+        g_psx_audio_pcm_probe = nullptr;
+        g_psx_audio_pcm_probe_context = nullptr;
+        psx_audio_diag_set_enabled(0);
+
+        if (!audio_diag_file_) {
+            return;
+        }
+
+        audioDiagLine("xa_raw: records_dropped=%u", audio_diag_xa_dropped_);
+        audioDiagSavePcm("audio_diag_xa.bin", audio_diag_xa_, "XAR1/sector+decoded");
+        audioDiagSavePcm("audio_diag_dialogue.pcm", audio_diag_stems_[0]);
+        audioDiagSavePcm("audio_diag_voices.pcm", audio_diag_stems_[1]);
+        audioDiagSavePcm("audio_diag_reverb.pcm", audio_diag_stems_[2]);
+        audioDiagSavePcm("audio_diag_core.pcm", audio_diag_core_pcm_);
+        audioDiagSavePcm("audio_diag_output.pcm", audio_diag_output_pcm_);
+
+        char tail[256];
+        std::snprintf(tail, sizeof(tail), "--- end capture #%d: %d snapshots ---\n",
+                      audio_diag_seq_, audio_diag_snapshots_);
+        std::fputs(tail, audio_diag_file_);
+        std::fflush(audio_diag_file_);
+        std::fclose(audio_diag_file_);
+        audio_diag_file_ = nullptr;
+    }
+
+    // Called once per emulated frame, after the audio for that frame has been mixed and queued
+    // so a snapshot describes a whole frame's worth of work.
+    void runAudioDiag() {
+        if (audio_diag_file_) {
+            if ((audio_diag_frames_left_ % kAudioDiagSnapshotFrames) == 0) {
+                audioDiagSnapshot();
+            }
+
+            if (--audio_diag_frames_left_ <= 0) {
+                audioDiagEnd();
+            }
+
+            return;
+        }
+
+        if (--audio_diag_poll_ > 0) {
+            return;
+        }
+
+        audio_diag_poll_ = kAudioDiagPollFrames;
+
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+        if (audio_diag_budget_ > 0 && audio_dev_) {
+            audio_diag_budget_--;
+            audioDiagBegin();
+            return;
+        }
+#endif
+
+        std::string path;
+        if (!audioDiagPath(path, "audio_diag")) {
+            return;
+        }
+
+        FILE* marker = std::fopen(path.c_str(), "rb");
+        if (!marker) {
+            return;
+        }
+        std::fclose(marker);
+
+        // Deleted before the capture opens, so a failed fopen() cannot leave the marker armed
+        // and a successful one cannot run a second window off one touch.
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::path(path), ec);
+
+        // The budget is checked AFTER the marker is consumed, and the refusal is written into
+        // the output file the user actually retrieves. A spent budget used to be indistinguishable
+        // from a marker that was never noticed: the marker just sat there and nothing happened,
+        // which reads as "the instrumentation is broken" rather than "relaunch the app".
+        if (audio_diag_budget_ <= 0) {
+            std::string out;
+            if (audioDiagPath(out, "audio_diag.txt")) {
+                if (FILE* f = std::fopen(out.c_str(), "a")) {
+                    // fputs, not fprintf: frontend/diagnostics.h #defines fprintf into the diag
+                    // pipe, which would both fail to compile as std::fprintf and mirror the line
+                    // into armsx.log. Same reason psx/dev/gpu.c's dump writes with fputs().
+                    char note[192];
+                    std::snprintf(note, sizeof(note),
+                                  "=== marker seen but the per-process capture budget of %d is "
+                                  "spent; relaunch the app to re-arm ===\n", kAudioDiagBudget);
+                    std::fputs(note, f);
+                    std::fclose(f);
+                }
+            }
+
+            psxe_diag_logf("audio", "audio_diag: budget spent, relaunch to re-arm");
+
+            return;
+        }
+
+        audio_diag_budget_--;
+        audioDiagBegin();
+    }
+
+    /* Decides how many samples the frame ABOUT TO RUN owes the audio device, and grants the
+       SPU exactly that many to produce while it runs.
+
+       This used to be the first thing queueAudioForFrame() did, i.e. after the frame, and the
+       SPU then produced all of them in one lump with the CPU stopped. That is what capped the
+       SPU interrupt rate at the video frame rate; the full measurement is in the block comment
+       above psx_spu_tick() in psx/dev/spu.c. Splitting the decision out and moving it ahead of
+       the frame is the whole change — the count per frame is identical, only the instants the
+       samples are produced at have moved onto the CPU's timeline.
+
+       Deliberately mirrors queueAudioForFrame()'s old early-outs: no device means no grant,
+       so a session without audio leaves the SPU exactly as frozen as it was before. */
+    void beginAudioFrame() {
+        audio_frame_samples_ = 0;
+
+        if (!psx_ || !audio_dev_) {
+            return;
+        }
+
+        // The SPU is pulled by the frontend, not free-running: psx_spu_get_sample() advances
+        // the voice cursors, the ADSR envelopes and the key-on/key-off latches once per call.
+        // So this asks for the same number of samples per EMULATED frame whatever the
+        // wall-clock speed is. Fast-forward is dealt with after the mix, by resampling — never
+        // by pulling fewer samples, which would stretch every envelope and eat note edges.
         audio_sample_accumulator_ += static_cast<double>(kAudioMixRate) / frameRate();
         const int sample_count = static_cast<int>(audio_sample_accumulator_);
         if (sample_count <= 0) {
@@ -2834,109 +5454,670 @@ class ArmsxSession {
         }
 
         audio_sample_accumulator_ -= static_cast<double>(sample_count);
+        audio_frame_samples_ = sample_count;
 
-        const size_t byte_count = static_cast<size_t>(sample_count) * sizeof(int16_t) * 2;
+        psx_spu_begin_frame(psx_->spu, sample_count);
+    }
+
+    void queueAudioForFrame() {
+        if (!psx_ || !audio_dev_) {
+            return;
+        }
+
+        recoverAudioUnderrunIfNeeded();
+
+        const int sample_count = audio_frame_samples_;
+        if (sample_count <= 0) {
+            return;
+        }
+
+        const size_t byte_count = static_cast<size_t>(sample_count) * kAudioBytesPerSample;
         if (byte_count == 0) {
             return;
         }
 
         std::vector<uint8_t> frame_audio(byte_count);
         MixPsxAudio(psx_, frame_audio.data(), static_cast<int>(frame_audio.size()));
+        audioDiagCapturePcm(audio_diag_core_pcm_, frame_audio);
+        applyOutputShaping(frame_audio.data(), static_cast<size_t>(sample_count));
 
-        size_t queue_before = static_cast<size_t>(SDL_GetQueuedAudioSize(audio_dev_));
-        if (queue_before > kMaxQueuedAudioBytes) {
-            SDL_PauseAudioDevice(audio_dev_, 1);
-            SDL_ClearQueuedAudio(audio_dev_);
-            audio_playback_started_ = false;
-            queue_before = 0;
-            audio_sample_accumulator_ = 0.0;
+        size_t queued_samples = 0;
+        size_t drained_samples = 0;
+        bool start_audio = false;
+        const bool deliberate_rate_conversion = audioRateConversionActive();
+        const bool realtime_elasticity = !deliberate_rate_conversion && audio_playback_started_;
+        if (deliberate_rate_conversion || realtime_elasticity) {
+            SDL_LockAudioDevice(audio_dev_);
+            queued_samples = (audio_queue_.size() - audio_queue_read_offset_) / kAudioBytesPerSample;
+            drained_samples = audio_consumed_bytes_ / kAudioBytesPerSample;
+            audio_consumed_bytes_ = 0;
+            SDL_UnlockAudioDevice(audio_dev_);
+
+            if (deliberate_rate_conversion) {
+                updateAudioRateRatio(sample_count, queued_samples, drained_samples);
+                audio_time_stretcher_.reset();
+                frame_audio = resampleToDeviceRate(
+                    frame_audio.data(), static_cast<size_t>(sample_count));
+            } else {
+                updateRealtimeAudioRatio(sample_count, queued_samples);
+                frame_audio = audio_time_stretcher_.process(
+                    frame_audio.data(), static_cast<size_t>(sample_count), audio_rate_ratio_);
+            }
+            if (frame_audio.empty()) {
+                return;
+            }
+        } else {
+            resetRealtimeAudioClock();
         }
 
-        if (SDL_QueueAudio(audio_dev_, frame_audio.data(), static_cast<Uint32>(frame_audio.size())) != 0) {
-            psxe_diag_logf("audio", "SDL_QueueAudio failed: %s", SDL_GetError());
-            return;
-        }
+        audioDiagCapturePcm(audio_diag_output_pcm_, frame_audio);
 
-        const size_t queue_after = static_cast<size_t>(SDL_GetQueuedAudioSize(audio_dev_));
-        if (!audio_playback_started_ && queue_after >= kAudioPrimeBytes) {
+        SDL_LockAudioDevice(audio_dev_);
+        const size_t queue_before = audio_queue_.size() - audio_queue_read_offset_;
+        compactAudioQueueLocked();
+        const ArmsxAudioQueueWriteDecision write = armsx_audio_queue_write_decision(
+            audio_queue_.size() - audio_queue_read_offset_, frame_audio.size(),
+            kMaxQueuedAudioBytes);
+        if (write.discard_queued_bytes > 0) {
+            audio_overflow_trims_++;
+            trimQueuedAudioFrontLocked(write.discard_queued_bytes);
+        }
+        if (write.copy_incoming_bytes < frame_audio.size()) {
+            frame_audio.resize(write.copy_incoming_bytes);
+        }
+        audio_queue_.insert(audio_queue_.end(), frame_audio.begin(), frame_audio.end());
+        const size_t queue_after = audio_queue_.size() - audio_queue_read_offset_;
+        if (!audio_playback_started_ &&
+            queue_after >= static_cast<size_t>(kAudioPrebufferSamples) * kAudioBytesPerSample) {
+            // Start only after several complete frames are queued.  This keeps OpenSL ES from
+            // consuming the first frame while the emulation thread is still bootstrapping and
+            // gives the normal frame loop a real jitter cushion rather than relying on luck at
+            // the first callback.
             audio_playback_started_ = true;
-            psxe_diag_logf(
-                "audio",
-                "SDL queued audio primed bytes=%zu target=%zu frame=%llu",
-                queue_after,
-                kAudioPrimeBytes,
-                static_cast<unsigned long long>(vblank_counter_)
-            );
+            start_audio = true;
+        }
+        SDL_UnlockAudioDevice(audio_dev_);
+
+        if (start_audio) {
             updateAudioPlaybackState();
         }
+
+        // Only read by the HW_DEBUG trace below.
+        (void)queue_before;
+        (void)queue_after;
+        (void)drained_samples;
 
 #if defined(USE_HARDWARE) && defined(HW_DEBUG)
         if (hardware_backend_active_) {
             psxe_diag_logf(
                 "audio",
-                "frame-audio frame=%llu samples=%d bytes=%zu queue_before=%zu queue_after=%zu accumulator=%.3f frame_rate=%.3f fast_forward=%s paused=%s",
+                "frame-audio frame=%llu samples=%d bytes=%zu queue_before=%zu queue_after=%zu accumulator=%.3f frame_rate=%.3f fast_forward=%s rate_ratio=%.3f drained=%zu paused=%s",
                 static_cast<unsigned long long>(vblank_counter_),
                 sample_count,
-                byte_count,
+                frame_audio.size(),
                 queue_before,
                 queue_after,
                 audio_sample_accumulator_,
                 frameRate(),
                 fast_forward_enabled_ ? "true" : "false",
+                audio_rate_ratio_,
+                drained_samples,
                 paused_ ? "true" : "false"
             );
         }
 #endif
+
+        // After the mix and the queue push, so a snapshot describes a whole frame.
+        runAudioDiag();
     }
 
-    void clearQueuedAudio() {
-        audio_sample_accumulator_ = 0.0;
-        audio_playback_started_ = false;
-        if (!audio_dev_) {
+    // Volume / mute / channel swap, applied to the freshly mixed frame. Deliberately a no-op
+    // at the defaults (volume 100, nothing muted, no swap) so normal playback is byte-for-byte
+    // what it was before the [audio] table existed.
+    void applyOutputShaping(uint8_t* data, size_t sample_count) {
+        const int volume = fast_forward_enabled_ ? audio_ff_volume_ : audio_volume_;
+        const bool silent = audio_muted_ || volume == 0
+            || (fast_forward_enabled_ && audio_mute_fast_forward_);
+
+        if (silent) {
+            // Zeroed rather than skipped: MixPsxAudio() has already run, so the SPU state is
+            // correct either way, and feeding the device silence beats letting it run dry.
+            std::memset(data, 0, sample_count * kAudioBytesPerSample);
             return;
         }
 
+        auto* samples = reinterpret_cast<int16_t*>(data);
+
+        if (audio_swap_channels_) {
+            for (size_t index = 0; index < sample_count; index++) {
+                std::swap(samples[(index << 1) + 0], samples[(index << 1) + 1]);
+            }
+        }
+
+        if (volume == 100) {
+            return;
+        }
+
+        for (size_t index = 0; index < (sample_count << 1); index++) {
+            const int scaled = (static_cast<int>(samples[index]) * volume) / 100;
+            samples[index] = static_cast<int16_t>(std::clamp(scaled, -32768, 32767));
+        }
+    }
+
+    // Track how far the emulated stream has to be rate-converted to reach the device.
+    //
+    // The obvious answer — divide by the requested multiplier — breaks the moment the device
+    // cannot actually reach it: a phone managing 1.3x while the user asked for 4x would have
+    // its queue starved solid, and "unlimited" has no nominal multiplier to divide by at all.
+    // So the ratio comes from what the device REALLY drained since the last frame (the
+    // feed-forward term, which is the whole answer in steady state) plus a slow pull toward a
+    // target queue depth, which absorbs the mismatch in either direction.
+    //
+    // Both inputs arrive in device-buffer-sized lumps, so the estimate is smoothed hard before
+    // it becomes a ratio: an estimate that tracked the lumps would wobble the pitch audibly.
+    void updateAudioRateRatio(int input_samples, size_t queued_samples, size_t drained_samples) {
+        if (audio_rate_output_estimate_ <= 0.0) {
+            // First frame at this speed: seed from the configured multiplier so the loop only
+            // has to trim, instead of ramping from 1x with an audible sweep.
+            audio_rate_output_estimate_ =
+                static_cast<double>(input_samples) / std::max(expectedSpeedMultiplier(), 0.05);
+        }
+
+        const double raw_output = static_cast<double>(drained_samples)
+            + (static_cast<double>(kAudioRateTargetQueueSamples) - static_cast<double>(queued_samples))
+                  / kAudioRateQueueCorrectionFrames;
+
+        audio_rate_output_estimate_ += kAudioRateSmoothing * (raw_output - audio_rate_output_estimate_);
+        audio_rate_output_estimate_ = std::max(audio_rate_output_estimate_, 1.0);
+        audio_rate_ratio_ = std::clamp(
+            static_cast<double>(input_samples) / audio_rate_output_estimate_, kAudioRateMinRatio, kAudioRateMaxRatio);
+    }
+
+    // Reset timing windows without discarding learned DRC state.
+    void resetRealtimeAudioClock() {
+        audio_realtime_last_counter_ = 0;
+        audio_realtime_elapsed_seconds_ = 0.0;
+        audio_realtime_input_samples_ = 0;
+        audio_realtime_window_frames_ = 0;
+        audio_time_stretcher_.reset();
+    }
+
+    /* Smooth normal-speed deficits over several frames. The SPU clock remains authoritative;
+       only the host stream duration changes. */
+    void updateRealtimeAudioRatio(int input_samples, size_t queued_samples) {
+        const Uint64 now = SDL_GetPerformanceCounter();
+        const Uint64 frequency = SDL_GetPerformanceFrequency();
+        if (audio_realtime_last_counter_ == 0 || frequency == 0) {
+            audio_realtime_last_counter_ = now;
+            return;
+        }
+
+        const double elapsed = static_cast<double>(now - audio_realtime_last_counter_) /
+                               static_cast<double>(frequency);
+        audio_realtime_last_counter_ = now;
+
+        // Ignore discontinuous timing across a pause or background transition.
+        if (!(elapsed > 0.0) || elapsed > 0.25) {
+            audio_realtime_elapsed_seconds_ = 0.0;
+            audio_realtime_input_samples_ = 0;
+            audio_realtime_window_frames_ = 0;
+            audio_drc_ = armsx_audio_drc_after_discontinuity(audio_drc_);
+            audio_rate_ratio_ = audio_drc_.ratio;
+            audio_time_stretcher_.reset();
+            return;
+        }
+
+        audio_realtime_elapsed_seconds_ += elapsed;
+        audio_realtime_input_samples_ += static_cast<size_t>(input_samples);
+        const bool low_water = queued_samples < kAudioRateTargetQueueSamples / 2;
+        const int window_frames = ++audio_realtime_window_frames_;
+        if (window_frames < kAudioRealtimeWindowFrames &&
+            (!low_water || window_frames < kAudioRealtimeLowWaterMinFrames)) {
+            return;
+        }
+
+        audio_drc_ = armsx_audio_drc_step(
+            audio_drc_, audio_realtime_input_samples_, audio_realtime_elapsed_seconds_,
+            kAudioMixRate, queued_samples, kAudioRateTargetQueueSamples);
+        audio_rate_ratio_ = audio_drc_.ratio;
+
+        audio_realtime_elapsed_seconds_ = 0.0;
+        audio_realtime_input_samples_ = 0;
+        audio_realtime_window_frames_ = 0;
+    }
+
+    // Convert explicit speed changes to the device rate. The ratio is input frames per output frame.
+    //
+    // Compressing uses a box average over the samples being collapsed rather than "keep every
+    // Nth": plain decimation of a 44.1 kHz stream aliases badly — the SPU's own pitch
+    // conversion leaves plenty of energy near Nyquist — and averaging the samples that would
+    // have been thrown away costs two adds each. Expansion uses cross-frame interpolation.
+    //
+    // Neither pitch is preserved: at 2x the audio comes out an octave up, which is what a
+    // fast-forward without a time-stretcher sounds like everywhere else. Phase and the partial
+    // accumulator survive across frames, so a fractional ratio neither drifts nor clicks at
+    // the frame boundary.
+    std::vector<uint8_t> resampleToDeviceRate(const uint8_t* data, size_t input_samples) {
+        const auto* samples = reinterpret_cast<const int16_t*>(data);
+        std::vector<uint8_t> out;
+        out.reserve(static_cast<size_t>(static_cast<double>(input_samples) / audio_rate_ratio_ + 4.0)
+                    * kAudioBytesPerSample);
+
+        auto emit = [&](int16_t left, int16_t right) {
+            const uint8_t* left_bytes = reinterpret_cast<const uint8_t*>(&left);
+            const uint8_t* right_bytes = reinterpret_cast<const uint8_t*>(&right);
+            out.insert(out.end(), left_bytes, left_bytes + sizeof(int16_t));
+            out.insert(out.end(), right_bytes, right_bytes + sizeof(int16_t));
+        };
+
+        if (input_samples == 0) {
+            return out;
+        }
+
+        if (audio_rate_ratio_ < 1.0) {
+            if (!audio_rate_expand_initialized_) {
+                audio_rate_expand_previous_left_ = samples[0];
+                audio_rate_expand_previous_right_ = samples[1];
+                audio_rate_expand_phase_ = 1.0;
+                audio_rate_expand_initialized_ = true;
+            }
+
+            while (audio_rate_expand_phase_ < static_cast<double>(input_samples)) {
+                const size_t upper = static_cast<size_t>(audio_rate_expand_phase_);
+                const double fraction =
+                    audio_rate_expand_phase_ - static_cast<double>(upper);
+                const int16_t left0 = upper == 0
+                    ? audio_rate_expand_previous_left_
+                    : samples[((upper - 1u) << 1) + 0u];
+                const int16_t right0 = upper == 0
+                    ? audio_rate_expand_previous_right_
+                    : samples[((upper - 1u) << 1) + 1u];
+                const int16_t left1 = samples[(upper << 1) + 0u];
+                const int16_t right1 = samples[(upper << 1) + 1u];
+                const int16_t left = static_cast<int16_t>(std::lround(
+                    static_cast<double>(left0) +
+                    (static_cast<double>(left1) - static_cast<double>(left0)) * fraction));
+                const int16_t right = static_cast<int16_t>(std::lround(
+                    static_cast<double>(right0) +
+                    (static_cast<double>(right1) - static_cast<double>(right0)) * fraction));
+                emit(left, right);
+                audio_rate_expand_phase_ += audio_rate_ratio_;
+            }
+
+            audio_rate_expand_phase_ -= static_cast<double>(input_samples);
+            audio_rate_expand_previous_left_ = samples[((input_samples - 1u) << 1) + 0u];
+            audio_rate_expand_previous_right_ = samples[((input_samples - 1u) << 1) + 1u];
+            return out;
+        }
+
+        audio_rate_expand_initialized_ = false;
+
+        for (size_t index = 0; index < input_samples; index++) {
+            audio_rate_accumulator_left_ += samples[(index << 1) + 0];
+            audio_rate_accumulator_right_ += samples[(index << 1) + 1];
+            audio_rate_accumulator_count_++;
+            audio_rate_phase_ += 1.0;
+
+            while (audio_rate_phase_ >= audio_rate_ratio_) {
+                audio_rate_phase_ -= audio_rate_ratio_;
+
+                if (audio_rate_accumulator_count_ > 0) {
+                    audio_rate_last_left_ =
+                        static_cast<int16_t>(audio_rate_accumulator_left_ / audio_rate_accumulator_count_);
+                    audio_rate_last_right_ =
+                        static_cast<int16_t>(audio_rate_accumulator_right_ / audio_rate_accumulator_count_);
+                    audio_rate_accumulator_left_ = 0;
+                    audio_rate_accumulator_right_ = 0;
+                    audio_rate_accumulator_count_ = 0;
+                }
+
+                emit(audio_rate_last_left_, audio_rate_last_right_);
+            }
+        }
+
+        return out;
+    }
+
+    void resetAudioRateConverter() {
+        audio_rate_ratio_ = 1.0;
+        audio_rate_output_estimate_ = 0.0;
+        audio_rate_phase_ = 0.0;
+        audio_rate_accumulator_left_ = 0;
+        audio_rate_accumulator_right_ = 0;
+        audio_rate_accumulator_count_ = 0;
+        audio_rate_last_left_ = 0;
+        audio_rate_last_right_ = 0;
+        audio_consumed_bytes_ = 0;
+        audio_drc_ = {1.0, 1.0, 1.0, false};
+        resetRealtimeAudioClock();
+        audio_rate_expand_initialized_ = false;
+        audio_rate_expand_phase_ = 1.0;
+        audio_rate_expand_previous_left_ = 0;
+        audio_rate_expand_previous_right_ = 0;
+        audio_time_stretcher_.reset();
+    }
+
+    void consumeQueuedAudio(uint8_t* buffer, size_t size) {
+        const size_t available = audio_queue_.size() - audio_queue_read_offset_;
+        const ArmsxAudioQueueReadDecision decision =
+            armsx_audio_queue_read_decision(available, size, audio_rebuffer_requested_);
+        const size_t to_copy = decision.copy_bytes;
+
+        // Consume complete queued frames and fade a short tail before rebuffering.
+        if (decision.request_rebuffer) {
+            audio_underruns_++;
+            audio_underrun_bytes_ += size - to_copy;
+            if (!audio_rebuffer_requested_) {
+                audio_rebuffer_requested_ = true;
+                audio_rebuffer_events_++;
+            }
+        }
+
+        if (to_copy > 0) {
+            std::memcpy(buffer, audio_queue_.data() + audio_queue_read_offset_, to_copy);
+            audio_queue_read_offset_ += to_copy;
+            // Feeds the fast-forward rate estimate above. Only ever touched from here (inside
+            // SDL's audio lock) and from the emulation thread under SDL_LockAudioDevice().
+            audio_consumed_bytes_ += to_copy;
+
+            if (decision.request_rebuffer) {
+                auto* samples = reinterpret_cast<int16_t*>(buffer);
+                const size_t copied_frames = to_copy / kAudioBytesPerSample;
+                const size_t fade_frames = std::min<size_t>(copied_frames, 64);
+                const size_t fade_begin = copied_frames - fade_frames;
+                for (size_t frame = 0; frame < fade_frames; ++frame) {
+                    const int gain = static_cast<int>(fade_frames - frame);
+                    const int divisor = static_cast<int>(fade_frames + 1);
+                    for (size_t channel = 0; channel < 2; ++channel) {
+                        const size_t index = ((fade_begin + frame) << 1) + channel;
+                        samples[index] = static_cast<int16_t>(
+                            (static_cast<int>(samples[index]) * gain) / divisor);
+                    }
+                }
+            }
+        }
+
+        if (audio_queue_read_offset_ >= audio_queue_.size()) {
+            // The callback owns only the queue storage.  The fractional sample accumulator is
+            // emulation-thread state and must survive a normal device drain.
+            resetAudioQueueStorageLocked();
+        }
+    }
+
+    void clearQueuedAudio() {
+        if (!audio_dev_) {
+            resetAudioQueueLocked();
+            audio_playback_started_ = false;
+            audio_rebuffer_requested_ = false;
+            return;
+        }
+
+        SDL_LockAudioDevice(audio_dev_);
+        resetAudioQueueLocked();
+        audio_rebuffer_requested_ = false;
+        SDL_UnlockAudioDevice(audio_dev_);
+        audio_playback_started_ = false;
+    }
+
+    void recoverAudioUnderrunIfNeeded() {
+        SDL_LockAudioDevice(audio_dev_);
+        const bool requested = audio_rebuffer_requested_;
+        SDL_UnlockAudioDevice(audio_dev_);
+        if (!requested) {
+            return;
+        }
+
+        // SDL may wait for an active callback, so pause from the emulation thread.
         SDL_PauseAudioDevice(audio_dev_, 1);
-        SDL_ClearQueuedAudio(audio_dev_);
+        SDL_LockAudioDevice(audio_dev_);
+        audio_rebuffer_requested_ = false;
+        audio_playback_started_ = false;
+        SDL_UnlockAudioDevice(audio_dev_);
+        audio_drc_ = armsx_audio_drc_after_rebuffer(audio_drc_);
+        audio_rate_ratio_ = audio_drc_.ratio;
+        resetRealtimeAudioClock();
+    }
+
+    void resetAudioQueueStorageLocked() {
+        audio_queue_.clear();
+        audio_queue_read_offset_ = 0;
+    }
+
+    void resetAudioQueueLocked() {
+        // The fractional sample accumulator belongs to the emulation thread.  Do not touch it
+        // from the SDL callback when the device happens to drain the queue: that was a data race
+        // and periodically discarded the fractional part of the next frame's sample budget.
+        audio_sample_accumulator_ = 0.0;
+        resetAudioQueueStorageLocked();
+    }
+
+    void trimQueuedAudioFrontLocked(size_t discard_bytes) {
+        const size_t queued_bytes = audio_queue_.size() - audio_queue_read_offset_;
+        size_t discard = std::min(discard_bytes & ~size_t{3}, queued_bytes & ~size_t{3});
+        if (discard == 0) {
+            return;
+        }
+        if (discard >= queued_bytes) {
+            resetAudioQueueStorageLocked();
+            return;
+        }
+
+        // Cross-fade the retained head after dropping stale audio.
+        uint8_t* samples = audio_queue_.data() + audio_queue_read_offset_;
+        const size_t discard_frames = discard / kAudioBytesPerSample;
+        const size_t remaining_frames = (queued_bytes - discard) / kAudioBytesPerSample;
+        const size_t fade_frames = std::min<size_t>({64, discard_frames, remaining_frames});
+        for (size_t frame = 0; frame < fade_frames; ++frame) {
+            const int old_weight = static_cast<int>(fade_frames - frame);
+            const int new_weight = static_cast<int>(frame + 1);
+            const int divisor = old_weight + new_weight;
+            for (size_t channel = 0; channel < 2; ++channel) {
+                const size_t old_offset = frame * kAudioBytesPerSample + channel * sizeof(int16_t);
+                const size_t new_offset =
+                    (discard_frames + frame) * kAudioBytesPerSample + channel * sizeof(int16_t);
+                int16_t old_sample = 0;
+                int16_t new_sample = 0;
+                std::memcpy(&old_sample, samples + old_offset, sizeof(old_sample));
+                std::memcpy(&new_sample, samples + new_offset, sizeof(new_sample));
+                const int mixed = static_cast<int>(old_sample) * old_weight +
+                                  static_cast<int>(new_sample) * new_weight;
+                const int16_t blended = static_cast<int16_t>(mixed / divisor);
+                std::memcpy(samples + new_offset, &blended, sizeof(blended));
+            }
+        }
+
+        audio_queue_.erase(
+            audio_queue_.begin() + static_cast<std::ptrdiff_t>(audio_queue_read_offset_),
+            audio_queue_.begin() +
+                static_cast<std::ptrdiff_t>(audio_queue_read_offset_ + discard));
+    }
+
+    void compactAudioQueueLocked() {
+        if (audio_queue_read_offset_ == 0) {
+            return;
+        }
+
+        if (audio_queue_read_offset_ >= audio_queue_.size()) {
+            resetAudioQueueStorageLocked();
+            return;
+        }
+
+        audio_queue_.erase(audio_queue_.begin(), audio_queue_.begin() + static_cast<std::ptrdiff_t>(audio_queue_read_offset_));
+        audio_queue_read_offset_ = 0;
     }
 
     static constexpr int kAudioMixRate = 44100;
-    static constexpr size_t kAudioBytesPerSampleFrame = sizeof(int16_t) * 2;
-    static constexpr size_t kAudioPrimeBytes =
-        static_cast<size_t>(kAudioMixRate * kAudioBytesPerSampleFrame * 50 / 1000);
-    static constexpr size_t kMaxQueuedAudioBytes =
-        static_cast<size_t>(kAudioMixRate * kAudioBytesPerSampleFrame * 200 / 1000);
+    // Android can pause the emulation thread for several scheduler quanta while the app is
+    // still foregrounded (surface callbacks, Compose work, or a CD read).  Keep enough queued
+    // audio to cover that without changing the emulated sample clock.  This is a startup/jitter
+    // cushion only; the authoritative mixer still produces exactly one frame's samples.
+    static constexpr int kAudioPrebufferSamples = kAudioMixRate * 120 / 1000;
+    // `audio_diag`: one minute of capture, sampled every 30 frames, sixteen arms per process.
+    static constexpr int kAudioDiagSeconds = 60;
+    static constexpr int kAudioDiagSnapshotFrames = 30;
+    static constexpr int kAudioDiagPollFrames = 30;
+    static constexpr int kAudioDiagBudget = 16;
+    static constexpr size_t kAudioBytesPerSample = sizeof(int16_t) * 2;
+    static constexpr size_t kMaxQueuedAudioBytes = static_cast<size_t>(kAudioMixRate * sizeof(int16_t) * 2 / 2);
     static constexpr std::uint32_t kMaxFrameSteps = PSX_CPU_CPS / 8u;
+    // The normal-speed elasticity controller holds the same 120 ms depth used to start/re-prime
+    // playback. It changes host sample duration, never the emulated SPU clock or CPU schedule.
+    static constexpr int kAudioRateTargetQueueSamples = kAudioPrebufferSamples;
+    static constexpr int kAudioRealtimeWindowFrames = 4;
+    static constexpr int kAudioRealtimeLowWaterMinFrames = 2;
+    // Frames the queue-depth correction is spread over, and how hard the whole estimate is
+    // smoothed. Both slow on purpose — see updateAudioRateRatio().
+    static constexpr double kAudioRateQueueCorrectionFrames = 16.0;
+    static constexpr double kAudioRateSmoothing = 0.05;
+    // Ratio bounds. The low end matches the 10% floor on speed_percent; the high end is a
+    // sanity rail, not a real limit (32x of a 44.1 kHz stream is already inaudible mush).
+    static constexpr double kAudioRateMinRatio = 0.1;
+    static constexpr double kAudioRateMaxRatio = 32.0;
+    // Stand-in for "no cap" in targetFrameRate(). Far above anything a PS1 core reaches, so
+    // waitForFrameDeadline() always finds the deadline already passed and never sleeps.
+    static constexpr double kUncappedFrameRate = 100000.0;
 
-    SDL_Renderer* renderer_ = nullptr;
+    // Presentation goes through the backend abstraction (frontend/render.h); the session no
+    // longer owns an SDL_Texture of its own.
+    armsx_renderer_t* render_ = nullptr;
     psx_t* psx_ = nullptr;
     psx_input_t* input_ = nullptr;
-    psxi_sda_t* pad_device_ = nullptr;
-    SDL_Texture* texture_ = nullptr;
-    SDL_Texture* presentation_texture_ = nullptr;
+    // What is actually in controller port 1, and the boot analog mode the live Multitap
+    // toggle has to rebuild it with (settings.analog_mode_default is not in scope there).
+    bool multitap_attached_ = false;
+    bool analog_mode_default_ = false;
+    // A look-ahead ran last frame and its snapshot is still waiting to be put back. See
+    // runaheadRestore() for why the restore cannot happen at the end of the frame that took it.
+    bool runahead_restore_pending_ = false;
+    double runahead_restore_ms_ = 0.0;
+    uint64_t runahead_profile_frames_ = 0;
+    RunaheadPrediction runahead_prediction_;
+    RunaheadSequence runahead_sequence_;
+    uint64_t runahead_reused_frames_ = 0;
+    bool frame_uploaded_ = false;
     std::vector<uint8_t> texture_snapshot_;
 #ifdef USE_HARDWARE
     armsx_hw_renderer_t* hw_renderer_ = nullptr;
+    // Internal-resolution rasterizer backend; null means the software path.
+    psx_gpu_backend_t* hw_rt_backend_ = nullptr;
+    bool hw_rt_is_gl_ = false;
+    // Remembered from the settings so checkRasterizerHealth() can rebuild a fallback
+    // rasterizer without a FrontendSettings in hand.
+    int rasterizer_mode_ = 0;
+    int internal_scale_ = 1;
 #endif
     SDL_AudioDeviceID audio_dev_ = 0;
-    double audio_sample_accumulator_ = 0.0;
     bool audio_playback_started_ = false;
+    // Set by the SDL callback under the device lock; consumed by the emulation thread, which
+    // performs the pause/re-prime outside the callback.
+    bool audio_rebuffer_requested_ = false;
+    std::vector<uint8_t> audio_queue_;
+    size_t audio_queue_read_offset_ = 0;
+    double audio_sample_accumulator_ = 0.0;
+    /* Samples beginAudioFrame() committed to for the frame in flight, and therefore the
+       budget psx_spu_tick() was granted. Read back by queueAudioForFrame() so the two cannot
+       disagree about how long the frame was. */
+    int audio_frame_samples_ = 0;
+    // Bytes the device has taken since the emulation thread last looked; drives the
+    // fast-forward rate estimate. Written under SDL's audio lock on both sides.
+    size_t audio_consumed_bytes_ = 0;
+    // `audio_diag` only. Same locking discipline as audio_consumed_bytes_.
+    uint32_t audio_underruns_ = 0;
+    uint64_t audio_underrun_bytes_ = 0;
+    uint32_t audio_rebuffer_events_ = 0;
+    uint32_t audio_overflow_trims_ = 0;
+    // One-shot capture state; see runAudioDiag(). All emulation thread.
+    FILE* audio_diag_file_ = nullptr;
+    static constexpr size_t kAudioDiagXaLimit = 16u * 1024u * 1024u;
+    bool core_split_enabled_ = false;
+    uint64_t instruction_loop_ticks_ = 0;
+    uint64_t stall_capture_start_ = 0, stall_last_start_ = 0, stall_audio_ticks_ = 0;
+    unsigned stall_frames_ = 0;
+    std::vector<uint8_t> audio_diag_xa_;
+    unsigned audio_diag_xa_dropped_ = 0;
+    std::array<std::vector<uint8_t>, 3> audio_diag_stems_;
+    std::vector<uint8_t> audio_diag_core_pcm_;
+    std::vector<uint8_t> audio_diag_output_pcm_;
+    int audio_diag_frames_left_ = 0;
+    int audio_diag_poll_ = 0;
+    int audio_diag_budget_ = kAudioDiagBudget;
+    int audio_diag_seq_ = 0;
+    int audio_diag_snapshots_ = 0;
+    // [audio], mirrored here so the audio path never reaches back into FrontendSettings.
+    int audio_volume_ = 100;
+    int audio_ff_volume_ = 100;
+    bool audio_muted_ = false;
+    bool audio_mute_fast_forward_ = false;
+    bool audio_swap_channels_ = false;
+    // Rate converter state (see updateAudioRateRatio / resampleToDeviceRate).
+    double audio_rate_ratio_ = 1.0;
+    double audio_rate_output_estimate_ = 0.0;
+    double audio_rate_phase_ = 0.0;
+    int32_t audio_rate_accumulator_left_ = 0;
+    int32_t audio_rate_accumulator_right_ = 0;
+    int audio_rate_accumulator_count_ = 0;
+    int16_t audio_rate_last_left_ = 0;
+    int16_t audio_rate_last_right_ = 0;
+    bool audio_rate_expand_initialized_ = false;
+    double audio_rate_expand_phase_ = 1.0;
+    int16_t audio_rate_expand_previous_left_ = 0;
+    int16_t audio_rate_expand_previous_right_ = 0;
+    Uint64 audio_realtime_last_counter_ = 0;
+    double audio_realtime_elapsed_seconds_ = 0.0;
+    size_t audio_realtime_input_samples_ = 0;
+    int audio_realtime_window_frames_ = 0;
+    ArmsxAudioDrcState audio_drc_{1.0, 1.0, 1.0, false};
+    ArmsxAudioTimeStretcher audio_time_stretcher_;
+    unsigned work_frames_ = 0, work_window_frames_ = 0, work_worst_frame_ = 0;
+    unsigned work_elapsed_frames_ = 0;
+    uint64_t probe720_start_ = 0, probe720_snapshot_ = 0, probe720_steps_ = 0;
+    uint64_t probe720_wall_[2]{}, probe720_cpu_[2]{};
+    unsigned probe720_frames_[2]{}, probe720_cpu_unavailable_ = 0, probe720_instruction_phase_ = 0;
+    bool probe720_finished_ = false;
+    uint64_t work_worst_core_ = 0;
+    psx_work_diag_t work_totals_{}, work_worst_{};
     std::filesystem::path disc_path_;
     std::filesystem::path exe_path_;
     std::string title_;
     LaunchKind launch_kind_ = LaunchKind::None;
     bool paused_ = false;
+    // App is off-screen (backgrounded / screen off). Independent of paused_: the pause menu
+    // freezes the VM but keeps the device open, this closes it outright.
+    bool audio_suspended_ = false;
+    // The spec the device was opened with, kept so it can be reopened identically on the way
+    // back from the background.
+    SDL_AudioSpec audio_desired_{};
+    bool audio_device_ever_opened_ = false; // gate for ensureAudioDevice()'s retry
+    bool audio_reopen_failed_ = false;      // one log line per failure run, not one per retry
+    Uint64 audio_reopen_next_attempt_ = 0;  // SDL_GetTicks64() throttle for the retry
     bool fast_forward_enabled_ = false;
+    // [runtime] frame pacing; see setSpeedLimits(). fast_forward_speed_ 0 = uncapped.
+    bool frame_limit_ = true;
+    int speed_percent_ = 100;
+    int fps_limit_ = 0;
+    double fast_forward_speed_ = 2.0;
+    // [runtime] frame_skip. Held here only because the host pushes it with the pacing policy;
+    // the session itself never acts on it (the app loop owns presentation).
+    int frame_skip_ = 0;
     bool debug_view_ = false;
+    /* Aspect/stretch trace: the first few frames, then only when the mode actually changes,
+       so logcat proves which display mode is in force without spamming per frame. */
+    int aspect_traces_ = 0;
+    int last_logged_aspect_mode_ = -1;
+    bool last_logged_stretch_ = false;
 #ifdef USE_HARDWARE
     bool hardware_backend_active_ = false;
 #endif
     std::uint64_t vblank_counter_ = 0;
     int texture_width_ = 0;
     int texture_height_ = 0;
-    int presentation_width_ = 0;
-    int presentation_height_ = 0;
-    int presentation_scale_ = 1;
+    // Pre-multiplier display size, kept so the degenerate "display width reported 0"
+    // fallback cannot compound the internal-resolution scale frame after frame.
+    /* [video] deinterlace scratch. Same pitch and height as the frame it replaces; kept
+       across frames so a steady 480-line game allocates once. */
+    std::vector<uint8_t> deint_buffer_;
+    int texture_native_width_ = 0;
+    int texture_native_height_ = 0;
     Uint32 texture_format_ = SDL_PIXELFORMAT_UNKNOWN;
 };
 
@@ -2975,49 +6156,12 @@ class GameplayInputRouter {
         return requested;
     }
 
-    bool takeControllerActivity() {
-        const bool active = controller_activity_;
-        controller_activity_ = false;
-        return active;
-    }
-
-    bool takeControllerDisconnected() {
-        const bool disconnected = controller_disconnected_;
-        controller_disconnected_ = false;
-        return disconnected;
-    }
-
-    void setVirtualDigitalMask(uint32_t mask) {
-        if (virtual_digital_mask_ == mask) {
-            return;
-        }
-        virtual_digital_mask_ = mask;
-        syncDigitalMask();
-    }
-
-    uint32_t activeDigitalMask() const {
-        return active_digital_mask_;
-    }
-
     void tick(bool fsui_active) {
         if (!fsui_active) {
             flushChordButtons(SDL_GetTicks());
         }
     }
 
-    std::vector<fsui::InputOverlayDeviceState> buildInputOverlay() const {
-        fsui::InputOverlayDeviceState device;
-        device.title = "P1";
-        device.bindings = {
-            fsui::InputOverlayBinding{.label = "Up", .glyph = "^", .kind = fsui::InputOverlayBindingKind::Button, .value = (active_digital_mask_ & PSXI_SW_SDA_PAD_UP) ? 1.0f : 0.0f},
-            fsui::InputOverlayBinding{.label = "Down", .glyph = "v", .kind = fsui::InputOverlayBindingKind::Button, .value = (active_digital_mask_ & PSXI_SW_SDA_PAD_DOWN) ? 1.0f : 0.0f},
-            fsui::InputOverlayBinding{.label = "Left", .glyph = "<", .kind = fsui::InputOverlayBindingKind::Button, .value = (active_digital_mask_ & PSXI_SW_SDA_PAD_LEFT) ? 1.0f : 0.0f},
-            fsui::InputOverlayBinding{.label = "Right", .glyph = ">", .kind = fsui::InputOverlayBindingKind::Button, .value = (active_digital_mask_ & PSXI_SW_SDA_PAD_RIGHT) ? 1.0f : 0.0f},
-            fsui::InputOverlayBinding{.label = "Start", .glyph = "S", .kind = fsui::InputOverlayBindingKind::Button, .value = (active_digital_mask_ & PSXI_SW_SDA_START) ? 1.0f : 0.0f},
-            fsui::InputOverlayBinding{.label = "Select", .glyph = "=", .kind = fsui::InputOverlayBindingKind::Button, .value = (active_digital_mask_ & PSXI_SW_SDA_SELECT) ? 1.0f : 0.0f},
-        };
-        return {device};
-    }
 
     void processEvent(const SDL_Event& event, ArmsxSession* session, bool fsui_active) {
         flushChordButtons(SDL_GetTicks());
@@ -3078,9 +6222,6 @@ class GameplayInputRouter {
 
             const bool pressed = event.type == SDL_CONTROLLERBUTTONDOWN;
             const SDL_GameControllerButton button = static_cast<SDL_GameControllerButton>(event.cbutton.button);
-            if (pressed && !fsui_active && !fsui_owns_input_) {
-                controller_activity_ = true;
-            }
 
             if (button == SDL_CONTROLLER_BUTTON_START || button == SDL_CONTROLLER_BUTTON_BACK ||
                 button == SDL_CONTROLLER_BUTTON_GUIDE || button == SDL_CONTROLLER_BUTTON_MISC1) {
@@ -3108,9 +6249,6 @@ class GameplayInputRouter {
                 return;
             }
 
-            if (std::abs(static_cast<int>(event.caxis.value)) > 8000) {
-                controller_activity_ = true;
-            }
             const uint16_t mapped = static_cast<uint16_t>((static_cast<int>(event.caxis.value) + INT16_MAX + 1) / 0x100);
             switch (event.caxis.axis) {
                 case SDL_CONTROLLER_AXIS_RIGHTX:
@@ -3153,7 +6291,6 @@ class GameplayInputRouter {
             if (joystick && SDL_JoystickInstanceID(joystick) == event.cdevice.which) {
                 SDL_GameControllerClose(controller_);
                 controller_ = nullptr;
-                controller_disconnected_ = true;
                 start_button_ = {};
                 select_button_ = {};
                 trigger_left_down_ = false;
@@ -3240,43 +6377,29 @@ class GameplayInputRouter {
     }
 
     void press(uint32_t mask) {
-        if (!mask) {
+        if (!pad_ || !mask) {
             return;
         }
-        physical_digital_mask_ |= mask;
-        syncDigitalMask();
+
+        if ((active_digital_mask_ & mask) == 0) {
+            psx_pad_button_press(pad_, 0, mask);
+            active_digital_mask_ |= mask;
+        }
     }
 
     void release(uint32_t mask) {
-        if (!mask) {
-            return;
-        }
-        physical_digital_mask_ &= ~mask;
-        syncDigitalMask();
-    }
-
-    void syncDigitalMask() {
-        const uint32_t desired_mask = physical_digital_mask_ | virtual_digital_mask_;
-        if (!pad_) {
-            active_digital_mask_ = desired_mask;
+        if (!pad_ || !mask) {
             return;
         }
 
-        const uint32_t pressed = desired_mask & ~active_digital_mask_;
-        const uint32_t released = active_digital_mask_ & ~desired_mask;
-        if (pressed) {
-            psx_pad_button_press(pad_, 0, pressed);
+        if ((active_digital_mask_ & mask) != 0) {
+            psx_pad_button_release(pad_, 0, mask);
+            active_digital_mask_ &= ~mask;
         }
-        if (released) {
-            psx_pad_button_release(pad_, 0, released);
-        }
-        active_digital_mask_ = desired_mask;
     }
 
     void clearAll() {
         if (!pad_) {
-            physical_digital_mask_ = 0;
-            virtual_digital_mask_ = 0;
             active_digital_mask_ = 0;
             return;
         }
@@ -3295,8 +6418,6 @@ class GameplayInputRouter {
             }
         }
 
-        physical_digital_mask_ = 0;
-        virtual_digital_mask_ = 0;
         active_digital_mask_ = 0;
         psx_pad_analog_change(pad_, 0, PSXI_AX_SDA_RIGHT_HORZ, 0x80);
         psx_pad_analog_change(pad_, 0, PSXI_AX_SDA_RIGHT_VERT, 0x80);
@@ -3363,8 +6484,6 @@ class GameplayInputRouter {
 
     psx_pad_t* pad_ = nullptr;
     SDL_GameController* controller_ = nullptr;
-    uint32_t physical_digital_mask_ = 0;
-    uint32_t virtual_digital_mask_ = 0;
     uint32_t active_digital_mask_ = 0;
     PendingChordButton start_button_{};
     PendingChordButton select_button_{};
@@ -3373,336 +6492,6 @@ class GameplayInputRouter {
     bool fsui_owns_input_ = false;
     bool trigger_left_down_ = false;
     bool trigger_right_down_ = false;
-    bool controller_activity_ = false;
-    bool controller_disconnected_ = false;
-};
-
-class ImGuiMobileControls {
-  public:
-    void processEvent(const SDL_Event& event) {
-        if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
-            if (!visible_) {
-                showNow();
-                suppress_mouse_until_up_ = true;
-            } else {
-                last_activity_ms_ = SDL_GetTicks();
-            }
-            return;
-        }
-        if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT) {
-            suppress_mouse_until_up_ = false;
-            return;
-        }
-        if (event.type != SDL_FINGERDOWN && event.type != SDL_FINGERMOTION && event.type != SDL_FINGERUP) {
-            return;
-        }
-
-        const auto suppressed = std::find(suppressed_touches_.begin(), suppressed_touches_.end(), event.tfinger.fingerId);
-        if (suppressed != suppressed_touches_.end()) {
-            if (event.type == SDL_FINGERUP) {
-                suppressed_touches_.erase(suppressed);
-            }
-            return;
-        }
-
-        if (event.type == SDL_FINGERDOWN && !visible_) {
-            showNow();
-            suppressed_touches_.push_back(event.tfinger.fingerId);
-            return;
-        }
-
-        last_activity_ms_ = SDL_GetTicks();
-        const auto found = std::find_if(touches_.begin(), touches_.end(), [&](const Touch& touch) {
-            return touch.id == event.tfinger.fingerId;
-        });
-
-        if (event.type == SDL_FINGERUP) {
-            if (found != touches_.end()) {
-                touches_.erase(found);
-            }
-            return;
-        }
-
-        const Touch next{
-            .id = event.tfinger.fingerId,
-            .x = std::clamp(event.tfinger.x, 0.0f, 1.0f),
-            .y = std::clamp(event.tfinger.y, 0.0f, 1.0f),
-        };
-        if (found == touches_.end()) {
-            touches_.push_back(next);
-        } else {
-            *found = next;
-        }
-    }
-
-    void reset(GameplayInputRouter& input) {
-        touches_.clear();
-        routed_mask_ = 0;
-        input.setVirtualDigitalMask(0);
-    }
-
-    void showNow() {
-        visible_ = true;
-        controller_in_use_ = false;
-        last_activity_ms_ = SDL_GetTicks();
-    }
-
-    void onControllerActivity(GameplayInputRouter& input) {
-        controller_in_use_ = true;
-        visible_ = false;
-        reset(input);
-    }
-
-    void onControllerDisconnected() {
-        showNow();
-    }
-
-    void drawAndRoute(GameplayInputRouter& input) {
-        const Uint32 now = SDL_GetTicks();
-        if (last_activity_ms_ == 0) {
-            last_activity_ms_ = now;
-        }
-        if (visible_ && touches_.empty() && !suppress_mouse_until_up_ &&
-            (now - last_activity_ms_) >= kMobileControlsAutoHideMs) {
-            visible_ = false;
-            reset(input);
-        }
-        if (!visible_) {
-            input.setVirtualDigitalMask(0);
-            return;
-        }
-
-        const ImVec2 display = ImGui::GetIO().DisplaySize;
-        if (display.x <= 0.0f || display.y <= 0.0f) {
-            input.setVirtualDigitalMask(0);
-            return;
-        }
-
-        const Layout layout = makeLayout(display);
-        uint32_t mask = 0;
-        for (const Touch& touch : touches_) {
-            mask |= maskForPoint(layout, ImVec2(touch.x * display.x, touch.y * display.y));
-        }
-
-        ImGuiIO& io = ImGui::GetIO();
-        if (touches_.empty() && io.MouseDown[0] && !io.WantCaptureMouse && !suppress_mouse_until_up_) {
-            mask |= maskForPoint(layout, io.MousePos);
-        }
-
-        routed_mask_ = mask;
-        input.setVirtualDigitalMask(mask);
-        draw(layout, input.activeDigitalMask());
-    }
-
-  private:
-    struct Touch {
-        SDL_FingerID id = 0;
-        float x = 0.0f;
-        float y = 0.0f;
-    };
-
-    struct Button {
-        ImVec2 center{};
-        float radius = 0.0f;
-        uint32_t mask = 0;
-    };
-
-    struct RectButton {
-        ImVec2 min{};
-        ImVec2 max{};
-        uint32_t mask = 0;
-        const char* label = "";
-    };
-
-    struct Layout {
-        ImVec2 display{};
-        ImVec2 stick_center{};
-        float stick_radius = 0.0f;
-        float stick_deadzone = 0.0f;
-        std::array<Button, 4> face{};
-        std::array<RectButton, 6> utility{};
-    };
-
-    static Layout makeLayout(const ImVec2& display) {
-        const float unit = std::max(std::min(display.x, display.y), 1.0f);
-        const float bottom_margin = unit * 0.075f;
-        const float stick_radius = unit * 0.135f;
-        const float face_radius = unit * 0.066f;
-        const float face_offset = unit * 0.125f;
-        const ImVec2 stick_center(unit * 0.21f, display.y - bottom_margin - stick_radius);
-        const ImVec2 face_center(display.x - unit * 0.21f, display.y - bottom_margin - stick_radius);
-
-        Layout layout;
-        layout.display = display;
-        layout.stick_center = stick_center;
-        layout.stick_radius = stick_radius;
-        layout.stick_deadzone = stick_radius * 0.27f;
-        layout.face = {
-            Button{ImVec2(face_center.x, face_center.y - face_offset), face_radius, PSXI_SW_SDA_TRIANGLE},
-            Button{ImVec2(face_center.x + face_offset, face_center.y), face_radius, PSXI_SW_SDA_CIRCLE},
-            Button{ImVec2(face_center.x, face_center.y + face_offset), face_radius, PSXI_SW_SDA_CROSS},
-            Button{ImVec2(face_center.x - face_offset, face_center.y), face_radius, PSXI_SW_SDA_SQUARE},
-        };
-
-        const float shoulder_width = unit * 0.23f;
-        const float shoulder_height = unit * 0.075f;
-        const float edge = unit * 0.035f;
-        const float shoulder_gap = unit * 0.025f;
-        const float pill_width = unit * 0.17f;
-        const float pill_height = unit * 0.065f;
-        const float pill_y = display.y - bottom_margin - pill_height;
-        layout.utility = {
-            RectButton{ImVec2(edge, edge), ImVec2(edge + shoulder_width, edge + shoulder_height), PSXI_SW_SDA_L2, "L2"},
-            RectButton{ImVec2(edge, edge + shoulder_height + shoulder_gap), ImVec2(edge + shoulder_width, edge + shoulder_height * 2.0f + shoulder_gap), PSXI_SW_SDA_L1, "L1"},
-            RectButton{ImVec2(display.x - edge - shoulder_width, edge), ImVec2(display.x - edge, edge + shoulder_height), PSXI_SW_SDA_R2, "R2"},
-            RectButton{ImVec2(display.x - edge - shoulder_width, edge + shoulder_height + shoulder_gap), ImVec2(display.x - edge, edge + shoulder_height * 2.0f + shoulder_gap), PSXI_SW_SDA_R1, "R1"},
-            RectButton{ImVec2(display.x * 0.5f - pill_width - shoulder_gap * 0.5f, pill_y), ImVec2(display.x * 0.5f - shoulder_gap * 0.5f, pill_y + pill_height), PSXI_SW_SDA_SELECT, "SELECT"},
-            RectButton{ImVec2(display.x * 0.5f + shoulder_gap * 0.5f, pill_y), ImVec2(display.x * 0.5f + pill_width + shoulder_gap * 0.5f, pill_y + pill_height), PSXI_SW_SDA_START, "START"},
-        };
-        return layout;
-    }
-
-    static float distanceSquared(const ImVec2& lhs, const ImVec2& rhs) {
-        const float dx = lhs.x - rhs.x;
-        const float dy = lhs.y - rhs.y;
-        return dx * dx + dy * dy;
-    }
-
-    static bool pointInRect(const ImVec2& point, const RectButton& button) {
-        return point.x >= button.min.x && point.x <= button.max.x &&
-            point.y >= button.min.y && point.y <= button.max.y;
-    }
-
-    static uint32_t maskForPoint(const Layout& layout, const ImVec2& point) {
-        uint32_t mask = 0;
-        const float stick_hit_radius = layout.stick_radius * 1.35f;
-        if (distanceSquared(point, layout.stick_center) <= stick_hit_radius * stick_hit_radius) {
-            const float dx = point.x - layout.stick_center.x;
-            const float dy = point.y - layout.stick_center.y;
-            if (dx <= -layout.stick_deadzone) mask |= PSXI_SW_SDA_PAD_LEFT;
-            if (dx >= layout.stick_deadzone) mask |= PSXI_SW_SDA_PAD_RIGHT;
-            if (dy <= -layout.stick_deadzone) mask |= PSXI_SW_SDA_PAD_UP;
-            if (dy >= layout.stick_deadzone) mask |= PSXI_SW_SDA_PAD_DOWN;
-        }
-
-        for (const Button& button : layout.face) {
-            const float hit_radius = button.radius * 1.35f;
-            if (distanceSquared(point, button.center) <= hit_radius * hit_radius) {
-                mask |= button.mask;
-            }
-        }
-        for (const RectButton& button : layout.utility) {
-            if (pointInRect(point, button)) {
-                mask |= button.mask;
-            }
-        }
-        return mask;
-    }
-
-    static void drawCenteredText(ImDrawList* draw_list, const ImVec2& center, ImU32 color, const char* text) {
-        const ImVec2 size = ImGui::CalcTextSize(text);
-        draw_list->AddText(ImVec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f), color, text);
-    }
-
-    static void drawFaceSymbol(ImDrawList* draw_list, const Button& button, uint32_t active_mask) {
-        const bool active = (active_mask & button.mask) != 0;
-        ImU32 accent = IM_COL32(225, 225, 235, 220);
-        if (button.mask == PSXI_SW_SDA_TRIANGLE) accent = IM_COL32(70, 220, 150, 235);
-        if (button.mask == PSXI_SW_SDA_CIRCLE) accent = IM_COL32(245, 90, 105, 235);
-        if (button.mask == PSXI_SW_SDA_CROSS) accent = IM_COL32(95, 150, 255, 235);
-        if (button.mask == PSXI_SW_SDA_SQUARE) accent = IM_COL32(225, 105, 220, 235);
-        draw_list->AddCircleFilled(
-            button.center,
-            button.radius,
-            active ? IM_COL32(255, 255, 255, 105) : IM_COL32(18, 20, 28, 112),
-            32
-        );
-        draw_list->AddCircle(button.center, button.radius, accent, 32, active ? 4.0f : 2.5f);
-
-        const float symbol = button.radius * 0.48f;
-        if (button.mask == PSXI_SW_SDA_TRIANGLE) {
-            draw_list->AddTriangle(
-                ImVec2(button.center.x, button.center.y - symbol),
-                ImVec2(button.center.x + symbol, button.center.y + symbol),
-                ImVec2(button.center.x - symbol, button.center.y + symbol),
-                accent,
-                3.0f
-            );
-        } else if (button.mask == PSXI_SW_SDA_CIRCLE) {
-            draw_list->AddCircle(button.center, symbol, accent, 24, 3.0f);
-        } else if (button.mask == PSXI_SW_SDA_CROSS) {
-            draw_list->AddLine(
-                ImVec2(button.center.x - symbol, button.center.y - symbol),
-                ImVec2(button.center.x + symbol, button.center.y + symbol),
-                accent,
-                3.0f
-            );
-            draw_list->AddLine(
-                ImVec2(button.center.x + symbol, button.center.y - symbol),
-                ImVec2(button.center.x - symbol, button.center.y + symbol),
-                accent,
-                3.0f
-            );
-        } else {
-            draw_list->AddRect(
-                ImVec2(button.center.x - symbol, button.center.y - symbol),
-                ImVec2(button.center.x + symbol, button.center.y + symbol),
-                accent,
-                1.0f,
-                0,
-                3.0f
-            );
-        }
-    }
-
-    static void draw(const Layout& layout, uint32_t active_mask) {
-        ImDrawList* draw_list = ImGui::GetForegroundDrawList();
-        const ImU32 panel = IM_COL32(18, 20, 28, 112);
-        const ImU32 outline = IM_COL32(235, 238, 246, 185);
-        const ImU32 active = IM_COL32(255, 255, 255, 105);
-
-        draw_list->AddCircleFilled(layout.stick_center, layout.stick_radius, panel, 40);
-        draw_list->AddCircle(layout.stick_center, layout.stick_radius, outline, 40, 2.5f);
-        ImVec2 knob = layout.stick_center;
-        const float knob_offset = layout.stick_radius * 0.43f;
-        if (active_mask & PSXI_SW_SDA_PAD_LEFT) knob.x -= knob_offset;
-        if (active_mask & PSXI_SW_SDA_PAD_RIGHT) knob.x += knob_offset;
-        if (active_mask & PSXI_SW_SDA_PAD_UP) knob.y -= knob_offset;
-        if (active_mask & PSXI_SW_SDA_PAD_DOWN) knob.y += knob_offset;
-        const bool stick_active = (active_mask &
-            (PSXI_SW_SDA_PAD_LEFT | PSXI_SW_SDA_PAD_RIGHT | PSXI_SW_SDA_PAD_UP | PSXI_SW_SDA_PAD_DOWN)) != 0;
-        draw_list->AddCircleFilled(
-            knob,
-            layout.stick_radius * 0.42f,
-            stick_active ? IM_COL32(165, 185, 255, 180) : IM_COL32(105, 115, 140, 160),
-            32
-        );
-        draw_list->AddCircle(knob, layout.stick_radius * 0.42f, outline, 32, 2.0f);
-
-        for (const Button& button : layout.face) {
-            drawFaceSymbol(draw_list, button, active_mask);
-        }
-
-        for (const RectButton& button : layout.utility) {
-            const bool is_active = (active_mask & button.mask) != 0;
-            draw_list->AddRectFilled(button.min, button.max, is_active ? active : panel, 10.0f);
-            draw_list->AddRect(button.min, button.max, outline, 10.0f, 0, is_active ? 3.5f : 2.0f);
-            drawCenteredText(
-                draw_list,
-                ImVec2((button.min.x + button.max.x) * 0.5f, (button.min.y + button.max.y) * 0.5f),
-                IM_COL32(245, 247, 252, 225),
-                button.label
-            );
-        }
-    }
-
-    std::vector<Touch> touches_;
-    std::vector<SDL_FingerID> suppressed_touches_;
-    uint32_t routed_mask_ = 0;
-    Uint32 last_activity_ms_ = 0;
-    bool visible_ = true;
-    bool controller_in_use_ = false;
-    bool suppress_mouse_until_up_ = false;
 };
 
 class ArmsxApp {
@@ -3712,9 +6501,28 @@ class ArmsxApp {
           external_renderer_(static_cast<SDL_Renderer*>(external_renderer)), cli_(ScanCliFlags(argc, argv)) {}
 
     int run() {
+        ARMSX_BOOTLOG("core: run() enter argc=%d external_window=%p external_renderer=%p",
+                      argc_, static_cast<void*>(external_window_), static_cast<void*>(external_renderer_));
+        for (int index = 0; index < argc_; ++index) {
+            ARMSX_BOOTLOG("core: argv[%d]=%s", index, argv_ && argv_[index] ? argv_[index] : "(null)");
+        }
+
+        {
+            std::lock_guard<std::mutex> host_lock(g_host_control_lock);
+            if (g_host_run_gate.active()) {
+                if (g_host_run_gate.cancelled(g_host_run_gate.active())) return 0;
+            } else {
+                g_host_shutdown_pending = false;
+            }
+        }
+
         psxe_diag_initialize(psxe_cfg_get_pref_path());
         psxe_diag_breadcrumbf("ARMSX startup argc=%d", argc_);
         psxe_diag_logf("diag", "Pref path: %s", psxe_cfg_get_pref_path() ? psxe_cfg_get_pref_path() : "(none)");
+
+        // RetroAchievements. After the pref path is resolved (its state file lives there) and
+        // before anything can boot, so a saved login is already restoring when a game arrives.
+        armsx_ach_startup();
 
         static bool log_callback_installed = false;
         if (!log_callback_installed) {
@@ -3725,6 +6533,7 @@ class ArmsxApp {
 
         psxe_config_t* cfg = psxe_cfg_create();
         if (!cfg) {
+            ARMSX_BOOTERR("core: psxe_cfg_create() failed");
             return 1;
         }
 
@@ -3733,7 +6542,6 @@ class ArmsxApp {
         psxe_cfg_load(cfg, argc_, const_cast<const char**>(argv_));
         settings_ = BuildSettings(cfg, cli_);
         psxe_cfg_destroy(cfg);
-        syncPlatformLibraries(false, false);
 
         applyLoggingSettings("startup");
 #if defined(USE_HARDWARE)
@@ -3757,9 +6565,31 @@ class ArmsxApp {
             settings_.logging_enabled ? "true" : "false",
             settings_.log_level);
 
+        ARMSX_BOOTLOG("core: settings loaded model=%s region=%s bios_override=%s bios_search=%s",
+                      settings_.model.c_str(), settings_.region.c_str(),
+                      settings_.bios_override.empty() ? "(none)" : settings_.bios_override.c_str(),
+                      settings_.bios_search.empty() ? "(none)" : settings_.bios_search.c_str());
+
         installCrashHandlers();
 
-        if (!initializeSdl() || !initializeWindowAndRenderer() || !initializeFsui()) {
+        if (!initializeSdl()) {
+            ARMSX_BOOTERR("core: initializeSdl() failed: %s", SDL_GetError());
+            shutdown();
+            return 1;
+        }
+        ARMSX_BOOTLOG("core: initializeSdl() ok");
+
+        if (!initializeWindowAndRenderer()) {
+            ARMSX_BOOTERR("core: initializeWindowAndRenderer() failed: %s", SDL_GetError());
+            shutdown();
+            return 1;
+        }
+        ARMSX_BOOTLOG("core: initializeWindowAndRenderer() ok window=%p renderer=%p backend=%s",
+                      static_cast<void*>(window_), static_cast<void*>(render_),
+                      armsx_render_backend_name(armsx_renderer_backend(render_)));
+
+        if (!initializeFsui()) {
+            ARMSX_BOOTERR("core: initializeFsui() failed");
             shutdown();
             return 1;
         }
@@ -3771,33 +6601,77 @@ class ArmsxApp {
         initializeWebLaunchSupport();
         consumePendingLaunchArguments();
 
+        ARMSX_BOOTLOG("core: boot request=%s cli_launch=%s cli_argument=%s",
+                      cli_.has_boot_request ? "true" : "false",
+                      pending_cli_launch_.has_value() ? "present" : "absent",
+                      pending_cli_argument_.empty() ? "(none)" : pending_cli_argument_.c_str());
+
         if (cli_.has_boot_request) {
             if (pending_cli_launch_.has_value()) {
-                launchSession(*pending_cli_launch_, false);
+                const bool launched = launchSession(*pending_cli_launch_, false);
+                ARMSX_BOOTLOG("core: cli launchSession -> %s%s%s",
+                              launched ? "ok" : "FAILED",
+                              launched ? "" : " error=",
+                              launched ? "" : (pending_error_dialog_.has_value() ? pending_error_dialog_->c_str() : "(none)"));
+                if (!launched) {
+                    armsx_ach_shutdown();
+                    shutdown();
+                    g_active_app = nullptr;
+                    return 1;
+                }
             } else if (!pending_cli_argument_.empty()) {
                 pending_error_dialog_ = "Unsupported launch path or URI.";
+                ARMSX_BOOTERR("core: unsupported launch path or URI: %s", pending_cli_argument_.c_str());
+                armsx_ach_shutdown();
+                shutdown();
+                g_active_app = nullptr;
+                return 1;
             }
         }
 
         consumePendingLaunchArguments();
 
-        if (!session_.valid()) {
-            showLandingWindow();
+        // FSUI removed: a plain SDL event pump + frame loop replaces fsui::RunSdlMainLoop, and there
+        // is no in-app landing menu — the game to boot arrives via CLI args or the JNI launch queue
+        // (Jetpack Compose owns all menus). With nothing queued this simply shows a black window.
+        ARMSX_BOOTLOG("core: entering main loop running_=%s session_valid=%s",
+                      running_ ? "true" : "false", session_.valid() ? "true" : "false");
+        // SDL is never quit between in-process runs, so a quit event pushed for the PREVIOUS
+        // session can still sit in the queue and would end this run on its very first poll.
+        // A shutdown aimed at THIS run still lands via g_host_shutdown_pending.
+        SDL_FlushEvent(SDL_QUIT);
+        g_host_loop_running.store(true, std::memory_order_release);
+        uint64_t loop_frames = 0;
+        while (running_) {
+            SDL_Event event;
+            while (SDL_PollEvent(&event)) {
+                handleEvent(event);
+            }
+            runFrame();
+            ++loop_frames;
+            // Proof-of-life only: the first few frames confirm the loop actually spun up, then
+            // roughly once a minute so a wedged loop is still visible in a bug report without
+            // turning logcat into a firehose.
+            if (loop_frames <= 3 || (loop_frames % 3600) == 0) {
+                ARMSX_BOOTLOG("core: loop frame=%llu session_valid=%s",
+                              static_cast<unsigned long long>(loop_frames),
+                              session_.valid() ? "true" : "false");
+            }
         }
-
-        fsui::SdlMainLoopCallbacks loop;
-        loop.handle_event = [this](const SDL_Event& event) { handleEvent(event); };
-        loop.run_frame = [this]() { runFrame(); };
-        loop.should_continue = [this]() { return running_; };
-        loop.on_exit = [this]() { shutdown(); };
-        fsui::RunSdlMainLoop(loop);
+        ARMSX_BOOTLOG("core: main loop exited after %llu frames", static_cast<unsigned long long>(loop_frames));
+        g_host_loop_running.store(false, std::memory_order_release);
+        g_host_vm_active.store(false, std::memory_order_release);
+        // Before shutdown(): this waits briefly for an unlock submitted on the last frame to
+        // reach the server rather than dropping it with the process.
+        armsx_ach_shutdown();
+        shutdown();
         g_active_app = nullptr;
 
         return 0;
     }
 
     void writeCrashContext(const char* reason) const {
-        const fsui::CurrentGameInfo info = session_.currentGameInfo();
+        const ArmsxGameInfo info = session_.currentGameInfo();
         psxe_diag_logf("crash", "Crash reason: %s", reason ? reason : "(unknown)");
         psxe_diag_logf("crash", "Running game: %s", info.has_game ? info.title.c_str() : "(none)");
         psxe_diag_logf("crash", "Game path: %s", info.path.empty() ? "(none)" : info.path.string().c_str());
@@ -3925,48 +6799,75 @@ class ArmsxApp {
         deferred_change_disc_ = std::filesystem::path(*selection);
     }
 
-    Uint32 managedRendererFlags(bool vsync_enabled) const {
-        Uint32 renderer_flags = settings_.gpu_backend == GpuBackend::SDLAccelerated
-            ? SDL_RENDERER_ACCELERATED
-            : SDL_RENDERER_SOFTWARE;
-#if !defined(__EMSCRIPTEN__)
-        if (vsync_enabled) {
-            renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
-        }
-#endif
-        return renderer_flags;
+    SDL_Renderer* sdlRenderer() const {
+        return armsx_renderer_sdl(render_);
     }
 
 #ifdef USE_HARDWARE
     bool hardwareRendererAvailable() const {
-        if (!owns_renderer_ || external_renderer_ || !renderer_) {
+        if (!owns_renderer_ || external_renderer_ || !render_) {
             return false;
         }
         return SupportsHardwareGpuBackend();
     }
 #endif
 
+    // Backend selection with a strict fallback ladder, so a device that cannot bring up the
+    // requested GPU backend still boots on the historical SDL path instead of failing.
+    //   opengl -> sdl-accelerated -> software
+    //   vulkan -> opengl -> sdl-accelerated -> software
     bool createManagedRenderer(bool vsync_enabled) {
-        renderer_ = SDL_CreateRenderer(window_, -1, managedRendererFlags(vsync_enabled));
-        owns_renderer_ = renderer_ != nullptr;
+        armsx_render_config_t config{};
+        config.vsync = vsync_enabled;
+        config.linear_filter = settings_.texture_scale_mode;
+        config.upscale_shared_image = settings_.internal_scale >= 3 &&
+            (settings_.rasterizer_mode == 1 || settings_.rasterizer_mode == 3);
 
-        if (!renderer_ && settings_.gpu_backend == GpuBackend::SDLAccelerated) {
-            psxe_diag_logf(
-                "renderer",
-                "SDL accelerated renderer unavailable error=%s; retrying software renderer.",
-                SDL_GetError()
-            );
-            Uint32 fallback_flags = SDL_RENDERER_SOFTWARE;
-#if !defined(__EMSCRIPTEN__)
-            if (vsync_enabled) {
-                fallback_flags |= SDL_RENDERER_PRESENTVSYNC;
-            }
+        std::vector<armsx_render_backend_t> ladder;
+#ifdef USE_HARDWARE
+        const armsx_render_backend_t requested = RenderBackendFor(settings_.gpu_backend);
+#else
+        const armsx_render_backend_t requested = ARMSX_RENDER_BACKEND_SDL_SOFTWARE;
 #endif
-            renderer_ = SDL_CreateRenderer(window_, -1, fallback_flags);
-            owns_renderer_ = renderer_ != nullptr;
+        ladder.push_back(requested);
+        if (requested == ARMSX_RENDER_BACKEND_VULKAN) {
+            ladder.push_back(ARMSX_RENDER_BACKEND_OPENGL);
+        }
+        if (requested == ARMSX_RENDER_BACKEND_VULKAN || requested == ARMSX_RENDER_BACKEND_OPENGL) {
+            ladder.push_back(ARMSX_RENDER_BACKEND_SDL_ACCELERATED);
+        }
+        if (requested != ARMSX_RENDER_BACKEND_SDL_SOFTWARE) {
+            ladder.push_back(ARMSX_RENDER_BACKEND_SDL_SOFTWARE);
         }
 
-        if (!renderer_) {
+        for (const armsx_render_backend_t backend : ladder) {
+            if (!armsx_render_backend_compiled_in(backend)) {
+                continue;
+            }
+
+            // A GL/Vulkan backend needs matching window flags; a window we did not create
+            // with them can only host the SDL backends. The EGL provider is exempt because
+            // it binds to the host's ANativeWindow, not to the SDL window.
+            const Uint32 needed = armsx_render_window_flags(backend);
+            if (needed && window_ && (SDL_GetWindowFlags(window_) & needed) != needed &&
+                !armsx_render_native_window()) {
+                psxe_diag_logf("renderer", "Skipping %s: window lacks the required SDL flags.",
+                               armsx_render_backend_name(backend));
+                continue;
+            }
+
+            render_ = armsx_renderer_create(backend, window_, &config);
+            if (render_) {
+                break;
+            }
+
+            psxe_diag_logf("renderer", "Backend %s unavailable (%s); falling back.",
+                           armsx_render_backend_name(backend), SDL_GetError());
+        }
+
+        owns_renderer_ = render_ != nullptr;
+
+        if (!render_) {
             psxe_diag_logf(
                 "renderer",
                 "Renderer initialization failed requested_vsync=%s error=%s",
@@ -3976,105 +6877,44 @@ class ArmsxApp {
             return false;
         }
 
-        SDL_RendererInfo info{};
-        if (SDL_GetRendererInfo(renderer_, &info) == 0) {
-            psxe_diag_logf(
-                "renderer",
-                "Selected SDL renderer driver=%s flags=%s",
-                info.name ? info.name : "(unknown)",
-                RendererFlagsTitle(info.flags).c_str()
-            );
-        }
+        psxe_diag_logf(
+            "renderer",
+            "Selected presentation backend=%s driver=%s accelerated=%s",
+            armsx_render_backend_name(armsx_renderer_backend(render_)),
+            armsx_renderer_driver_name(render_),
+            armsx_renderer_is_accelerated(render_) ? "true" : "false"
+        );
 
         managed_renderer_vsync_ = vsync_enabled;
         return true;
     }
 
     void shutdownFsuiFrontend() {
-        if (fsui_initialized_) {
-            fsui::Shutdown(true);
-            fsui_initialized_ = false;
-        }
-
-        ImGuiFullscreen::ClearFileSelectorExtraRoots();
-
-        imgui_backend_.shutdown();
-
-        if (ImGui::GetCurrentContext()) {
-            ImGui::DestroyContext();
-        }
     }
 
-    void refreshFileSelectorRoots() {
-        std::vector<ImGuiFullscreen::FileSelectorRootEntry> roots{
-            ImGuiFullscreen::FileSelectorRootEntry{
-                .title = "App Folder",
-                .path = DefaultBrowseDirectory().string(),
-            },
-        };
-
-        ImGuiFullscreen::SetFileSelectorExtraRoots(std::move(roots));
-    }
 
     void showLandingWindow() {
-        ui_window_state_ = FsuiWindowState::Landing;
-        fsui::ShowLandingWindow();
     }
 
     void showStartGameWindow() {
-        ui_window_state_ = FsuiWindowState::StartGame;
-        fsui::ShowStartGameWindow();
     }
 
     void showExitWindow() {
-        ui_window_state_ = FsuiWindowState::Exit;
-        fsui::ShowExitWindow();
     }
 
     void showGameListWindow() {
-        ui_window_state_ = FsuiWindowState::GameList;
-        fsui::ShowGameListWindow();
     }
 
     void switchToSettingsWindow() {
-        ui_window_state_ = FsuiWindowState::Settings;
-        fsui::SwitchToSettings();
     }
 
     void returnToMainWindow() {
-        ui_window_state_ = session_.valid() ? FsuiWindowState::None : FsuiWindowState::Landing;
-        fsui::ReturnToMainWindow();
     }
 
     void showPauseMenuWindow() {
-        ui_window_state_ = FsuiWindowState::PauseMenu;
-        fsui::OpenPauseMenu();
     }
 
     void restoreUiWindow() {
-        switch (ui_window_state_) {
-            case FsuiWindowState::Landing:
-                showLandingWindow();
-                break;
-            case FsuiWindowState::StartGame:
-                showStartGameWindow();
-                break;
-            case FsuiWindowState::Exit:
-                showExitWindow();
-                break;
-            case FsuiWindowState::GameList:
-                showGameListWindow();
-                break;
-            case FsuiWindowState::Settings:
-                switchToSettingsWindow();
-                break;
-            case FsuiWindowState::PauseMenu:
-                showPauseMenuWindow();
-                break;
-            case FsuiWindowState::None:
-            default:
-                break;
-        }
     }
 
     bool recreateManagedRenderer(bool desired_vsync) {
@@ -4092,9 +6932,9 @@ class ArmsxApp {
             settings_.vsync_enabled = previous_vsync;
             SaveSettings(settings_);
 
-            if (renderer_) {
-                SDL_DestroyRenderer(renderer_);
-                renderer_ = nullptr;
+            if (render_) {
+                armsx_renderer_destroy(render_);
+                render_ = nullptr;
             }
             owns_renderer_ = false;
 
@@ -4105,7 +6945,7 @@ class ArmsxApp {
             }
 
             if (had_session) {
-                session_.rebindRenderer(renderer_, settings_);
+                session_.rebindRenderer(render_, settings_);
                 session_.setPaused(should_be_paused_after_restore);
             }
 
@@ -4123,9 +6963,9 @@ class ArmsxApp {
 
         shutdownFsuiFrontend();
 
-        if (renderer_) {
-            SDL_DestroyRenderer(renderer_);
-            renderer_ = nullptr;
+        if (render_) {
+            armsx_renderer_destroy(render_);
+            render_ = nullptr;
         }
         owns_renderer_ = false;
 
@@ -4138,7 +6978,7 @@ class ArmsxApp {
         }
 
         if (had_session) {
-            session_.rebindRenderer(renderer_, settings_);
+            session_.rebindRenderer(render_, settings_);
             session_.setPaused(should_be_paused_after_restore);
         }
 
@@ -4150,6 +6990,15 @@ class ArmsxApp {
     }
 
     void installCrashHandlers() {
+#if defined(__ANDROID__)
+        // Android's debuggerd owns native fatal signals and writes the tombstone/backtrace that
+        // can identify the faulting thread and instruction. Replacing those handlers with
+        // ReportNativeCrash() ended in _Exit(1), so logcat only said "exited cleanly (1)" and
+        // erased the evidence needed to fix intermittent lifecycle crashes. The platform handler
+        // is both more complete and async-signal-safe; leave std::terminate at its default too so
+        // its SIGABRT reaches debuggerd.
+        return;
+#else
         static bool installed = false;
         if (installed) {
             return;
@@ -4188,6 +7037,7 @@ class ArmsxApp {
 
 #if defined(_WIN32) && !defined(UWP_TARGET)
         SetUnhandledExceptionFilter(&WindowsUnhandledExceptionFilter);
+#endif
 #endif
     }
 
@@ -4229,6 +7079,14 @@ class ArmsxApp {
         const uint64_t frequency = SDL_GetPerformanceFrequency();
         const uint64_t slack_ticks = std::max<uint64_t>(1, frequency / 2000u);
         uint64_t now = SDL_GetPerformanceCounter();
+
+        // How late the loop arrived for THIS frame — the only honest measure of "the device
+        // cannot keep up", and what adaptive frame skip acts on. Sampled here because this is
+        // the one point that knows it: the resync branch below rewrites the deadline, and a
+        // frame that overran shows up as lateness at the START of the frame after it.
+        frame_lateness_ticks_ = (next_frame_deadline_ != 0 && now > next_frame_deadline_)
+                                    ? (now - next_frame_deadline_)
+                                    : 0;
 
         if (next_frame_deadline_ == 0) {
             next_frame_deadline_ = now;
@@ -4281,11 +7139,94 @@ class ArmsxApp {
 #if !defined(__EMSCRIPTEN__)
         next_frame_deadline_ = 0;
         frame_period_ticks_ = 0;
+        frame_lateness_ticks_ = 0;
         if (reason && reason[0]) {
             psxe_diag_breadcrumbf("Frame pacing reset reason=%s", reason);
         }
 #else
         (void)reason;
+#endif
+    }
+
+    // Park the skip counter so the next decision resolves to "present". The run limit is never
+    // above kMaxFrameSkip, so this is unconditional without having to know which mode is live.
+    void requestPresentNextFrame() {
+        frames_skipped_run_ = kMaxFrameSkip;
+    }
+
+    /**
+     * Frame skip. Should THIS frame's presentation be dropped?
+     *
+     * ⚠ Presentation only. The machine is always stepped to the next vblank by
+     * ArmsxSession::runFrame(), which is also where queueAudioForFrame() pulls the SPU — the SPU
+     * is front-end-pulled, so skipping an emulated frame would advance every voice cursor and
+     * ADSR envelope by the wrong amount and starve the device besides. What a skipped frame
+     * drops is updateTexture() (the dirty-row scan + the framebuffer upload, and on the GLES
+     * rasterizer the render-target readback) and draw() (the present itself). Guest timing,
+     * audio and save states are bit-identical either way.
+     *
+     * Two modes, because they answer different questions:
+     *   fixed (1..kMaxFrameSkip)  present one frame then skip N. Predictable, applies whether or
+     *                             not the device is struggling, and is what "frame skip" means to
+     *                             anyone arriving from another emulator. Also the battery lever.
+     *   adaptive (-1)             skip only when the previous frame overran its budget, and never
+     *                             more than kAdaptiveFrameSkipRun in a row. Costs nothing on a
+     *                             device that keeps up and is the one that actually rescues one
+     *                             that does not — which is why it is the mode the UI offers first.
+     *
+     * Deliberately NOT engaged when the pacer has no deadline to miss (frame limit off, or
+     * fast-forward with an unlimited multiplier): "late" is meaningless there, adaptive would
+     * skip every frame it is allowed to, and the result would read as a second, invisible
+     * limiter fighting the one the user switched off. Fixed skip still applies in those modes,
+     * because the user asked for a ratio rather than for a rescue.
+     */
+    bool shouldSkipPresent(bool stepping) {
+        // A paused session presents the same still frame every tick and that IS the pause menu's
+        // backdrop; a pending screenshot needs the frame's real geometry through updateTexture().
+        if (!stepping || deferred_screenshot_) {
+            requestPresentNextFrame();
+            return false;
+        }
+
+        const int mode = session_.frameSkip();
+        if (mode == 0) {
+            requestPresentNextFrame();
+            return false;
+        }
+
+        const int max_run = (mode > 0) ? std::min(mode, kMaxFrameSkip) : kAdaptiveFrameSkipRun;
+        if (frames_skipped_run_ >= max_run) {
+            frames_skipped_run_ = 0;
+            return false;
+        }
+
+        if (mode < 0 && !runningBehindDeadline()) {
+            frames_skipped_run_ = 0;
+            return false;
+        }
+
+        frames_skipped_run_++;
+        frames_dropped_++;
+        return true;
+    }
+
+    // Was the loop late enough arriving for this frame that dropping a present is worth it?
+    // A quarter of a frame period: small enough to react before the stutter is audible in the
+    // pacing, large enough that ordinary scheduler jitter does not trip it.
+    bool runningBehindDeadline() const {
+#if !defined(__EMSCRIPTEN__)
+        if (frame_period_ticks_ == 0) {
+            return false;
+        }
+
+        // No real deadline to miss — see shouldSkipPresent().
+        if (currentTargetFrameRate() >= ArmsxSession::uncappedFrameRate()) {
+            return false;
+        }
+
+        return frame_lateness_ticks_ > (frame_period_ticks_ / 4u);
+#else
+        return false;
 #endif
     }
 
@@ -4299,39 +7240,49 @@ class ArmsxApp {
     }
 
     void applyLoggingSettings(const char* reason) {
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+        const bool enable_logs = true;
+        const int effective_level = LOG_DEBUG;
+#else
         const bool enable_logs = settings_.logging_enabled;
+        const int effective_level = settings_.log_level;
+#endif
+#if !defined(ARMSX_DIAGNOSTIC_BUILD)
         settings_.quiet = !enable_logs;
+#endif
 
         if (!enable_logs && psxe_diag_is_enabled()) {
             psxe_diag_logf("diag", "Debug logging disabled reason=%s", reason ? reason : "(none)");
         }
 
         psxe_diag_set_enabled(enable_logs ? 1 : 0);
-        log_set_level(settings_.log_level);
-        log_set_quiet(settings_.quiet ? 1 : 0);
+        log_set_level(effective_level);
+        log_set_quiet(enable_logs ? 0 : 1);
 
         if (enable_logs) {
             psxe_diag_logf(
                 "diag",
                 "Debug logging enabled reason=%s level=%s path=%s",
                 reason ? reason : "(none)",
-                log_level_string(settings_.log_level),
+                log_level_string(effective_level),
                 diagnosticsLogPath().string().c_str()
             );
         }
     }
 
     void logRendererBootstrap(const char* phase, double frame_rate) const {
-        if (!renderer_) {
+        if (!render_) {
             return;
         }
 
         SDL_RendererInfo info{};
-        SDL_GetRendererInfo(renderer_, &info);
+        if (SDL_Renderer* sdl = sdlRenderer()) {
+            SDL_GetRendererInfo(sdl, &info);
+        }
 
         int output_width = 0;
         int output_height = 0;
-        SDL_GetRendererOutputSize(renderer_, &output_width, &output_height);
+        armsx_renderer_output_size(render_, &output_width, &output_height);
 
         int refresh_rate = 0;
         SDL_DisplayMode display_mode{};
@@ -4348,8 +7299,9 @@ class ArmsxApp {
             "phase=%s source=%s driver=%s flags=%s output=%dx%d refresh_hz=%d timing=%s target_fps=%.2f frame_period_ms=%.3f requested_vsync=%s",
             phase ? phase : "(none)",
             external_renderer_ ? "external" : "internal",
-            info.name ? info.name : "(unknown)",
-            RendererFlagsTitle(info.flags).c_str(),
+            armsx_renderer_driver_name(render_),
+            info.name ? RendererFlagsTitle(info.flags).c_str()
+                      : armsx_render_backend_name(armsx_renderer_backend(render_)),
             output_width,
             output_height,
             refresh_rate,
@@ -4361,6 +7313,8 @@ class ArmsxApp {
     }
 
     void logUiRendererState(const char* stage) const {
+        // SDL-renderer-specific state dump; the GL/Vulkan backends have no equivalent.
+        SDL_Renderer* renderer_ = sdlRenderer();
         if (!renderer_) {
             return;
         }
@@ -4399,16 +7353,6 @@ class ArmsxApp {
         float imgui_font_scale = 0.0f;
         int imgui_backend_flags = 0;
         int imgui_config_flags = 0;
-        if (ImGui::GetCurrentContext()) {
-            const ImGuiIO& io = ImGui::GetIO();
-            imgui_display_x = io.DisplaySize.x;
-            imgui_display_y = io.DisplaySize.y;
-            imgui_scale_x = io.DisplayFramebufferScale.x;
-            imgui_scale_y = io.DisplayFramebufferScale.y;
-            imgui_font_scale = io.FontGlobalScale;
-            imgui_backend_flags = static_cast<int>(io.BackendFlags);
-            imgui_config_flags = static_cast<int>(io.ConfigFlags);
-        }
 
         psxe_diag_logf(
             "ui",
@@ -4483,19 +7427,87 @@ class ArmsxApp {
         );
     }
 
+    // [audio] driver, applied just before SDL_INIT_AUDIO — the only moment SDL reads
+    // SDL_AUDIODRIVER. Android only; every other platform is left with SDL's own probe order,
+    // which is what it has always used.
+    //
+    // On Android the choice is genuinely dangerous, not merely a preference: SDL's "android"
+    // and "aaudio" backends reach org.libsdl.app.SDLAudioManager's static JNI glue, and with
+    // Compose owning the Activity there is no SDLActivity to have set it up. openslES is the
+    // one backend that stays entirely inside the native OpenSL ES API, which is why
+    // frontend/android_jni.cpp forces it before anything else runs. That host also registers
+    // the glue itself and hands SDLAudioManager a Context; only once it reports that it
+    // managed both is aaudio (whose SDL_AudioInit unconditionally enumerates devices through
+    // that Context) safe to select. "default" hands the choice back to SDL's probe order,
+    // which starts with the "android" backend and is therefore gated the same way.
+    void applyAudioDriverSetting() {
+#if defined(__ANDROID__)
+        const bool embedded = []() {
+            std::lock_guard<std::mutex> lock(g_host_control_lock);
+            return g_host_embedded;
+        }();
+
+        if (!embedded) {
+            return;
+        }
+
+        int driver = settings_.audio_driver;
+        if (driver != 1 && !g_host_audio_backends_ready.load(std::memory_order_acquire)) {
+            ARMSX_BOOTLOG("core: audio driver '%s' needs host JNI audio glue that is not ready; using openslES",
+                          AudioDriverToString(driver));
+            driver = 1;
+        }
+
+        switch (driver) {
+            case 0:
+                unsetenv("SDL_AUDIODRIVER");
+                break;
+            case 2:
+                setenv("SDL_AUDIODRIVER", "aaudio", 1);
+                break;
+            default:
+                setenv("SDL_AUDIODRIVER", "openslES", 1);
+                break;
+        }
+#endif
+    }
+
     bool initializeSdl() {
-        const Uint32 required = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER;
+        Uint32 required = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER;
+
+        // Embedded hosts own input (Compose touch overlay + Android InputDevice routing) and
+        // there is no org.libsdl.app activity backing SDL's Android joystick JNI glue, so
+        // asking for SDL_INIT_GAMECONTROLLER there would call into a null activity class.
+        {
+            std::lock_guard<std::mutex> lock(g_host_control_lock);
+            if (g_host_embedded) {
+                required &= ~static_cast<Uint32>(SDL_INIT_GAMECONTROLLER);
+            }
+        }
+
         psxe_diag_breadcrumbf("Initializing SDL subsystems flags=0x%x", required);
 
-        if (SDL_WasInit(0) == 0) {
-            owns_sdl_ = true;
-            if (SDL_Init(required) != 0) {
-                psxe_diag_logf("sdl", "SDL_Init failed: %s", SDL_GetError());
-                return false;
-            }
-        } else if (SDL_InitSubSystem(required) != 0) {
+        // Audio is not worth failing the whole boot over: a silent game still beats a game that
+        // never appears. Bring the mandatory subsystems up first, then try audio on its own.
+        const Uint32 mandatory = required & ~static_cast<Uint32>(SDL_INIT_AUDIO);
+        const bool wants_audio = (required & SDL_INIT_AUDIO) != 0;
+
+        if (!sdl_subsystems_.acquire(mandatory)) {
+            ARMSX_BOOTERR("core: SDL_InitSubSystem(0x%x) failed: %s", mandatory, SDL_GetError());
             psxe_diag_logf("sdl", "SDL_InitSubSystem failed: %s", SDL_GetError());
             return false;
+        }
+
+        if (wants_audio) {
+            applyAudioDriverSetting();
+        }
+
+        if (wants_audio && !sdl_subsystems_.acquire(SDL_INIT_AUDIO)) {
+            ARMSX_BOOTERR("core: audio init failed (continuing silently): %s", SDL_GetError());
+            psxe_diag_logf("sdl", "Audio init failed (continuing without audio): %s", SDL_GetError());
+        } else if (wants_audio) {
+            ARMSX_BOOTLOG("core: audio driver=%s",
+                          SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "(none)");
         }
 
         if (argc_ > 1) {
@@ -4549,9 +7561,17 @@ class ArmsxApp {
             if (SupportsManagedWindowSizing()) {
                 flags |= SDL_WINDOW_RESIZABLE;
             }
-#if defined(__ANDROID__) || defined(IOS_TARGET)
-            flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+
+            // A GL/Vulkan drawable has to be requested at window-creation time, and the GL
+            // attributes (ES 3.0 profile) have to be set before SDL_CreateWindow().
+#ifdef USE_HARDWARE
+            const armsx_render_backend_t wanted = RenderBackendFor(settings_.gpu_backend);
+#else
+            const armsx_render_backend_t wanted = ARMSX_RENDER_BACKEND_SDL_SOFTWARE;
 #endif
+            armsx_render_prepare_window_attributes(wanted);
+            flags |= armsx_render_window_flags(wanted);
+
             window_ = SDL_CreateWindow(
                 "ARMSX",
                 SDL_WINDOWPOS_CENTERED,
@@ -4560,6 +7580,24 @@ class ArmsxApp {
                 window_height,
                 flags
             );
+
+            if (!window_ && (flags & (SDL_WINDOW_OPENGL | SDL_WINDOW_VULKAN))) {
+                // The GPU drawable was refused; retry as a plain window so the SDL fallback
+                // ladder in createManagedRenderer() still has something to attach to.
+                psxe_diag_logf("renderer",
+                               "Window with a %s drawable failed (%s); retrying without it.",
+                               armsx_render_backend_name(wanted), SDL_GetError());
+                flags &= ~(Uint32)(SDL_WINDOW_OPENGL | SDL_WINDOW_VULKAN);
+                window_ = SDL_CreateWindow(
+                    "ARMSX",
+                    SDL_WINDOWPOS_CENTERED,
+                    SDL_WINDOWPOS_CENTERED,
+                    window_width,
+                    window_height,
+                    flags
+                );
+            }
+
             owns_window_ = window_ != nullptr;
         }
 
@@ -4568,155 +7606,85 @@ class ArmsxApp {
             return false;
         }
 
-        if (external_renderer_) {
-            renderer_ = external_renderer_;
+        render_ = nullptr;
+
+#ifdef USE_HARDWARE
+        // An embedder-supplied SDL_Renderer is normally adopted as-is. The exception is the
+        // Android in-process host: it hands us a *software* renderer over an SDL_Surface that
+        // it then CPU-blits into its ANativeWindow. When the user asked for a GPU backend and
+        // that ANativeWindow was registered (armsx_render_set_native_window), we bind to the
+        // surface directly instead and the host's blit bridge stands down.
+        const bool prefer_native_gpu = external_renderer_ && armsx_render_native_window() &&
+                                       (settings_.gpu_backend == GpuBackend::OpenGL ||
+                                        settings_.gpu_backend == GpuBackend::Vulkan);
+#else
+        const bool prefer_native_gpu = false;
+#endif
+
+        if (prefer_native_gpu) {
+            if (!createManagedRenderer(settings_.vsync_enabled)) {
+                psxe_diag_logf("renderer", "GPU backend on the host surface failed; adopting the host renderer.");
+            } else if (!armsx_render_native_window_claimed()) {
+                // The ladder fell all the way back to an SDL backend on our own window, which
+                // is not what the host surface expects. Drop it and adopt the host renderer.
+                armsx_renderer_destroy(render_);
+                render_ = nullptr;
+                owns_renderer_ = false;
+            }
+        }
+
+        if (!render_ && external_renderer_) {
+            render_ = armsx_renderer_create_from_sdl(external_renderer_);
             owns_renderer_ = false;
-        } else {
-            renderer_ = nullptr;
+        } else if (!render_) {
             if (!createManagedRenderer(settings_.vsync_enabled)) {
                 return false;
             }
         }
 
-        if (!renderer_) {
+        if (!render_) {
             psxe_diag_logf("renderer", "Renderer initialization failed: %s", SDL_GetError());
         }
 
-        return renderer_ != nullptr;
+        return render_ != nullptr;
     }
 
     bool initializeFsui() {
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-        io.IniFilename = nullptr;
-
-        fsui::SdlImGuiBackendConfig backend_config;
-        backend_config.window = window_;
-        backend_config.sdl_renderer = renderer_;
-        backend_config.renderer_backend = fsui::RendererBackend::SDLRenderer;
-#if defined(__EMSCRIPTEN__)
-        // SDL_Renderer on Emscripten renders correctly when the canvas backing store
-        // matches the CSS size instead of a DPR-scaled framebuffer.
-        backend_config.web_canvas.max_device_pixel_ratio = 1.0;
-#endif
-
-        if (!imgui_backend_.initialize(backend_config)) {
-            return false;
-        }
-
-#if defined(__EMSCRIPTEN__)
-        fsui::SyncSdl2WebCanvasLayout(window_, backend_config.web_canvas, true);
-#endif
-
-        fsui::FontStack fonts;
-        if (!fsui::BuildDefaultFontStack(fsui::DescribeSdl2FontBootstrap(window_), fonts)) {
-            return false;
-        }
-
-        fsui::UiContext context;
-        context.window = window_;
-        context.fonts = fonts;
-        context.app_title = "ARMSX";
-        context.app_icon_path = ResolveFsuiAppIconPath();
-        context.platform_backend = fsui::PlatformBackendKind::SDL2;
-        context.renderer_backend = fsui::RendererBackend::SDLRenderer;
-
-        fsui::Host host;
-        host.ui_state = &settings_.ui_state;
-        host.has_running_game = [this]() { return session_.valid(); };
-        host.get_current_game = [this]() { return session_.currentGameInfo(); };
-        host.get_game_list = [this]() { return game_list_; };
-        host.refresh_game_list = [this](bool full_rescan) { refreshGameList(full_rescan); };
-        host.persist_ui_state = [this](bool reload) {
-            if (reload) {
-                refreshGameList(true);
-            }
-            SaveSettings(settings_);
-        };
-        host.set_paused = [this](bool paused) {
-            if (!session_.valid()) {
-                return;
-            }
-            session_.setPaused(paused);
-            resetFramePacing(paused ? "fsui-pause" : "fsui-unpause");
-            if (paused) {
-                input_router_.onFsuiOpened();
-            }
-        };
-        host.resume_game = [this]() {
-            if (session_.valid()) {
-                session_.setPaused(false);
-                resetFramePacing("fsui-resume");
-            }
-        };
-        host.reset_system = [this]() {
-            if (session_.valid()) {
-                session_.reset();
-                resetFramePacing("fsui-reset");
-            }
-        };
-        host.exit_to_library = [this]() { exitToLibrary(); };
-        host.request_quit = [this]() { running_ = false; };
-        host.request_classic_ui = []() {};
-        host.close_selector = []() {};
-        host.detect_prompt_icon_pack = []() { return fsui::DetectPromptIconPackFromSDL(); };
-        host.detect_swap_north_west_gamepad_buttons = []() { return false; };
-        host.runtime_overlay_options = fsui::RuntimeOverlayOptions{
-            .show_inputs = true,
-            .show_settings = true,
-            .show_performance = true,
-        };
-        host.get_input_overlay_devices = [this]() { return input_router_.buildInputOverlay(); };
-        host.get_settings_overlay_lines = [this]() { return session_.settingsOverlayLines(settings_); };
-        host.get_performance_overlay_lines = [this]() { return session_.performanceOverlayLines(settings_); };
-        host.get_landing_items = [this]() { return buildLandingItems(); };
-        host.get_start_items = [this]() { return buildStartItems(); };
-        host.get_exit_items = [this]() { return buildExitItems(); };
-        host.get_pause_items = [this]() { return buildPauseItems(); };
-        host.get_game_launch_options = [this](const fsui::GameEntry& entry) { return buildGameLaunchOptions(entry); };
-        host.get_settings_pages = [this](fsui::SettingsScope scope) { return buildSettingsPages(scope); };
-
-        context.host = std::move(host);
-        refreshFileSelectorRoots();
-
-        if (!fsui::Initialize(context)) {
-            return false;
-        }
-
-        fsui_initialized_ = true;
         return true;
     }
 
     void shutdown() {
         psxe_diag_breadcrumbf("Frontend shutdown");
+        // Close the ADPF session while still on the thread that owns it. The session is bound
+        // to this tid, and the next run in the same process (the Android host keeps the
+        // library loaded between games) gets a different one.
+        armsx_perf_hint_shutdown();
         input_router_.detach();
+        // Drop the psx_t RetroAchievements reads memory through before it is freed. Covers the
+        // early-failure paths that reach shutdown() without ever entering the main loop.
+        armsx_ach_session_ended();
         session_.destroy();
 
         shutdownFsuiFrontend();
 
-        if (owns_renderer_ && renderer_) {
-            SDL_DestroyRenderer(renderer_);
+        // Adopted renderers (armsx_renderer_create_from_sdl) never own the embedder's
+        // SDL_Renderer, so this is safe for both the managed and the external case.
+        if (render_) {
+            armsx_renderer_destroy(render_);
         }
         if (owns_window_ && window_) {
             SDL_DestroyWindow(window_);
         }
 
-        renderer_ = nullptr;
+        render_ = nullptr;
         window_ = nullptr;
 
-        if (owns_sdl_) {
-            SDL_Quit();
-        }
+        sdl_subsystems_.release();
 
         psxe_diag_shutdown();
     }
 
     void handleEvent(const SDL_Event& event) {
-        imgui_backend_.processEvent(event);
-        mobile_controls_.processEvent(event);
 
         if (event.type == SDL_QUIT) {
             running_ = false;
@@ -4735,28 +7703,46 @@ class ArmsxApp {
             return;
         }
 
-        const bool fsui_active = fsui::HasActiveWindow();
+        // FSUI removed: input is never gated by a native menu window (Compose owns menus).
+        const bool fsui_active = false;
         input_router_.processEvent(event, session_.valid() ? &session_ : nullptr, fsui_active);
-        if (input_router_.takeControllerDisconnected()) {
-            mobile_controls_.onControllerDisconnected();
-        }
-        if (input_router_.takeControllerActivity()) {
-            mobile_controls_.onControllerActivity(input_router_);
-        }
 
-        if (event.type == SDL_KEYDOWN && !fsui_active && session_.valid() && event.key.repeat == 0 && event.key.keysym.sym == SDLK_RETURN) {
+        if (event.type == SDL_KEYDOWN && session_.valid() && event.key.repeat == 0 && event.key.keysym.sym == SDLK_RETURN) {
             psx_exp2_atcons_put(session_.psx()->exp2, 13);
         }
 
-        if (session_.valid() && !fsui_active && input_router_.takePauseRequest()) {
-            openPauseMenu();
+        // A pause request is consumed but no longer opens a native menu; the Compose overlay owns
+        // pause via JNI. Draining it keeps the router state clean.
+        if (session_.valid()) {
+            (void)input_router_.takePauseRequest();
         }
     }
 
     void runFrame() {
-        const bool fsui_was_active = fsui::HasActiveWindow();
-        input_router_.tick(fsui_was_active);
-        syncPlatformLibraries(true, true);
+        const bool stall_probe = g_psx_audio_diag_enabled != 0;
+        const uint64_t stall_start = stall_probe ? SDL_GetPerformanceCounter() : 0;
+        if (stall_probe) std::memset(&g_psx_disc_timing, 0, sizeof(g_psx_disc_timing));
+
+        // Affinity Control Mode. Here rather than once at startup because sched_setaffinity()
+        // acts on the CALLING thread and this is the emulation thread, and because polling an
+        // atomic per frame is what turns a boot-only setting into a live one. Costs one relaxed
+        // load while the mode is unchanged, which is every frame in the default (off) case.
+        armsx_affinity_apply_emulation_thread();
+
+        /* Runahead: put the machine back where the timeline really is, BEFORE anything
+           applies this frame's input. A snapshot carries the pad's button word, so a restore
+           that happened after an input pass would swallow the press outright —
+           applyHostPadCommands only ever sends the EDGE, so it would never be re-sent. No-op
+           unless [emulation] runahead is on.
+
+           Deliberately NOT gated on !paused(): the pause menu is exactly where a save state
+           gets taken, and a save taken while a look-ahead was still outstanding would record
+           the FUTURE rather than the timeline the player is on. */
+        if (session_.valid()) {
+            session_.runaheadRestore();
+        }
+
+        input_router_.tick(false);
 
         if (deferred_vsync_.has_value()) {
             const bool desired_vsync = *deferred_vsync_;
@@ -4771,19 +7757,144 @@ class ArmsxApp {
         }
 
         consumePendingLaunchArguments();
+        applyHostControlRequests();
 
-        waitForFrameDeadline(currentTargetFrameRate());
+        // Backstop for a background→foreground reopen that failed. Deliberately AFTER the
+        // request drain so a resume that just landed gets its device on this same frame.
+        if (session_.valid()) {
+            session_.ensureAudioDevice();
+        }
+
+        // Save/load-state requests are parked by the JNI thread and drained by
+        // psx_state_service_requests() from inside psx_update(). psx_update() does not run while
+        // the session is paused — and the pause menu is exactly where Save/Load State is pressed.
+        // Drain here too, on this same (emulation) thread, or every state op taken from the menu
+        // would sit parked until it timed out.
+        if (session_.valid() && session_.paused()) {
+            psx_state_service_requests();
+        }
+
+        const bool gpu720_probe = session_.valid() && !session_.paused() && session_.probe720Active();
+        // Presentation still runs while paused: gate it here as well, so the
+        // Vulkan probe cannot outlive the capture budget in an open pause menu.
+        if (gpu720_probe || armsx_gpu_profile_720_probe_active())
+            armsx_gpu_profile_set_720_probe_active(gpu720_probe);
+        const bool lag_probe = session_.valid() && !session_.paused()
+            && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || gpu720_probe || stall_probe);
+        const uint64_t lag_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        uint64_t lag_wait = 0, lag_core_end = 0;
+        uint64_t probe720_core_cpu_ns = 0;
+        bool probe720_work_sampled = false;
+        const bool pace_before_present = armsx_mali_frame_pacing_active(
+            armsx_gpu_profile_get()->vendor, session_.valid() && !session_.paused())
+            || (session_.valid() && !session_.paused() &&
+                ((settings_.gpu_backend == GpuBackend::Vulkan && settings_.vsync_enabled &&
+                  armsx_gpu_profile_prefers_vulkan_mailbox()) ||
+                 (settings_.gpu_backend != GpuBackend::Vulkan &&
+                  armsx_gpu_profile_prefers_pre_present_pacing())));
+        if (pace_before_present != mali_pacing_active_) {
+            mali_pacing_active_ = pace_before_present;
+            resetFramePacing("Presentation pacing changed");
+            psxe_diag_logf("renderer", "Pre-present pacing active=%d", pace_before_present);
+        }
+        if (!pace_before_present) waitForFrameDeadline(currentTargetFrameRate());
+        const uint64_t lag_work_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        if (lag_probe) lag_wait = lag_work_begin - lag_begin;
+
+        // `touch files/logs/perf_log` sends the overlay's own snapshot to the diag log as well
+        // as to the UI. The numbers otherwise exist only inside Compose, which makes every
+        // measurement a screenshot read by eye — and the backend records a
+        // sweep that produced six screenshots OF THE LIBRARY because of exactly that. With the
+        // marker present two runs are matched on the primitive counters as numbers. Re-armed
+        // rather than armed once, so a UI that switches the overlay off cannot silence it.
+        if (perfLogEnabled() && !g_host_stats_enabled.load(std::memory_order_relaxed)) {
+            g_host_stats_enabled.store(true, std::memory_order_relaxed);
+            psx_perf_set_enabled(1);
+        }
+
+        // Phase timing for the overlay. Gated, not just unread: with the overlay off these
+        // three clock reads never happen and psx_perf's counters are not armed either.
+        const bool stats_enabled = g_host_stats_enabled.load(std::memory_order_relaxed);
+        const uint64_t phase_frame_begin = stats_enabled ? SDL_GetPerformanceCounter() : 0;
 
         std::uint32_t session_steps = 0;
-        if (session_.valid() && !session_.paused()) {
+        const bool session_stepping = session_.valid() && !session_.paused();
+
+        // Frame skip ([runtime] frame_skip). Decided BEFORE the step, because the work it drops
+        // starts at updateTexture(): the dirty-row scan, the framebuffer upload and — on the
+        // GLES rasterizer — the render-target readback, all of which are presentation, not
+        // emulation. runFrame() itself always runs; see shouldSkipPresent() for why.
+        const bool skip_present = shouldSkipPresent(session_stepping);
+
+        // ADPF work bracket opens HERE — after waitForFrameDeadline() has already slept off the
+        // limiter's share of the frame. What ADPF must be told is how long the emulation thread
+        // WORKED, and a frame's wall clock is work + sleep: report that and every frame looks
+        // like it consumed exactly its budget, which is a constant, not a signal. This span is
+        // the same one the perf overlay prints as `emu`.
+        //
+        // A non-stepping tick (paused, no disc, menu open) is not a frame at all; pausing the
+        // bracket keeps the pause out of the next report. Default off: one atomic load.
+        if (session_stepping) {
+            armsx_perf_hint_frame_begin(currentTargetFrameRate());
+        } else {
+            armsx_perf_hint_pause();
+        }
+
+        if (session_stepping) {
+            session_.beginMaliWorkProbe();
+            probe720_work_sampled = gpu720_probe && g_psx_work_diag_enabled;
+            const uint64_t cpu_begin = gpu720_probe ? armsx_host_thread_cpu_ns() : 0;
             session_steps = session_.runFrame();
-            session_.updateTexture(settings_);
+            if (lag_probe) lag_core_end = SDL_GetPerformanceCounter();
+            if (gpu720_probe) {
+                const uint64_t cpu_end = armsx_host_thread_cpu_ns();
+                probe720_core_cpu_ns = cpu_begin && cpu_end >= cpu_begin ? cpu_end - cpu_begin : 0;
+            }
+            if (lag_probe && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || gpu720_probe)) {
+                const uint64_t core = lag_core_end - lag_work_begin;
+                const uint64_t instructions = session_.instructionLoopTicks();
+                core_split_ticks_ += core;
+                instruction_split_ticks_ += instructions;
+                if (++core_split_frames_ >= 120) {
+                    psxe_diag_pacingf("core_split frames=%u instruction_loop_ms=%.3f "
+                        "outside_loop_ms=%.3f core_ms=%.3f inclusive=yes wall_time=yes",
+                        core_split_frames_,
+                        CounterTicksToMilliseconds(instruction_split_ticks_) / core_split_frames_,
+                        CounterTicksToMilliseconds(core_split_ticks_ > instruction_split_ticks_ ?
+                            core_split_ticks_ - instruction_split_ticks_ : 0) / core_split_frames_,
+                        CounterTicksToMilliseconds(core_split_ticks_) / core_split_frames_);
+                    core_split_frames_ = 0;
+                    core_split_ticks_ = instruction_split_ticks_ = 0;
+                }
+            }
+            session_.finishMaliWorkProbe(lag_core_end ? lag_core_end - lag_work_begin : 0);
+            if (!skip_present) {
+                session_.updateTexture(settings_);
+            }
+            // Always: begin_frame ran inside runFrame() and the GPU rasterizer's frame has to be
+            // closed whether or not anyone is going to look at it.
             session_.finishHardwareFrame();
         }
+        (void)session_steps;
+
+        // ...and closes BEFORE the present. The present is real work, but on this port it runs
+        // on this same thread and can block in the buffer queue waiting on the display — idle
+        // time that would land in the report wearing work's clothes. A GPU-bound game therefore
+        // reports a short work duration and gets no CPU boost, which is the right answer: its
+        // CPU is not the thing that is short.
+        armsx_perf_hint_frame_end();
+
+        const uint64_t phase_emu_end = (stats_enabled || lag_probe) ? SDL_GetPerformanceCounter() : 0;
+
+        // RetroAchievements pump. Unconditional: it also drives the saved-login restore and the
+        // deferred disc identification, neither of which needs a stepping session.
+        armsx_ach_frame_update(session_stepping);
+
+        publishSessionTelemetry(session_stepping);
 
 #if defined(USE_HARDWARE) && defined(HW_DEBUG)
         if (session_.valid() && session_.hardwareBackendActive()) {
-            logUiRendererState("ui-pre-imgui");
+            logUiRendererState("ui-pre-present");
             psxe_diag_logf(
                 "hw",
                 "frame-present frame=%llu steps=%u paused=%s fast_forward=%s texture=%dx%d format=%s target_fps=%.3f",
@@ -4798,102 +7909,723 @@ class ArmsxApp {
             );
         }
 #endif
-        imgui_backend_.newFrame();
-#if defined(USE_HARDWARE) && defined(HW_DEBUG)
-        if (session_.valid() && session_.hardwareBackendActive()) {
-            logUiRendererState("ui-post-imgui-backend");
-        }
-#endif
-        ImGui::NewFrame();
-
-        if (session_.valid()) {
-            session_.draw(settings_);
-        }
-
-        if (session_.valid() && settings_.mobile_controls && !fsui::HasActiveWindow()) {
-            mobile_controls_.drawAndRoute(input_router_);
-        } else {
-            mobile_controls_.reset(input_router_);
-        }
 
         if (pending_error_dialog_.has_value()) {
-            ImGuiFullscreen::OpenInfoMessageDialog("ARMSX", *pending_error_dialog_);
+            psxe_diag_logf("ui", "error: %s", pending_error_dialog_->c_str());
             pending_error_dialog_.reset();
         }
 
-        fsui::Render();
+        // Present the emulated frame through the active backend. No imgui/FSUI pass — the
+        // Jetpack Compose front-end owns every menu/overlay.
+        //
+        // ...unless the app is off-screen. Drawing to a surface nobody can see burns real
+        // battery: with the VM parked by the background pause, the loop was still measured
+        // accumulating ~6.5 jiffies/s of system time purely uploading and posting frames to
+        // an invisible window. Skipping the draw is safe because there is no observer to go
+        // stale for — and the first frame after resume repaints it anyway.
+        //
+        // Deliberately its own flag, not `paused_` and not `audio_suspended_`: the pause
+        // menu is on-screen and MUST keep presenting, and [audio] background_playback can
+        // legitimately keep audio alive while the screen is off.
+        const bool presentation_suspended =
+            g_host_presentation_suspended.load(std::memory_order_acquire);
 
-        for (const fsui::Command& command : fsui::ConsumeCommands()) {
-            applyCommand(command);
+        // Coming back on-screen: arm the resume probe for the next few uploads. Deliberately
+        // counted in UPLOADS rather than seconds — a session that comes back paused does not
+        // upload until the user resumes it, which is exactly the frame worth sampling.
+        if (g_presentation_was_suspended && !presentation_suspended) {
+            if (resumeProbeEnabled()) {
+                g_resume_probe_frames = 8;
+            }
+            psxe_diag_logf("renderer", "presentation resumed (window generation %lu)",
+                           armsx_render_native_window_generation());
+        } else if (!g_presentation_was_suspended && presentation_suspended) {
+            psxe_diag_logf("renderer", "presentation suspended (window generation %lu)",
+                           armsx_render_native_window_generation());
         }
+        g_presentation_was_suspended = presentation_suspended;
+
+        // ...or unless frame skip dropped this one. Same shape as the suspend above and for the
+        // same reason, but a different question: suspended means "nobody can see it", skipped
+        // means "the device cannot afford to draw every one". Note the ORDER — a suspended frame
+        // still has to hit the pacing wait below, so skip cannot short-circuit it.
+        // Experimental Mali path: finish emulation before waiting, so variations in
+        // its cost do not shift the draw start. Still wait on skipped frames to keep
+        // emulation speed unchanged. This is not a display-vsync synchronizer.
+        const uint64_t lag_wait_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        if (pace_before_present) waitForFrameDeadline(currentTargetFrameRate());
+        const uint64_t lag_draw_begin = lag_probe ? SDL_GetPerformanceCounter() : 0;
+        if (lag_probe) lag_wait += lag_draw_begin - lag_wait_begin;
+        if (presentation_suspended) {
+            // Nothing to post, but the loop still has to pace itself or it becomes a spin.
+            waitForFrameDeadline(currentTargetFrameRate());
+        } else if (skip_present) {
+            // Nothing at all: no upload happened, nothing is posted, and the surface keeps the
+            // last frame that was. Deliberately NO extra pacing wait — the saved time is the
+            // whole point, and advanceFrameDeadline() below keeps the emulated cadence exact.
+        } else if (session_.valid()) {
+            session_.draw(settings_);
+        } else if (render_) {
+            // No session: still hand the host a (black) frame every tick so an embedded
+            // surface keeps getting posted instead of freezing on stale contents.
+            armsx_renderer_present_blank(render_);
+        }
+
+        g_host_vm_active.store(session_.valid(), std::memory_order_release);
+        // Only count frames that were actually posted. The counter is what the host polls to
+        // decide the VM is alive and advancing (the auto-load-on-boot gate reads it), so
+        // ticking it while nothing is being drawn would report progress that is not happening.
+        // A skipped frame therefore does NOT tick it — which is also what makes the counter the
+        // instrument that proves frame skip is really skipping.
+        if (session_.valid() && !presentation_suspended && !skip_present) {
+            g_host_presented_frames.fetch_add(1u, std::memory_order_relaxed);
+        }
+        // When a GPU backend owns the host's ANativeWindow it has already posted the frame
+        // (eglSwapBuffers / vkQueuePresentKHR). Running the host's CPU blit bridge on top of
+        // that would fight the buffer queue for the same surface.
+        if (!presentation_suspended && !skip_present && !armsx_render_native_window_claimed()) {
+            HostNotifyFramePresented();
+        }
+
+        if (stall_probe && session_stepping && lag_core_end) {
+            const uint64_t end = SDL_GetPerformanceCounter();
+            session_.recordStallTiming(stall_start, end, lag_core_end - lag_work_begin,
+                                      phase_emu_end - lag_core_end, end - lag_draw_begin, lag_wait);
+        }
+        if (lag_probe && (armsx_gpu_profile_get()->vendor == ARMSX_GPU_VENDOR_MALI || gpu720_probe)
+            && session_stepping && lag_core_end) {
+            const uint64_t end = SDL_GetPerformanceCounter();
+            const uint64_t interval = lag_prev_end_ ? end - lag_prev_end_ : 0;
+            lag_prev_end_ = end;
+            const uint64_t values[6] = {
+                lag_core_end - lag_work_begin, // Emulation (includes audio and disc work).
+                phase_emu_end - lag_core_end, // Texture upload / hardware frame completion.
+                lag_wait,
+                end - lag_draw_begin, // Draw / swap / host presentation (CPU wall time).
+                lag_wait_begin - phase_emu_end, // Achievements and other host work.
+                interval
+            };
+            if (gpu720_probe && frame_period_ticks_ && interval > frame_period_ticks_ * 11 / 10 &&
+                end - probe720_last_dip_ >= SDL_GetPerformanceFrequency()) {
+                probe720_last_dip_ = end;
+                psxe_diag_pacingf("probe720_dip dip_index=%u steps=%u "
+                    "core_ms=%.3f core_cpu_ms=%.3f upload_finish_ms=%.3f wait_ms=%.3f draw_swap_ms=%.3f "
+                    "other_ms=%.3f interval_ms=%.3f budget_ms=%.3f "
+                    "skip_present=%d suspended=%d sampled=%d wall_times_not_display_timestamps=yes",
+                    ++probe720_dip_count_, session_steps,
+                    CounterTicksToMilliseconds(values[0]),
+                    probe720_core_cpu_ns ? double(probe720_core_cpu_ns) / 1e6 : -1.0,
+                    CounterTicksToMilliseconds(values[1]),
+                    CounterTicksToMilliseconds(values[2]), CounterTicksToMilliseconds(values[3]),
+                    CounterTicksToMilliseconds(values[4]), CounterTicksToMilliseconds(values[5]),
+                    CounterTicksToMilliseconds(frame_period_ticks_), skip_present, presentation_suspended,
+                    probe720_work_sampled);
+            }
+            for (unsigned i = 0; i < 6; ++i) {
+                lag_sum_[i] += values[i];
+                lag_max_[i] = std::max(lag_max_[i], values[i]);
+            }
+            ++lag_samples_;
+            if (interval) ++lag_intervals_;
+            if (skip_present || presentation_suspended) ++lag_not_presented_;
+            if (interval && frame_period_ticks_ && interval > frame_period_ticks_ * 3 / 2)
+                ++lag_long_intervals_;
+            if (!lag_window_start_) lag_window_start_ = lag_begin;
+            if (end - lag_window_start_ >= SDL_GetPerformanceFrequency() * 2) {
+                const auto avg = [this](unsigned i) {
+                    const unsigned n = i == 5 ? lag_intervals_ : lag_samples_;
+                    return n ? CounterTicksToMilliseconds(lag_sum_[i]) / n : 0.0;
+                };
+                psxe_diag_pacingf(
+                    "gpu=%s model=%d driver=%s backend=%s presentation_driver=%s target_fps=%.3f mode=pre-draw samples=%u "
+                    "core_ms=%.2f/%.2f upload_finish_ms=%.2f/%.2f wait_ms=%.2f/%.2f "
+                    "draw_swap_ms=%.2f/%.2f other_ms=%.2f/%.2f loop_interval_ms=%.2f/%.2f "
+                    "long_intervals=%u not_presented=%u (pairs=avg/max; CPU wall time, not display timestamps)",
+                    armsx_gpu_profile_get()->name, armsx_gpu_profile_get()->model,
+                    armsx_gpu_profile_get()->driver_info,
+                    armsx_render_backend_name(armsx_renderer_backend(render_)),
+                    armsx_renderer_driver_name(render_), currentTargetFrameRate(), lag_samples_,
+                    avg(0), CounterTicksToMilliseconds(lag_max_[0]),
+                    avg(1), CounterTicksToMilliseconds(lag_max_[1]),
+                    avg(2), CounterTicksToMilliseconds(lag_max_[2]),
+                    avg(3), CounterTicksToMilliseconds(lag_max_[3]),
+                    avg(4), CounterTicksToMilliseconds(lag_max_[4]),
+                    avg(5), CounterTicksToMilliseconds(lag_max_[5]),
+                    lag_long_intervals_, lag_not_presented_);
+                lag_window_start_ = 0;
+                lag_samples_ = lag_intervals_ = lag_long_intervals_ = lag_not_presented_ = 0;
+                lag_sum_.fill(0); lag_max_.fill(0);
+            }
+        } else {
+            lag_window_start_ = lag_prev_end_ = 0;
+            lag_samples_ = lag_intervals_ = lag_long_intervals_ = lag_not_presented_ = 0;
+            lag_sum_.fill(0); lag_max_.fill(0);
+        }
+        if (gpu720_probe && session_stepping && lag_core_end)
+            session_.record720Core(lag_core_end - lag_work_begin, probe720_core_cpu_ns,
+                session_steps, probe720_work_sampled);
+        publishFrameSkipTrace(session_stepping);
+        publishFrameStats(stats_enabled, session_stepping, phase_frame_begin, phase_emu_end);
 
         applyDeferredActions();
-
-        ImGui::Render();
-        imgui_backend_.renderDrawData(ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
-
-#if defined(USE_HARDWARE) && defined(HW_DEBUG)
-        if (session_.valid() && session_.hardwareBackendActive()) {
-            logUiRendererState("ui-post-imgui-render");
-        }
-#endif
-
-        const bool fsui_is_active = fsui::HasActiveWindow();
-
-        if (fsui_was_active && !fsui_is_active) {
-            ui_window_state_ = FsuiWindowState::None;
-            if (session_.valid()) {
-                input_router_.onFsuiClosed();
-            }
-        } else if (!fsui_was_active && fsui_is_active && session_.valid()) {
-            input_router_.onFsuiOpened();
-        }
 
         advanceFrameDeadline();
     }
 
-    void applyCommand(const fsui::Command& command) {
-        psxe_diag_breadcrumbf("Frontend command type=%d", static_cast<int>(command.type));
+    // Frame skip's own measurement, in the diag log rather than the OSD.
+    //
+    // "It looks smoother" is not evidence, and the OSD's FPS row deliberately keeps counting
+    // EMULATED frames (that is what "is the game running at full speed" means), so nothing on
+    // screen would show whether a single present was actually dropped. This prints the ratio
+    // roughly every four seconds while skipping is armed: emulated frames in the window against
+    // the ones that got posted, plus the pacing lateness adaptive mode is reacting to.
+    //
+    // Costs nothing while frame_skip = 0 — the counters only move when a frame is skipped, and
+    // psxe_diag_logf() is itself suppressed unless [runtime] logging_enabled is on.
+    void publishFrameSkipTrace(bool stepping) {
+        if (!stepping) {
+            frame_skip_trace_frames_ = 0;
+            frames_dropped_ = 0;
+            return;
+        }
 
-        switch (command.type) {
-            case fsui::CommandType::LaunchPath:
-                queueLaunchArgument(command.path.string(), true);
-                break;
+        if (session_.frameSkip() == 0) {
+            frame_skip_trace_frames_ = 0;
+            frames_dropped_ = 0;
+            return;
+        }
 
-            case fsui::CommandType::RequestQuit:
-                if (session_.valid()) {
-                    exitToLibrary();
-                } else {
-                    running_ = false;
+        if (++frame_skip_trace_frames_ < kFrameSkipTraceFrames) {
+            return;
+        }
+
+        psxe_diag_logf("timing",
+                       "frame skip mode=%d window_frames=%u dropped=%u presented_total=%u "
+                       "late_ms=%.2f target_fps=%.2f",
+                       session_.frameSkip(),
+                       frame_skip_trace_frames_,
+                       frames_dropped_,
+                       g_host_presented_frames.load(std::memory_order_relaxed),
+                       CounterTicksToMilliseconds(frame_lateness_ticks_),
+                       currentTargetFrameRate());
+
+        frame_skip_trace_frames_ = 0;
+        frames_dropped_ = 0;
+    }
+
+    // Full performance overlay: drain the core's per-frame work counters, add the host phase
+    // timing measured around them, and publish the pair as one snapshot for psxe_host_stats().
+    //
+    // Accumulated over the same half-second window the frame rate uses and divided by the frames
+    // in it, so every number the overlay shows is a per-frame average rather than whichever
+    // single frame happened to be current when the UI polled. WORST_FRAME_MS is the exception —
+    // averaging a spike away is precisely the thing that hides a stutter.
+    //
+    // Nothing here runs while the overlay is off: psx_perf's counters are not armed, so the
+    // whole core carries zero instrumentation, and the phase timers in runFrame() are skipped.
+    void publishFrameStats(bool enabled, bool stepped, uint64_t frame_begin, uint64_t emu_end) {
+        if (!enabled) {
+            if (stats_window_frames_) {
+                stats_window_frames_ = 0;
+                stats_window_start_ = 0;
+                stats_worst_frame_ticks_ = 0;
+                stats_accum_ = {};
+                stats_prev_frame_begin_ = 0;
+            }
+
+            return;
+        }
+
+        psx_perf_counters_t counters{};
+        psx_perf_take_frame(&counters);
+
+        if (!stepped) {
+            // A paused or closed session did no guest work; keep the last published snapshot
+            // rather than averaging zeroes into it, and restart the window on resume.
+            stats_prev_frame_begin_ = 0;
+
+            return;
+        }
+
+        const uint64_t now = SDL_GetPerformanceCounter();
+        const uint64_t frequency = std::max<uint64_t>(1, SDL_GetPerformanceFrequency());
+
+        // The frame's own wall clock: begin-to-begin, so it includes the limiter sleep that
+        // precedes the emulation step. The first frame of a window has no predecessor.
+        const uint64_t frame_ticks = stats_prev_frame_begin_ ? (frame_begin - stats_prev_frame_begin_) : 0;
+        stats_prev_frame_begin_ = frame_begin;
+
+        stats_accum_.emu_ticks += emu_end - frame_begin;
+        stats_accum_.present_ticks += now - emu_end;
+        stats_accum_.frame_ticks += frame_ticks;
+        stats_accum_.counters.cpu_instructions += counters.cpu_instructions;
+        stats_accum_.counters.cpu_cycles += counters.cpu_cycles;
+        stats_accum_.counters.gte_ops += counters.gte_ops;
+        for (int i = 0; i < PSX_PERF_PRIM_KINDS; ++i)
+            stats_accum_.counters.gpu_primitives[i] += counters.gpu_primitives[i];
+        stats_accum_.counters.gpu_raster_pixels += counters.gpu_raster_pixels;
+        stats_accum_.counters.gpu_vram_words += counters.gpu_vram_words;
+        stats_accum_.counters.spu_samples += counters.spu_samples;
+        stats_accum_.counters.spu_voice_samples += counters.spu_voice_samples;
+        stats_accum_.counters.mdec_macroblocks += counters.mdec_macroblocks;
+        stats_accum_.counters.mdec_blocks += counters.mdec_blocks;
+        stats_accum_.counters.cdrom_sectors += counters.cdrom_sectors;
+        for (int i = 0; i < PSX_PERF_DMA_CHANNELS; ++i)
+            stats_accum_.counters.dma_words[i] += counters.dma_words[i];
+
+        if (frame_ticks > stats_worst_frame_ticks_)
+            stats_worst_frame_ticks_ = frame_ticks;
+
+        ++stats_window_frames_;
+
+        if (stats_window_start_ == 0) {
+            stats_window_start_ = now;
+
+            return;
+        }
+
+        if ((now - stats_window_start_) < (frequency / 2u))
+            return;
+
+        const double frames = static_cast<double>(stats_window_frames_);
+        const double ms_per_tick = 1000.0 / static_cast<double>(frequency);
+        const auto per_frame = [frames](uint64_t total) {
+            return static_cast<double>(total) / frames;
+        };
+
+        double out[PSXE_HOST_STAT_COUNT] = {};
+
+        const double frame_ms = per_frame(stats_accum_.frame_ticks) * ms_per_tick;
+        const double emu_ms = per_frame(stats_accum_.emu_ticks) * ms_per_tick;
+        const double present_ms = per_frame(stats_accum_.present_ticks) * ms_per_tick;
+
+        out[PSXE_HOST_STAT_FRAME_MS] = frame_ms;
+        out[PSXE_HOST_STAT_EMU_MS] = emu_ms;
+        out[PSXE_HOST_STAT_PRESENT_MS] = present_ms;
+        out[PSXE_HOST_STAT_IDLE_MS] = std::max(0.0, frame_ms - emu_ms - present_ms);
+        out[PSXE_HOST_STAT_WORST_FRAME_MS] = static_cast<double>(stats_worst_frame_ticks_) * ms_per_tick;
+
+        const psx_perf_counters_t& c = stats_accum_.counters;
+
+        out[PSXE_HOST_STAT_CPU_INSTRUCTIONS] = per_frame(c.cpu_instructions);
+        out[PSXE_HOST_STAT_CPU_CYCLES] = per_frame(c.cpu_cycles);
+        out[PSXE_HOST_STAT_GTE_OPS] = per_frame(c.gte_ops);
+        out[PSXE_HOST_STAT_GPU_TRIANGLES] = per_frame(c.gpu_primitives[PSX_PERF_PRIM_TRIANGLE]);
+        out[PSXE_HOST_STAT_GPU_RECTS] = per_frame(c.gpu_primitives[PSX_PERF_PRIM_RECT]);
+        out[PSXE_HOST_STAT_GPU_LINES] = per_frame(c.gpu_primitives[PSX_PERF_PRIM_LINE]);
+        out[PSXE_HOST_STAT_GPU_PIXELS] = per_frame(c.gpu_raster_pixels);
+        out[PSXE_HOST_STAT_GPU_VRAM_WORDS] = per_frame(c.gpu_vram_words);
+        // Voices are per generated SAMPLE, so this divides by samples, not frames: the result
+        // is how many of the 24 voices were sounding on average, which is what "SPU load" means.
+        out[PSXE_HOST_STAT_SPU_VOICES] = c.spu_samples
+            ? (static_cast<double>(c.spu_voice_samples) / static_cast<double>(c.spu_samples))
+            : 0.0;
+        out[PSXE_HOST_STAT_MDEC_MACROBLOCKS] = per_frame(c.mdec_macroblocks);
+        out[PSXE_HOST_STAT_MDEC_BLOCKS] = per_frame(c.mdec_blocks);
+        out[PSXE_HOST_STAT_CDROM_SECTORS] = per_frame(c.cdrom_sectors);
+
+        uint64_t dma_total = 0;
+        for (int i = 0; i < PSX_PERF_DMA_CHANNELS; ++i)
+            dma_total += c.dma_words[i];
+
+        out[PSXE_HOST_STAT_DMA_WORDS] = per_frame(dma_total);
+        out[PSXE_HOST_STAT_DMA_GPU_WORDS] = per_frame(c.dma_words[PSX_PERF_DMA_GPU]);
+        out[PSXE_HOST_STAT_DMA_SPU_WORDS] = per_frame(c.dma_words[PSX_PERF_DMA_SPU]);
+        out[PSXE_HOST_STAT_DMA_MDEC_WORDS] =
+            per_frame(c.dma_words[PSX_PERF_DMA_MDEC_IN] + c.dma_words[PSX_PERF_DMA_MDEC_OUT]);
+        out[PSXE_HOST_STAT_DMA_CDROM_WORDS] = per_frame(c.dma_words[PSX_PERF_DMA_CDROM]);
+        out[PSXE_HOST_STAT_DMA_OTC_WORDS] = per_frame(c.dma_words[PSX_PERF_DMA_OTC]);
+
+        psx_t* machine = session_.psx();
+
+        if (machine) {
+            out[PSXE_HOST_STAT_WIDTH] = static_cast<double>(psx_get_display_width(machine));
+            out[PSXE_HOST_STAT_HEIGHT] = static_cast<double>(psx_get_display_height(machine));
+        }
+
+        /* Host device usage. Sampled here rather than on the UI side because the poll is
+           rate-limited internally and this is already the once-per-window publish point. The
+           unavailable sentinel is negative and is passed through untouched — see host_usage.h
+           on why a missing GPU counter must not be substituted with something plausible. */
+        {
+            armsx_host_usage_t usage{};
+            armsx_host_usage_sample(&usage);
+            out[PSXE_HOST_STAT_HOST_CPU_PERCENT] = usage.cpu_percent;
+            out[PSXE_HOST_STAT_HOST_CPU_CORES] = static_cast<double>(usage.cpu_cores);
+            out[PSXE_HOST_STAT_HOST_RAM_MB] = usage.ram_mb;
+            out[PSXE_HOST_STAT_HOST_RAM_AVAILABLE_MB] = usage.ram_available_mb;
+            out[PSXE_HOST_STAT_HOST_GPU_PERCENT] = usage.gpu_percent;
+        }
+
+        /* Read from the GPU rather than from settings.internal_scale: the requested scale and
+           the live one differ whenever the rasterizer fell back (no GL context, or the
+           downgrade fired). The OSD must show what is running, not what was asked for. */
+        {
+            psx_gpu_t* scale_gpu = machine ? psx_get_gpu(machine) : nullptr;
+            out[PSXE_HOST_STAT_INTERNAL_SCALE] =
+                scale_gpu ? (double)psx_gpu_resolution_scale(scale_gpu) : 1.0;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_host_stats_lock);
+            std::memcpy(g_host_stats, out, sizeof(out));
+            g_host_stats_published = true;
+        }
+
+        if (perfLogEnabled()) {
+            psxe_diag_logf(
+                "perf",
+                "fps=%.1f frame=%.2f emu=%.2f present=%.2f idle=%.2f worst=%.2f "
+                "tri=%.0f rect=%.0f line=%.0f px=%.0f vramwords=%.0f disp=%.0fx%.0f frames=%u",
+                frame_ms > 0.0 ? (1000.0 / frame_ms) : 0.0, frame_ms, emu_ms, present_ms,
+                out[PSXE_HOST_STAT_IDLE_MS], out[PSXE_HOST_STAT_WORST_FRAME_MS],
+                out[PSXE_HOST_STAT_GPU_TRIANGLES], out[PSXE_HOST_STAT_GPU_RECTS],
+                out[PSXE_HOST_STAT_GPU_LINES], out[PSXE_HOST_STAT_GPU_PIXELS],
+                out[PSXE_HOST_STAT_GPU_VRAM_WORDS], out[PSXE_HOST_STAT_WIDTH],
+                out[PSXE_HOST_STAT_HEIGHT], stats_window_frames_);
+        }
+
+        stats_window_start_ = now;
+        stats_window_frames_ = 0;
+        stats_worst_frame_ticks_ = 0;
+        stats_accum_ = {};
+    }
+
+    // Publish what the emulation loop knows about itself for an embedded host to poll
+    // (psxe_host_measured_fps / psxe_host_nominal_frame_rate). The Android front-end draws its
+    // OSD in Compose, so this is the only route those numbers have out of the core.
+    //
+    // The measured rate is averaged over a window rather than derived from the last frame: a
+    // per-frame reciprocal jitters far too much to read, and this is a number a human stares at.
+    // Everything resets the moment the session stops stepping (paused, closed, or between games)
+    // so a resumed game can never briefly show the rate it had before the pause.
+    void publishSessionTelemetry(bool stepped) {
+        if (!stepped) {
+            fps_window_start_ = 0;
+            fps_window_frames_ = 0;
+            g_host_measured_fps.store(0.0f, std::memory_order_relaxed);
+            g_host_nominal_fps.store(
+                session_.valid() ? static_cast<float>(session_.frameRate()) : 0.0f,
+                std::memory_order_relaxed);
+            return;
+        }
+
+        g_host_nominal_fps.store(static_cast<float>(session_.frameRate()), std::memory_order_relaxed);
+
+        const uint64_t now = SDL_GetPerformanceCounter();
+        if (fps_window_start_ == 0) {
+            fps_window_start_ = now;
+            fps_window_frames_ = 0;
+            return;
+        }
+
+        ++fps_window_frames_;
+
+        const uint64_t frequency = std::max<uint64_t>(1, SDL_GetPerformanceFrequency());
+        const uint64_t elapsed = now - fps_window_start_;
+        if (elapsed < (frequency / 2u)) {
+            return; // Half-second window: settled enough to read, quick enough to react.
+        }
+
+        const double seconds = static_cast<double>(elapsed) / static_cast<double>(frequency);
+        g_host_measured_fps.store(
+            static_cast<float>(static_cast<double>(fps_window_frames_) / seconds),
+            std::memory_order_relaxed);
+        fps_window_start_ = now;
+        fps_window_frames_ = 0;
+    }
+
+    // Fast-forward has to escape the DISPLAY's refresh rate, not just the frame-pacing deadline.
+    // targetFrameRate() doubles the deadline, but with vsync on the present blocks anyway
+    // (eglSwapInterval(1) / VK_PRESENT_MODE_FIFO), so on a 60 Hz panel a ~59.94 fps game
+    // fast-forwards to ~60 fps — i.e. not at all, which is exactly how it reads on a phone. The
+    // swap interval is therefore dropped for the duration and restored from the user's setting
+    // afterwards. Only ever touched on a fast-forward edge, so a normal session keeps whatever
+    // the renderer was built with. Safe on every backend: GL sets the swap interval live, Vulkan
+    // just invalidates the swapchain so the next present rebuilds it with the new present mode,
+    // and the SDL blit-bridge backend implements no set_vsync at all (a no-op).
+    void applyPresentVsync(bool fast_forward) {
+        if (!render_ || fast_forward_vsync_dropped_ == fast_forward) {
+            return;
+        }
+
+        fast_forward_vsync_dropped_ = fast_forward;
+        armsx_renderer_set_vsync(render_, settings_.vsync_enabled && !fast_forward);
+        psxe_diag_breadcrumbf("Present vsync %s for fast-forward",
+                              fast_forward ? "dropped" : "restored");
+    }
+
+
+    // Drain everything the embedded host parked since the last frame. Runs on the
+    // emulation thread, so it is the only place that touches the psx_t / SDL state.
+    void applyHostControlRequests() {
+        std::vector<HostPadCommand> pad_commands;
+        bool pause_pending = false;
+        bool pause_value = false;
+        bool audio_suspend_pending = false;
+        bool audio_suspend_value = false;
+        bool shutdown_pending = false;
+        bool reset_pending = false;
+        bool fast_forward_pending = false;
+        bool fast_forward_value = false;
+        bool speed_limits_pending = false;
+        bool speed_limit_frame_limit = true;
+        int speed_limit_percent = 100;
+        int speed_limit_fps = 0;
+        double speed_limit_fast_forward = 2.0;
+        int speed_limit_frame_skip = 0;
+        bool screenshot_pending = false;
+        bool disc_swap_pending = false;
+        std::string disc_swap_path;
+        std::string screenshot_path;
+        bool multitap_pending = false;
+        bool multitap_value = false;
+        bool rewind_config_pending = false;
+        bool rewind_config_enabled = false;
+        int rewind_config_seconds = PSX_REWIND_DEFAULT_SECONDS;
+        int rewind_config_frequency = PSX_REWIND_DEFAULT_FREQUENCY;
+        bool runahead_pending = false;
+        int runahead_value = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(g_host_control_lock);
+            pad_commands.swap(g_host_pad_queue);
+            std::swap(pause_pending, g_host_pause_pending);
+            pause_value = g_host_pause_value;
+            std::swap(audio_suspend_pending, g_host_audio_suspend_pending);
+            audio_suspend_value = g_host_audio_suspend_value;
+            std::swap(shutdown_pending, g_host_shutdown_pending);
+            std::swap(reset_pending, g_host_reset_pending);
+            std::swap(fast_forward_pending, g_host_fast_forward_pending);
+            fast_forward_value = g_host_fast_forward_value;
+            std::swap(speed_limits_pending, g_host_speed_limits_pending);
+            speed_limit_frame_limit = g_host_speed_limit_frame_limit;
+            speed_limit_percent = g_host_speed_limit_percent;
+            speed_limit_fps = g_host_speed_limit_fps;
+            speed_limit_fast_forward = g_host_speed_limit_fast_forward;
+            speed_limit_frame_skip = g_host_speed_limit_frame_skip;
+            std::swap(screenshot_pending, g_host_screenshot_pending);
+            screenshot_path.swap(g_host_screenshot_path);
+            std::swap(disc_swap_pending, g_host_disc_swap_pending);
+            disc_swap_path.swap(g_host_disc_swap_path);
+            std::swap(multitap_pending, g_host_multitap_pending);
+            multitap_value = g_host_multitap_value;
+            std::swap(rewind_config_pending, g_host_rewind_config_pending);
+            rewind_config_enabled = g_host_rewind_config_enabled;
+            rewind_config_seconds = g_host_rewind_config_seconds;
+            rewind_config_frequency = g_host_rewind_config_frequency;
+            std::swap(runahead_pending, g_host_runahead_pending);
+            runahead_value = g_host_runahead_value;
+        }
+
+        /* Multitap BEFORE the pad commands: a toggle in the same pass as a press must reach
+           the device that is actually going to be in the port, not the one being thrown away
+           (whose held-button state goes with it). */
+        if (multitap_pending) {
+            settings_.multitap = multitap_value;
+
+            if (session_.valid() && session_.setMultitapEnabled(multitap_value)) {
+                /* Every held bit belonged to the device that was just destroyed. */
+                for (int i = 0; i < kHostMaxPlayers; i++) {
+                    host_pad_mask_player_[i] = 0;
+                    host_pad_pressed_prev_pass_[i] = 0;
                 }
-                break;
+            }
+        }
 
-            case fsui::CommandType::Resume:
-                if (session_.valid()) {
-                    ui_window_state_ = FsuiWindowState::None;
-                    session_.setPaused(false);
-                    resetFramePacing("command-resume");
+        if (rewind_config_pending) {
+            settings_.rewind = rewind_config_enabled;
+            settings_.rewind_seconds = rewind_config_seconds;
+            settings_.rewind_frequency = rewind_config_frequency;
+            psx_rewind_configure(rewind_config_enabled ? 1 : 0, rewind_config_seconds,
+                                 rewind_config_frequency);
+        }
+
+        if (runahead_pending) {
+            settings_.runahead = runahead_value;
+            psx_runahead_configure(runahead_value);
+        }
+
+        applyHostPadCommands(pad_commands);
+
+        // [audio] background_playback is the user opting IN to a game that keeps running with the
+        // screen off. Default off: quiet, underrunning audio out of a sleeping device is never
+        // what anyone wanted, and a PS1 core burning a core in your pocket even less so.
+        // Checked here rather than in psxe_host_set_audio_suspended() so the live settings are
+        // in scope, and so the toggle applies to a request that is already parked.
+        const bool suspend_audio = audio_suspend_value && !settings_.audio_background_playback;
+
+        // Un-suspend BEFORE the resume and suspend AFTER the pause, so the device is never asked
+        // to carry frames it cannot play: coming back, the stream is running again before the VM
+        // produces its first sample; going away, the VM has already stopped producing.
+        if (audio_suspend_pending && !suspend_audio && session_.valid()) {
+            session_.setAudioSuspended(false);
+        }
+
+        if (pause_pending && session_.valid()) {
+            session_.setPaused(pause_value);
+            if (!pause_value) {
+                resetFramePacing("host-resume");
+            }
+        }
+
+        if (audio_suspend_pending && suspend_audio && session_.valid()) {
+            session_.setAudioSuspended(true);
+        }
+
+        if (reset_pending) {
+            deferred_reset_ = true;
+        }
+
+        // Speed limits before the fast-forward edge: engaging fast-forward in the same pass
+        // that changed its multiplier must use the NEW multiplier, not the previous one.
+        if (speed_limits_pending) {
+            settings_.frame_limit = speed_limit_frame_limit;
+            settings_.speed_percent = speed_limit_percent;
+            settings_.fps_limit = speed_limit_fps;
+            settings_.fast_forward_speed = speed_limit_fast_forward;
+            settings_.frame_skip = speed_limit_frame_skip;
+
+            if (session_.valid()) {
+                session_.setSpeedLimits(speed_limit_frame_limit, speed_limit_percent, speed_limit_fps,
+                                        speed_limit_fast_forward, speed_limit_frame_skip);
+                resetFramePacing("host-speed-limits");
+            }
+            // Whatever run of skipped presents was in flight belongs to the old policy; the
+            // frame after a change must be drawn so the user sees the setting land.
+            requestPresentNextFrame();
+        }
+
+        if (fast_forward_pending) {
+            deferred_fast_forward_value_ = fast_forward_value;
+        }
+
+        if (screenshot_pending) {
+            deferred_screenshot_ = true;
+            deferred_screenshot_path_ = std::move(screenshot_path);
+        }
+
+        if (disc_swap_pending && !disc_swap_path.empty()) {
+            /* swapDisc() clears fast-forward and re-tags the launch kind itself. A failure is
+               logged rather than dialogued: on Android there is no modal to show it in, and the
+               running game simply keeps the disc it had — which is the correct outcome. */
+            if (!session_.swapDisc(std::filesystem::path(disc_swap_path))) {
+                log_error("disc swap failed: %s", disc_swap_path.c_str());
+            } else {
+                resetFramePacing("change-disc");
+            }
+        }
+
+        if (shutdown_pending) {
+            running_ = false;
+        }
+    }
+
+    // A press and its release can both land inside one frame (a quick tap on the touch
+    // overlay, a macro, a turbo pulse, `adb shell input keyevent`). Applying both would
+    // leave the guest seeing nothing at all, so a release whose press happened in this
+    // pass — or in the one before it — is pushed back for the next frame.
+    //
+    // TWO frames, not one, deliberately. One frame is not reliably observable: the guest
+    // polls the pad over the serial link at a phase of its own choosing, and a tap that
+    // opened and closed inside a single emulated frame was missed roughly half the time
+    // (measured on Crash Bandicoot's title menu — two injected d-pad taps moved the
+    // selection one step). A real controller press already spans several frames, so the
+    // extra frame costs held input nothing: prev_pass is empty by the time its release
+    // arrives, and the release is applied immediately.
+    void applyHostPadCommands(std::vector<HostPadCommand>& commands) {
+        // Consume the previous pass's presses even on an empty drain, so a long-held
+        // button's release is never delayed by a stale mask.
+        uint32_t pressed_prev_pass[kHostMaxPlayers];
+        for (int i = 0; i < kHostMaxPlayers; i++) {
+            pressed_prev_pass[i] = host_pad_pressed_prev_pass_[i];
+            host_pad_pressed_prev_pass_[i] = 0;
+        }
+
+        if (commands.empty()) {
+            return;
+        }
+
+        psx_pad_t* pad = session_.valid() ? session_.pad() : nullptr;
+        if (!pad) {
+            for (int i = 0; i < kHostMaxPlayers; i++) {
+                host_pad_mask_player_[i] = 0;
+            }
+            return;
+        }
+
+        uint32_t pressed_this_pass[kHostMaxPlayers] = {};
+        std::vector<HostPadCommand> deferred;
+
+        for (const HostPadCommand& command : commands) {
+            if (command.kind == HostPadCommandKind::Analog) {
+                const int stick = command.stick != 0 ? 1 : 0;
+                const uint16_t x = static_cast<uint16_t>(std::clamp(command.x, 0, 0xFF));
+                const uint16_t y = static_cast<uint16_t>(std::clamp(command.y, 0, 0xFF));
+                psx_pad_analog_change_player(pad, 0, command.player,
+                    stick == 0 ? PSXI_AX_SDA_LEFT_HORZ : PSXI_AX_SDA_RIGHT_HORZ, x);
+                psx_pad_analog_change_player(pad, 0, command.player,
+                    stick == 0 ? PSXI_AX_SDA_LEFT_VERT : PSXI_AX_SDA_RIGHT_VERT, y);
+#if defined(ARMSX_DIAGNOSTIC_BUILD)
+                static uint64_t last_sample[kHostMaxPlayers][2] = {};
+                const int player = std::clamp(command.player, 0, kHostMaxPlayers - 1);
+                const uint64_t now = SDL_GetTicks64();
+                if (now - last_sample[player][stick] >= 250) {
+                    last_sample[player][stick] = now;
+                    const psx_input_t* input = pad->joy_slot[0];
+                    const psxi_sda_t* sda = nullptr;
+                    if (input && input->udata) {
+                        if (input->kind == PSX_INPUT_KIND_SDA && command.player == 0)
+                            sda = static_cast<const psxi_sda_t*>(input->udata);
+                        else if (input->kind == PSX_INPUT_KIND_MULTITAP && command.player >= 0 &&
+                                 command.player < PSXI_MULTITAP_SLOTS)
+                            sda = &static_cast<const psxi_multitap_t*>(input->udata)->sub[command.player];
+                    }
+                    psxe_diag_logf("input", "applied player=%d stick=%d x=%u y=%u connected=%d analog=%d buttons=%04x",
+                                   command.player, stick, x, y, sda != nullptr,
+                                   sda ? sda->sa_mode : -1, sda ? psxi_sda_button_state(sda) : 0xffff);
                 }
-                break;
+#endif
+                continue;
+            }
 
-            case fsui::CommandType::Reset:
-                if (session_.valid()) {
-                    session_.reset();
-                    session_.setPaused(false);
-                    resetFramePacing("command-reset");
+            if (!command.mask) {
+                continue;
+            }
+
+            // Held-button bookkeeping is PER PLAYER. Sharing one mask across a multitap
+            // would let player 2's release cancel player 1's identical press — the two are
+            // different buttons on different pads and only look the same as a bit.
+            const int player = std::clamp(command.player, 0, kHostMaxPlayers - 1);
+            uint32_t& held = host_pad_mask_player_[player];
+
+            if (command.pressed) {
+                if ((held & command.mask) == 0) {
+                    psx_pad_button_press_player(pad, 0, player, command.mask);
+                    held |= command.mask;
                 }
-                break;
+                pressed_this_pass[player] |= command.mask;
+                continue;
+            }
 
-            case fsui::CommandType::ExitToLibrary:
-                exitToLibrary();
-                break;
+            if (((pressed_this_pass[player] | pressed_prev_pass[player]) & command.mask) != 0) {
+                deferred.push_back(command);
+                continue;
+            }
 
-            case fsui::CommandType::CloseSelector:
-            case fsui::CommandType::ExitFullscreenUI:
-            case fsui::CommandType::SwitchShell:
-            case fsui::CommandType::Custom:
-            default:
-                break;
+            if ((held & command.mask) != 0) {
+                psx_pad_button_release_player(pad, 0, player, command.mask);
+                held &= ~command.mask;
+            }
+        }
+
+        for (int i = 0; i < kHostMaxPlayers; i++) {
+            host_pad_pressed_prev_pass_[i] = pressed_this_pass[i];
+        }
+
+        if (!deferred.empty()) {
+            std::lock_guard<std::mutex> lock(g_host_control_lock);
+            g_host_pad_queue.insert(g_host_pad_queue.begin(), deferred.begin(), deferred.end());
         }
     }
 
@@ -4939,6 +8671,8 @@ class ArmsxApp {
                 session_.setPaused(false);
                 resetFramePacing("change-disc");
                 refreshGameList(false);
+                // A new disc is a different RA game: drop the old set and re-identify.
+                armsx_ach_session_started(session_.psx());
                 returnToMainWindow();
             }
         }
@@ -4946,28 +8680,53 @@ class ArmsxApp {
         if (deferred_screenshot_) {
             deferred_screenshot_ = false;
 
-            const std::filesystem::path snap_dir = DefaultBrowseDirectory() / "snap";
-            try {
-                std::filesystem::create_directories(snap_dir);
-                const std::time_t now = std::time(nullptr);
-                char name[64] = {};
-                std::strftime(name, sizeof(name), "armsx-%Y%m%d-%H%M%S.bmp", std::localtime(&now));
-                if (!session_.saveScreenshot(snap_dir / name)) {
-                    pending_error_dialog_ = "Failed to write the screenshot.";
+            // An embedded host (JNI saveScreenshot) supplies its own destination; the
+            // built-in path keeps the timestamped snap/ folder. Either way the payload is
+            // written by SDL_SaveBMP, so a caller asking for ".png" still gets BMP bytes.
+            if (!deferred_screenshot_path_.empty()) {
+                const std::filesystem::path target(deferred_screenshot_path_);
+                deferred_screenshot_path_.clear();
+                try {
+                    if (target.has_parent_path()) {
+                        std::filesystem::create_directories(target.parent_path());
+                    }
+                    if (!session_.saveScreenshot(target)) {
+                        pending_error_dialog_ = "Failed to write the screenshot.";
+                    }
+                } catch (...) {
+                    pending_error_dialog_ = "Failed to prepare the screenshot folder.";
                 }
-            } catch (...) {
-                pending_error_dialog_ = "Failed to prepare the screenshot folder.";
+            } else {
+                const std::filesystem::path snap_dir = DefaultBrowseDirectory() / "snap";
+                try {
+                    std::filesystem::create_directories(snap_dir);
+                    const std::time_t now = std::time(nullptr);
+                    char name[64] = {};
+                    std::strftime(name, sizeof(name), "armsx-%Y%m%d-%H%M%S.bmp", std::localtime(&now));
+                    if (!session_.saveScreenshot(snap_dir / name)) {
+                        pending_error_dialog_ = "Failed to write the screenshot.";
+                    }
+                } catch (...) {
+                    pending_error_dialog_ = "Failed to prepare the screenshot folder.";
+                }
             }
         }
 
-        if (deferred_fast_forward_toggle_) {
-            deferred_fast_forward_toggle_ = false;
-            if (session_.valid()) {
-                session_.setFastForwardEnabled(!session_.fastForwardEnabled());
-                session_.setPaused(false);
-                resetFramePacing("toggle-fast-forward");
-                returnToMainWindow();
+        // The single fast-forward entry point. There used to be a second one — a
+        // deferred_fast_forward_toggle_ flag with its own copy of this block, meant for an
+        // in-core hotkey — but nothing ever set it (the toggle lives in the Compose front-end
+        // and arrives through psxe_host_set_fast_forward as an absolute value), so it was two
+        // code paths where only one ran. The toggle is now resolved by the caller.
+        if (deferred_fast_forward_value_.has_value()) {
+            const bool enabled = *deferred_fast_forward_value_;
+            deferred_fast_forward_value_.reset();
+            if (session_.valid() && session_.fastForwardEnabled() != enabled) {
+                session_.setFastForwardEnabled(enabled);
+                resetFramePacing("host-fast-forward");
             }
+            // Outside the guard above: a request that arrives with no session (the front-end
+            // clears fast-forward as it closes a game) still has to hand the swap interval back.
+            applyPresentVsync(session_.valid() && session_.fastForwardEnabled());
         }
     }
 
@@ -4978,7 +8737,7 @@ class ArmsxApp {
             request.path.empty() ? "(none)" : request.path.string().c_str(),
             close_ui ? "true" : "false");
 
-        if (!session_.create(renderer_, settings_, request, error)) {
+        if (!session_.create(render_, settings_, request, error)) {
             pending_error_dialog_ = error;
             psxe_diag_logf("launch", "Session launch failed kind=%s error=%s", LaunchKindTitle(request.kind), error.c_str());
             if (request.kind == LaunchKind::Bios) {
@@ -4990,11 +8749,14 @@ class ArmsxApp {
         }
 
         input_router_.attach(session_.pad());
-        mobile_controls_.showNow();
         resetFramePacing("launch-session");
         applyWindowMetrics();
         logRendererBootstrap("session-launch", session_.frameRate());
         refreshGameList(false);
+
+        // Publish the machine to RetroAchievements. Identification (disc hash + set download)
+        // is deferred to the first frame update so the disc read never lands inside a boot.
+        armsx_ach_session_started(session_.psx());
 
         if (close_ui) {
             returnToMainWindow();
@@ -5006,1121 +8768,25 @@ class ArmsxApp {
     void exitToLibrary() {
         psxe_diag_breadcrumbf("Exit to library requested");
         input_router_.detach();
+        armsx_ach_session_ended();
         session_.destroy();
         resetFramePacing("exit-to-library");
         showLandingWindow();
     }
 
-    void openPauseMenu() {
-        if (!session_.valid()) {
-            return;
-        }
-
-        session_.setPaused(true);
-        resetFramePacing("open-pause-menu");
-        input_router_.onFsuiOpened();
-        showPauseMenuWindow();
-    }
-
-    bool syncPlatformLibraries(bool persist, bool refresh) {
-        std::vector<PlatformLibraryRoot> roots;
-        std::vector<PlatformLibraryGame> games;
-        const std::uint64_t version = CopyPlatformLibrarySnapshot(roots, games);
-        if (version == 0 || version == platform_library_version_) {
-            return false;
-        }
-
-#if defined(__ANDROID__)
-        auto remove_virtual_roots = [](std::vector<std::filesystem::path>& paths) {
-            paths.erase(
-                std::remove_if(paths.begin(), paths.end(), [](const std::filesystem::path& path) {
-                    return IsAndroidVirtualPath(path.string());
-                }),
-                paths.end()
-            );
-        };
-        remove_virtual_roots(settings_.ui_state.game_list_paths);
-        remove_virtual_roots(settings_.ui_state.game_list_recursive_paths);
-#endif
-
-        platform_roots_ = std::move(roots);
-        platform_games_ = std::move(games);
-        for (const PlatformLibraryRoot& root : platform_roots_) {
-            auto& paths = root.recursive
-                ? settings_.ui_state.game_list_recursive_paths
-                : settings_.ui_state.game_list_paths;
-            const std::filesystem::path path(root.path);
-            if (!PathListContains(paths, path)) {
-                paths.push_back(path);
-            }
-        }
-        platform_library_version_ = version;
-
-        if (refresh) {
-            refreshGameList(true);
-        }
-        if (persist) {
-            SaveSettings(settings_);
-        }
-        return true;
-    }
 
     void refreshGameList(bool full_rescan) {
         (void)full_rescan;
-        game_list_.clear();
-        std::vector<std::filesystem::path> seen_game_paths;
-        std::vector<std::pair<std::filesystem::path, bool>> scan_roots;
-
-        auto add_scan_root = [&](const std::filesystem::path& root, bool recursive) {
-            if (root.empty() || IsAndroidVirtualPath(root.string())) {
-                return;
-            }
-
-            for (auto& entry : scan_roots) {
-                if (PathsMatch(entry.first, root)) {
-                    entry.second = entry.second || recursive;
-                    return;
-                }
-            }
-
-            scan_roots.emplace_back(root, recursive);
-        };
-
-        auto scan_root = [&](const std::filesystem::path& root, bool recursive) {
-            try {
-                if (!std::filesystem::exists(root)) {
-                    return;
-                }
-
-                auto append_entry = [&](const std::filesystem::directory_entry& item) {
-                    if (!item.is_regular_file()) {
-                        return;
-                    }
-
-                    const std::filesystem::path path = item.path();
-                    if (!IsDiscPath(path) && !IsExePath(path)) {
-                        return;
-                    }
-                    if (IsLikelyBiosImagePath(path, settings_)) {
-                        return;
-                    }
-                    if (ToLower(path.extension().string()) == ".bin" && CueDirectoryReferencesImage(path)) {
-                        return;
-                    }
-                    if (PathListContains(seen_game_paths, path)) {
-                        return;
-                    }
-                    seen_game_paths.push_back(path);
-
-                    fsui::GameEntry entry;
-                    entry.path = path;
-                    entry.type = IsExePath(path) ? fsui::GameEntryType::Homebrew : fsui::GameEntryType::Application;
-                    entry.title = StemToTitle(path);
-                    entry.title_sort = ToLower(entry.title);
-                    entry.english_title = entry.title;
-                    entry.title_id = NormalizeModel(entry.title);
-                    entry.file_size = item.file_size();
-                    entry.modified_time = FileTimeToTimeT(item.last_write_time());
-
-                    const int region = RegionFromSettings(settings_);
-                    if (region == CDR_REGION_EUROPE) {
-                        entry.region = "Europe";
-                        entry.region_flag_path = "icons/flags/eu.png";
-                    } else if (region == CDR_REGION_JAPAN) {
-                        entry.region = "Japan";
-                        entry.region_flag_path = "icons/flags/jp.png";
-                    } else {
-                        entry.region = "North America";
-                        entry.region_flag_path = "icons/flags/us.png";
-                    }
-
-                    game_list_.push_back(std::move(entry));
-                };
-
-                if (recursive) {
-                    for (const auto& item : std::filesystem::recursive_directory_iterator(root)) {
-                        append_entry(item);
-                    }
-                } else {
-                    for (const auto& item : std::filesystem::directory_iterator(root)) {
-                        append_entry(item);
-                    }
-                }
-            } catch (...) {
-            }
-        };
-
-        for (const auto& root : settings_.ui_state.game_list_paths) {
-            add_scan_root(root, false);
-        }
-
-        for (const auto& root : settings_.ui_state.game_list_recursive_paths) {
-            add_scan_root(root, true);
-        }
-
-#if defined(UWP_TARGET)
-        add_scan_root(DefaultBrowseDirectory(), true);
-#endif
-
-        for (const auto& [root, recursive] : scan_roots) {
-            scan_root(root, recursive);
-        }
-
-        for (const PlatformLibraryGame& game : platform_games_) {
-            const auto root = std::find_if(platform_roots_.begin(), platform_roots_.end(), [&](const PlatformLibraryRoot& candidate) {
-                return PlatformPathBelongsToRoot(game.path, candidate.path, candidate.recursive);
-            });
-            if (root == platform_roots_.end()) {
-                continue;
-            }
-
-            const std::filesystem::path path(game.path);
-            if ((!IsDiscPath(path) && !IsExePath(path) && !IsZipPath(path)) ||
-                IsLikelyBiosImagePath(path, settings_) ||
-                PathListContains(seen_game_paths, path)) {
-                continue;
-            }
-            seen_game_paths.push_back(path);
-
-            fsui::GameEntry entry;
-            entry.path = path;
-            entry.type = IsExePath(path) ? fsui::GameEntryType::Homebrew : fsui::GameEntryType::Application;
-            entry.title = game.label.empty() ? StemToTitle(path) : game.label;
-            entry.title_sort = ToLower(entry.title);
-            entry.english_title = entry.title;
-            entry.title_id = NormalizeModel(entry.title);
-            entry.file_size = game.size;
-            entry.modified_time = game.modified;
-
-            const int region = RegionFromSettings(settings_);
-            if (region == CDR_REGION_EUROPE) {
-                entry.region = "Europe";
-                entry.region_flag_path = "icons/flags/eu.png";
-            } else if (region == CDR_REGION_JAPAN) {
-                entry.region = "Japan";
-                entry.region_flag_path = "icons/flags/jp.png";
-            } else {
-                entry.region = "North America";
-                entry.region_flag_path = "icons/flags/us.png";
-            }
-            game_list_.push_back(std::move(entry));
-        }
-
-        std::sort(game_list_.begin(), game_list_.end(), [](const fsui::GameEntry& left, const fsui::GameEntry& right) {
-            if (left.title_sort == right.title_sort) {
-                return left.path < right.path;
-            }
-            return left.title_sort < right.title_sort;
-        });
     }
 
-    std::vector<fsui::MenuItemDescriptor> buildLandingItems() {
-        std::vector<fsui::MenuItemDescriptor> items;
 
-        fsui::MenuItemDescriptor game_list;
-        game_list.id = "game-list";
-        game_list.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::GameList);
-        game_list.title = "Game List";
-        game_list.summary = "Browse your library folders and open a game.";
-        game_list.on_activate = [this]() { showGameListWindow(); };
-        items.push_back(std::move(game_list));
 
-        fsui::MenuItemDescriptor start;
-        start.id = "start-game";
-        start.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::StartGame);
-        start.title = "Start Game";
-        start.summary = "Boot a disc, PS-X EXE, or the BIOS directly.";
-        start.on_activate = [this]() { showStartGameWindow(); };
-        items.push_back(std::move(start));
 
-        fsui::MenuItemDescriptor settings;
-        settings.id = "settings";
-        settings.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::Settings);
-        settings.title = "Settings";
-        settings.summary = "Adjust ARMSX, BIOS, video, and library settings.";
-        settings.on_activate = [this]() { switchToSettingsWindow(); };
-        items.push_back(std::move(settings));
 
-        fsui::MenuItemDescriptor exit;
-        exit.id = "exit";
-        exit.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::Exit);
-        exit.title = "Exit";
-        exit.summary = "Quit ARMSX.";
-        exit.on_activate = [this]() { showExitWindow(); };
-        items.push_back(std::move(exit));
 
-        return items;
-    }
 
-    std::vector<fsui::MenuItemDescriptor> buildStartItems() {
-        std::vector<fsui::MenuItemDescriptor> items;
 
-        auto default_dir = initialBrowseDirectory();
 
-        fsui::MenuItemDescriptor start_file;
-        start_file.id = "start-file";
-        start_file.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::StartFile);
-        start_file.title = "Start File";
-        start_file.summary = "Choose a disc image or PS-X EXE from your files.";
-        start_file.on_activate = [this, default_dir]() {
-#if defined(__EMSCRIPTEN__)
-            requestWebFiles(false);
-#else
-            ImGuiFullscreen::OpenFileSelector(
-                "Start File",
-                false,
-                [this](const std::string& path) {
-                    queueLaunchSelection(path);
-                },
-                {".cue", ".bin", ".iso", ".img",
-#ifdef USE_CHD
-                 ".chd",
-#endif
-                 ".exe", ".ps-exe", ".psexe"},
-                default_dir.string()
-            );
-#endif
-        };
-        items.push_back(std::move(start_file));
-
-        if (!settings_.default_exe_path.empty()) {
-            fsui::MenuItemDescriptor start_saved_exe;
-            start_saved_exe.id = "start-default-exe";
-            start_saved_exe.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::StartFile);
-            start_saved_exe.title = "Start Saved PS-X EXE";
-            start_saved_exe.summary = settings_.default_exe_path;
-            start_saved_exe.on_activate = [this]() {
-                deferred_launch_ = LaunchRequest{
-                    .kind = LaunchKind::Exe,
-                    .path = std::filesystem::path(settings_.default_exe_path),
-                    .label = StemToTitle(settings_.default_exe_path),
-                };
-                close_ui_after_launch_ = true;
-            };
-            items.push_back(std::move(start_saved_exe));
-        }
-
-        fsui::MenuItemDescriptor start_disc;
-        start_disc.id = "start-disc";
-        start_disc.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::StartDisc);
-        start_disc.title = "Start Disc";
-        start_disc.summary = "Pick a disc image directly.";
-        start_disc.on_activate = [this, default_dir]() {
-#if defined(__EMSCRIPTEN__)
-            requestWebFiles(false);
-#else
-            ImGuiFullscreen::OpenFileSelector(
-                "Start Disc",
-                false,
-                [this](const std::string& path) {
-                    queueLaunchSelection(path, LaunchKind::Disc);
-                },
-                {".cue", ".bin", ".iso", ".img",
-#ifdef USE_CHD
-                 ".chd",
-#endif
-                },
-                default_dir.string()
-            );
-#endif
-        };
-        items.push_back(std::move(start_disc));
-
-#if defined(__EMSCRIPTEN__)
-        fsui::MenuItemDescriptor start_folder;
-        start_folder.id = "start-web-folder";
-        start_folder.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::StartFile);
-        start_folder.title = "Open Game Folder";
-        start_folder.summary = "Grant temporary access to a folder and start a discovered game.";
-        start_folder.on_activate = [this]() { requestWebFiles(true); };
-        items.push_back(std::move(start_folder));
-#endif
-
-        fsui::MenuItemDescriptor start_bios;
-        start_bios.id = "start-bios";
-        start_bios.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::StartBios);
-        start_bios.title = "Start BIOS";
-        start_bios.summary = "Boot into the BIOS without media.";
-        start_bios.on_activate = [this]() {
-            deferred_launch_ = LaunchRequest{.kind = LaunchKind::Bios, .path = {}, .label = "PlayStation BIOS"};
-            close_ui_after_launch_ = true;
-        };
-        items.push_back(std::move(start_bios));
-
-        fsui::MenuItemDescriptor back;
-        back.id = "back";
-        back.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::Back);
-        back.title = "Back";
-        back.summary = "Return to the main menu.";
-        back.on_activate = [this]() { showLandingWindow(); };
-        items.push_back(std::move(back));
-
-        return items;
-    }
-
-    std::vector<fsui::MenuItemDescriptor> buildExitItems() {
-        std::vector<fsui::MenuItemDescriptor> items;
-
-        fsui::MenuItemDescriptor quit;
-        quit.id = "quit";
-        quit.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::Exit);
-        quit.title = "Quit";
-        quit.summary = "Close ARMSX.";
-        quit.command = fsui::MakeRequestQuitCommand();
-        items.push_back(std::move(quit));
-
-        fsui::MenuItemDescriptor back;
-        back.id = "back";
-        back.icon_path = fsui::GetBuiltInStartupIconPath(fsui::BuiltInStartupIcon::Back);
-        back.title = "Back";
-        back.summary = "Return to the main menu.";
-        back.on_activate = [this]() { showLandingWindow(); };
-        items.push_back(std::move(back));
-
-        return items;
-    }
-
-    std::vector<fsui::MenuItemDescriptor> buildPauseItems() {
-        std::vector<fsui::MenuItemDescriptor> items;
-
-        fsui::MenuItemDescriptor resume;
-        resume.id = "resume";
-        resume.title = ICON_FA_PLAY " Resume";
-        resume.summary = "Return to gameplay.";
-        resume.command = fsui::MakeResumeCommand();
-        items.push_back(std::move(resume));
-
-        fsui::MenuItemDescriptor reset;
-        reset.id = "reset";
-        reset.title = ICON_FA_SYNC " Reset";
-        reset.summary = "Soft-reset the active session.";
-        reset.command = fsui::MakeResetCommand();
-        items.push_back(std::move(reset));
-
-        fsui::MenuItemDescriptor change_disc;
-        change_disc.id = "change-disc";
-        change_disc.title = ICON_FA_COMPACT_DISC " Change Disc";
-        change_disc.summary = "Swap to another disc image and resume.";
-        change_disc.on_activate = [this]() {
-            ImGuiFullscreen::OpenFileSelector(
-                "Change Disc",
-                false,
-                [this](const std::string& path) { queueDiscSwapSelection(path); },
-                {".cue", ".bin", ".iso", ".img",
-#ifdef USE_CHD
-                 ".chd",
-#endif
-                },
-                initialBrowseDirectory().string()
-            );
-        };
-        items.push_back(std::move(change_disc));
-
-        fsui::MenuItemDescriptor screenshot;
-        screenshot.id = "screenshot";
-        screenshot.title = ICON_FA_CAMERA " Save Screenshot";
-        screenshot.summary = "Save a BMP screenshot to the screenshot folder.";
-        screenshot.on_activate = [this]() { deferred_screenshot_ = true; };
-        items.push_back(std::move(screenshot));
-
-        fsui::MenuItemDescriptor settings;
-        settings.id = "settings";
-        settings.title = ICON_FA_SLIDERS_H " Settings";
-        settings.summary = "Open the in-game settings pages.";
-        settings.on_activate = [this]() { switchToSettingsWindow(); };
-        items.push_back(std::move(settings));
-
-        fsui::MenuItemDescriptor fast_forward;
-        fast_forward.id = "fast-forward";
-        fast_forward.title = ICON_FA_FAST_FORWARD " Fast Forward";
-        fast_forward.summary = session_.fastForwardEnabled()
-            ? "Current speed is 2x. Click to return to normal speed and resume gameplay."
-            : "Current speed is normal. Click to resume gameplay at 2x.";
-        fast_forward.on_activate = [this]() { deferred_fast_forward_toggle_ = true; };
-        items.push_back(std::move(fast_forward));
-
-        fsui::MenuItemDescriptor quit;
-        quit.id = "quit-game";
-        quit.title = ICON_FA_POWER_OFF " Quit Game";
-        quit.summary = "Close the current game and return to the main menu.";
-        quit.command = fsui::MakeExitToLibraryCommand();
-        items.push_back(std::move(quit));
-
-        return items;
-    }
-
-    std::vector<fsui::MenuItemDescriptor> buildGameLaunchOptions(const fsui::GameEntry&) {
-        return {};
-    }
-
-    std::vector<fsui::SettingsPageDescriptor> buildSettingsPages(fsui::SettingsScope scope) {
-        std::vector<fsui::SettingsPageDescriptor> pages;
-
-        if (scope == fsui::SettingsScope::PerGame) {
-            pages = buildPerGameSettingsPages();
-        } else {
-            pages = buildGlobalSettingsPages();
-        }
-
-        if (pending_settings_page_restore_.has_value()) {
-            const std::string restore_id = *pending_settings_page_restore_;
-            const auto match = std::find_if(pages.begin(), pages.end(), [&](const fsui::SettingsPageDescriptor& page) {
-                return page.id == restore_id;
-            });
-
-            if (match != pages.end()) {
-                std::rotate(pages.begin(), match, match + 1);
-            }
-
-            pending_settings_page_restore_.reset();
-        }
-
-        return pages;
-    }
-
-    std::vector<fsui::SettingsPageDescriptor> buildGlobalSettingsPages() {
-        std::vector<fsui::SettingsPageDescriptor> pages;
-
-        fsui::SettingsPageDescriptor bios_page;
-        bios_page.id = "BIOS";
-        bios_page.scope = fsui::SettingsScope::Global;
-        bios_page.built_in_page = fsui::BuiltInSettingsPage::BIOS;
-        bios_page.build_rows = [this]() {
-            std::vector<fsui::SettingsRowDescriptor> rows;
-
-            fsui::SettingsRowDescriptor model;
-            model.kind = fsui::SettingsRowKind::Choice;
-            model.id = "model";
-            model.title = ICON_FA_MICROCHIP " Model";
-            model.summary = "Choose which BIOS model to use when a BIOS folder contains more than one.";
-            model.value = settings_.model;
-            model.dialog_title = model.title;
-            model.choices = BuildModelChoices(settings_.model);
-            model.on_choice = [this](int index) {
-                const auto models = ModelChoices();
-                if (index >= 0 && index < static_cast<int>(models.size())) {
-                    settings_.model = models[static_cast<size_t>(index)];
-                    SaveSettings(settings_);
-                }
-            };
-            rows.push_back(std::move(model));
-
-            fsui::SettingsRowDescriptor folder;
-            folder.kind = fsui::SettingsRowKind::Action;
-            folder.id = "bios-folder";
-            folder.title = ICON_FA_FOLDER " BIOS Folder";
-            if (settings_.bios_search.empty()) {
-                folder.summary = AppendBrowseRootHint("Choose a folder that contains BIOS files.");
-            } else {
-                folder.summary = settings_.bios_search;
-            }
-            folder.on_activate = [this]() {
-                ImGuiFullscreen::OpenFileSelector(
-                    "BIOS Folder",
-                    true,
-                    [this](const std::string& path) {
-                        if (const std::optional<std::string> selection = NormalizedPickerSelection(path)) {
-                            settings_.bios_search = *selection;
-                            SaveSettings(settings_);
-                        }
-                    },
-                    {},
-                    browseDirectoryForPath(settings_.bios_search, true).string()
-                );
-            };
-            rows.push_back(std::move(folder));
-
-            fsui::SettingsRowDescriptor override;
-            override.kind = fsui::SettingsRowKind::Action;
-            override.id = "bios-override";
-            override.title = ICON_FA_FILE " BIOS Override";
-            override.summary = settings_.bios_override.empty() ? "Auto-select from the BIOS folder." : settings_.bios_override;
-            override.on_activate = [this]() {
-                const std::string browse_seed = settings_.bios_override.empty() ? settings_.bios_search : settings_.bios_override;
-                ImGuiFullscreen::OpenFileSelector(
-                    "BIOS Override",
-                    false,
-                    [this](const std::string& path) {
-                        if (const std::optional<std::string> selection = NormalizedPickerSelection(path)) {
-                            settings_.bios_override = *selection;
-                            SaveSettings(settings_);
-                        }
-                    },
-                    {".bin", ".rom"},
-                    browseDirectoryForPath(browse_seed, false).string()
-                );
-            };
-            rows.push_back(std::move(override));
-
-            fsui::SettingsRowDescriptor clear_override;
-            clear_override.kind = fsui::SettingsRowKind::Action;
-            clear_override.id = "clear-bios-override";
-            clear_override.title = ICON_FA_TIMES " Clear BIOS Override";
-            clear_override.summary = "Fall back to the BIOS folder + preferred model.";
-            clear_override.enabled = !settings_.bios_override.empty();
-            clear_override.on_activate = [this]() {
-                settings_.bios_override.clear();
-                SaveSettings(settings_);
-            };
-            rows.push_back(std::move(clear_override));
-
-            return rows;
-        };
-        pages.push_back(std::move(bios_page));
-
-        fsui::SettingsPageDescriptor emulation_page;
-        emulation_page.id = "Emulation";
-        emulation_page.scope = fsui::SettingsScope::Global;
-        emulation_page.built_in_page = fsui::BuiltInSettingsPage::Emulation;
-        emulation_page.build_rows = [this]() {
-            std::vector<fsui::SettingsRowDescriptor> rows;
-
-            fsui::SettingsRowDescriptor cpu_engine;
-            cpu_engine.kind = fsui::SettingsRowKind::Choice;
-            cpu_engine.id = "cpu-engine";
-            cpu_engine.title = ICON_FA_MICROCHIP " CPU Engine";
-            cpu_engine.summary = "Use the cached interpreter for normal play or the reference interpreter for compatibility diagnostics. Applies on the next launch.";
-            cpu_engine.value = CpuEngineTitle(settings_.cpu_engine);
-            cpu_engine.dialog_title = cpu_engine.title;
-            cpu_engine.choices = BuildCpuEngineChoices(settings_.cpu_engine);
-            cpu_engine.on_choice = [this](int index) {
-                settings_.cpu_engine = index == 1 ? PSX_CPU_INTERPRETER : PSX_CPU_CACHED_INTERPRETER;
-                SaveSettings(settings_);
-            };
-            rows.push_back(std::move(cpu_engine));
-
-            fsui::SettingsRowDescriptor region;
-            region.kind = fsui::SettingsRowKind::Choice;
-            region.id = "region";
-            region.title = ICON_FA_GLOBE " Region";
-            region.summary = "Choose which region the console should use when starting a disc.";
-            region.value = ToLower(settings_.region);
-            region.dialog_title = region.title;
-            region.choices = BuildRegionChoices(settings_.region);
-            region.on_choice = [this](int index) {
-                static const std::array<const char*, 3> values = {"auto", "ntsc", "pal"};
-                if (index >= 0 && index < static_cast<int>(values.size())) {
-                    settings_.region = values[static_cast<size_t>(index)];
-                    SaveSettings(settings_);
-                }
-            };
-            rows.push_back(std::move(region));
-
-            fsui::SettingsRowDescriptor expansion;
-            expansion.kind = fsui::SettingsRowKind::Action;
-            expansion.id = "expansion-rom";
-            expansion.title = ICON_FA_MEMORY " Expansion ROM";
-            expansion.summary = settings_.exp_path.empty() ? "No expansion ROM selected." : settings_.exp_path;
-            expansion.on_activate = [this]() {
-                ImGuiFullscreen::OpenFileSelector(
-                    "Expansion ROM",
-                    false,
-                    [this](const std::string& path) {
-                        if (const std::optional<std::string> selection = NormalizedPickerSelection(path)) {
-                            settings_.exp_path = *selection;
-                            SaveSettings(settings_);
-                        }
-                    },
-                    {".bin", ".rom"},
-                    initialBrowseDirectory().string()
-                );
-            };
-            rows.push_back(std::move(expansion));
-
-            fsui::SettingsRowDescriptor default_exe;
-            default_exe.kind = fsui::SettingsRowKind::Action;
-            default_exe.id = "default-exe";
-            default_exe.title = ICON_FA_FILE_CODE " Default PS-X EXE";
-            default_exe.summary = settings_.default_exe_path.empty() ? "No default executable selected." : settings_.default_exe_path;
-            default_exe.on_activate = [this]() {
-                ImGuiFullscreen::OpenFileSelector(
-                    "Default PS-X EXE",
-                    false,
-                    [this](const std::string& path) {
-                        if (const std::optional<std::string> selection = NormalizedPickerSelection(path)) {
-                            settings_.default_exe_path = *selection;
-                            SaveSettings(settings_);
-                        }
-                    },
-                    {".exe", ".ps-exe", ".psexe"},
-                    initialBrowseDirectory().string()
-                );
-            };
-            rows.push_back(std::move(default_exe));
-
-            return rows;
-        };
-        pages.push_back(std::move(emulation_page));
-
-        fsui::SettingsPageDescriptor graphics_page;
-        graphics_page.id = "Graphics";
-        graphics_page.scope = fsui::SettingsScope::Global;
-        graphics_page.built_in_page = fsui::BuiltInSettingsPage::Graphics;
-        graphics_page.build_rows = [this]() { return buildGraphicsRows(SupportsManagedWindowSizing()); };
-        pages.push_back(std::move(graphics_page));
-
-        fsui::SettingsPageDescriptor folders_page;
-        folders_page.id = "Folders";
-        folders_page.scope = fsui::SettingsScope::Global;
-        folders_page.built_in_page = fsui::BuiltInSettingsPage::Folders;
-        folders_page.build_rows = [this]() {
-            std::vector<fsui::SettingsRowDescriptor> rows;
-
-#if defined(UWP_TARGET)
-            fsui::SettingsRowDescriptor browse_notice;
-            browse_notice.kind = fsui::SettingsRowKind::Notice;
-            browse_notice.id = "uwp-filesystem-roots";
-            browse_notice.title = ICON_FA_FOLDER_OPEN " Mounted Drives";
-            browse_notice.summary = "Drive roots are available in the file picker. Use Filesystem Roots or Parent Directory to switch drives.";
-            rows.push_back(std::move(browse_notice));
-#endif
-
-            fsui::SettingsRowDescriptor add_folder;
-            add_folder.kind = fsui::SettingsRowKind::Action;
-            add_folder.id = "add-folder";
-            add_folder.title = ICON_FA_FOLDER_PLUS " Add Library Folder";
-#if defined(__ANDROID__) || defined(IOS_TARGET)
-            add_folder.summary = "Grant persistent access to one game directory using the system folder picker.";
-#else
-            add_folder.summary = AppendBrowseRootHint("Scan only the selected directory.");
-#endif
-            add_folder.on_activate = [this]() {
-                if (RequestPlatformLibraryDirectory(false)) {
-                    return;
-                }
-                ImGuiFullscreen::OpenFileSelector(
-                    "Add Library Folder",
-                    true,
-                    [this](const std::string& path) {
-                        if (const std::optional<std::string> selection = NormalizedPickerSelection(path)) {
-                            settings_.ui_state.game_list_paths.emplace_back(*selection);
-                            refreshGameList(true);
-                            SaveSettings(settings_);
-                        }
-                    },
-                    {},
-                    initialBrowseDirectory().string()
-                );
-            };
-            rows.push_back(std::move(add_folder));
-
-            fsui::SettingsRowDescriptor add_recursive;
-            add_recursive.kind = fsui::SettingsRowKind::Action;
-            add_recursive.id = "add-recursive-folder";
-            add_recursive.title = ICON_FA_FOLDER_PLUS " Add Recursive Folder";
-#if defined(__ANDROID__) || defined(IOS_TARGET)
-            add_recursive.summary = "Grant persistent access to a game directory and scan all of its subfolders.";
-#else
-            add_recursive.summary = AppendBrowseRootHint("Scan the selected directory and its children.");
-#endif
-            add_recursive.on_activate = [this]() {
-                if (RequestPlatformLibraryDirectory(true)) {
-                    return;
-                }
-                ImGuiFullscreen::OpenFileSelector(
-                    "Add Recursive Library Folder",
-                    true,
-                    [this](const std::string& path) {
-                        if (const std::optional<std::string> selection = NormalizedPickerSelection(path)) {
-                            settings_.ui_state.game_list_recursive_paths.emplace_back(*selection);
-                            refreshGameList(true);
-                            SaveSettings(settings_);
-                        }
-                    },
-                    {},
-                    initialBrowseDirectory().string()
-                );
-            };
-            rows.push_back(std::move(add_recursive));
-
-            fsui::SettingsRowDescriptor refresh;
-            refresh.kind = fsui::SettingsRowKind::Action;
-            refresh.id = "refresh-library";
-            refresh.title = ICON_FA_SYNC " Refresh Library";
-            refresh.summary = "Rescan every configured library folder.";
-            refresh.on_activate = [this]() { refreshGameList(true); };
-            rows.push_back(std::move(refresh));
-
-            auto append_folder_rows = [&](const std::vector<std::filesystem::path>& folders, bool recursive) {
-                for (size_t index = 0; index < folders.size(); index++) {
-                    fsui::SettingsRowDescriptor row;
-                    row.kind = fsui::SettingsRowKind::Action;
-                    row.id = std::string(recursive ? "recursive-" : "folder-") + std::to_string(index);
-                    row.title = WithHiddenId(
-                        recursive ? ICON_FA_FOLDER_OPEN " Recursive Folder" : ICON_FA_FOLDER " Library Folder",
-                        row.id
-                    );
-                    const std::string configured_path = folders[index].string();
-                    const auto platform_root = std::find_if(platform_roots_.begin(), platform_roots_.end(), [&](const PlatformLibraryRoot& root) {
-                        return root.path == configured_path;
-                    });
-                    row.summary = platform_root != platform_roots_.end() && !platform_root->label.empty()
-                        ? platform_root->label + "\n" + configured_path
-                        : configured_path;
-                    row.on_activate = [this, index, recursive]() {
-                        auto& list = recursive ? settings_.ui_state.game_list_recursive_paths : settings_.ui_state.game_list_paths;
-                        if (index < list.size()) {
-                            const std::string removed_path = list[index].string();
-                            list.erase(list.begin() + static_cast<std::ptrdiff_t>(index));
-                            NotifyPlatformLibraryDirectoryRemoved(removed_path);
-                            refreshGameList(true);
-                            SaveSettings(settings_);
-                        }
-                    };
-                    rows.push_back(std::move(row));
-                }
-            };
-
-            append_folder_rows(settings_.ui_state.game_list_paths, false);
-            append_folder_rows(settings_.ui_state.game_list_recursive_paths, true);
-
-            return rows;
-        };
-        pages.push_back(std::move(folders_page));
-
-        fsui::SettingsPageDescriptor advanced_page;
-        advanced_page.id = "Advanced";
-        advanced_page.scope = fsui::SettingsScope::Global;
-        advanced_page.built_in_page = fsui::BuiltInSettingsPage::Advanced;
-        advanced_page.build_rows = [this]() {
-            std::vector<fsui::SettingsRowDescriptor> rows;
-
-            fsui::SettingsRowDescriptor logging_enabled;
-            logging_enabled.kind = fsui::SettingsRowKind::Toggle;
-            logging_enabled.id = "logging-enabled";
-            logging_enabled.title = ICON_FA_BUG " Debug Logging";
-            logging_enabled.summary =
-                "Write diagnostic logs for troubleshooting only. Leave this off during normal play because it can reduce performance.";
-            logging_enabled.toggle_value = settings_.logging_enabled;
-            logging_enabled.on_toggle = [this](bool value) {
-                settings_.logging_enabled = value;
-                applyLoggingSettings("settings-toggle");
-                SaveSettings(settings_);
-            };
-            rows.push_back(std::move(logging_enabled));
-
-            fsui::SettingsRowDescriptor mobile_controls;
-            mobile_controls.kind = fsui::SettingsRowKind::Toggle;
-            mobile_controls.id = "mobile-controls";
-            mobile_controls.title = ICON_FA_GAMEPAD " ImGui Mobile Controls";
-            mobile_controls.summary =
-                "Show the multitouch PlayStation controls during play. They hide after three seconds idle or when a controller is used, and reappear on touch.";
-            mobile_controls.toggle_value = settings_.mobile_controls;
-            mobile_controls.on_toggle = [this](bool value) {
-                settings_.mobile_controls = value;
-                if (!value) {
-                    mobile_controls_.reset(input_router_);
-                } else {
-                    mobile_controls_.showNow();
-                }
-                SaveSettings(settings_);
-            };
-            rows.push_back(std::move(mobile_controls));
-
-            if (settings_.logging_enabled) {
-                fsui::SettingsRowDescriptor log_level;
-                log_level.kind = fsui::SettingsRowKind::Choice;
-                log_level.id = "log-level";
-                log_level.title = ICON_FA_TERMINAL " Log Level";
-                log_level.summary = "Choose how much detail ARMSX writes to the debug log.";
-                log_level.value = log_level_string(settings_.log_level);
-                log_level.dialog_title = log_level.title;
-                log_level.choices = BuildLogLevelChoices(settings_.log_level);
-                log_level.on_choice = [this](int index) {
-                    settings_.log_level = std::clamp(index, static_cast<int>(LOG_TRACE), static_cast<int>(LOG_FATAL));
-                    applyLoggingSettings("settings-log-level");
-                    SaveSettings(settings_);
-                };
-                rows.push_back(std::move(log_level));
-
-                fsui::SettingsRowDescriptor log_path;
-                log_path.kind = fsui::SettingsRowKind::Notice;
-                log_path.id = "log-path";
-                log_path.title = ICON_FA_FILE_ALT " Log File";
-                log_path.summary = diagnosticsLogPath().string();
-                rows.push_back(std::move(log_path));
-            }
-
-            fsui::SettingsRowDescriptor settings_path;
-            settings_path.kind = fsui::SettingsRowKind::Notice;
-            settings_path.id = "settings-path";
-            settings_path.title = ICON_FA_FILE_ALT " Settings File";
-            settings_path.summary = settings_.settings_path;
-            rows.push_back(std::move(settings_path));
-
-            return rows;
-        };
-        pages.push_back(std::move(advanced_page));
-
-        return pages;
-    }
-
-    std::vector<fsui::SettingsPageDescriptor> buildPerGameSettingsPages() {
-        std::vector<fsui::SettingsPageDescriptor> pages;
-
-        fsui::SettingsPageDescriptor summary;
-        summary.id = "Summary";
-        summary.scope = fsui::SettingsScope::PerGame;
-        summary.built_in_page = fsui::BuiltInSettingsPage::Summary;
-        summary.build_rows = [this]() {
-            std::vector<fsui::SettingsRowDescriptor> rows;
-            const fsui::CurrentGameInfo info = session_.currentGameInfo();
-
-            fsui::SettingsRowDescriptor title;
-            title.kind = fsui::SettingsRowKind::Notice;
-            title.id = "current-game";
-            title.title = info.title;
-            title.summary = info.path.empty() ? info.subtitle : info.path.string();
-            rows.push_back(std::move(title));
-
-            return rows;
-        };
-        pages.push_back(std::move(summary));
-
-        fsui::SettingsPageDescriptor graphics;
-        graphics.id = "Graphics";
-        graphics.scope = fsui::SettingsScope::PerGame;
-        graphics.built_in_page = fsui::BuiltInSettingsPage::Graphics;
-        graphics.build_rows = [this]() { return buildGraphicsRows(false); };
-        pages.push_back(std::move(graphics));
-
-        fsui::SettingsPageDescriptor emulation;
-        emulation.id = "Emulation";
-        emulation.scope = fsui::SettingsScope::PerGame;
-        emulation.built_in_page = fsui::BuiltInSettingsPage::Emulation;
-        emulation.build_rows = [this]() {
-            std::vector<fsui::SettingsRowDescriptor> rows;
-
-            fsui::SettingsRowDescriptor reset;
-            reset.kind = fsui::SettingsRowKind::Action;
-            reset.id = "reset-now";
-            reset.title = ICON_FA_SYNC " Reset";
-            reset.summary = "Soft-reset the active session.";
-            reset.on_activate = [this]() { deferred_reset_ = true; };
-            rows.push_back(std::move(reset));
-
-            fsui::SettingsRowDescriptor disc;
-            disc.kind = fsui::SettingsRowKind::Action;
-            disc.id = "change-disc-now";
-            disc.title = ICON_FA_COMPACT_DISC " Change Disc";
-            disc.summary = "Swap to a different disc image.";
-            disc.on_activate = [this]() {
-                ImGuiFullscreen::OpenFileSelector(
-                    "Change Disc",
-                    false,
-                [this](const std::string& path) { queueDiscSwapSelection(path); },
-                {".cue", ".bin", ".iso", ".img",
-#ifdef USE_CHD
-                 ".chd",
-#endif
-                },
-                initialBrowseDirectory().string()
-            );
-        };
-            rows.push_back(std::move(disc));
-
-            fsui::SettingsRowDescriptor screenshot;
-            screenshot.kind = fsui::SettingsRowKind::Action;
-            screenshot.id = "save-screenshot-now";
-            screenshot.title = ICON_FA_CAMERA " Save Screenshot";
-            screenshot.summary = "Write a BMP screenshot to the snapshot folder.";
-            screenshot.on_activate = [this]() { deferred_screenshot_ = true; };
-            rows.push_back(std::move(screenshot));
-
-            fsui::SettingsRowDescriptor exit_library;
-            exit_library.kind = fsui::SettingsRowKind::Action;
-            exit_library.id = "exit-library-now";
-            exit_library.title = ICON_FA_FOLDER_OPEN " Exit To Library";
-            exit_library.summary = "Close the current game and return to the main menu.";
-            exit_library.on_activate = [this]() { deferred_exit_to_library_ = true; };
-            rows.push_back(std::move(exit_library));
-
-            return rows;
-        };
-        pages.push_back(std::move(emulation));
-
-        return pages;
-    }
-
-    std::vector<fsui::SettingsRowDescriptor> buildGraphicsRows(bool include_scale) {
-        std::vector<fsui::SettingsRowDescriptor> rows;
-#if defined(__EMSCRIPTEN__)
-        const bool can_control_vsync = false;
-#else
-        const bool can_control_vsync = owns_renderer_ && !external_renderer_;
-#endif
-
-#ifdef USE_HARDWARE
-        {
-            fsui::SettingsRowDescriptor gpu_backend;
-            gpu_backend.kind = fsui::SettingsRowKind::Choice;
-            gpu_backend.id = "gpu-backend";
-            gpu_backend.title = ICON_FA_TACHOMETER_ALT " GPU Backend";
-            gpu_backend.summary = hardwareRendererAvailable()
-                ? "Choose SDL software or accelerated presentation. PlayStation GPU rasterization remains accuracy-first in software. Applies on the next launch."
-                : "SDL renderer selection is controlled by the embedding host in this display mode.";
-            gpu_backend.value = GpuBackendTitle(settings_.gpu_backend);
-            gpu_backend.dialog_title = gpu_backend.title;
-            gpu_backend.choices = BuildGpuBackendChoices(settings_.gpu_backend);
-            gpu_backend.enabled = hardwareRendererAvailable();
-            if (!gpu_backend.enabled) {
-                gpu_backend.availability = fsui::AvailabilityMode::Disabled;
-                gpu_backend.unavailable_title = gpu_backend.title;
-                gpu_backend.unavailable_message = "This embedding host owns the SDL renderer.";
-            }
-            gpu_backend.on_choice = [this](int index) {
-                settings_.gpu_backend = (index == 1) ? GpuBackend::SDLAccelerated : GpuBackend::Software;
-                SaveSettings(settings_);
-            };
-            rows.push_back(std::move(gpu_backend));
-        }
-#endif
-
-        if (include_scale) {
-            fsui::SettingsRowDescriptor scale;
-            scale.kind = fsui::SettingsRowKind::Choice;
-            scale.id = "display-scale";
-            scale.title = ICON_FA_EXPAND " Display Scale";
-            scale.summary = "Resize the app window.";
-            scale.value = std::to_string(settings_.scale) + "x";
-            scale.dialog_title = scale.title;
-            scale.choices = BuildScaleChoices(settings_.scale);
-            scale.on_choice = [this](int index) {
-                static const std::array<int, 6> values = {1, 2, 3, 4, 5, 6};
-                if (index >= 0 && index < static_cast<int>(values.size())) {
-                    settings_.scale = values[static_cast<size_t>(index)];
-                    applyWindowMetrics();
-                    SaveSettings(settings_);
-                }
-            };
-            rows.push_back(std::move(scale));
-        }
-
-        fsui::SettingsRowDescriptor vsync;
-        vsync.kind = fsui::SettingsRowKind::Toggle;
-        vsync.id = "vsync";
-        vsync.title = ICON_FA_SYNC " VSync";
-#if defined(__EMSCRIPTEN__)
-        vsync.summary = "Synchronize presentation to the display refresh rate. The browser controls this on web builds.";
-#else
-        vsync.summary = can_control_vsync
-            ? "Synchronize presentation to the display refresh rate to reduce tearing. This applies immediately."
-            : "Synchronize presentation to the display refresh rate. This renderer is host-controlled here.";
-#endif
-        vsync.toggle_value = settings_.vsync_enabled;
-        vsync.enabled = can_control_vsync;
-        vsync.on_toggle = [this](bool value) {
-            settings_.vsync_enabled = value;
-            pending_settings_page_restore_ = "Graphics";
-            SaveSettings(settings_);
-            deferred_vsync_ = value;
-        };
-        rows.push_back(std::move(vsync));
-
-        fsui::SettingsRowDescriptor filter;
-        filter.kind = fsui::SettingsRowKind::Toggle;
-        filter.id = "texture-filter";
-        filter.title = ICON_FA_ADJUST " Texture Scaling / Bilinear";
-        filter.summary = "Use smoother filtering for the display output.";
-        filter.toggle_value = settings_.texture_scale_mode;
-        filter.on_toggle = [this](bool value) {
-            settings_.texture_scale_mode = value;
-            SaveSettings(settings_);
-        };
-        rows.push_back(std::move(filter));
-
-        fsui::SettingsRowDescriptor presentation_upscale;
-        presentation_upscale.kind = fsui::SettingsRowKind::Choice;
-        presentation_upscale.id = "presentation-upscale";
-        presentation_upscale.title = ICON_FA_MAGIC " SDL Quality Upscale";
-        presentation_upscale.summary =
-            "Build a higher-resolution SDL presentation texture without changing PlayStation rasterization.";
-        presentation_upscale.value = std::to_string(settings_.presentation_upscale) + "x";
-        presentation_upscale.dialog_title = presentation_upscale.title;
-        presentation_upscale.choices = BuildPresentationUpscaleChoices(settings_.presentation_upscale);
-        presentation_upscale.on_choice = [this](int index) {
-            if (index >= 0 && index < 8) {
-                settings_.presentation_upscale = index + 1;
-                SaveSettings(settings_);
-            }
-        };
-        rows.push_back(std::move(presentation_upscale));
-
-        fsui::SettingsRowDescriptor stretch;
-        stretch.kind = fsui::SettingsRowKind::Toggle;
-        stretch.id = "stretch";
-        stretch.title = ICON_FA_EXPAND_ARROWS_ALT " Stretch";
-        stretch.summary = "Fill the window instead of preserving the original aspect ratio.";
-        stretch.toggle_value = settings_.stretch_mode;
-        stretch.on_toggle = [this](bool value) {
-            settings_.stretch_mode = value;
-            SaveSettings(settings_);
-        };
-        rows.push_back(std::move(stretch));
-
-        fsui::SettingsRowDescriptor aspect;
-        aspect.kind = fsui::SettingsRowKind::Choice;
-        aspect.id = "aspect";
-        aspect.title = ICON_FA_TV " Display Aspect";
-        aspect.summary = "Choose the presentation aspect ratio.";
-        aspect.value = AspectTitle(settings_.display_aspect);
-        aspect.dialog_title = aspect.title;
-        aspect.choices = BuildAspectChoices(settings_.display_aspect);
-        aspect.on_choice = [this](int index) {
-            settings_.display_aspect = std::clamp(index, 0, 2);
-            applyWindowMetrics();
-            SaveSettings(settings_);
-        };
-        rows.push_back(std::move(aspect));
-
-        fsui::SettingsRowDescriptor upscale;
-        upscale.kind = fsui::SettingsRowKind::Choice;
-        upscale.id = "wide-upscale";
-        upscale.title = ICON_FA_EXPAND " Wide Upscale";
-        upscale.summary = "Choose the wide-mode output height.";
-        upscale.value = UpscaleToString(settings_.upscale_height);
-        upscale.dialog_title = upscale.title;
-        upscale.choices = BuildUpscaleChoices(settings_.upscale_height);
-        upscale.on_choice = [this](int index) {
-            static const std::array<int, 5> heights = {480, 720, 1080, 1440, 2160};
-            if (index >= 0 && index < static_cast<int>(heights.size())) {
-                settings_.upscale_height = heights[static_cast<size_t>(index)];
-                applyWindowMetrics();
-                SaveSettings(settings_);
-            }
-        };
-        rows.push_back(std::move(upscale));
-
-        fsui::SettingsRowDescriptor debug_panel;
-        debug_panel.kind = fsui::SettingsRowKind::Toggle;
-        debug_panel.id = "debug-panel";
-        debug_panel.title = ICON_FA_TACHOMETER_ALT " Debug Panel";
-        debug_panel.summary = "Show the settings and performance overlays.";
-        debug_panel.toggle_value = settings_.debug_panel;
-        debug_panel.on_toggle = [this](bool value) {
-            settings_.debug_panel = value;
-            settings_.ui_state.show_settings_overlay = value;
-            settings_.ui_state.show_performance_overlay = value;
-            SaveSettings(settings_);
-        };
-        rows.push_back(std::move(debug_panel));
-
-        if (session_.valid()) {
-            fsui::SettingsRowDescriptor debug_view;
-            debug_view.kind = fsui::SettingsRowKind::Toggle;
-            debug_view.id = "debug-view";
-            debug_view.title = ICON_FA_BUG " VRAM Debug View";
-            debug_view.summary = "Show raw VRAM instead of the game image.";
-            debug_view.toggle_value = session_.debugView();
-            debug_view.on_toggle = [this](bool value) {
-                session_.setDebugView(value);
-                applyWindowMetrics();
-            };
-            rows.push_back(std::move(debug_view));
-        }
-
-        return rows;
-    }
 
     void applyWindowMetrics() {
         if (!SupportsManagedWindowSizing() || !owns_window_ || !window_) {
@@ -6160,7 +8826,7 @@ class ArmsxApp {
 
     std::filesystem::path initialBrowseDirectory() const {
         if (session_.valid()) {
-            const fsui::CurrentGameInfo info = session_.currentGameInfo();
+            const ArmsxGameInfo info = session_.currentGameInfo();
             if (!info.path.empty() && info.path.has_parent_path()) {
                 return info.path.parent_path();
             }
@@ -6214,19 +8880,13 @@ class ArmsxApp {
     CliFlags cli_{};
     FrontendSettings settings_{};
     bool running_ = true;
-    bool owns_sdl_ = false;
+    armsx::SdlSubsystemLease sdl_subsystems_{};
     bool owns_window_ = false;
     bool owns_renderer_ = false;
     SDL_Window* window_ = nullptr;
-    SDL_Renderer* renderer_ = nullptr;
-    fsui::SdlImGuiBackend imgui_backend_{};
+    armsx_renderer_t* render_ = nullptr;
     ArmsxSession session_{};
     GameplayInputRouter input_router_{};
-    ImGuiMobileControls mobile_controls_{};
-    std::vector<fsui::GameEntry> game_list_{};
-    std::vector<PlatformLibraryRoot> platform_roots_{};
-    std::vector<PlatformLibraryGame> platform_games_{};
-    std::uint64_t platform_library_version_ = 0;
     std::optional<std::string> pending_error_dialog_{};
     std::optional<LaunchRequest> deferred_launch_{};
     std::optional<std::filesystem::path> deferred_change_disc_{};
@@ -6238,12 +8898,61 @@ class ArmsxApp {
     bool deferred_exit_to_library_ = false;
     bool deferred_reset_ = false;
     bool deferred_screenshot_ = false;
-    bool deferred_fast_forward_toggle_ = false;
-    bool fsui_initialized_ = false;
+    // Embedded-host (JNI) additions: an explicit screenshot destination, an absolute
+    // fast-forward request, and the digital pad bits the host currently holds down.
+    std::string deferred_screenshot_path_;
+    std::optional<bool> deferred_fast_forward_value_{};
+    // Digital bits the host currently holds down, PER PLAYER (a multitap carries four
+    // pads behind one port). Index 0 is the only one that ever moves without a tap.
+    uint32_t host_pad_mask_player_[kHostMaxPlayers] = {};
+    // Bits pressed by the PREVIOUS applyHostPadCommands pass — a tap's release is held
+    // back until they have aged out, so every press is visible to the guest for two
+    // emulated frames (see applyHostPadCommands).
+    uint32_t host_pad_pressed_prev_pass_[kHostMaxPlayers] = {};
     FsuiWindowState ui_window_state_ = FsuiWindowState::None;
     bool managed_renderer_vsync_ = DefaultVsyncEnabled();
+    std::array<uint64_t, 6> lag_sum_{}, lag_max_{};
+    uint64_t lag_window_start_ = 0, lag_prev_end_ = 0;
+    uint64_t probe720_last_dip_ = 0;
+    unsigned probe720_dip_count_ = 0;
+    unsigned lag_samples_ = 0, lag_intervals_ = 0, lag_long_intervals_ = 0, lag_not_presented_ = 0;
+    unsigned core_split_frames_ = 0;
+    uint64_t core_split_ticks_ = 0, instruction_split_ticks_ = 0;
+    bool mali_pacing_active_ = false;
     uint64_t next_frame_deadline_ = 0;
     uint64_t frame_period_ticks_ = 0;
+    // How late the loop arrived for the current frame, sampled in waitForFrameDeadline(). 0
+    // whenever the limiter had headroom to sleep. Adaptive frame skip is the only reader.
+    uint64_t frame_lateness_ticks_ = 0;
+    // Frame skip ([runtime] frame_skip) — see shouldSkipPresent(). frames_skipped_run_ counts
+    // consecutive dropped presents and is parked at kMaxFrameSkip to mean "draw the next one";
+    // the other two are the diag trace's window.
+    int frames_skipped_run_ = kMaxFrameSkip;
+    uint32_t frames_dropped_ = 0;
+    uint32_t frame_skip_trace_frames_ = 0;
+    // ~4 s at 60 Hz. Long enough that the ratio is readable, rare enough that the trace cannot
+    // become the thing that costs the frame.
+    static constexpr uint32_t kFrameSkipTraceFrames = 240;
+    // True while applyPresentVsync() is holding the swap interval down for fast-forward.
+    bool fast_forward_vsync_dropped_ = false;
+    // Rolling window behind psxe_host_measured_fps() — see publishSessionTelemetry().
+    uint64_t fps_window_start_ = 0;
+    uint32_t fps_window_frames_ = 0;
+
+    // Rolling window behind psxe_host_stats() — see publishFrameStats(). Everything here is
+    // untouched (and the counters unarmed) while the performance overlay is off.
+    struct StatsAccumulator {
+        uint64_t emu_ticks = 0;
+        uint64_t present_ticks = 0;
+        uint64_t frame_ticks = 0;
+        psx_perf_counters_t counters{};
+    };
+
+    StatsAccumulator stats_accum_{};
+    uint64_t stats_window_start_ = 0;
+    uint64_t stats_prev_frame_begin_ = 0;
+    uint64_t stats_worst_frame_ticks_ = 0;
+    uint32_t stats_window_frames_ = 0;
 };
 
 std::string ModuleNameFromPath(const char* path) {
@@ -6382,6 +9091,518 @@ extern "C" PSXE_API void psxe_enqueue_launch_argument(const char* argument) {
     EnqueuePendingLaunchArgument(argument);
 }
 
+// ---------------------------------------------------------------------------
+// Embedded-host control API (see the g_host_* block near the top of this file).
+//
+// Every entry point below is safe to call from any thread at any time — including
+// before the emulation loop starts and after it has exited. Requests are parked under
+// g_host_control_lock and applied by ArmsxApp::applyHostControlRequests() on the
+// emulation thread. frontend/android_jni.cpp is the first consumer.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The embedder's button code space (inherited from the Android/PS2 front-end: Android
+// KEYCODE_* values for the pad, plus 200 for the DualShock analog-mode button) mapped onto
+// the PS1 pad's PSXI_SW_SDA_* bits.
+uint32_t HostPadMaskForCode(int code) {
+    switch (code) {
+        case 19:  return PSXI_SW_SDA_PAD_UP;      // KEYCODE_DPAD_UP
+        case 20:  return PSXI_SW_SDA_PAD_DOWN;    // KEYCODE_DPAD_DOWN
+        case 21:  return PSXI_SW_SDA_PAD_LEFT;    // KEYCODE_DPAD_LEFT
+        case 22:  return PSXI_SW_SDA_PAD_RIGHT;   // KEYCODE_DPAD_RIGHT
+        case 96:  return PSXI_SW_SDA_CROSS;       // KEYCODE_BUTTON_A
+        case 97:  return PSXI_SW_SDA_CIRCLE;      // KEYCODE_BUTTON_B
+        case 99:  return PSXI_SW_SDA_SQUARE;      // KEYCODE_BUTTON_X
+        case 100: return PSXI_SW_SDA_TRIANGLE;    // KEYCODE_BUTTON_Y
+        case 102: return PSXI_SW_SDA_L1;          // KEYCODE_BUTTON_L1
+        case 103: return PSXI_SW_SDA_R1;          // KEYCODE_BUTTON_R1
+        case 104: return PSXI_SW_SDA_L2;          // KEYCODE_BUTTON_L2
+        case 105: return PSXI_SW_SDA_R2;          // KEYCODE_BUTTON_R2
+        case 106: return PSXI_SW_SDA_L3;          // KEYCODE_BUTTON_THUMBL
+        case 107: return PSXI_SW_SDA_R3;          // KEYCODE_BUTTON_THUMBR
+        case 108: return PSXI_SW_SDA_START;       // KEYCODE_BUTTON_START
+        case 109: return PSXI_SW_SDA_SELECT;      // KEYCODE_BUTTON_SELECT
+        case 200: return PSXI_SW_SDA_ANALOG;      // DualShock analog-mode button
+        default:  return 0;
+    }
+}
+
+// Codes 110-113 (left stick) and 120-123 (right stick) arrive as four independent
+// per-direction magnitudes in 0..32767. The PS1 pad wants two 0x00..0xFF axes centred on
+// 0x80, so the magnitudes are accumulated here and collapsed into one axis pair.
+constexpr int kHostStickFullRange = 32767;
+// [player][stick][up,right,down,left]. Per player because each pad behind a multitap has
+// its own two sticks; sharing one accumulator made player 2's stick move player 1's.
+int g_host_stick_dir[kHostMaxPlayers][2][4] = {};
+
+bool HostStickSlotForCode(int code, int* stick, int* slot) {
+    switch (code) {
+        case 110: *stick = 0; *slot = 0; return true; // left  up
+        case 111: *stick = 0; *slot = 1; return true; // left  right
+        case 112: *stick = 0; *slot = 2; return true; // left  down
+        case 113: *stick = 0; *slot = 3; return true; // left  left
+        case 120: *stick = 1; *slot = 0; return true; // right up
+        case 121: *stick = 1; *slot = 1; return true; // right right
+        case 122: *stick = 1; *slot = 2; return true; // right down
+        case 123: *stick = 1; *slot = 3; return true; // right left
+        default: return false;
+    }
+}
+
+int HostAxisByte(int positive, int negative) {
+    const int delta = std::clamp(positive, 0, kHostStickFullRange) - std::clamp(negative, 0, kHostStickFullRange);
+    const int scaled = (delta * (delta < 0 ? 128 : 127)) / kHostStickFullRange;
+    return std::clamp(0x80 + scaled, 0x00, 0xFF);
+}
+
+} // namespace
+
+extern "C" PSXE_API void psxe_host_set_embedded(int enabled) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_embedded = enabled != 0;
+}
+
+extern "C" PSXE_API void psxe_host_set_present_callback(void (*callback)(void*), void* user) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_present_callback = callback;
+    g_host_present_user = user;
+}
+
+extern "C" PSXE_API void psxe_host_set_paused(int paused) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_pause_pending = true;
+    g_host_pause_value = paused != 0;
+}
+
+// The app went off-screen (backgrounded, or the screen was switched off) / came back.
+//
+// Closes the SDL audio device outright, which is the only thing that actually stops the stream
+// on Android — see ArmsxSession::closeAudioDevice(). Separate from psxe_host_set_paused() because the two are
+// genuinely different states: the pause menu freezes the VM with the app still on screen, this
+// is the app not being on screen at all. The host front-end normally asks for both.
+//
+// Honoured (or deliberately ignored) in applyHostControlRequests(), where [audio]
+// background_playback is in scope.
+extern "C" PSXE_API void psxe_host_set_audio_suspended(int suspended) {
+    {
+        std::lock_guard<std::mutex> lock(g_host_control_lock);
+        g_host_audio_suspend_pending = true;
+        g_host_audio_suspend_value = suspended != 0;
+    }
+
+    // ★ The PGO counter flush for an instrumented build, and the one that actually matters.
+    // Going off-screen is the last callback guaranteed to arrive before Android may SIGKILL the
+    // process, and SIGKILL means compiler-rt's atexit writer never runs — an instrumented build
+    // without this hook profiles a whole play session and then loses all of it. Deliberately
+    // OUTSIDE the lock above: this does file I/O, and g_host_control_lock is taken on the
+    // emulation thread every loop tick. No-op in a normal build (see frontend/pgo.c).
+    if (suspended) {
+        armsx_pgo_flush("background");
+    }
+}
+
+// 0 = classic 4:3, 1 = square 1:1, 2 = wide 16:9; anything negative drops back to
+// settings.toml's [video] display_aspect. Applies on the next presented frame — no VM
+// restart, because nothing in the VM depends on it.
+// App off-screen: stop drawing and posting frames entirely. Separate from
+// psxe_host_set_paused() (the pause menu is on-screen and must keep presenting) and from
+// psxe_host_set_audio_suspended() ([audio] background_playback can keep audio alive with the
+// screen off). Cheap and immediate — read once per loop tick, gates nothing but presentation.
+extern "C" PSXE_API void psxe_host_set_presentation_suspended(int suspended) {
+    g_host_presentation_suspended.store(suspended != 0, std::memory_order_release);
+}
+
+// Live custom ratio (width/height) used while the mode is 3. <= 0 clears the override and
+// falls back to settings.toml's [video] display_aspect_custom. Applies on the next presented
+// frame, like the mode itself.
+// Live integer-scaling override; negative clears it back to settings.toml. Applies on the
+// next presented frame — it only changes the destination rect.
+extern "C" PSXE_API void psxe_host_set_portrait_render_top(int enabled) {
+    g_host_portrait_top.store(enabled ? 1 : 0, std::memory_order_release);
+}
+
+extern "C" PSXE_API void psxe_host_set_portrait_render_top_inset(int pixels) {
+    g_host_portrait_top_inset.store(pixels > 0 ? pixels : 0, std::memory_order_release);
+}
+
+extern "C" PSXE_API void psxe_host_set_integer_scaling(int enabled) {
+    g_host_integer_scaling.store(enabled < 0 ? -1 : (enabled != 0 ? 1 : 0), std::memory_order_release);
+}
+
+extern "C" PSXE_API void psxe_host_set_display_aspect_custom(float ratio) {
+    g_host_display_aspect_custom.store(ratio > 0.0f ? ratio : 0.0f, std::memory_order_release);
+}
+
+extern "C" PSXE_API void psxe_host_set_display_aspect(int mode) {
+    g_host_display_aspect.store(mode >= 0 && mode <= 3 ? mode : -1, std::memory_order_release);
+}
+
+// 1 = fill the window and ignore the aspect, 0 = letterbox/pillarbox to it, negative =
+// defer to settings.toml's [video] stretch_mode.
+extern "C" PSXE_API void psxe_host_set_stretch_mode(int enabled) {
+    g_host_stretch_mode.store(enabled < 0 ? -1 : (enabled != 0 ? 1 : 0), std::memory_order_release);
+}
+
+/* ---- [video] display features, live ------------------------------------------------------
+   Each takes a negative value to mean "clear the override and go back to settings.toml".
+   All three only affect how the finished frame is presented, so they apply on the very next
+   presented frame with no VM interaction at all — safe with no session running. */
+extern "C" PSXE_API void psxe_host_set_deinterlace(int mode) {
+    g_host_deinterlace.store(mode >= 0 && mode <= 2 ? mode : -1, std::memory_order_release);
+}
+
+extern "C" PSXE_API void psxe_host_set_overscan_crop(int mode) {
+    g_host_overscan_crop.store(mode >= 0 && mode <= 2 ? mode : -1, std::memory_order_release);
+}
+
+/* Degrees (0/90/180/270), matching settings.toml, converted to quarter turns here so every
+   caller speaks one language. Anything that is not a right angle clears the override. */
+extern "C" PSXE_API void psxe_host_set_display_rotation(int degrees) {
+    int turns = -1;
+
+    switch (degrees) {
+        case 0:   turns = 0; break;
+        case 90:  turns = 1; break;
+        case 180: turns = 2; break;
+        case 270: turns = 3; break;
+        default:  turns = -1; break;
+    }
+
+    g_host_display_rotation.store(turns, std::memory_order_release);
+}
+
+/* The GTE widescreen hack is CORE state, not presentation: it changes the vertices the
+   machine produces, so it is applied straight to psx/cpu.c's global rather than parked as a
+   present-time override. Safe while the VM runs — the next projected vertex simply uses the
+   new scale, exactly like PGXP's toggle. */
+extern "C" PSXE_API void psxe_host_set_widescreen_hack(int enabled) {
+    psx_cpu_set_widescreen_hack(enabled ? 1 : 0);
+}
+
+/* Texture dumping / replacement (psx/texrep.h). PARKED, not applied: the reconfigure frees
+   decoded replacement images and the rasterizers hold pointers into them, so it has to happen
+   on the emulation thread. ArmsxApp::applyPendingTextureOptions() drains this once a frame. */
+extern "C" PSXE_API void psxe_host_set_texture_options(int dump, int replace, const char* dir) {
+    {
+        std::lock_guard<std::mutex> lock(g_host_texture_lock);
+        g_host_texture_dir = (dir && *dir) ? dir : "";
+    }
+
+    g_host_texture_dump.store(dump ? 1 : 0, std::memory_order_release);
+    g_host_texture_replace.store(replace ? 1 : 0, std::memory_order_release);
+    g_host_texture_pending.store(true, std::memory_order_release);
+}
+
+/* GLES rasterizer options. Forwarded verbatim; the backend clamps and owns the semantics. */
+extern "C" PSXE_API void psxe_host_set_gl_video_options(int texture_filter, int downsample,
+                                                        int line_detect) {
+#ifdef USE_HARDWARE
+    armsx_hw_gl_set_video_options(texture_filter, downsample, line_detect);
+#else
+    (void)texture_filter;
+    (void)downsample;
+    (void)line_detect;
+#endif
+}
+
+extern "C" PSXE_API uint64_t psxe_host_prepare_run(void) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    const uint64_t token = g_host_run_gate.prepare();
+    if (token) g_host_shutdown_pending = false;
+    return token;
+}
+
+extern "C" PSXE_API int psxe_host_claim_run(uint64_t token) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    return g_host_run_gate.claim(token) ? 1 : 0;
+}
+
+extern "C" PSXE_API int psxe_host_run_cancelled(uint64_t token) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    return g_host_run_gate.cancelled(token) ? 1 : 0;
+}
+
+extern "C" PSXE_API int psxe_host_run_reserved(void) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    return g_host_run_gate.active() ? 1 : 0;
+}
+
+extern "C" PSXE_API void psxe_host_release_run(uint64_t token, int finished) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    if (g_host_run_gate.release(token, finished != 0)) g_host_shutdown_pending = false;
+}
+
+static void QueueHostShutdownLocked() {
+    g_host_shutdown_pending = true;
+    g_host_pause_pending = true;
+    g_host_pause_value = false;
+    g_host_audio_suspend_pending = true;
+    g_host_audio_suspend_value = false;
+}
+
+extern "C" PSXE_API void psxe_host_cancel_run(uint64_t token) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    if (g_host_run_gate.cancel(token)) QueueHostShutdownLocked();
+}
+
+extern "C" PSXE_API void psxe_host_request_shutdown(void) {
+    {
+        std::lock_guard<std::mutex> lock(g_host_control_lock);
+        QueueHostShutdownLocked();
+        if (g_host_run_gate.active()) {
+            g_host_run_gate.cancel(g_host_run_gate.active());
+            return;
+        }
+    }
+
+    // Wake a LIVE loop only. With no loop running there is nothing to wake, and SDL may be
+    // mid-teardown between sessions — SDL_StopEventLoop destroys the event-queue mutex, so a
+    // push from the VMStop thread in that window locks a destroyed mutex. The pending flag
+    // above is still drained by a live loop, and a loop that starts later deliberately drops
+    // it at run() entry (a stale shutdown targeted the previous session).
+    if (g_host_loop_running.load(std::memory_order_acquire)) {
+        // SDL_PushEvent is thread-safe; this also breaks a loop parked in SDL_PollEvent.
+        SDL_Event quit{};
+        quit.type = SDL_QUIT;
+        SDL_PushEvent(&quit);
+    }
+}
+
+extern "C" PSXE_API void psxe_host_request_reset(void) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_reset_pending = true;
+}
+
+extern "C" PSXE_API void psxe_host_set_fast_forward(int enabled) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_fast_forward_pending = true;
+    g_host_fast_forward_value = enabled != 0;
+}
+
+// The whole frame-pacing policy in one call, so the deferred pump needs one flag instead of
+// four and a host that changes two of them at once can never have them applied a frame apart.
+//   frame_limit         0 runs unthrottled (the front-end's "Frame limit" switch)
+//   speed_percent       10..1000, % of the game's own rate ("Emulation speed")
+//   fps_limit           extra absolute ceiling in fps, 0 = off ("Frame rate cap")
+//   fast_forward_speed  multiplier used instead while fast-forward is engaged, 0 = uncapped
+//   frame_skip          presents to DROP, not speed: 0 off, 1..5 fixed, -1 adaptive ("Frame skip")
+extern "C" PSXE_API void psxe_host_set_speed_limits(int frame_limit,
+                                                    int speed_percent,
+                                                    int fps_limit,
+                                                    float fast_forward_speed,
+                                                    int frame_skip) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_speed_limits_pending = true;
+    g_host_speed_limit_frame_limit = frame_limit != 0;
+    g_host_speed_limit_percent = speed_percent;
+    g_host_speed_limit_fps = fps_limit;
+    g_host_speed_limit_fast_forward = static_cast<double>(fast_forward_speed);
+    g_host_speed_limit_frame_skip = frame_skip;
+}
+
+extern "C" PSXE_API void psxe_host_request_disc_swap(const char* path) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_disc_swap_pending = path && *path;
+    g_host_disc_swap_path = (path && *path) ? path : "";
+}
+
+extern "C" PSXE_API void psxe_host_request_screenshot(const char* path) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_screenshot_pending = true;
+    g_host_screenshot_path = path && *path ? path : "";
+}
+
+// Declared by an embedded host once SDLAudioManager's JNI glue AND its static Context are in
+// place. Without both, only openslES is safe in-process; see applyAudioDriverSetting().
+extern "C" PSXE_API void psxe_host_set_audio_backends_ready(int ready) {
+    g_host_audio_backends_ready.store(ready != 0, std::memory_order_release);
+}
+
+extern "C" PSXE_API int psxe_host_vm_active(void) {
+    return g_host_vm_active.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+extern "C" PSXE_API int psxe_host_loop_running(void) {
+    return g_host_loop_running.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+// Session telemetry. Pure reads of what the emulation loop published on its last frame — safe
+// from any thread, and 0 whenever nothing is running. See publishSessionTelemetry().
+extern "C" PSXE_API float psxe_host_measured_fps(void) {
+    return g_host_measured_fps.load(std::memory_order_relaxed);
+}
+
+extern "C" PSXE_API float psxe_host_nominal_frame_rate(void) {
+    return g_host_nominal_fps.load(std::memory_order_relaxed);
+}
+
+extern "C" PSXE_API unsigned int psxe_host_presented_frames(void) {
+    return g_host_presented_frames.load(std::memory_order_relaxed);
+}
+
+// Arm/disarm the full performance overlay. Also arms psx/perf.c's counters, so switching it
+// off really does remove the instrumentation from the core rather than merely hiding the
+// numbers. Safe from any thread: psx_perf_set_enabled() only writes a plain int and zeroes a
+// counter block the emulation thread will overwrite on its next frame anyway.
+//
+// IDEMPOTENT, and that is load-bearing rather than tidiness: psx_perf_set_enabled() zeroes the
+// counter block on every call and the disable path zeroes the snapshot, so a caller that simply
+// re-asserted the state it wanted would keep wiping live measurements. Because it could not,
+// the UI had to arm this on an EDGE (a Compose DisposableEffect keyed on "in a game" + "a
+// statistics row is on"), while GameOsd.reset() disarms it unconditionally on every VM stop —
+// including the stop half of a RESTART. When the STOPPED/RUNNING pair lands inside one
+// recomposition the keys never change, the edge never fires, and the counters stay disarmed for
+// the rest of the session: every row reads 0 forever while the game plays normally. With this
+// a no-op, the overlay can re-assert its arm on the poll tick and the state converges.
+extern "C" PSXE_API void psxe_host_set_stats_enabled(int enabled) {
+    const bool on = enabled != 0;
+
+    if (g_host_stats_enabled.exchange(on, std::memory_order_relaxed) == on) {
+        return;
+    }
+
+    psx_perf_set_enabled(on ? 1 : 0);
+
+    if (!on) {
+        std::lock_guard<std::mutex> lock(g_host_stats_lock);
+        std::memset(g_host_stats, 0, sizeof(g_host_stats));
+        g_host_stats_published = false;
+    }
+}
+
+// Copy the latest snapshot into [out]. Returns the number of doubles written (0 when the
+// overlay has never been armed, or before the first window closed). Layout: PSXE_HOST_STAT_*.
+extern "C" PSXE_API unsigned int psxe_host_stats(double* out, unsigned int count) {
+    if (!out || count == 0) {
+        return 0;
+    }
+
+    const unsigned int n = count < (unsigned int)PSXE_HOST_STAT_COUNT
+        ? count
+        : (unsigned int)PSXE_HOST_STAT_COUNT;
+
+    std::lock_guard<std::mutex> lock(g_host_stats_lock);
+
+    /* The documented "0 until the first window closed" — it was documented but never
+       implemented, so an unpublished (all-zero) snapshot was handed over as if it were a
+       reading, and the UI's own "not ready yet, print --" state could never be reached. */
+    if (!g_host_stats_published) {
+        return 0;
+    }
+
+    std::memcpy(out, g_host_stats, n * sizeof(double));
+
+    return n;
+}
+
+extern "C" PSXE_API void psxe_host_pad_button_player(int player, int code, int range, int pressed) {
+    const int target = std::clamp(player, 0, kHostMaxPlayers - 1);
+
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+
+    int stick = 0;
+    int slot = 0;
+    if (HostStickSlotForCode(code, &stick, &slot)) {
+        // range is the direction's magnitude; a release (pressed == 0) zeroes it.
+        g_host_stick_dir[target][stick][slot] = pressed ? std::clamp(range, 0, kHostStickFullRange) : 0;
+
+        HostPadCommand command{};
+        command.kind = HostPadCommandKind::Analog;
+        command.stick = stick;
+        command.player = target;
+        command.x = HostAxisByte(g_host_stick_dir[target][stick][1], g_host_stick_dir[target][stick][3]);
+        command.y = HostAxisByte(g_host_stick_dir[target][stick][2], g_host_stick_dir[target][stick][0]);
+        g_host_pad_queue.push_back(command);
+        return;
+    }
+
+    const uint32_t mask = HostPadMaskForCode(code);
+    if (!mask) {
+        return;
+    }
+
+    HostPadCommand command{};
+    command.kind = HostPadCommandKind::Digital;
+    command.mask = mask;
+    command.pressed = pressed != 0;
+    command.player = target;
+    g_host_pad_queue.push_back(command);
+}
+
+extern "C" PSXE_API void psxe_host_pad_button(int code, int range, int pressed) {
+    psxe_host_pad_button_player(0, code, range, pressed);
+}
+
+extern "C" PSXE_API void psxe_host_pad_analog_player(int player, int stick, int x, int y) {
+    const int target = std::clamp(player, 0, kHostMaxPlayers - 1);
+
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+
+    HostPadCommand command{};
+    command.kind = HostPadCommandKind::Analog;
+    command.stick = stick != 0 ? 1 : 0;
+    command.player = target;
+    command.x = std::clamp(x, 0x00, 0xFF);
+    command.y = std::clamp(y, 0x00, 0xFF);
+    g_host_pad_queue.push_back(command);
+}
+
+extern "C" PSXE_API void psxe_host_pad_analog(int stick, int x, int y) {
+    psxe_host_pad_analog_player(0, stick, x, y);
+}
+
+extern "C" PSXE_API void psxe_host_reset_pad_state(void) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_pad_queue.clear();
+    std::memset(g_host_stick_dir, 0, sizeof(g_host_stick_dir));
+}
+
+/* ---- [input] multitap, [emulation] rewind / runahead ------------------------------------
+   The first three park a request for the emulation thread (they allocate, free, or rebuild
+   the device the SIO reads through). The last two are the hold-to-rewind engagement, which
+   is read once per frame straight out of an atomic — see the note by g_host_rewind_active. */
+
+extern "C" PSXE_API void psxe_host_set_multitap(int enabled) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_multitap_pending = true;
+    g_host_multitap_value = enabled != 0;
+}
+
+extern "C" PSXE_API void psxe_host_set_rewind(int enabled, int seconds, int frequency) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_rewind_config_pending = true;
+    g_host_rewind_config_enabled = enabled != 0;
+    g_host_rewind_config_seconds = seconds;
+    g_host_rewind_config_frequency = frequency;
+}
+
+extern "C" PSXE_API void psxe_host_set_runahead(int frames) {
+    std::lock_guard<std::mutex> lock(g_host_control_lock);
+    g_host_runahead_pending = true;
+    g_host_runahead_value = frames;
+}
+
+extern "C" PSXE_API void psxe_host_set_rewind_active(int active) {
+    g_host_rewind_active.store(active != 0, std::memory_order_release);
+}
+
+extern "C" PSXE_API void psxe_host_rewind_step(void) {
+    g_host_rewind_step_requests.fetch_add(1, std::memory_order_acq_rel);
+}
+
+/* Bytes ONE snapshot takes: measured once a game is running, an estimate before that. The
+   front-end multiplies by seconds x frequency to show what the control actually costs. */
+extern "C" PSXE_API unsigned int psxe_host_rewind_snapshot_bytes(void) {
+    return static_cast<unsigned int>(psx_rewind_snapshot_bytes());
+}
+
+/* Bytes the ring is holding right now, so a UI can show the real figure rather than the
+   worst case. 0 when rewind is off — nothing is allocated then. */
+extern "C" PSXE_API unsigned int psxe_host_rewind_bytes_used(void) {
+    return static_cast<unsigned int>(psx_rewind_bytes_used());
+}
+
 extern "C" PSXE_API void psxe_wasm_on_file(const char* path) {
     if (!path || !*path) {
         return;
@@ -6394,34 +9615,6 @@ extern "C" PSXE_API void psxe_wasm_on_error(const char* message) {
     const char* text = message && *message ? message : "Unknown browser file error.";
     psxe_diag_logf("web", "Browser file access failed: %s", text);
     EnqueueWebError(text);
-}
-
-extern "C" PSXE_API void psxe_set_library_directory_picker_callback(
-    PlatformDirectoryPickerCallback callback,
-    void* userdata
-) {
-    g_platform_directory_picker_callback = callback;
-    g_platform_directory_picker_userdata = userdata;
-}
-
-extern "C" PSXE_API void psxe_set_library_directory_removed_callback(
-    PlatformDirectoryRemovedCallback callback,
-    void* userdata
-) {
-    g_platform_directory_removed_callback = callback;
-    g_platform_directory_removed_userdata = userdata;
-}
-
-extern "C" PSXE_API void psxe_register_platform_library_directory(
-    const char* path,
-    const char* label,
-    int recursive
-) {
-    RegisterPlatformLibraryRoot(
-        path ? path : "",
-        label ? label : "",
-        recursive != 0
-    );
 }
 
 #if defined(__ANDROID__)
@@ -6442,101 +9635,33 @@ extern "C" JNIEXPORT void JNICALL Java_com_nanodata_armsx_EmulatorActivity_nativ
     psxe_enqueue_launch_argument(utf);
     env->ReleaseStringUTFChars(argument, utf);
 }
-
-extern "C" JNIEXPORT void JNICALL Java_com_nanodata_armsx_EmulatorActivity_nativeSetPlatformLibrarySnapshot(
-    JNIEnv* env,
-    jclass,
-    jobjectArray root_paths,
-    jobjectArray root_labels,
-    jbooleanArray root_recursive,
-    jobjectArray game_paths,
-    jobjectArray game_labels,
-    jlongArray game_sizes,
-    jlongArray game_modified
-) {
-    if (!env) {
-        return;
-    }
-
-    auto array_string = [&](jobjectArray values, jsize index) -> std::string {
-        if (!values || index < 0 || index >= env->GetArrayLength(values)) {
-            return {};
-        }
-        auto value = static_cast<jstring>(env->GetObjectArrayElement(values, index));
-        if (!value) {
-            return {};
-        }
-        const char* utf = env->GetStringUTFChars(value, nullptr);
-        std::string result = utf ? utf : "";
-        if (utf) {
-            env->ReleaseStringUTFChars(value, utf);
-        }
-        env->DeleteLocalRef(value);
-        return result;
-    };
-
-    std::vector<PlatformLibraryRoot> roots;
-    const jsize root_count = root_paths ? env->GetArrayLength(root_paths) : 0;
-    std::vector<jboolean> recursive(static_cast<size_t>(root_count), JNI_TRUE);
-    if (root_recursive && root_count > 0) {
-        const jsize count = std::min(root_count, env->GetArrayLength(root_recursive));
-        env->GetBooleanArrayRegion(root_recursive, 0, count, recursive.data());
-    }
-    roots.reserve(static_cast<size_t>(root_count));
-    for (jsize index = 0; index < root_count; index++) {
-        std::string path = array_string(root_paths, index);
-        if (!path.empty()) {
-            roots.push_back(PlatformLibraryRoot{
-                .path = std::move(path),
-                .label = array_string(root_labels, index),
-                .recursive = recursive[static_cast<size_t>(index)] == JNI_TRUE,
-            });
-        }
-    }
-
-    std::vector<PlatformLibraryGame> games;
-    const jsize game_count = game_paths ? env->GetArrayLength(game_paths) : 0;
-    std::vector<jlong> sizes(static_cast<size_t>(game_count), 0);
-    std::vector<jlong> modified(static_cast<size_t>(game_count), 0);
-    if (game_sizes && game_count > 0) {
-        env->GetLongArrayRegion(game_sizes, 0, std::min(game_count, env->GetArrayLength(game_sizes)), sizes.data());
-    }
-    if (game_modified && game_count > 0) {
-        env->GetLongArrayRegion(game_modified, 0, std::min(game_count, env->GetArrayLength(game_modified)), modified.data());
-    }
-    games.reserve(static_cast<size_t>(game_count));
-    for (jsize index = 0; index < game_count; index++) {
-        std::string path = array_string(game_paths, index);
-        if (!path.empty()) {
-            games.push_back(PlatformLibraryGame{
-                .path = std::move(path),
-                .label = array_string(game_labels, index),
-                .size = sizes[static_cast<size_t>(index)] > 0
-                    ? static_cast<std::uint64_t>(sizes[static_cast<size_t>(index)])
-                    : 0,
-                .modified = modified[static_cast<size_t>(index)] > 0
-                    ? static_cast<std::time_t>(modified[static_cast<size_t>(index)] / 1000)
-                    : 0,
-            });
-        }
-    }
-    SetPlatformLibrarySnapshot(std::move(roots), std::move(games));
-}
 #endif
 
-extern "C" PSXE_API int external_main(int argc, const char* argv[], void* external_window, void* external_renderer) {
+// ---------------------------------------------------------------------------
+// Process entry points.
+//
+// `external_main` MUST keep the plain `int(int, char**)` main signature. SDL's Android
+// glue (SDLActivity.nativeRunMain -> the symbol named by getMainFunction(), which
+// com.nanodata.armsx.EmulatorActivity sets to "external_main") calls it through a
+// SDL_main_func function pointer of exactly that shape. When this used to be the 4-arg
+// form, parameters 3 and 4 arrived as whatever happened to be in x2/x3 — garbage that
+// initializeWindowAndRenderer() then adopted as an SDL_Window/SDL_Renderer, so
+// ArmsxApp::run() bailed out with 1 and the process vanished with no crash and no log.
+//
+// Hosts that really do own the window/renderer (PSVita, and any future embedder) call
+// `external_main_ex` instead.
+// ---------------------------------------------------------------------------
+
+extern "C" PSXE_API int external_main_ex(int argc, const char* argv[], void* external_window, void* external_renderer) {
     return psxe_run(argc, argv, external_window, external_renderer);
 }
 
-#if defined(__ANDROID__)
-extern "C" PSXE_API int armsx_android_main(int argc, char* argv[]) {
-    psxe_platform_set_fopen_callback(AndroidPlatformFopen, nullptr);
-    return psxe_run(argc, const_cast<const char**>(argv), nullptr, nullptr);
+extern "C" PSXE_API int external_main(int argc, const char* argv[]) {
+    return psxe_run(argc, argv, nullptr, nullptr);
 }
-#endif
 
 #ifndef __DLL_BUILD
 int main(int argc, const char* argv[]) {
-    return external_main(argc, argv, nullptr, nullptr);
+    return psxe_run(argc, argv, nullptr, nullptr);
 }
 #endif

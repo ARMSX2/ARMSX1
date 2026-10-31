@@ -54,7 +54,7 @@ if (-not $MsBuildCommand) {
 
 New-Item -ItemType Directory -Force -Path bin, $UwpOutputDir, $UwpIconsDir | Out-Null
 
-cmake -S third_party/fuse-lib -B $FsuiBuildDir -G "MinGW Makefiles" `
+cmake -S third_party/fsui-lib -B $FsuiBuildDir -G "MinGW Makefiles" `
     -DFSUI_BUILD_SAMPLES=OFF `
     -DFSUI_PLATFORM_BACKEND=SDL2 `
     -DFSUI_USE_SYSTEM_SDL2=ON `

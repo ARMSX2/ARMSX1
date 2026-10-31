@@ -8,6 +8,9 @@
 #include "mcd.h"
 
 #include "../input/sda.h"
+#include "../input/guncon.h"
+#include "../input/multitap.h"
+#include "../state.h"
 
 #define PSX_PAD_BEGIN 0x1f801040
 #define PSX_PAD_SIZE  0x10
@@ -104,6 +107,18 @@ enum {
 */
 
 typedef struct {
+    uint32_t commands[256];
+    uint32_t incomplete[256];
+    uint32_t transactions;
+    uint32_t min_bytes;
+    uint32_t max_bytes;
+    uint32_t analog_polls;
+    uint8_t last_poll[9];
+    uint8_t axis_min[4];
+    uint8_t axis_max[4];
+} psx_pad_trace_t;
+
+typedef struct {
     uint32_t bus_delay;
     uint32_t io_base, io_size;
 
@@ -118,6 +133,18 @@ typedef struct {
     int irq_bit;
 
     uint16_t mode, ctrl, baud, stat;
+
+    /* Host diagnostics, excluded from save states. */
+    psx_pad_trace_t trace[2][2];
+    uint64_t trace_cycles;
+    uint32_t trace_open_bytes;
+    uint8_t trace_pending;
+    uint8_t trace_open;
+    uint8_t trace_open_slot;
+    uint8_t trace_open_dev;
+    uint8_t trace_open_cmd;
+    uint8_t trace_reply_size;
+    uint8_t trace_reply[9];
 } psx_pad_t;
 
 psx_pad_t* psx_pad_create(void);
@@ -132,10 +159,33 @@ void psx_pad_destroy(psx_pad_t*);
 void psx_pad_button_press(psx_pad_t*, int, uint32_t);
 void psx_pad_button_release(psx_pad_t*, int, uint32_t);
 void psx_pad_analog_change(psx_pad_t*, int, uint32_t, uint16_t);
+/* The same three, addressed to one of the four PLAYERS behind a multitap in
+   `slot`. player 0 is the port itself, so with no tap plugged in these behave
+   exactly like the three above and players 1..3 are dropped — which is what
+   makes them safe to call unconditionally from a front-end that does not know
+   whether a tap is attached. */
+void psx_pad_button_press_player(psx_pad_t*, int slot, int player, uint32_t);
+void psx_pad_button_release_player(psx_pad_t*, int slot, int player, uint32_t);
+void psx_pad_analog_change_player(psx_pad_t*, int slot, int player, uint32_t, uint16_t);
+/* How many players the device in `slot` accepts: 4 for a multitap, 1 for a pad,
+   0 for an empty slot. Lets a host size its routing without knowing the type. */
+int psx_pad_player_count(psx_pad_t*, int slot);
 void psx_pad_attach_joy(psx_pad_t*, int, psx_input_t*);
 void psx_pad_detach_joy(psx_pad_t*, int);
 int psx_pad_attach_mcd(psx_pad_t*, int, const char*);
 void psx_pad_detach_mcd(psx_pad_t*, int);
+/* Read-only fingerprint of the card in `slot`, for the save-state divergence
+   check (psx/state.c, PSX_SS_MCARD). Returns 1 when a card is attached and the
+   out params are filled, 0 when the slot is empty (out params zeroed). Any
+   out pointer may be NULL. Nothing is mutated except the card's lazily cached
+   content hash. */
+int psx_pad_mcd_fingerprint(psx_pad_t*, int slot, uint64_t* out_hash,
+                            uint64_t* out_session, uint32_t* out_generation,
+                            int64_t* out_mtime);
 void psx_pad_update(psx_pad_t*, int);
+/* JOY_STAT/CTRL/MODE/BAUD, the ACK countdown, and tagged sub-blocks for
+   whatever is in the two controller and two memory-card slots. */
+void psx_pad_save_state(psx_pad_t*, psx_state_writer_t*);
+int psx_pad_load_state(psx_pad_t*, psx_state_reader_t*);
 
 #endif

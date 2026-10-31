@@ -1,0 +1,29 @@
+// ARMSX CRT — Aperture Grille
+// Copyright (c) 2026 Moon. See LICENSE.txt in this folder.
+//
+// Scanlines plus vertical R/G/B stripes — the Trinitron/Diamondtron look. One triad per 3
+// output pixels, so it wants a reasonably dense panel; below roughly 720p of letterboxed
+// picture the stripes start to alias and "Sharp Scanlines" is the better choice.
+//
+// Brightness compensation is higher here than in the maskless preset because the mask
+// throws light away by construction.
+
+shaders = "1"
+
+shader0 = "armsx-crt.slang"
+filter_linear0 = "true"
+scale_type0 = "viewport"
+scale0 = "1.000000"
+
+crt_scanline = "1.000000"
+crt_beam_min = "0.600000"
+crt_beam_max = "1.100000"
+crt_mask_type = "1.000000"
+crt_mask = "0.450000"
+crt_sharp = "0.750000"
+crt_curve = "0.000000"
+crt_corner = "0.000000"
+crt_vignette = "0.000000"
+crt_bright = "1.350000"
+crt_gamma_in = "2.400000"
+crt_gamma_out = "2.200000"

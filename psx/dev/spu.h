@@ -4,12 +4,20 @@
 #include <stdint.h>
 
 #include "ic.h"
+#include "../state.h"
 
 #define PSX_SPU_BEGIN 0x1f801c00
 #define PSX_SPU_SIZE  0x400
 #define PSX_SPU_END   0x1f801fff
 
 #define SPU_RAM_SIZE 0x80000
+
+/* Depth of the sample ring psx_spu_tick() fills. Only ever has to hold ONE frame's pull —
+   886 samples at the PAL rate, 744 at NTSC — because the front-end hands out a per-frame
+   budget and drains the whole thing again at the end of the same frame. Rounded up to a
+   power of two with better than 2x headroom so the modulo is a mask and no plausible
+   frame-rate value can overrun it. */
+#define PSX_SPU_SAMPLE_RING 2048
 
 /*
     1F801D88h - Voice 0..23 Key ON (Start Attack/Decay/Sustain) (KON) (W)
@@ -169,7 +177,29 @@ typedef struct __attribute__((__packed__)) {
         int adsr_pending_step;
         int adsr_sustain_level;
         uint32_t envctl;
+
+        /* Set when the CPU writes this voice's ADPCM Repeat Address register (1F801C0Eh),
+           cleared on key-on. While set, a Loop Start flag in the sample data must NOT
+           overwrite the repeat address — the game has taken ownership of it. Deliberately
+           absent from the save-state payload so the existing format is unchanged; it is
+           reset on load, and the next register write re-establishes it. */
+        int ignore_loop_addr;
     } data[24];
+
+    /* Host-side reverb bypass ([audio] skip_reverb). Not guest state, so it is
+       deliberately outside the save-state payload: a state saved with reverb on
+       must not force it back on for someone running the low-power path. */
+    int reverb_disabled;
+
+    /* Sample ring written by psx_spu_tick() and drained by the front-end. Host-side
+       scheduling state, not guest state: absent from the save-state payload, flushed on
+       load. See the block comment above psx_spu_tick() in spu.c for why it exists. */
+    uint32_t gen_ring[PSX_SPU_SAMPLE_RING];
+    int gen_head;
+    int gen_tail;
+    int gen_count;
+    int gen_budget;
+    uint32_t gen_cycles;
 } psx_spu_t;
 
 psx_spu_t* psx_spu_create(void);
@@ -180,8 +210,31 @@ uint8_t psx_spu_read8(psx_spu_t*, uint32_t);
 void psx_spu_write32(psx_spu_t*, uint32_t, uint32_t);
 void psx_spu_write16(psx_spu_t*, uint32_t, uint16_t);
 void psx_spu_write8(psx_spu_t*, uint32_t, uint8_t);
+/* Sound RAM + every voice/mixer/reverb register + the 24 ADPCM decoder and
+   ADSR envelope contexts. spu->ic and the spu->ram allocation are not saved
+   (the RAM contents are, into the existing buffer). */
+void psx_spu_save_state(psx_spu_t*, psx_state_writer_t*);
+int psx_spu_load_state(psx_spu_t*, psx_state_reader_t*);
 void psx_spu_destroy(psx_spu_t*);
 void psx_spu_update_cdda_buffer(psx_spu_t*, void*);
+void psx_spu_capture_cd_audio(psx_spu_t*, const void*, size_t frames);
+/* Internal runahead snapshots also preserve the CD capture IRQ divider. */
+int psx_spu_cdda_irq_phase(void);
+void psx_spu_restore_cdda_irq_phase(int phase);
 uint32_t psx_spu_get_sample(psx_spu_t*);
+/* Sample generation on the CPU's timeline rather than in one lump at the frame boundary.
+   psx_spu_begin_frame() grants the number of samples the front-end is going to pull for the
+   frame it is about to run; psx_spu_tick() is charged the same device cycles as every other
+   peripheral from psx_update() and spends that grant across the frame; psx_spu_pop_sample()
+   hands the results back. Read the block comment above psx_spu_tick() before changing any
+   of it — the pacing, not the audio, is the point. */
+void psx_spu_begin_frame(psx_spu_t*, int sample_budget);
+void psx_spu_tick(psx_spu_t*, uint32_t cycles);
+int psx_spu_pop_sample(psx_spu_t*, uint32_t* out);
+void psx_spu_flush_samples(psx_spu_t*);
+/* Skip the reverb all-pass/comb network in psx_spu_get_sample(). Purely a host
+   performance lever (spu_get_reverb_sample() is the SPU's hot spot and is still
+   marked "To-do: Optimize"); games that use reverb lose their echo when set. */
+void psx_spu_set_reverb_disabled(psx_spu_t*, int);
 
 #endif

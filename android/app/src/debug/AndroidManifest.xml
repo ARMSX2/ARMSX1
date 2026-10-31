@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name="com.armsx2.SettingsChangeAuditActivity"
+            android:exported="false" android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+        <activity android:name="com.armsx2.EngineAuditActivity"
+            android:exported="false" android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+        <provider android:name="com.armsx2.LoggerAuditProvider" android:authorities="${applicationId}.logger-audit" android:exported="false" />
+    </application>
+</manifest>

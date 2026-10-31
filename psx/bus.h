@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "state.h"
+
 struct psx_bus_t;
 
 typedef struct psx_bus_t psx_bus_t;
@@ -19,6 +21,10 @@ void psx_bus_write8(psx_bus_t*, uint32_t, uint32_t);
 uint32_t psx_bus_get_access_cycles(psx_bus_t*);
 uint32_t psx_bus_physical_address(uint32_t);
 void psx_bus_set_write_observer(psx_bus_t*, psx_bus_write_observer_t, void*);
+/* Only access_cycles is machine state. The device pointers and the write
+   observer are host wiring and are left in place across a load. */
+void psx_bus_save_state(psx_bus_t*, psx_state_writer_t*);
+int psx_bus_load_state(psx_bus_t*, psx_state_reader_t*);
 void psx_bus_destroy(psx_bus_t*);
 
 #endif

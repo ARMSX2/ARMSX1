@@ -1,8 +1,63 @@
-# ARMSX1
-ARMSX1 is a fork of `psxe`, rebuilt around a native FSUI donor shell and SDL2-hosted frontends for desktop, Android, iOS, UWP, web, and PSVita.
+# ARMSX
+
+Android now uses the original PSX Lab backend with the existing Compose UI.
+See [PSXLAB-BACKEND.md](PSXLAB-BACKEND.md) for build instructions, validation,
+save compatibility and current limitations. Historical platform documentation
+below also describes earlier engines and does not override those Android notes.
+ARMSX is a fork of `psxe`, rebuilt around a native FSUI donor shell and SDL2-hosted frontends for desktop, Android, iOS, UWP, web, and PSVita.
+
+## Local SwanStation dev integration
+
+The Android dev Compose build now uses SwanStation with the normal dev frontend.
+This is not a public release; see [SWANSTATION-DEV.md](SWANSTATION-DEV.md) for
+source boundaries, unfinished features, build commands and verification results.
+Existing old-engine source edits are preserved but are not Android build inputs.
+The old-engine feature description below is not a SwanStation feature checklist.
+
+### Android Compose additions
+
+Video settings include Native/2x/3x/4x HD presets, globally or for an individual
+game. These set internal 3D resolution rather than replacing textures or videos;
+they preserve the renderer and disable downsampling. Restart the game to apply.
+
+The [texture-pack browser](texture-packs/README.md) downloads and installs a
+selected compatible pack automatically, with offline reuse. The catalogue is
+initially empty; only verified, redistribution-approved packs should be added.
+Selection uses the disc ID/region and never applies a pack globally.
+
+CTR USA (`SCUS-94426`) has an experimental secondary-display companion. Launch
+the game on the top display of a dual-screen handheld such as Thor. The bottom
+shows a larger race map, eight vertical live racer positions with original
+portraits, and the timer/laps/Wumpa/items/boost display. Boot/menu/loading/results
+screens have an information panel. Adventure hubs have a read-only map/player
+marker; hub alignment and transitions still need broader live validation.
+Other games do not use this companion, and other CTR regions do not guess the
+USA memory layout.
+
+Original pictures/fonts/maps come from the running user-supplied game; no game
+artwork is bundled or downloaded. With a populated bottom race panel, guarded
+temporary RAM drawing edits hide the original top race HUD. They do not change
+the ROM file, fruit collection or race mechanics, and are restored on pause,
+reset, shutdown, state save/load and rewind. Missing required artwork leaves
+the original HUD visible. Achievements are disabled for any session in which
+the drawing patch activates. Hub/menu displays do not activate it.
+
+Main-library controller navigation now keeps highlighted covers visible without
+restartable scrolling animations, including partially clipped covers and
+recents/collection rows. Grid row steps account for cover size and safe-area
+padding. This does not change touch scrolling or emulation controls.
 
 ## What It Supports
-ARMSX1 currently has the following emulator pieces wired up:
+The Android Compose frontend includes an offline PS1 cheat catalogue under **Cheats**.
+Known serial/region matches load automatically; uncertain regions/revisions require confirmation
+in **Browse cheat database**. Select cheats by name, with optional search; no pasted codes are
+needed for covered games. Imported/custom groups and existing selections are preserved, and new
+database cheats start disabled. Back up your memory cards before using cheats. Some games and
+code types are not covered. Data is from [Libretro](https://github.com/libretro/libretro-database)
+under CC BY-SA 4.0; attribution/license files are bundled with the catalogue. Rebuild the assets
+with `tools/update_ps1_cheats.py` and the source commit recorded in `ps1-cheats-NOTICE.txt`.
+
+ARMSX currently has the following emulator pieces wired up:
 - CPU, DMA, GPU, SPU, MDEC, GTE, and timers
 - CD-ROM loading
 - memory cards
@@ -21,9 +76,14 @@ Disc image support is:
 - `CHD`, including mixed-mode metadata, pregaps/postgaps, audio byte order, and Q subchannel data
 - `ZIP` archives containing a supported game image and its companion files
 
+Not implemented yet:
+- save states
+- netplay
+- texture packs
+
 ## Accuracy and Acceleration
 
-ARMSX1 has two portable CPU engines:
+ARMSX has two portable CPU engines:
 
 - `cached` is the default. It caches decoded instruction handlers, but still performs a real bus fetch and opcode check for every emulated instruction. Writes invalidate matching entries, including cached/uncached address aliases.
 - `interpreter` is the reference path and remains selectable for diagnostics.

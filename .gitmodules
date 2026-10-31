@@ -1,9 +1,12 @@
 [submodule "third_party/SDL"]
 	path = third_party/SDL
-	url = https://github.com/libsdl-org/SDL.git
+	url = https://github.com/ARMSX2/SDL.git
+[submodule "third_party/fsui-lib"]
+	path = third_party/fsui-lib
+	url = https://git.nanodata.cloud/moonpower/fsui-lib.git
 [submodule "third_party/libchdr"]
 	path = third_party/libchdr
 	url = https://github.com/rtissera/libchdr.git
-[submodule "third_party/fuse-lib"]
-	path = third_party/fuse-lib
-	url = https://github.com/momo-AUX1/fuse-lib.git
+[submodule "third_party/angle-prebuilt"]
+	path = third_party/angle-prebuilt
+	url = https://android.googlesource.com/platform/packages/modules/ANGLE

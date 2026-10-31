@@ -1,5 +1,8 @@
 #include "dma.h"
 #include "../log.h"
+#include "../perf.h"
+#include "../pgxp.h"
+#include "gpu.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -8,7 +11,7 @@
 #include <ctype.h>
 
 psx_dma_t* psx_dma_create(void) {
-    return (psx_dma_t*)malloc(sizeof(psx_dma_t));
+    return (psx_dma_t*)calloc(1, sizeof(psx_dma_t));
 }
 
 const uint32_t g_psx_dma_ctrl_hw_1_table[] = {
@@ -58,13 +61,13 @@ uint32_t psx_dma_read32(psx_dma_t* dma, uint32_t offset) {
             cr &= g_psx_dma_ctrl_hw_0_table[channel];
         }
 
-        log_error("DMA channel %u register %u (%08x) read %08x", channel, reg, PSX_DMAR_BEGIN + offset, cr);
+        log_trace("DMA channel %u register %u (%08x) read %08x", channel, reg, PSX_DMAR_BEGIN + offset, cr);
         
         return cr;
     } else {
         switch (offset) {
-            case 0x70: log_error("DMA control read %08x", dma->dpcr); return dma->dpcr;
-            case 0x74: log_error("DMA irqc    read %08x", dma->dicr); return dma->dicr;
+            case 0x70: log_trace("DMA control read %08x", dma->dpcr); return dma->dpcr;
+            case 0x74: log_trace("DMA irqc    read %08x", dma->dicr); return dma->dicr;
 
             default: {
                 log_error("Unhandled 32-bit DMA read at offset %08x", offset);
@@ -124,13 +127,13 @@ void psx_dma_write32(psx_dma_t* dma, uint32_t offset, uint32_t value) {
 
         CR(channel, reg) = value;
 
-        log_error("DMA channel %u register %u write (%08x) %08x", channel, reg, PSX_DMAR_BEGIN + offset, value);
+        log_trace("DMA channel %u register %u write (%08x) %08x", channel, reg, PSX_DMAR_BEGIN + offset, value);
 
         if (reg == 2)
             g_psx_dma_do_table[channel](dma);
     } else {
         switch (offset) {
-            case 0x70: log_error("DMA control write %08x", value); dma->dpcr = value; break;
+            case 0x70: log_trace("DMA control write %08x", value); dma->dpcr = value; break;
             case 0x74: {
                 dma_write_dicr(dma, value);
             } break;
@@ -144,12 +147,18 @@ void psx_dma_write32(psx_dma_t* dma, uint32_t offset, uint32_t value) {
 
 void psx_dma_write16(psx_dma_t* dma, uint32_t offset, uint16_t value) {
     switch (offset) {
-        case 0x74: dma_write_dicr(dma, ((uint32_t)value) << 0);
-        case 0x76: dma_write_dicr(dma, ((uint32_t)value) << 16);
+        /*
+            These two were missing their `break`, so a 16-bit DICR write at 0x74 fell through
+            into 0x76 — applying the same value to BOTH halves of the register — and then into
+            default:, logging a fatal for a write it had just performed twice. Every 16-bit
+            DICR write was corrupting the upper half and crying about it.
+        */
+        case 0x74: dma_write_dicr(dma, ((uint32_t)value) << 0); break;
+        case 0x76: dma_write_dicr(dma, ((uint32_t)value) << 16); break;
         default: {
-            log_fatal("Unhandled 16-bit DMA write at offset %08x (%04x)", offset, value);
-
-            //exit(1);
+            /* Not fatal: nothing here ends the run, and log_fatal on a hot path is how the
+               real errors get buried. Matches psx_dma_write32's default above. */
+            log_error("Unhandled 16-bit DMA write at offset %08x (%04x)", offset, value);
         } break;
     }
 }
@@ -162,9 +171,9 @@ void psx_dma_write8(psx_dma_t* dma, uint32_t offset, uint8_t value) {
         case 0x76: dma_write_dicr(dma, ((uint32_t)value) << 16); break;
         case 0x77: dma_write_dicr(dma, ((uint32_t)value) << 24); break;
         default: {
-            log_fatal("Unhandled 8-bit DMA write at offset %08x (%02x)", offset, value);
-
-            //exit(1);
+            /* Not fatal, and consistent with psx_dma_write16/32 above: nothing here ends the
+               run, and log_fatal on a hot path is how the real errors get buried. */
+            log_error("Unhandled 8-bit DMA write at offset %08x (%02x)", offset, value);
         } break;
     }
 }
@@ -175,6 +184,10 @@ const char* g_psx_dma_sync_type_name_table[] = {
     "linked",
     "reserved"
 };
+
+static uint32_t dma_transfer_address(uint32_t address) {
+    return address & 0x00fffffc;
+}
 
 void psx_dma_do_mdec_in(psx_dma_t* dma) {
     if (!CHCR_BUSY(mdec_in))
@@ -189,10 +202,12 @@ void psx_dma_do_mdec_in(psx_dma_t* dma) {
 
     size_t size = BCR_SIZE(mdec_in) * BCR_BCNT(mdec_in);
 
+    PSX_PERF_ADD(dma_words[PSX_PERF_DMA_MDEC_IN], size);
+
     int step = CHCR_STEP(mdec_in) ? -4 : 4;
 
     for (int i = 0; i < size; i++) {
-        uint32_t data = psx_bus_read32(dma->bus, dma->mdec_in.madr);
+        uint32_t data = psx_bus_read32(dma->bus, dma_transfer_address(dma->mdec_in.madr));
 
         psx_bus_write32(dma->bus, 0x1f801820, data);
 
@@ -220,10 +235,12 @@ void psx_dma_do_mdec_out(psx_dma_t* dma) {
 
     size_t size = BCR_SIZE(mdec_out) * BCR_BCNT(mdec_out);
 
+    PSX_PERF_ADD(dma_words[PSX_PERF_DMA_MDEC_OUT], size);
+
     for (int i = 0; i < size; i++) {
         uint32_t data = psx_bus_read32(dma->bus, 0x1f801820);
 
-        psx_bus_write32(dma->bus, dma->mdec_out.madr, data);
+        psx_bus_write32(dma->bus, dma_transfer_address(dma->mdec_out.madr), data);
 
         dma->mdec_out.madr += CHCR_STEP(mdec_out) ? -4 : 4;
     }
@@ -235,9 +252,9 @@ void psx_dma_do_mdec_out(psx_dma_t* dma) {
 }
 
 void psx_dma_do_gpu_linked(psx_dma_t* dma) {
-    uint32_t hdr = psx_bus_read32(dma->bus, dma->gpu.madr);
+    uint32_t addr = dma_transfer_address(dma->gpu.madr);
+    uint32_t hdr = psx_bus_read32(dma->bus, addr);
     uint32_t size = hdr >> 24;
-    uint32_t addr = dma->gpu.madr;
 
     int timeout = 16384;
 
@@ -248,8 +265,16 @@ void psx_dma_do_gpu_linked(psx_dma_t* dma) {
             // Get command from linked list
             uint32_t cmd = psx_bus_read32(dma->bus, addr);
 
+            /* PGXP: this is the one spot where a GP0 word still has a RAM
+               address. The bus write below lands in psx_gpu_write32()
+               synchronously, which consumes (or discards) the note. */
+            if (psx_pgxp_active())
+                psx_pgxp_note_gp0_word(addr);
+
             // Write to GP0
             psx_bus_write32(dma->bus, 0x1f801810, cmd);
+
+            PSX_PERF_INC(dma_words[PSX_PERF_DMA_GPU]);
 
             dma->gpu_irq_delay++;
         }
@@ -259,6 +284,7 @@ void psx_dma_do_gpu_linked(psx_dma_t* dma) {
         if (addr == 0xffffff)
             break;
 
+        addr = dma_transfer_address(addr);
         hdr = psx_bus_read32(dma->bus, addr);
         size = hdr >> 24;
     }
@@ -270,9 +296,18 @@ void psx_dma_do_gpu_request(psx_dma_t* dma) {
 
     uint32_t size = BCR_SIZE(gpu) * BCR_BCNT(gpu);
 
+    PSX_PERF_ADD(dma_words[PSX_PERF_DMA_GPU], size);
+
     if (CHCR_TDIR(gpu)) {
         for (int i = 0; i < size; i++) {
-            uint32_t data = psx_bus_read32(dma->bus, dma->gpu.madr);
+            uint32_t addr = dma_transfer_address(dma->gpu.madr);
+            uint32_t data = psx_bus_read32(dma->bus, addr);
+
+            /* PGXP: request-mode transfers are mostly VRAM image uploads (the
+               GPU discards those notes in RECV_DATA), but some titles push
+               command lists this way too. */
+            if (psx_pgxp_active())
+                psx_pgxp_note_gp0_word(addr);
 
             psx_bus_write32(dma->bus, 0x1f801810, data);
 
@@ -282,7 +317,7 @@ void psx_dma_do_gpu_request(psx_dma_t* dma) {
         for (int i = 0; i < size; i++) {
             uint32_t data = psx_bus_read32(dma->bus, 0x1f801810);
 
-            psx_bus_write32(dma->bus, dma->gpu.madr, data);
+            psx_bus_write32(dma->bus, dma_transfer_address(dma->gpu.madr), data);
 
             dma->gpu.madr += CHCR_STEP(gpu) ? -4 : 4;
         }
@@ -350,6 +385,8 @@ void psx_dma_do_cdrom(psx_dma_t* dma) {
 
     dma->cdrom_irq_delay = 1;
 
+    PSX_PERF_ADD(dma_words[PSX_PERF_DMA_CDROM], size);
+
     if (!CHCR_TDIR(cdrom)) {
         for (int i = 0; i < size; i++) {
             uint32_t data = 0;
@@ -359,7 +396,7 @@ void psx_dma_do_cdrom(psx_dma_t* dma) {
             data |= psx_bus_read8(dma->bus, 0x1f801802) << 16;
             data |= psx_bus_read8(dma->bus, 0x1f801802) << 24;
 
-            psx_bus_write32(dma->bus, dma->cdrom.madr, data);
+            psx_bus_write32(dma->bus, dma_transfer_address(dma->cdrom.madr), data);
 
             dma->cdrom.madr += CHCR_STEP(cdrom) ? -4 : 4;
         }
@@ -404,10 +441,12 @@ void psx_dma_do_spu(psx_dma_t* dma) {
 
     dma->spu_irq_delay = 32;
 
+    PSX_PERF_ADD(dma_words[PSX_PERF_DMA_SPU], (uint64_t)size * (uint64_t)blocks);
+
     if (CHCR_TDIR(spu)) {
         for (int j = 0; j < blocks; j++) {
             for (int i = 0; i < size; i++) {
-                uint32_t data = psx_bus_read32(dma->bus, dma->spu.madr);
+                uint32_t data = psx_bus_read32(dma->bus, dma_transfer_address(dma->spu.madr));
 
                 psx_bus_write16(dma->bus, 0x1f801da8, data & 0xffff);
                 psx_bus_write16(dma->bus, 0x1f801da8, data >> 16);
@@ -423,7 +462,7 @@ void psx_dma_do_spu(psx_dma_t* dma) {
                 data  = psx_bus_read16(dma->bus, 0x1f801da8);
                 data |= psx_bus_read16(dma->bus, 0x1f801da8) << 16;
 
-                psx_bus_write32(dma->bus, dma->spu.madr, data);
+                psx_bus_write32(dma->bus, dma_transfer_address(dma->spu.madr), data);
 
                 dma->spu.madr += CHCR_STEP(spu) ? -4 : 4;
             }
@@ -457,10 +496,12 @@ void psx_dma_do_otc(psx_dma_t* dma) {
     if (!size)
         size = 0x10000;
 
-    for (int i = size; i > 0; i--) {
-        uint32_t addr = (i != 1) ? (dma->otc.madr - 4) : 0xffffff;
+    PSX_PERF_ADD(dma_words[PSX_PERF_DMA_OTC], size);
 
-        psx_bus_write32(dma->bus, dma->otc.madr, addr & 0xffffff);
+    for (int i = size; i > 0; i--) {
+        uint32_t addr = (i != 1) ? dma_transfer_address(dma->otc.madr - 4) : 0xffffff;
+
+        psx_bus_write32(dma->bus, dma_transfer_address(dma->otc.madr), addr);
 
         dma->otc.madr -= 4;
     }
@@ -473,7 +514,7 @@ void psx_dma_do_otc(psx_dma_t* dma) {
     dma->otc.bcr = 0;
 }
 
-void psx_dma_update(psx_dma_t* dma, int cyc) {
+__attribute__((always_inline)) void psx_dma_update(psx_dma_t* dma, int cyc) {
     if (dma->cdrom_irq_delay) {
         dma->cdrom_irq_delay = 0;
 
@@ -533,6 +574,66 @@ void psx_dma_update(psx_dma_t* dma, int cyc) {
     
     dma->dicr &= ~DICR_IRQSI;
     dma->dicr |= irq_signal << 31;
+}
+
+static void dma_save_channel(psx_state_writer_t* w, const dma_channel_t* c) {
+    psx_sw_u32(w, c->madr);
+    psx_sw_u32(w, c->bcr);
+    psx_sw_u32(w, c->chcr);
+}
+
+static void dma_load_channel(psx_state_reader_t* r, dma_channel_t* c) {
+    c->madr = psx_sr_u32(r);
+    c->bcr = psx_sr_u32(r);
+    c->chcr = psx_sr_u32(r);
+}
+
+void psx_dma_save_state(psx_dma_t* dma, psx_state_writer_t* w) {
+    dma_save_channel(w, &dma->mdec_in);
+    dma_save_channel(w, &dma->mdec_out);
+    dma_save_channel(w, &dma->gpu);
+    dma_save_channel(w, &dma->cdrom);
+    dma_save_channel(w, &dma->spu);
+    dma_save_channel(w, &dma->pio);
+    dma_save_channel(w, &dma->otc);
+
+    /* Pending completion-IRQ countdowns. These are scheduling state: dropping
+       them would lose a DMA completion interrupt the game is waiting on. */
+    psx_sw_i32(w, dma->mdec_in_irq_delay);
+    psx_sw_i32(w, dma->mdec_out_irq_delay);
+    psx_sw_i32(w, dma->cdrom_irq_delay);
+    psx_sw_i32(w, dma->spu_irq_delay);
+    psx_sw_i32(w, dma->gpu_irq_delay);
+    psx_sw_i32(w, dma->otc_irq_delay);
+
+    psx_sw_u32(w, dma->dpcr);
+    psx_sw_u32(w, dma->dicr);
+}
+
+int psx_dma_load_state(psx_dma_t* dma, psx_state_reader_t* r) {
+    dma_load_channel(r, &dma->mdec_in);
+    dma_load_channel(r, &dma->mdec_out);
+    dma_load_channel(r, &dma->gpu);
+    dma_load_channel(r, &dma->cdrom);
+    dma_load_channel(r, &dma->spu);
+    dma_load_channel(r, &dma->pio);
+    dma_load_channel(r, &dma->otc);
+
+    dma->mdec_in_irq_delay = psx_sr_i32(r);
+    dma->mdec_out_irq_delay = psx_sr_i32(r);
+    dma->cdrom_irq_delay = psx_sr_i32(r);
+    dma->spu_irq_delay = psx_sr_i32(r);
+    dma->gpu_irq_delay = psx_sr_i32(r);
+    dma->otc_irq_delay = psx_sr_i32(r);
+
+    dma->dpcr = psx_sr_u32(r);
+    dma->dicr = psx_sr_u32(r);
+
+    /* dma->bus / dma->ic are host wiring and stay as they are. Every DMA in
+       this core runs to completion inside psx_dma_perform(), so there is never
+       a partially transferred block to resume: the channel registers above are
+       the whole picture. */
+    return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
 }
 
 void psx_dma_destroy(psx_dma_t* dma) {

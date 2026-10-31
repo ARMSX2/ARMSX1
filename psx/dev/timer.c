@@ -149,7 +149,7 @@ const char* g_psx_timer_reg_names[] = {
 };
 
 psx_timer_t* psx_timer_create(void) {
-    return (psx_timer_t*)malloc(sizeof(psx_timer_t));
+    return (psx_timer_t*)calloc(1, sizeof(psx_timer_t));
 }
 
 void psx_timer_init(psx_timer_t* timer, psx_ic_t* ic, psx_gpu_t* gpu) {
@@ -172,7 +172,8 @@ uint32_t psx_timer_read32(psx_timer_t* timer, uint32_t offset) {
         case 8: return timer->timer[index].target;
     }
 
-    printf("Unhandled 32-bit TIMER read at offset %08x\n", offset);
+    if (log_first_access(0x1f801100u + offset, false, 32))
+        printf("Unhandled 32-bit TIMER read at offset %08x\n", offset);
 
     return 0x0;
 }
@@ -187,13 +188,15 @@ uint16_t psx_timer_read16(psx_timer_t* timer, uint32_t offset) {
         case 8: return timer->timer[index].target;
     }
 
-    printf("Unhandled 16-bit TIMER read at offset %08x\n", offset);
+    if (log_first_access(0x1f801100u + offset, false, 16))
+        printf("Unhandled 16-bit TIMER read at offset %08x\n", offset);
 
     return 0x0;
 }
 
 uint8_t psx_timer_read8(psx_timer_t* timer, uint32_t offset) {
-    printf("Unhandled 8-bit TIMER read at offset %08x\n", offset);
+    if (log_first_access(0x1f801100u + offset, false, 8))
+        printf("Unhandled 8-bit TIMER read at offset %08x\n", offset);
 
     return 0x0;
 }
@@ -227,7 +230,8 @@ void psx_timer_write16(psx_timer_t* timer, uint32_t offset, uint16_t value) {
 }
 
 void psx_timer_write8(psx_timer_t* timer, uint32_t offset, uint8_t value) {
-    printf("Unhandled 8-bit TIMER write at offset %08x (%02x)\n", offset, value);
+    if (log_first_access(0x1f801100u + offset, true, 8))
+        printf("Unhandled 8-bit TIMER write at offset %08x (%02x)\n", offset, value);
 }
 
 void timer_handle_irq(psx_timer_t* timer, int i) {
@@ -284,18 +288,24 @@ void timer_handle_irq(psx_timer_t* timer, int i) {
 }
 
 float timer_get_dotclock_div(psx_timer_t* timer) {
-    static const float dmode_dotclk_div_table[] = {
-        10.0f, 8.0f, 5.0f, 4.0f
+    /* Constant-fold the complete ratio, preserving the original order of
+       float operations. This path can run for every CPU instruction when
+       timer 0 uses the dot clock; dividing by a table load prevents folding. */
+    static const float dmode_dotclk_ratio_table[] = {
+        11.0f / 7.0f / 10.0f,
+        11.0f / 7.0f / 8.0f,
+        11.0f / 7.0f / 5.0f,
+        11.0f / 7.0f / 4.0f
     };
 
     if (timer->gpu->display_mode & 0x40) {
         return 11.0f / 7.0f / 7.0f;
     } else {
-        return 11.0f / 7.0f / dmode_dotclk_div_table[timer->gpu->display_mode & 0x3];
+        return dmode_dotclk_ratio_table[timer->gpu->display_mode & 0x3];
     }
 }
 
-void timer_update_timer0(psx_timer_t* timer, int cyc) {
+static inline void timer_update_timer0(psx_timer_t* timer, int cyc) {
     if (T0_PAUSED)
         return;
 
@@ -309,7 +319,7 @@ void timer_update_timer0(psx_timer_t* timer, int cyc) {
     timer_handle_irq(timer, 0);
 }
 
-void timer_update_timer1(psx_timer_t* timer, int cyc) {
+static inline void timer_update_timer1(psx_timer_t* timer, int cyc) {
     if (T1_PAUSED)
         return;
 
@@ -322,7 +332,7 @@ void timer_update_timer1(psx_timer_t* timer, int cyc) {
     timer_handle_irq(timer, 1);
 }
 
-void timer_update_timer2(psx_timer_t* timer, int cyc) {
+static inline void timer_update_timer2(psx_timer_t* timer, int cyc) {
     if (T2_PAUSED)
         return;
 
@@ -335,13 +345,16 @@ void timer_update_timer2(psx_timer_t* timer, int cyc) {
     timer_handle_irq(timer, 2);
 }
 
-void psx_timer_update(psx_timer_t* timer, int cyc) {
+__attribute__((always_inline)) void psx_timer_update(psx_timer_t* timer, int cyc) {
     timer->prev_hblank = timer->hblank;
     timer->prev_vblank = timer->vblank;
 
-    timer_update_timer0(timer, 2);
-    timer_update_timer1(timer, 2);
-    timer_update_timer2(timer, 2);
+    // Use the same elapsed device cycles as GPU/SPU/CD-ROM. Charging a fixed
+    // two cycles per instruction makes root counters run slow during expensive
+    // instructions and lets timer-driven animation drift behind the audio.
+    timer_update_timer0(timer, cyc);
+    timer_update_timer1(timer, cyc);
+    timer_update_timer2(timer, cyc);
 }
 
 void psxe_gpu_hblank_event_cb(psx_gpu_t* gpu) {
@@ -420,6 +433,75 @@ void psxe_gpu_vblank_end_event_cb(psx_gpu_t* gpu) {
         case 0: T1_PAUSED = 0; break;
         case 2: T1_PAUSED = 1; break;
     }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Save state. All three root counters plus the h/v-blank edge latches they are
+   synchronised against. timer->ic and timer->gpu are host wiring.
+
+   timer[n].counter is a float and is written as its IEEE-754 bit pattern, so
+   the resumed counter is bit-identical rather than rounded.
+   --------------------------------------------------------------------------- */
+
+void psx_timer_save_state(psx_timer_t* timer, psx_state_writer_t* w) {
+    int i;
+
+    psx_sw_i32(w, timer->hblank);
+    psx_sw_i32(w, timer->prev_hblank);
+    psx_sw_i32(w, timer->vblank);
+    psx_sw_i32(w, timer->prev_vblank);
+
+    for (i = 0; i < 3; i++) {
+        psx_sw_f32(w, timer->timer[i].counter);
+        psx_sw_u32(w, timer->timer[i].target);
+        psx_sw_i32(w, timer->timer[i].sync_enable);
+        psx_sw_i32(w, timer->timer[i].sync_mode);
+        psx_sw_i32(w, timer->timer[i].reset_target);
+        psx_sw_i32(w, timer->timer[i].irq_target);
+        psx_sw_i32(w, timer->timer[i].irq_max);
+        psx_sw_i32(w, timer->timer[i].irq_repeat);
+        psx_sw_i32(w, timer->timer[i].irq_toggle);
+        psx_sw_i32(w, timer->timer[i].clk_source);
+        psx_sw_i32(w, timer->timer[i].irq);
+        psx_sw_i32(w, timer->timer[i].target_reached);
+        psx_sw_i32(w, timer->timer[i].max_reached);
+        psx_sw_i32(w, timer->timer[i].irq_fired);
+        psx_sw_u32(w, timer->timer[i].div_counter);
+        psx_sw_i32(w, timer->timer[i].paused);
+        psx_sw_i32(w, timer->timer[i].blank_once);
+    }
+}
+
+int psx_timer_load_state(psx_timer_t* timer, psx_state_reader_t* r) {
+    int i;
+
+    timer->hblank = psx_sr_i32(r);
+    timer->prev_hblank = psx_sr_i32(r);
+    timer->vblank = psx_sr_i32(r);
+    timer->prev_vblank = psx_sr_i32(r);
+
+    for (i = 0; i < 3; i++) {
+        timer->timer[i].counter = psx_sr_f32(r);
+        timer->timer[i].target = psx_sr_u32(r);
+        timer->timer[i].sync_enable = psx_sr_i32(r);
+        timer->timer[i].sync_mode = psx_sr_i32(r);
+        timer->timer[i].reset_target = psx_sr_i32(r);
+        timer->timer[i].irq_target = psx_sr_i32(r);
+        timer->timer[i].irq_max = psx_sr_i32(r);
+        timer->timer[i].irq_repeat = psx_sr_i32(r);
+        timer->timer[i].irq_toggle = psx_sr_i32(r);
+        timer->timer[i].clk_source = psx_sr_i32(r);
+        timer->timer[i].irq = psx_sr_i32(r);
+        timer->timer[i].target_reached = psx_sr_i32(r);
+        timer->timer[i].max_reached = psx_sr_i32(r);
+        timer->timer[i].irq_fired = psx_sr_i32(r);
+        timer->timer[i].div_counter = psx_sr_u32(r);
+        timer->timer[i].paused = psx_sr_i32(r);
+        timer->timer[i].blank_once = psx_sr_i32(r);
+    }
+
+    return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
 }
 
 void psx_timer_destroy(psx_timer_t* timer) {

@@ -6,7 +6,7 @@
 #include "exp2.h"
 
 psx_exp2_t* psx_exp2_create(void) {
-    return (psx_exp2_t*)malloc(sizeof(psx_exp2_t));
+    return (psx_exp2_t*)calloc(1, sizeof(psx_exp2_t));
 }
 
 void psx_exp2_init(psx_exp2_t* exp2, exp2_tty_tx atcons_tx, exp2_tty_tx duart_tx) {
@@ -73,6 +73,18 @@ void psx_exp2_write8(psx_exp2_t* exp2, uint32_t offset, uint8_t value) {
     }
 
     log_warn("Unhandled 8-bit EXP2 write at offset %08x (%02x)", offset, value);
+}
+
+void psx_exp2_save_state(psx_exp2_t* exp2, psx_state_writer_t* w) {
+    psx_sw_u8(w, exp2->atc_stat);
+    psx_sw_u8(w, exp2->atc_rx);
+}
+
+int psx_exp2_load_state(psx_exp2_t* exp2, psx_state_reader_t* r) {
+    exp2->atc_stat = psx_sr_u8(r);
+    exp2->atc_rx = psx_sr_u8(r);
+
+    return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
 }
 
 void psx_exp2_destroy(psx_exp2_t* exp2) {

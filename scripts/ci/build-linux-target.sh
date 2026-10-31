@@ -17,7 +17,7 @@ package_root="$artifact_root/armsx-linux-$target"
 package_zip="$artifact_root/armsx-linux-$target.zip"
 
 cmake_args=(
-    -S "$repo_root/third_party/fuse-lib"
+    -S "$repo_root/third_party/fsui-lib"
     -B "$fsui_build_dir"
     -DFSUI_BUILD_SAMPLES=OFF
     -DFSUI_PLATFORM_BACKEND=SDL2

@@ -51,7 +51,7 @@ set(FSUI_PLATFORM_BACKEND SDL2 CACHE STRING "Platform backend to build" FORCE)
 set(FSUI_IMGUI_OPENGL_ES3 ON CACHE BOOL "Build the fsui OpenGL backend in OpenGL ES 3 mode" FORCE)
 set(FSUI_USE_SYSTEM_SDL2 OFF CACHE BOOL "Prefer a system SDL2 package when an SDL target is not already available" FORCE)
 
-add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../third_party/fuse-lib" "${CMAKE_BINARY_DIR}/fuse-lib")
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../third_party/fsui-lib" "${CMAKE_BINARY_DIR}/fsui-lib")
 
 if(DEFINED VITASDK AND VITASDK)
     # Vita packaging tools reject PIC-style ARM relocations such as R_ARM_BASE_PREL.

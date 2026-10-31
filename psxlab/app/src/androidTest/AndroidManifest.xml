@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider android:name="dev.psxlab.DiscFixtureProvider"
+            android:authorities="dev.psxlab.test.media-fixtures" android:exported="true" />
+    </application>
+</manifest>

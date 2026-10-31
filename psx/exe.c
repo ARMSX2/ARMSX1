@@ -2,13 +2,12 @@
 
 #include "exe.h"
 #include "log.h"
-#include "frontend/platform_file.h"
 
 int psx_exe_load(psx_cpu_t* cpu, const char* path) {
     if (!path)
         return 0;
 
-    FILE* file = psxe_platform_fopen(path, "rb");
+    FILE* file = fopen(path, "rb");
 
     if (!file)
         return 1;

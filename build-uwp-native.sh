@@ -184,7 +184,7 @@ fi
 
 mkdir -p "$repo_root/bin" "$uwp_output_dir" "$uwp_icons_dir"
 
-cmake -S "$repo_root/third_party/fuse-lib" -B "$fsui_build_dir" -G "MinGW Makefiles" \
+cmake -S "$repo_root/third_party/fsui-lib" -B "$fsui_build_dir" -G "MinGW Makefiles" \
     -DFSUI_BUILD_SAMPLES=OFF \
     -DFSUI_PLATFORM_BACKEND=SDL2 \
     -DFSUI_USE_SYSTEM_SDL2=ON \

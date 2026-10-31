@@ -1,0 +1,15 @@
+plugins { id 'com.android.library' }
+android {
+    namespace 'dev.psxlab.backend'
+    compileSdk 35
+    ndkVersion '28.2.13676358'
+    defaultConfig { minSdk 28; ndk { abiFilters 'arm64-v8a' }; consumerProguardFiles 'consumer-rules.pro' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    sourceSets.main {
+        java.srcDirs = ['../app/src/main/java']
+        java.includes = ['dev/psxlab/core/**', 'dev/psxlab/ArmSxBackend.java', 'dev/psxlab/BackendStateStore.java', 'dev/psxlab/MigrationBackup.java',
+                         'dev/psxlab/AudioOutput.java', 'dev/psxlab/AudioCapture.java', 'dev/psxlab/NativeTempo.java',
+                         'dev/psxlab/CardStorage.java', 'dev/psxlab/FileSource.java', 'dev/psxlab/ChdSource.java']
+    }
+    externalNativeBuild { cmake { path '../app/src/main/cpp/CMakeLists.txt'; version '3.22.1' } }
+}

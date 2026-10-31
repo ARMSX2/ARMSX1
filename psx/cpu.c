@@ -1,6 +1,10 @@
 #include "cpu.h"
+#include "fastboot.h"
 #include "bus.h"
+#include "instruction_fetch.h"
 #include "log.h"
+#include "perf.h"
+#include "pgxp.h"
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -12,11 +16,12 @@
 
 typedef int (*psx_cpu_cached_handler_t)(psx_cpu_t*);
 
+/* Keep ARM64 entries at 16 bytes (four per 64-byte cache line). The handler
+   doubles as the validity tag, avoiding eight bytes of flag/alignment overhead. */
 typedef struct {
     uint32_t address;
     uint32_t opcode;
     psx_cpu_cached_handler_t handler;
-    uint8_t valid;
 } psx_cpu_cache_entry_t;
 
 struct psx_cpu_cache_t {
@@ -32,6 +37,8 @@ static uint32_t psx_cpu_cache_index(uint32_t address) {
 
 static void psx_cpu_bus_write_observer(void* udata, uint32_t address, uint32_t size) {
     psx_cpu_invalidate_range((psx_cpu_t*)udata, address, size);
+    if (psx_pgxp_active())
+        psx_pgxp_memory_written(address, size);
 }
 
 static const uint32_t g_psx_cpu_cop0_write_mask_table[] = {
@@ -131,6 +138,8 @@ static inline void psx_gte_i_ncct(psx_cpu_t*);
 #define R_RA (cpu->r[31])
 
 #define DO_PENDING_LOAD { \
+    if (psx_pgxp_active()) \
+        psx_pgxp_cpu_load_commit(cpu->load_d, cpu->load_v); \
     cpu->r[cpu->load_d] = cpu->load_v; \
     R_R0 = 0; \
     cpu->load_v = 0xffffffff; \
@@ -194,6 +203,7 @@ psx_cpu_t* psx_cpu_create(void) {
     }
 
     cpu->execution_mode = PSX_CPU_CACHED_INTERPRETER;
+    cpu->base_instruction_cycles = 1;
     return cpu;
 }
 
@@ -216,38 +226,236 @@ void psx_cpu_set_b_kcall_hook(psx_cpu_t* cpu, psx_cpu_kcall_hook_t hook) {
     cpu->b_function_hook = hook;
 }
 
-void psx_cpu_save_state(psx_cpu_t* cpu, FILE* file) {
-    fwrite((char*)cpu, offsetof(psx_cpu_t, bus), 1, file);
+/*
+    Save state.
+
+    The old implementation fwrite()'d the raw struct up to offsetof(bus). That
+    is not portable (padding, endianness, and the packed GTE unions) and it also
+    wrote the GTE register file as an opaque blob. Everything is now emitted
+    field by field as fixed-width little-endian values.
+
+    Deliberately NOT saved: cpu->bus (host wiring), the A/B kcall hooks (host
+    callbacks), cpu->execution_mode (a user setting, not machine state) and
+    cpu->cache (a derived block cache — invalidated on load and rebuilt lazily).
+*/
+
+static void cpu_save_gte_vertex(psx_state_writer_t* w, const gte_vertex_t* v) {
+    psx_sw_u32(w, v->xy);
+    psx_sw_u16(w, (uint16_t)v->z);
 }
 
-void psx_cpu_load_state(psx_cpu_t* cpu, FILE* file) {
-    psx_bus_t* bus = cpu->bus;
-    psx_cpu_kcall_hook_t a_hook = cpu->a_function_hook;
-    psx_cpu_kcall_hook_t b_hook = cpu->b_function_hook;
-    psx_cpu_execution_mode_t execution_mode = cpu->execution_mode;
-    struct psx_cpu_cache_t* cache = cpu->cache;
+static void cpu_load_gte_vertex(psx_state_reader_t* r, gte_vertex_t* v) {
+    v->xy = psx_sr_u32(r);
+    v->z = (int16_t)psx_sr_u16(r);
+}
 
-    if (!fread((char*)cpu, offsetof(psx_cpu_t, bus), 1, file)) {
-        perror("Error reading CPU state");
+static void cpu_save_gte_matrix(psx_state_writer_t* w, const gte_matrix_t* m) {
+    int i;
 
-        exit(1);
-    }
+    for (i = 0; i < 4; i++)
+        psx_sw_u32(w, m->m[i].u32);
 
-    cpu->bus = bus;
-    cpu->a_function_hook = a_hook;
-    cpu->b_function_hook = b_hook;
-    cpu->execution_mode = execution_mode;
-    cpu->cache = cache;
-    psx_cpu_invalidate_cache(cpu);
+    psx_sw_u16(w, (uint16_t)m->m33);
+}
+
+static void cpu_load_gte_matrix(psx_state_reader_t* r, gte_matrix_t* m) {
+    int i;
+
+    for (i = 0; i < 4; i++)
+        m->m[i].u32 = psx_sr_u32(r);
+
+    m->m33 = (int16_t)psx_sr_u16(r);
+}
+
+static void cpu_save_gte_vec3(psx_state_writer_t* w, const gte_vec3_t* v) {
+    psx_sw_i32(w, v->x);
+    psx_sw_i32(w, v->y);
+    psx_sw_i32(w, v->z);
+}
+
+static void cpu_load_gte_vec3(psx_state_reader_t* r, gte_vec3_t* v) {
+    v->x = psx_sr_i32(r);
+    v->y = psx_sr_i32(r);
+    v->z = psx_sr_i32(r);
+}
+
+void psx_cpu_save_state(psx_cpu_t* cpu, psx_state_writer_t* w) {
+    int i;
+
+    for (i = 0; i < 32; i++)
+        psx_sw_u32(w, cpu->r[i]);
+
+    psx_sw_u32(w, cpu->opcode);
+    psx_sw_u32(w, cpu->pc);
+    psx_sw_u32(w, cpu->next_pc);
+    psx_sw_u32(w, cpu->saved_pc);
+    psx_sw_u32(w, cpu->hi);
+    psx_sw_u32(w, cpu->lo);
+    psx_sw_u32(w, cpu->load_d);
+    psx_sw_u32(w, cpu->load_v);
+    psx_sw_u32(w, cpu->last_cycles);
+    psx_sw_u32(w, cpu->total_cycles);
+    psx_sw_i32(w, cpu->branch);
+    psx_sw_i32(w, cpu->delay_slot);
+    psx_sw_i32(w, cpu->branch_taken);
+
+    for (i = 0; i < 16; i++)
+        psx_sw_u32(w, cpu->cop0_r[i]);
+
+    /* COP2 data registers */
+    for (i = 0; i < 3; i++)
+        cpu_save_gte_vertex(w, &cpu->cop2_dr.v[i]);
+
+    psx_sw_u32(w, cpu->cop2_dr.rgbc.rgbc);
+    psx_sw_u16(w, cpu->cop2_dr.otz);
+
+    for (i = 0; i < 4; i++)
+        psx_sw_u16(w, (uint16_t)cpu->cop2_dr.ir[i]);
+
+    for (i = 0; i < 4; i++)
+        psx_sw_u32(w, cpu->cop2_dr.sxy[i].xy);
+
+    for (i = 0; i < 4; i++)
+        psx_sw_u16(w, cpu->cop2_dr.sz[i]);
+
+    for (i = 0; i < 3; i++)
+        psx_sw_u32(w, cpu->cop2_dr.rgb[i].rgbc);
+
+    psx_sw_u32(w, cpu->cop2_dr.res1);
+
+    for (i = 0; i < 4; i++)
+        psx_sw_i32(w, cpu->cop2_dr.mac[i]);
+
+    psx_sw_u16(w, cpu->cop2_dr.irgb);
+    psx_sw_u16(w, cpu->cop2_dr.orgb);
+    psx_sw_i32(w, cpu->cop2_dr.lzcs);
+    psx_sw_i32(w, cpu->cop2_dr.lzcr);
+
+    /* COP2 control registers */
+    cpu_save_gte_matrix(w, &cpu->cop2_cr.rt);
+    cpu_save_gte_vec3(w, &cpu->cop2_cr.tr);
+    cpu_save_gte_matrix(w, &cpu->cop2_cr.l);
+    cpu_save_gte_vec3(w, &cpu->cop2_cr.bk);
+    cpu_save_gte_matrix(w, &cpu->cop2_cr.lr);
+    cpu_save_gte_vec3(w, &cpu->cop2_cr.fc);
+    psx_sw_u32(w, cpu->cop2_cr.ofx);
+    psx_sw_u32(w, cpu->cop2_cr.ofy);
+    psx_sw_u32(w, cpu->cop2_cr.h);
+    psx_sw_u16(w, (uint16_t)cpu->cop2_cr.dqa);
+    psx_sw_i32(w, cpu->cop2_cr.dqb);
+    psx_sw_u16(w, (uint16_t)cpu->cop2_cr.zsf3);
+    psx_sw_u16(w, (uint16_t)cpu->cop2_cr.zsf4);
+    psx_sw_u32(w, cpu->cop2_cr.flag);
+
+    /* GTE instruction-decode latches */
+    psx_sw_i32(w, cpu->gte_lm);
+    psx_sw_i32(w, cpu->gte_sf);
+    psx_sw_i32(w, cpu->gte_mx);
+    psx_sw_i32(w, cpu->gte_v);
+    psx_sw_i32(w, cpu->gte_cv);
+    psx_sw_i64(w, cpu->s_mac0);
+    psx_sw_i64(w, cpu->s_mac3);
+}
+
+int psx_cpu_load_state_keep_decode_cache(psx_cpu_t* cpu, psx_state_reader_t* r) {
+    int i;
+
+    for (i = 0; i < 32; i++)
+        cpu->r[i] = psx_sr_u32(r);
+
+    cpu->opcode = psx_sr_u32(r);
+    cpu->pc = psx_sr_u32(r);
+    cpu->next_pc = psx_sr_u32(r);
+    cpu->saved_pc = psx_sr_u32(r);
+    cpu->hi = psx_sr_u32(r);
+    cpu->lo = psx_sr_u32(r);
+    cpu->load_d = psx_sr_u32(r);
+    cpu->load_v = psx_sr_u32(r);
+    cpu->last_cycles = psx_sr_u32(r);
+    cpu->total_cycles = psx_sr_u32(r);
+    cpu->branch = psx_sr_i32(r);
+    cpu->delay_slot = psx_sr_i32(r);
+    cpu->branch_taken = psx_sr_i32(r);
+
+    for (i = 0; i < 16; i++)
+        cpu->cop0_r[i] = psx_sr_u32(r);
+
+    for (i = 0; i < 3; i++)
+        cpu_load_gte_vertex(r, &cpu->cop2_dr.v[i]);
+
+    cpu->cop2_dr.rgbc.rgbc = psx_sr_u32(r);
+    cpu->cop2_dr.otz = psx_sr_u16(r);
+
+    for (i = 0; i < 4; i++)
+        cpu->cop2_dr.ir[i] = (int16_t)psx_sr_u16(r);
+
+    for (i = 0; i < 4; i++)
+        cpu->cop2_dr.sxy[i].xy = psx_sr_u32(r);
+
+    for (i = 0; i < 4; i++)
+        cpu->cop2_dr.sz[i] = psx_sr_u16(r);
+
+    for (i = 0; i < 3; i++)
+        cpu->cop2_dr.rgb[i].rgbc = psx_sr_u32(r);
+
+    cpu->cop2_dr.res1 = psx_sr_u32(r);
+
+    for (i = 0; i < 4; i++)
+        cpu->cop2_dr.mac[i] = psx_sr_i32(r);
+
+    cpu->cop2_dr.irgb = psx_sr_u16(r);
+    cpu->cop2_dr.orgb = psx_sr_u16(r);
+    cpu->cop2_dr.lzcs = psx_sr_i32(r);
+    cpu->cop2_dr.lzcr = psx_sr_i32(r);
+
+    cpu_load_gte_matrix(r, &cpu->cop2_cr.rt);
+    cpu_load_gte_vec3(r, &cpu->cop2_cr.tr);
+    cpu_load_gte_matrix(r, &cpu->cop2_cr.l);
+    cpu_load_gte_vec3(r, &cpu->cop2_cr.bk);
+    cpu_load_gte_matrix(r, &cpu->cop2_cr.lr);
+    cpu_load_gte_vec3(r, &cpu->cop2_cr.fc);
+    cpu->cop2_cr.ofx = psx_sr_u32(r);
+    cpu->cop2_cr.ofy = psx_sr_u32(r);
+    cpu->cop2_cr.h = psx_sr_u32(r);
+    cpu->cop2_cr.dqa = (int16_t)psx_sr_u16(r);
+    cpu->cop2_cr.dqb = psx_sr_i32(r);
+    cpu->cop2_cr.zsf3 = (int16_t)psx_sr_u16(r);
+    cpu->cop2_cr.zsf4 = (int16_t)psx_sr_u16(r);
+    cpu->cop2_cr.flag = psx_sr_u32(r);
+
+    cpu->gte_lm = psx_sr_i32(r);
+    cpu->gte_sf = psx_sr_i32(r);
+    cpu->gte_mx = psx_sr_i32(r);
+    cpu->gte_v = psx_sr_i32(r);
+    cpu->gte_cv = psx_sr_i32(r);
+    cpu->s_mac0 = psx_sr_i64(r);
+    cpu->s_mac3 = psx_sr_i64(r);
+
+    if (r->error)
+        return PSX_STATE_ERR_TRUNCATED;
+
+    /* R0 is hardwired to zero; never let a corrupt state break that invariant. */
+    cpu->r[0] = 0;
+
+
+    return PSX_STATE_OK;
+}
+
+int psx_cpu_load_state(psx_cpu_t* cpu, psx_state_reader_t* r) {
+    const int result = psx_cpu_load_state_keep_decode_cache(cpu, r);
+    if (result == PSX_STATE_OK) psx_cpu_invalidate_cache(cpu);
+    return result;
 }
 
 void psx_cpu_init(psx_cpu_t* cpu, psx_bus_t* bus) {
     struct psx_cpu_cache_t* cache = cpu->cache;
     psx_cpu_execution_mode_t execution_mode = cpu->execution_mode;
+    unsigned base_instruction_cycles = cpu->base_instruction_cycles;
 
     memset(cpu, 0, sizeof(psx_cpu_t));
 
     cpu->cache = cache;
+    psx_cpu_set_base_instruction_cycles(cpu, base_instruction_cycles);
     cpu->execution_mode = execution_mode == PSX_CPU_INTERPRETER
         ? PSX_CPU_INTERPRETER
         : PSX_CPU_CACHED_INTERPRETER;
@@ -263,6 +471,10 @@ void psx_cpu_init(psx_cpu_t* cpu, psx_bus_t* bus) {
 
     cpu->cop0_r[COP0_SR] = 0x10900000;
     cpu->cop0_r[COP0_PRID] = 0x00000002;
+}
+
+void psx_cpu_set_base_instruction_cycles(psx_cpu_t* cpu, unsigned cycles) {
+    if (cpu) cpu->base_instruction_cycles = cycles == 2 ? 2 : 1;
 }
 
 void psx_cpu_set_execution_mode(psx_cpu_t* cpu, psx_cpu_execution_mode_t mode) {
@@ -300,8 +512,8 @@ void psx_cpu_invalidate_range(psx_cpu_t* cpu, uint32_t address, uint32_t size) {
 
     for (uint32_t current = first;; current += 4u) {
         psx_cpu_cache_entry_t* entry = &cpu->cache->entries[psx_cpu_cache_index(current)];
-        if (entry->valid && entry->address == current) {
-            entry->valid = 0;
+        if (entry->handler && entry->address == current) {
+            entry->handler = NULL;
             cpu->cache->stats.invalidations++;
         }
 
@@ -344,12 +556,26 @@ static inline void psx_cpu_exception(psx_cpu_t* cpu, uint32_t cause) {
     cpu->next_pc = cpu->pc + 4;
 }
 
-void psx_cpu_cycle(psx_cpu_t* cpu) {
+__attribute__((always_inline)) void psx_cpu_cycle(psx_cpu_t* cpu) {
     cpu->last_cycles = 0;
 
     if ((cpu->pc & 0x3fffffff) == 0x000000b4)
         if (cpu->b_function_hook)
             cpu->b_function_hook(cpu);
+
+    /* Skip BIOS. This is the single fetch/dispatch point for BOTH execution modes, so one hook
+       covers the interpreter and the cached interpreter alike — placing it in either of the two
+       execute functions instead would work in one mode and silently do nothing in the other.
+       psx_fastboot_try() rewrites PC/SP/GP and returns non-zero when it takes over, so the rest
+       of this cycle must be abandoned: the opcode fetched below would otherwise come from the
+       BIOS shell we just replaced. It disarms itself, so this compare is a no-op thereafter.
+
+       Compared as a PHYSICAL address, not a raw PC. The BIOS may enter the shell through the
+       cached KSEG0 mirror (0x80030000) or the uncached KSEG1 one (0xA0030000); an equality test
+       against one literal silently misses the other, and which one a given BIOS revision uses is
+       not something to guess at. The b_function_hook directly above masks for the same reason. */
+    if (psx_bus_physical_address(cpu->pc) == PSX_FASTBOOT_SHELL_PHYS && psx_fastboot_try(cpu))
+        return;
 
     cpu->saved_pc = cpu->pc;
     cpu->delay_slot = cpu->branch;
@@ -359,7 +585,7 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
     if (cpu->saved_pc & 3)
         psx_cpu_exception(cpu, CAUSE_ADEL);
 
-    cpu->opcode = psx_bus_read32(cpu->bus, cpu->pc);
+    cpu->opcode = psx_instruction_fetch(cpu->bus, cpu->pc);
     cpu->last_cycles = psx_bus_get_access_cycles(cpu->bus);
 
     cpu->pc = cpu->next_pc;
@@ -369,6 +595,8 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
         // GTE instructions "win" over interrupts (fast path)
         if ((cpu->opcode & 0xfe000000) == 0x4a000000) {
             DO_PENDING_LOAD;
+
+            PSX_PERF_INC(gte_ops);
 
             cpu->gte_sf = ((cpu->opcode & 0x80000) != 0) * 12;
             cpu->gte_lm = (cpu->opcode & 0x400) != 0;
@@ -411,9 +639,13 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
         return;
     }
 
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_instruction_begin(cpu->opcode, cpu->r);
     int cyc = cpu->execution_mode == PSX_CPU_INTERPRETER
         ? psx_cpu_execute(cpu)
         : psx_cpu_execute_cached(cpu);
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_instruction(cpu->opcode, cpu->r);
 
     if (!cyc) {
         printf("psxe: Illegal instruction %08x at %08x (next=%08x, saved=%08x)\n", cpu->opcode, cpu->pc, cpu->next_pc, cpu->saved_pc);
@@ -421,6 +653,10 @@ void psx_cpu_cycle(psx_cpu_t* cpu) {
         psx_cpu_exception(cpu, CAUSE_RI);
     }
 
+    // Both engines share the host's base-cycle compatibility policy. Mali can
+    // retain the earlier two-cycle accounting without changing Thor's one-cycle
+    // path. Explicit GTE latencies and fetched bus delays remain intact.
+    if (cyc == 2) cyc = cpu->base_instruction_cycles;
     cpu->last_cycles += cyc;
     cpu->total_cycles += cpu->last_cycles;
 
@@ -724,6 +960,8 @@ static inline void psx_cpu_i_lw(psx_cpu_t* cpu) {
     } else {
         cpu->load_d = T;
         cpu->load_v = psx_bus_read32(cpu->bus, addr);
+        if (psx_pgxp_active())
+            psx_pgxp_cpu_lw(T, addr, cpu->load_v);
     }
 }
 
@@ -794,8 +1032,6 @@ static inline void psx_cpu_i_sb(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -813,8 +1049,6 @@ static inline void psx_cpu_i_sh(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -828,19 +1062,29 @@ static inline void psx_cpu_i_sh(psx_cpu_t* cpu) {
 static inline void psx_cpu_i_swl(psx_cpu_t* cpu) {
     TRACE_M("swl");
 
+    /* BOTH source registers are sampled before the pending load is committed. Reading
+       cpu->r[T] after DO_PENDING_LOAD made an SWL sitting in a load delay slot store the
+       value the previous load is about to deliver, where the R3000A stores the OLD one --
+       every other store in this file samples rt first, these two did not. */
     uint32_t s = cpu->r[S];
+    uint32_t t = cpu->r[T];
 
     DO_PENDING_LOAD;
+
+    // Cache isolated
+    if (cpu->cop0_r[COP0_SR] & SR_ISC) {
+        return;
+    }
 
     uint32_t addr = s + IMM16S;
     uint32_t aligned = addr & 0xfffffffc;
     uint32_t v = psx_bus_read32(cpu->bus, aligned);
 
     switch (addr & 0x3) {
-        case 0: v = (v & 0xffffff00) | (cpu->r[T] >> 24); break;
-        case 1: v = (v & 0xffff0000) | (cpu->r[T] >> 16); break;
-        case 2: v = (v & 0xff000000) | (cpu->r[T] >> 8 ); break;
-        case 3: v =                     cpu->r[T]       ; break;
+        case 0: v = (v & 0xffffff00) | (t >> 24); break;
+        case 1: v = (v & 0xffff0000) | (t >> 16); break;
+        case 2: v = (v & 0xff000000) | (t >> 8 ); break;
+        case 3: v =                     t       ; break;
     }
 
     psx_bus_write32(cpu->bus, aligned, v);
@@ -853,12 +1097,12 @@ static inline void psx_cpu_i_sw(psx_cpu_t* cpu) {
     uint32_t t = cpu->r[T];
     uint32_t addr = s + IMM16S;
 
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_store_begin(T);
     DO_PENDING_LOAD;
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
@@ -866,25 +1110,38 @@ static inline void psx_cpu_i_sw(psx_cpu_t* cpu) {
         psx_cpu_exception(cpu, CAUSE_ADES);
     } else {
         psx_bus_write32(cpu->bus, addr, t);
+        /* PGXP: attach precision when rt still holds a tracked SXY word, and
+           invalidate any stale entry this store overwrites either way. */
+        if (psx_pgxp_active())
+            psx_pgxp_cpu_sw(addr, t, T);
+
     }
 }
 
 static inline void psx_cpu_i_swr(psx_cpu_t* cpu) {
     TRACE_M("swr");
 
+    /* See psx_cpu_i_swl: rt is sampled before the pending load, and an isolated cache
+       swallows this store like every other one. */
     uint32_t s = cpu->r[S];
+    uint32_t t = cpu->r[T];
 
     DO_PENDING_LOAD;
+
+    // Cache isolated
+    if (cpu->cop0_r[COP0_SR] & SR_ISC) {
+        return;
+    }
 
     uint32_t addr = s + IMM16S;
     uint32_t aligned = addr & 0xfffffffc;
     uint32_t v = psx_bus_read32(cpu->bus, aligned);
 
     switch (addr & 0x3) {
-        case 0: v =                     cpu->r[T]       ; break;
-        case 1: v = (v & 0x000000ff) | (cpu->r[T] << 8 ); break;
-        case 2: v = (v & 0x0000ffff) | (cpu->r[T] << 16); break;
-        case 3: v = (v & 0x00ffffff) | (cpu->r[T] << 24); break;
+        case 0: v =                     t       ; break;
+        case 1: v = (v & 0x000000ff) | (t << 8 ); break;
+        case 2: v = (v & 0x0000ffff) | (t << 16); break;
+        case 3: v = (v & 0x00ffffff) | (t << 24); break;
     }
 
     psx_bus_write32(cpu->bus, aligned, v);
@@ -1339,7 +1596,12 @@ uint32_t gte_read_register(psx_cpu_t* cpu, uint32_t r) {
         case 26: return cpu->cop2_dr.mac[2];
         case 27: return cpu->cop2_dr.mac[3];
         case 28: gte_handle_irgb_read(cpu); return cpu->cop2_dr.irgb;
-        case 29: return cpu->cop2_dr.irgb; // IRGB mirror
+        /* ORGB is a read-only MIRROR of the IRGB conversion — psx-spx: reading it performs the
+           IR1-3 -> 5:5:5 conversion, same as reading IRGB. Returning the stored word handed
+           back whatever was last WRITTEN to IRGB (or last read through reg 28), i.e. a stale
+           value whenever IR1-3 changed in between — a readback lying about live state, the
+           same defect class as the GPUINFO(5) echo. Gate: gte-regfile in tests/gte_matrix.c. */
+        case 29: gte_handle_irgb_read(cpu); return cpu->cop2_dr.irgb;
         case 30: return cpu->cop2_dr.lzcs;
         case 31: return cpu->cop2_dr.lzcr;
         case 32: return cpu->cop2_cr.rt.m[0].u32;
@@ -1381,6 +1643,11 @@ uint32_t gte_read_register(psx_cpu_t* cpu, uint32_t r) {
 }
 
 static inline void gte_write_register(psx_cpu_t* cpu, uint32_t r, uint32_t value) {
+    /* PGXP: direct SXY writes (MTC2/LWC2, and the reg-15 FIFO push) must keep
+       the precise-shadow FIFO in step — see psx/pgxp.c. */
+    if (psx_pgxp_active())
+        psx_pgxp_gte_reg_write(r, value);
+
     switch (r) {
         case 0 : cpu->cop2_dr.v[0].xy = value; break;
         case 1 : cpu->cop2_dr.v[0].z = value; break;
@@ -1458,7 +1725,10 @@ static inline void psx_cpu_i_lwc2(psx_cpu_t* cpu) {
     if (addr & 0x3) {
         psx_cpu_exception(cpu, CAUSE_ADEL);
     } else {
-        gte_write_register(cpu, T, psx_bus_read32(cpu->bus, addr));
+        const uint32_t value = psx_bus_read32(cpu->bus, addr);
+        gte_write_register(cpu, T, value);
+        if (psx_pgxp_active())
+            psx_pgxp_cpu_lwc2(addr, value, T);
     }
 }
 
@@ -1470,15 +1740,19 @@ static inline void psx_cpu_i_swc2(psx_cpu_t* cpu) {
 
     // Cache isolated
     if (cpu->cop0_r[COP0_SR] & SR_ISC) {
-        log_debug("Ignoring write while cache is isolated");
-
         return;
     }
 
     if (addr & 0x3) {
         psx_cpu_exception(cpu, CAUSE_ADES);
     } else {
-        psx_bus_write32(cpu->bus, addr, gte_read_register(cpu, T));
+        uint32_t value = gte_read_register(cpu, T);
+        psx_bus_write32(cpu->bus, addr, value);
+
+        /* PGXP: an SXY store is the main road a precise vertex takes into RAM. */
+        if (psx_pgxp_active())
+            psx_pgxp_cpu_swc2(addr, value, T);
+
     }
 }
 
@@ -1489,6 +1763,11 @@ static inline void psx_cpu_i_mfc2(psx_cpu_t* cpu) {
 
     cpu->load_v = gte_read_register(cpu, D);
     cpu->load_d = T;
+
+    /* PGXP: remember which CPU register now holds an SXY word so a later plain
+       SW can carry the precision (validated against the stored value there). */
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_mfc2(T, cpu->load_v, D);
 }
 
 static inline void psx_cpu_i_cfc2(psx_cpu_t* cpu) {
@@ -1505,9 +1784,13 @@ static inline void psx_cpu_i_mtc2(psx_cpu_t* cpu) {
 
     uint32_t t = cpu->r[T];
 
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_store_begin(T);
     DO_PENDING_LOAD;
 
     gte_write_register(cpu, D, t);
+    if (psx_pgxp_active())
+        psx_pgxp_cpu_mtc2(t, D);
 }
 
 static inline void psx_cpu_i_ctc2(psx_cpu_t* cpu) {
@@ -1764,6 +2047,48 @@ static inline void psx_gte_i_invalid(psx_cpu_t* cpu) {
 #define R_LB2 cpu->cop2_cr.lr.m[3].c[1]
 #define R_LB3 cpu->cop2_cr.lr.m33
 
+/*
+    Widescreen hack. See psx/cpu.h for why scaling the IR1 product (and nothing else) is
+    the correct place: OFX is the projection centre, so this shrinks X about the centre.
+
+    Fixed 3/4 = (4:3)/(16:9). Integer arithmetic on purpose — |IR1| < 2^15 and |div| < 2^17,
+    so the product is under 2^32 and tripling it cannot come close to overflowing int64_t.
+    The truncation is at 1/65536 of a pixel (the result is >> 16 immediately afterwards), so
+    rounding direction is not observable.
+
+    Applied INSIDE gte_clamp_mac0()'s argument so the MAC0 overflow flags describe the value
+    actually produced. With the hack off the expression is textually the original one.
+*/
+#define GTE_WIDE(prod) (psx_widescreen_active() ? (((prod) * 3) / 4) : (prod))
+
+int g_psx_widescreen_hack = 0;
+
+void psx_cpu_set_widescreen_hack(int enabled) {
+    g_psx_widescreen_hack = enabled ? 1 : 0;
+}
+
+int psx_cpu_widescreen_hack(void) {
+    return g_psx_widescreen_hack;
+}
+
+/*
+    PGXP capture, shared by GTE_RTP and GTE_RTP_DQ. Runs right after the SXY2
+    assignments, with the macro-local `div` still in scope. The pre-truncation
+    screen coordinate the hardware computes is (OFX + IR1*div) as a 48-bit
+    16.16-ish value that gte_clamp_sxy() then shifts and saturates; dividing
+    the same product by 65536.0 in double is exact (|IR1*div| < 2^33 fits a
+    53-bit mantissa), so the float we hand PGXP truncates to exactly the
+    integer the game will read whenever no saturation fired. SZ3 is the depth
+    the projection divide used, kept for perspective-correct interpolation.
+*/
+#define GTE_PGXP_CAPTURE() { \
+    if (psx_pgxp_active()) { \
+        psx_pgxp_gte_vertex(R_SXY2, \
+            (float)(((double)((int32_t)R_OFX) + GTE_WIDE((double)R_IR1 * (double)div)) / 65536.0), \
+            (float)(((double)((int32_t)R_OFY) + (double)R_IR2 * (double)div) / 65536.0), \
+            (float)R_SZ3); \
+    } }
+
 #define GTE_RTP_DQ(i) { \
     int64_t vx = (int64_t)((int16_t)cpu->cop2_dr.v[i].p[0]); \
     int64_t vy = (int64_t)((int16_t)cpu->cop2_dr.v[i].p[1]); \
@@ -1781,8 +2106,9 @@ static inline void psx_gte_i_invalid(psx_cpu_t* cpu) {
     int32_t div = gte_divide(cpu, R_H, R_SZ3); \
     R_SXY0 = R_SXY1; \
     R_SXY1 = R_SXY2; \
-    R_SX2 = gte_clamp_sxy(cpu, 1, (gte_clamp_mac0(cpu, (int64_t)((int32_t)R_OFX) + ((int64_t)R_IR1 * div)) >> 16)); \
+    R_SX2 = gte_clamp_sxy(cpu, 1, (gte_clamp_mac0(cpu, (int64_t)((int32_t)R_OFX) + GTE_WIDE((int64_t)R_IR1 * div)) >> 16)); \
     R_SY2 = gte_clamp_sxy(cpu, 2, (gte_clamp_mac0(cpu, (int64_t)((int32_t)R_OFY) + ((int64_t)R_IR2 * div)) >> 16)); \
+    GTE_PGXP_CAPTURE(); \
     R_MAC0 = gte_clamp_mac0(cpu, ((int64_t)R_DQB) + (((int64_t)R_DQA) * div)); \
     R_IR0 = gte_clamp_ir0(cpu, cpu->s_mac0 >> 12); }
 
@@ -1803,8 +2129,9 @@ static inline void psx_gte_i_invalid(psx_cpu_t* cpu) {
     int32_t div = gte_divide(cpu, R_H, R_SZ3); \
     R_SXY0 = R_SXY1; \
     R_SXY1 = R_SXY2; \
-    R_SX2 = gte_clamp_sxy(cpu, 1, (gte_clamp_mac0(cpu, (int64_t)((int32_t)R_OFX) + ((int64_t)R_IR1 * div)) >> 16)); \
-    R_SY2 = gte_clamp_sxy(cpu, 2, (gte_clamp_mac0(cpu, (int64_t)((int32_t)R_OFY) + ((int64_t)R_IR2 * div)) >> 16)); }
+    R_SX2 = gte_clamp_sxy(cpu, 1, (gte_clamp_mac0(cpu, (int64_t)((int32_t)R_OFX) + GTE_WIDE((int64_t)R_IR1 * div)) >> 16)); \
+    R_SY2 = gte_clamp_sxy(cpu, 2, (gte_clamp_mac0(cpu, (int64_t)((int32_t)R_OFY) + ((int64_t)R_IR2 * div)) >> 16)); \
+    GTE_PGXP_CAPTURE(); }
 
 #define DPCT1 { \
     int64_t mac1 = gte_clamp_mac(cpu, 1, (((int64_t)R_RFC) << 12) - (((int64_t)cpu->cop2_dr.rgb[0].c[0]) << 16)); \
@@ -2379,6 +2706,7 @@ PSX_CPU_CACHED_BXX_WRAPPER(bgezal)
 #define PSX_CPU_CACHED_GTE_WRAPPER(name, cycles) \
     static int psx_cpu_cached_gte_##name(psx_cpu_t* cpu) { \
         DO_PENDING_LOAD; \
+        PSX_PERF_INC(gte_ops); \
         cpu->gte_sf = ((cpu->opcode & 0x80000) != 0) * 12; \
         cpu->gte_lm = (cpu->opcode & 0x400) != 0; \
         cpu->gte_cv = (cpu->opcode >> 13) & 3; \
@@ -2539,6 +2867,13 @@ static psx_cpu_cached_handler_t psx_cpu_decode(uint32_t opcode) {
     }
 }
 
+/* A null handler marks an invalid cache slot. Unsupported opcodes need a
+   callable entry too, preserving the old zero-cycle fallback and cache hits. */
+static int psx_cpu_cached_unsupported(psx_cpu_t* cpu) {
+    (void)cpu;
+    return 0;
+}
+
 static int psx_cpu_execute_cached(psx_cpu_t* cpu) {
     if (!cpu->cache)
         return psx_cpu_execute(cpu);
@@ -2546,17 +2881,18 @@ static int psx_cpu_execute_cached(psx_cpu_t* cpu) {
     const uint32_t address = psx_bus_physical_address(cpu->saved_pc);
     psx_cpu_cache_entry_t* entry = &cpu->cache->entries[psx_cpu_cache_index(address)];
 
-    if (entry->valid && entry->address == address && entry->opcode == cpu->opcode) {
+    if (entry->handler && entry->address == address && entry->opcode == cpu->opcode) {
         cpu->cache->stats.hits++;
     } else {
         cpu->cache->stats.misses++;
         entry->address = address;
         entry->opcode = cpu->opcode;
         entry->handler = psx_cpu_decode(cpu->opcode);
-        entry->valid = 1;
+        if (!entry->handler)
+            entry->handler = psx_cpu_cached_unsupported;
     }
 
-    return entry->handler ? entry->handler(cpu) : 0;
+    return entry->handler(cpu);
 }
 
 int psx_cpu_execute(psx_cpu_t* cpu) {
@@ -2641,6 +2977,8 @@ int psx_cpu_execute(psx_cpu_t* cpu) {
                 case 0x00c00000 >> 21: psx_cpu_i_ctc2(cpu); return 2;
                 default: {
                     DO_PENDING_LOAD;
+
+                    PSX_PERF_INC(gte_ops);
 
                     cpu->gte_sf = ((cpu->opcode & 0x80000) != 0) * 12;
                     cpu->gte_lm = (cpu->opcode & 0x400) != 0;

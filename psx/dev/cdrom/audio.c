@@ -3,6 +3,9 @@
 
 #include "cdrom.h"
 #include "../spu.h"
+#include "../../perf.h"
+#include "xa_search_budget.h"
+#include "xa_resampler.h"
 
 #define ITOB(b) itob_table[b]
 
@@ -49,40 +52,57 @@ static const int neg_adpcm_table[] = {
     0,   0,  -52, -55,  -60
 };
 
-void cdrom_resample_xa_buf(psx_cdrom_t* cdrom, int16_t* dst, int16_t* src, int stereo, int16_t ls) {
-    int f18khz = ((cdrom->xa_buf[0x13] >> 2) & 1) == 1;
-    int sample_count = stereo ? XA_STEREO_SAMPLES : XA_MONO_SAMPLES;
-    int resample_count = stereo ? XA_STEREO_RESAMPLE_SIZE : XA_MONO_RESAMPLE_SIZE;
+/*
+    CD audio volume (the ATV matrix, 1F801802h/1F801803h index 2 and 3).
 
-    resample_count *= f18khz + 1;
+    80h is UNITY, not "half of FFh": the hardware applies these as (sample * volume) >> 7, so
+    the divisor is 128 and values above 80h are legal gains up to just under 2x. Dividing by
+    255 made 80h come out as 0.502 and cost a flat 6.02 dB on everything arriving from the
+    disc — the same class of error as the SPU main volume, and corroborated by this file's own
+    reset defaults of 80h/00h/80h/00h, which are meant to be "unity, no cross-feed".
 
-    // Nearest neighbor
-    // for (int i = 0; i < sample_count; i++)
-    //     for (int k = 0; k < 7; k++)
-    //         cdrom->xa_upsample_buf[(i*7)+k] = src[i];
+    Not measured on this game: all three MGS captures show XA and CDDA completely inactive, so
+    the CD path never carried a sample. It is fixed anyway because leaving it would put the CD
+    path 6 dB BELOW the SPU once the main-volume fix lands, turning a uniform error into a
+    balance error between the two halves of the same mix.
 
-    // Linear Upsampling
-    int16_t a = ls;
-    int16_t b = src[0];
+    Because unity is now reachable and cross-feed can legitimately sum two terms, the stores
+    have to saturate: they are float-to-int16 conversions, which are undefined out of range.
+*/
+static inline int16_t cdrom_vol_clamp(float v) {
+    if (v > 32767.0f)
+        return (int16_t)32767;
 
-    for (int k = 0; k < 7; k++)
-        cdrom->xa_upsample_buf[k] = a + ((k+1)/8) * (b - a);
+    if (v < -32768.0f)
+        return (int16_t)-32768;
 
-    for (int i = 1; i < sample_count; i++) {
-        a = b;
-        b = src[i];
+    return (int16_t)v;
+}
 
-        for (int k = 0; k < 7; k++)
-            cdrom->xa_upsample_buf[(i*7)+k] =
-                a + ((k+1)/8) * (b - a);
+#define CD_VOL_UNITY 128.0f
+
+/* Preserve the preceding decoded tail before the sector buffers are replaced.
+   These buffers are already saved/restored, so no save-state format change is
+   needed. The old upsample scratch holds the two independent 32-sample rings. */
+static void cdrom_prepare_xa_history(psx_cdrom_t* cdrom) {
+    const int stereo = cdrom->xa_buf[0x13] & 1;
+    const int half = (cdrom->xa_buf[0x13] >> 2) & 1;
+    const int count = stereo ? XA_STEREO_SAMPLES : XA_MONO_SAMPLES;
+    const int16_t* left = stereo ? cdrom->xa_left_buf : cdrom->xa_mono_buf;
+    const int16_t* right = stereo ? cdrom->xa_right_buf : left;
+    for (int i = 0; i < 32; ++i) {
+        const int index = count - (32 >> half) + (i >> half);
+        cdrom->xa_upsample_buf[i] = left[index];
+        cdrom->xa_upsample_buf[32 + i] = right[index];
     }
+}
 
-    int m = f18khz ? 3 : 6;
-
-    for (int i = 0; i < resample_count; i++)
-        dst[i] = cdrom->xa_upsample_buf[i*m];
-
-    cdrom->xa_remaining_samples = resample_count;
+void cdrom_resample_xa_buf(psx_cdrom_t* cdrom, int16_t* dst, int16_t* src, int stereo, int16_t ls) {
+    (void)ls; /* Legacy argument: filter history now uses decoded samples. */
+    const int half = (cdrom->xa_buf[0x13] >> 2) & 1;
+    const int count = stereo ? XA_STEREO_SAMPLES : XA_MONO_SAMPLES;
+    int16_t* history = cdrom->xa_upsample_buf + (src == cdrom->xa_right_buf ? 32 : 0);
+    cdrom->xa_remaining_samples = (int)xa_resample_filtered(src, count, half, history, dst);
 }
 
 void cdrom_decode_xa_block(psx_cdrom_t* cdrom, int idx, int blk, int nib, int16_t* buf, int16_t* h) {
@@ -95,10 +115,17 @@ void cdrom_decode_xa_block(psx_cdrom_t* cdrom, int idx, int blk, int nib, int16_
     for (int j = 0; j < 28; j++) {
         uint16_t n = (cdrom->xa_buf[idx + 16 + blk + j * 4] >> (nib * 4)) & 0x0f;
 
-        int16_t t = (int16_t)(n << 12) >> 12; 
-        int16_t s = (t << shift) + (((h[0] * f0) + (h[1] * f1) + 32) / 64);
+        int16_t t = (int16_t)(n << 12) >> 12;
 
-        s = (s < INT16_MIN) ? INT16_MIN : ((s > INT16_MAX) ? INT16_MAX : s);
+        /* Same dead saturation as psx/dev/spu.c's spu_read_block() had: clamping an int16_t
+           against the int16 limits is unreachable by construction, so the compiler dropped it
+           and out-of-range predictions wrapped sign instead of clipping. XA carries the voice
+           acting in games that stream it (Silent Hill), so this is the same defect on the other
+           audio path. Accumulate in int32, clamp, then narrow. */
+        int32_t acc = (t << shift) + (((h[0] * f0) + (h[1] * f1) + 32) / 64);
+
+        int16_t s = (acc < INT16_MIN) ? INT16_MIN
+                                      : ((acc > INT16_MAX) ? INT16_MAX : (int16_t)acc);
 
         h[1] = h[0];
         h[0] = s;
@@ -144,26 +171,92 @@ void cdrom_decode_xa_sector(psx_cdrom_t* cdrom, void* buf) {
     }
 }
 
-int cdrom_fetch_xa_sector(psx_cdrom_t* cdrom) {
-    while (1) {
+/* `audio_diag`: one entry per sector DECISION — accepted, rejected, walked past or aborted on.
+   This is the only place the raw XA framing is visible, and recording the verdict alongside the
+   filter that produced it is what makes "the music plays but the dialogue does not" answerable:
+   two XA streams share one track, so the question is never "did XA arrive" but "which channel
+   arrived, and what did the fetcher decide about it". */
+static void cdrom_xa_diag_push(psx_cdrom_t* cdrom, uint32_t lba, int verdict) {
+    uint32_t slot;
+
+    if (!g_psx_audio_diag_enabled)
+        return;
+
+    slot = g_psx_audio_diag.xa_hdr_head;
+
+    g_psx_audio_diag.xa_hdr[slot].lba = lba;
+    g_psx_audio_diag.xa_hdr[slot].file = cdrom->xa_buf[0x10];
+    g_psx_audio_diag.xa_hdr[slot].chan = cdrom->xa_buf[0x11];
+    g_psx_audio_diag.xa_hdr[slot].submode = cdrom->xa_buf[0x12];
+    g_psx_audio_diag.xa_hdr[slot].coding = cdrom->xa_buf[0x13];
+    g_psx_audio_diag.xa_hdr[slot].filter_file = (uint8_t)cdrom->xa_file;
+    g_psx_audio_diag.xa_hdr[slot].filter_chan = (uint8_t)cdrom->xa_channel;
+    g_psx_audio_diag.xa_hdr[slot].filter_on = (cdrom->mode & MODE_XA_FILTER) ? 1u : 0u;
+    g_psx_audio_diag.xa_hdr[slot].verdict = (uint8_t)verdict;
+
+    g_psx_audio_diag.xa_hdr_head = (slot + 1u) % PSX_AUDIO_DIAG_XA_HDRS;
+    g_psx_audio_diag.xa_hdr_seen++;
+}
+
+static int cdrom_fetch_xa_sector(psx_cdrom_t* cdrom, xa_search_budget_t* budget) {
+    uint32_t walked = 0;
+
+    while (xa_search_budget_available(budget)) {
+        const uint64_t read_start = xa_search_clock_ns();
         int ts = psx_disc_read(cdrom->disc, cdrom->xa_lba, cdrom->xa_buf);
+        xa_search_budget_charge(budget, read_start, xa_search_clock_ns());
 
-        if (ts == TS_FAR)
-            return 0;
+        if (ts == TS_FAR) {
+            /* No sub-header to record: xa_buf still holds the PREVIOUS sector, so pushing one
+               here would log a sector that was never read. Counter only. */
+            if (g_psx_audio_diag_enabled)
+                g_psx_audio_diag.xa_stop_far++;
 
-        if (cdrom->xa_buf[0x12] & 1)
             return 0;
+        }
+
+        if (cdrom->xa_buf[0x12] & 1) {
+            /* Submode bit0 is End-Of-Record, not End-Of-File (that is bit7), and this test sits
+               AHEAD of both the audio-bit test and the filter test — so a sector merely being
+               walked past on the way to the wanted channel can abandon XA playback outright.
+               Recorded rather than changed: the verdict log says whether this is what silences
+               a codec call, and the entry carries the filter that was being searched for. */
+            if (g_psx_audio_diag_enabled) {
+                g_psx_audio_diag.xa_stop_eor++;
+                cdrom_xa_diag_push(cdrom, cdrom->xa_lba, PSX_XA_VERDICT_STOP_EOR);
+            }
+
+            return 0;
+        }
 
         ++cdrom->xa_lba;
 
         // Check Audio bit
-        if (!(cdrom->xa_buf[0x12] & 4))
+        if (!(cdrom->xa_buf[0x12] & 4)) {
+            if (g_psx_audio_diag_enabled) {
+                g_psx_audio_diag.xa_skip_nonaudio++;
+                cdrom_xa_diag_push(cdrom, cdrom->xa_lba - 1u, PSX_XA_VERDICT_SKIP_NONAUDIO);
+            }
+
+            ++walked;
+
             continue;
+        }
 
         // If we get here it means this is a real-time audio sector.
         // If the XA filter is disabled, we're done
-        if (!(cdrom->mode & MODE_XA_FILTER))
+        if (!(cdrom->mode & MODE_XA_FILTER)) {
+            if (g_psx_audio_diag_enabled) {
+                g_psx_audio_diag.xa_sectors++;
+                cdrom_xa_diag_push(cdrom, cdrom->xa_lba - 1u,
+                                   PSX_XA_VERDICT_ACCEPT_NOFILTER);
+
+                if (walked > g_psx_audio_diag.xa_walk_peak)
+                    g_psx_audio_diag.xa_walk_peak = walked;
+            }
+
             return 1;
+        }
 
         // printf("fetch_xa_sector: lba=%u %02x:%02x:%02x mode=%02x file=%02x channel=%02x sm=%02x ci=%02x xafile=%02x xachannel=%02x\n",
         //     cdrom->xa_lba,
@@ -185,13 +278,94 @@ int cdrom_fetch_xa_sector(psx_cdrom_t* cdrom) {
 
         // If they are equal to our filter values, we're done
         // else keep searching
-        if (file_eq && channel_eq)
+        if (file_eq && channel_eq) {
+            if (g_psx_audio_diag_enabled) {
+                g_psx_audio_diag.xa_sectors++;
+                cdrom_xa_diag_push(cdrom, cdrom->xa_lba - 1u, PSX_XA_VERDICT_ACCEPT_MATCH);
+
+                if (walked > g_psx_audio_diag.xa_walk_peak)
+                    g_psx_audio_diag.xa_walk_peak = walked;
+            }
+
             return 1;
+        }
+
+        if (g_psx_audio_diag_enabled) {
+            g_psx_audio_diag.xa_filter_rejects++;
+            cdrom_xa_diag_push(cdrom, cdrom->xa_lba - 1u, PSX_XA_VERDICT_REJECT_FILTER);
+        }
+
+        ++walked;
     }
+
+    if (g_psx_audio_diag_enabled && walked > g_psx_audio_diag.xa_walk_peak)
+        g_psx_audio_diag.xa_walk_peak = walked;
+
+    return -1;
+}
+
+/* Search while the current decoded sector is still playing. The existing
+   per-call I/O budget is shared with demand reads; no unbounded extra scan. */
+static int cdrom_prefetch_xa(psx_cdrom_t* cdrom, xa_search_budget_t* budget, int consume) {
+    if (!cdrom->xa_prefetch_state || cdrom->xa_prefetch_base != cdrom->xa_lba ||
+        cdrom->xa_prefetch_file != cdrom->xa_file ||
+        cdrom->xa_prefetch_channel != cdrom->xa_channel ||
+        cdrom->xa_prefetch_mode != cdrom->mode) {
+        cdrom->xa_prefetch_state = 1;
+        cdrom->xa_prefetch_base = cdrom->xa_lba;
+        cdrom->xa_prefetch_next = cdrom->xa_lba;
+        cdrom->xa_prefetch_file = cdrom->xa_file;
+        cdrom->xa_prefetch_channel = cdrom->xa_channel;
+        cdrom->xa_prefetch_mode = cdrom->mode;
+    }
+    if (cdrom->xa_prefetch_state == 1 && xa_search_budget_available(budget)) {
+        uint8_t playing_sector[CD_SECTOR_SIZE];
+        memcpy(playing_sector, cdrom->xa_buf, sizeof(playing_sector));
+        const uint32_t playing_lba = cdrom->xa_lba;
+        cdrom->xa_lba = cdrom->xa_prefetch_next;
+        const int found = cdrom_fetch_xa_sector(cdrom, budget);
+        cdrom->xa_prefetch_next = cdrom->xa_lba;
+        if (found >= 0) {
+            cdrom->xa_prefetch_state = found ? 2 : 3;
+            if (found) memcpy(cdrom->xa_prefetch_buf, cdrom->xa_buf, CD_SECTOR_SIZE);
+        }
+        cdrom->xa_lba = playing_lba;
+        memcpy(cdrom->xa_buf, playing_sector, sizeof(playing_sector));
+    }
+    const int result = cdrom->xa_prefetch_state == 2 ? 1 :
+                       cdrom->xa_prefetch_state == 3 ? 0 : -1;
+    if (consume) {
+        // Read-ahead may cache future sectors, but the mixer must not play them
+        // before the emulated transport reaches them. Otherwise a dialogue's next
+        // line leaks out before the game's Pause, then repeats on the next ReadS.
+        // Keep the cached sector and cursor intact while waiting (not starvation).
+        if (result == 1 && cdrom->xa_prefetch_next - 1u > cdrom->lba) {
+            const uint32_t sector = cdrom->xa_prefetch_next - 1u;
+            // Audio is pulled in frame-sized blocks; a query can leave the last
+            // completed-sector cursor just behind the scheduled next sector.
+            // Admit only that adjacent, already scheduled read, never arbitrary
+            // look-ahead (which leaked the next Dino Crisis line before Pause).
+            const int scheduled_next = cdrom->read_ongoing &&
+                cdrom->lba != UINT32_MAX && sector == cdrom->lba + 1u &&
+                cdrom->pending_lba == sector &&
+                (cdrom->state == CD_STATE_READ || cdrom->read_delay_pending > 0);
+            if (!scheduled_next)
+                return -1;
+        }
+        cdrom->xa_lba = cdrom->xa_prefetch_next;
+        cdrom->xa_prefetch_base = cdrom->xa_lba;
+        if (result >= 0) {
+            if (result) memcpy(cdrom->xa_buf, cdrom->xa_prefetch_buf, CD_SECTOR_SIZE);
+            cdrom->xa_prefetch_state = 0;
+        }
+    }
+    return result;
 }
 
 int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
     if ((!cdrom->xa_playing) || !(cdrom->mode & MODE_XA_ADPCM)) {
+        cdrom->xa_prefetch_state = 0;
+        cdrom->xa_start_phase = 0;
         cdrom->xa_remaining_samples = 0;
         cdrom->xa_sample_index = 0;
 
@@ -200,27 +374,74 @@ int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
         return 0;
     }
 
-    float ll_vol = (((float)cdrom->vol[0]) / 255.0f);
-    float lr_vol = (((float)cdrom->vol[1]) / 255.0f);
-    float rr_vol = (((float)cdrom->vol[2]) / 255.0f);
-    float rl_vol = (((float)cdrom->vol[3]) / 255.0f);
+    float ll_vol = (((float)cdrom->vol[0]) / CD_VOL_UNITY);
+    float lr_vol = (((float)cdrom->vol[1]) / CD_VOL_UNITY);
+    float rr_vol = (((float)cdrom->vol[2]) / CD_VOL_UNITY);
+    float rl_vol = (((float)cdrom->vol[3]) / CD_VOL_UNITY);
 
     int16_t* ptr = (int16_t*)buf;
 
-    for (int i = 0; i < (size >> 2); i++) {
+    xa_search_budget_t search_budget = {0};
+    if (cdrom->xa_remaining_samples > 0)
+        cdrom_prefetch_xa(cdrom, &search_budget, 0);
+
+    int start_frame = 0;
+    if (cdrom->xa_start_phase < 0) {
+        memset(buf, 0, size);
+        return 1;
+    }
+    if (cdrom->xa_start_phase > 0) {
+        /* 33,868,800 CPU clocks / 44,100 output frames = 768. Only the
+           part of this batch after delivery may consume the new stream. */
+        const uint64_t ready_frames = cdrom->xa_start_age_cycles / 768u;
+        if (ready_frames < (size >> 2))
+            start_frame = (int)((size >> 2) - ready_frames);
+        memset(ptr, 0, (size_t)start_frame * 4);
+        ptr += start_frame * 2;
+        if (ready_frames)
+            cdrom->xa_start_phase = 0;
+    }
+
+    for (int i = start_frame; i < (size >> 2); i++) {
         int stereo = (cdrom->xa_buf[0x13] & 1) == 1;
 
         if (!cdrom->xa_remaining_samples) {
-            if (!cdrom_fetch_xa_sector(cdrom)) {
-                cdrom->xa_playing = 0;
+            const uint8_t previous_coding = cdrom->xa_buf[0x13];
+            cdrom_prepare_xa_history(cdrom);
+            const int fetched = cdrom_prefetch_xa(cdrom, &search_budget, 1);
+            if (fetched <= 0) {
+                cdrom->xa_buf[0x13] = previous_coding;
+                if (fetched == 0)
+                    cdrom->xa_playing = 0;
                 cdrom->xa_remaining_samples = 0;
+                cdrom->xa_sample_index = 0;
 
-                return 0;
+                if (fetched == 0 && g_psx_audio_diag_enabled)
+                    g_psx_audio_diag.xa_starved++;
+
+                memset(ptr, 0, size - (size_t)i * 4);
+                return 1;
             }
 
             stereo = (cdrom->xa_buf[0x13] & 1) == 1;
 
+            psx_xa_probe_sector_t probe = {0};
+            if (g_psx_xa_probe) {
+                probe.lba = cdrom->xa_lba - 1;
+                probe.output_offset = (uint32_t)i;
+                probe.rate = (cdrom->xa_buf[0x13] & 4) ? 18900 : 37800;
+                probe.frames = stereo ? XA_STEREO_SAMPLES : XA_MONO_SAMPLES;
+                probe.history[0] = cdrom->xa_left_h[0];
+                probe.history[1] = cdrom->xa_left_h[1];
+                probe.history[2] = cdrom->xa_right_h[0];
+                probe.history[3] = cdrom->xa_right_h[1];
+                probe.sector = cdrom->xa_buf;
+                probe.left = stereo ? cdrom->xa_left_buf : cdrom->xa_mono_buf;
+                probe.right = stereo ? cdrom->xa_right_buf : cdrom->xa_mono_buf;
+            }
             cdrom_decode_xa_sector(cdrom, buf);
+            if (g_psx_xa_probe)
+                g_psx_xa_probe(g_psx_audio_pcm_probe_context, &probe);
 
             if (stereo) {
                 cdrom_resample_xa_buf(
@@ -255,6 +476,7 @@ int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
             *ptr++ = 0;
             *ptr++ = 0;
 
+            ++cdrom->xa_sample_index;
             --cdrom->xa_remaining_samples;
 
             continue;
@@ -264,14 +486,24 @@ int cdrom_get_xa_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
             cdrom->xa_prev_left_sample = cdrom->xa_left_resample_buf[cdrom->xa_sample_index];
             cdrom->xa_prev_right_sample = cdrom->xa_right_resample_buf[cdrom->xa_sample_index++];
 
-            *ptr++ = (cdrom->xa_prev_left_sample * ll_vol) + (cdrom->xa_prev_right_sample * rl_vol);
-            *ptr++ = (cdrom->xa_prev_left_sample * lr_vol) + (cdrom->xa_prev_right_sample * rr_vol);
+            *ptr++ = cdrom_vol_clamp((cdrom->xa_prev_left_sample * ll_vol) +
+                                     (cdrom->xa_prev_right_sample * rl_vol));
+            *ptr++ = cdrom_vol_clamp((cdrom->xa_prev_left_sample * lr_vol) +
+                                     (cdrom->xa_prev_right_sample * rr_vol));
 
         } else {
             cdrom->xa_prev_left_sample = cdrom->xa_mono_resample_buf[cdrom->xa_sample_index++];
 
-            *ptr++ = cdrom->xa_prev_left_sample * ll_vol;
-            *ptr++ = cdrom->xa_prev_left_sample * rr_vol;
+            *ptr++ = cdrom_vol_clamp(cdrom->xa_prev_left_sample * ll_vol);
+            *ptr++ = cdrom_vol_clamp(cdrom->xa_prev_left_sample * rr_vol);
+        }
+
+        /* `audio_diag`: the level XA actually reaches the host buffer at, after cdrom->vol[].
+           "You cannot hear the dialogue" is either a zero here or a stream that never arrives,
+           and the two need completely different fixes. */
+        if (g_psx_audio_diag_enabled) {
+            PSX_AUDIO_DIAG_PEAK(g_psx_audio_diag.xa_peak_l, ptr[-2]);
+            PSX_AUDIO_DIAG_PEAK(g_psx_audio_diag.xa_peak_r, ptr[-1]);
         }
 
         --cdrom->xa_remaining_samples;
@@ -306,6 +538,9 @@ int cdrom_reload_cdda_buffer(psx_cdrom_t* cdrom, void* buf, size_t size) {
 
         return 0;
     }
+
+    if (g_psx_audio_diag_enabled)
+        g_psx_audio_diag.cdda_sectors++;
 
     cdrom->cdda_remaining_samples = CD_SECTOR_SIZE >> 1;
     cdrom->cdda_sample_index = 0;
@@ -387,10 +622,10 @@ void psx_cdrom_get_audio_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
 
     int16_t* ptr = buf;
 
-    float ll_vol = (((float)cdrom->vol[0]) / 255.0f);
-    float lr_vol = (((float)cdrom->vol[1]) / 255.0f);
-    float rr_vol = (((float)cdrom->vol[2]) / 255.0f);
-    float rl_vol = (((float)cdrom->vol[3]) / 255.0f);
+    float ll_vol = (((float)cdrom->vol[0]) / CD_VOL_UNITY);
+    float lr_vol = (((float)cdrom->vol[1]) / CD_VOL_UNITY);
+    float rr_vol = (((float)cdrom->vol[2]) / CD_VOL_UNITY);
+    float rl_vol = (((float)cdrom->vol[3]) / CD_VOL_UNITY);
 
     for (int i = 0; i < (size >> 1);) {
         if (!cdrom->cdda_remaining_samples) {
@@ -420,8 +655,8 @@ void psx_cdrom_get_audio_samples(psx_cdrom_t* cdrom, void* buf, size_t size) {
         int16_t right = cdrom->cdda_buf[cdrom->cdda_sample_index++];
 
         // Apply volume settings to CDDA
-        ptr[i++] = left  * ll_vol + right * rl_vol;
-        ptr[i++] = right * rr_vol + left  * lr_vol;
+        ptr[i++] = cdrom_vol_clamp(left  * ll_vol + right * rl_vol);
+        ptr[i++] = cdrom_vol_clamp(right * rr_vol + left  * lr_vol);
 
         cdrom->cdda_remaining_samples -= 2;
     }

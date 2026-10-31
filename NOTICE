@@ -1,0 +1,45 @@
+ARMSX1
+======
+
+Copyright (c) 2026 Moon. All rights reserved.
+
+Moon-owned ARMSX material is proprietary and governed by LICENSE. That license
+applies only to material Moon owns or is authorized to license. It does not
+relicense or supersede upstream code, contributor-owned work, bundled
+frameworks, or third-party dependencies.
+
+Credits
+-------
+allkern     Original PlayStation 1 emulator core, psxe (Lisandro Alarcon) --
+            the foundation this project is built on.
+            https://github.com/allkern/psxe
+            Distributed under the MIT license; see LICENSES/UPSTREAM-MIT.txt.
+
+Moonpower   Cached interpreter and cross-platform compatibility work.
+
+jpolo1224   Android frontend and UI, JNI platform layer, renderer work,
+            RetroAchievements, shader support, save states, input, audio, and
+            emulation-accuracy fixes. Contributor notices and file-level
+            licenses continue to apply.
+
+Third-party components
+----------------------
+Each component retains its own license. Relevant license files and notices
+must accompany distributions as required by those licenses.
+
+  psxe (allkern)          MIT              LICENSES/UPSTREAM-MIT.txt
+  librashader             MPL-2.0          LICENSES/MPL-2.0.txt
+  SDL2                    zlib
+  rcheevos                MIT
+  libchdr                 BSD-3-Clause
+  adrenotools             BSD-2-Clause
+  log.c (rxi)             MIT              see psx/log.h
+  ANGLE                   BSD-3-Clause
+  Discord Partner SDK     Proprietary; redistributed only under Discord's terms.
+
+COPYING and COPYING.LESSER are retained for files and contributor-owned
+portions that identify GPL or LGPL terms. Bundled frameworks, files under
+third_party/, and files carrying their own notices remain under those terms.
+
+No PlayStation BIOS, game, or other copyrighted Sony material is included. A
+BIOS image and games must be supplied by the user.

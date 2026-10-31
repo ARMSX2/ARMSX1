@@ -2,7 +2,7 @@ if(NOT DEFINED INPUT_FILE)
     message(FATAL_ERROR "postprocess_web_html.cmake requires INPUT_FILE")
 endif()
 
-include("${CMAKE_CURRENT_LIST_DIR}/../third_party/fuse-lib/cmake/postprocess_web_html.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../third_party/fsui-lib/cmake/postprocess_web_html.cmake")
 
 file(READ "${INPUT_FILE}" html)
 file(READ "${CMAKE_CURRENT_LIST_DIR}/file_access.js" file_access)

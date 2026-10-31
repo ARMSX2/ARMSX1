@@ -6,6 +6,7 @@
 #include "frontend/diagnostics.h"
 
 #include "queue.h"
+#include "../../state.h"
 #include "disc.h"
 #include "../ic.h"
 
@@ -37,7 +38,22 @@
 #define CD_DELAY_READ_SS (33868800 / 75)
 #define CD_DELAY_READ_DS (33868800 / (2*75))
 #define CD_DELAY_START_READ (cdrom_get_read_delay(cdrom) + cdrom_get_seek_delay(cdrom, ts))
+/* The ongoing-read cadence must preserve the drive's real streaming rate. Slower pacing causes
+   XA refill gaps and can loop FMVs; validate timing changes against streaming games. */
 #define CD_DELAY_ONGOING_READ (cdrom_get_read_delay(cdrom) + (CD_DELAY_1MS * 4))
+
+/* How far short of its target the coarse (audio) seek lands. CdlSeekP does not position the
+   head exactly; the drive arrives early and reads its way onto the target. This is the size of
+   that undershoot, applied ONCE when the seek completes — psx_cdrom_update() then walks the
+   reported position forward onto the target at the drive's sector rate. */
+#define CD_SEEKP_UNDERSHOOT 25
+
+/* Sectors the reported position cycles through while the drive is parked with the motor on,
+   and how far below the parked sector that window starts. A paused drive keeps spinning and
+   keeps following the spiral, kicking back about a revolution to hold station, so its sub-Q
+   position moves without running away — over roughly [parked-2, parked+4]. */
+#define CD_REPORT_HOLD_SECTORS 7
+#define CD_REPORT_HOLD_OFFSET  2
 
 #define XA_STEREO_SAMPLES 2016 // Samples per sector
 #define XA_MONO_SAMPLES 4032 // Samples per sector
@@ -213,10 +229,17 @@ typedef struct {
     int region;
     int index;
     int pending_speed_switch_delay;
+    /* 0 after CdlSeekP, 1 after CdlSeekL: which of the two seeks last ran. CdlGetlocP used to
+       read this and subtract the coarse seek's undershoot from its answer every time it was
+       asked, which reported the target minus 25 for as long as the drive stayed parked. The
+       undershoot is now a landing position that CdlSeekP sets once and psx_cdrom_update()
+       walks off; the field itself stays because save states carry it. */
     int seek_precision;
     int fake_getlocl_data;
     uint8_t ier;
     uint8_t ifr;
+    // Transient tray-change status, not serialized into save states.
+    uint8_t shell_open_latched;
     uint8_t vol_pending[4];
     uint8_t vol[4];
     uint8_t mode;
@@ -242,8 +265,17 @@ typedef struct {
     int int1_pending;
     int int2_pending;
     int delay;
+    /* What a running read had left on its sector countdown when a query command borrowed
+       `delay` from it. Lives for exactly one command service — see cdrom_write_cmd(). */
+    int read_delay_pending;
     uint32_t pending_lba;
     uint32_t lba;
+    /* Where the HEAD is, as opposed to `lba`, which is the sector the transport will read
+       next. CdlGetlocP reports this one and nothing else does. Derived state: never
+       serialised, re-anchored to `lba` on load. See psx_cdrom_update() in cdrom.c. */
+    uint32_t report_lba;
+    uint32_t report_anchor;
+    int report_accum;
     int16_t cdda_buf[CD_SECTOR_SIZE >> 1];
     int32_t cdda_remaining_samples;
     uint32_t cdda_sample_index;
@@ -259,6 +291,37 @@ typedef struct {
     int16_t xa_left_resample_buf[XA_STEREO_RESAMPLE_MAX_SIZE];
     int16_t xa_right_resample_buf[XA_STEREO_RESAMPLE_MAX_SIZE];
     int16_t xa_mono_resample_buf[XA_MONO_RESAMPLE_MAX_SIZE];
+    /* Disposable one-sector read-ahead cache. Logical xa_lba is committed only
+       when consumed; disc data is re-read after loading an existing save state. */
+    /* Derived startup phase: -1 waits for transport delivery, 1 timestamps it,
+       0 is established playback. Not added to the save-state wire format. */
+    int xa_start_phase;
+    uint64_t xa_start_age_cycles;
+    int xa_prefetch_state; /* 0=empty, 1=searching, 2=ready, 3=end */
+    uint32_t xa_prefetch_base, xa_prefetch_next;
+    int xa_prefetch_file, xa_prefetch_channel, xa_prefetch_mode;
+    uint8_t xa_prefetch_buf[CD_SECTOR_SIZE];
+    /* Path of the currently-open image. Save states never embed the disc itself; they record
+       this plus a fingerprint so a state can be refused if it is loaded against a different
+       game, and so the already-open disc can simply be re-seeked on load. */
+    char disc_path[1024];
+    /* Run-length state for the command trace in cdrom_write_cmd(). Host-side only.
+       `trace_async` counts interrupts raised while the run was current that did NOT come from
+       the traced command — the per-sector INT1 of a read that is still running is the one
+       that matters, and conflating it with the command's own answer is a mistake this trace
+       has already made once. */
+    uint32_t trace_repeat;
+    uint32_t trace_exec;
+    uint32_t trace_async[8];
+    uint8_t trace_cmd;
+    uint8_t trace_nparams;
+    uint8_t trace_nresp;
+    uint8_t trace_int;
+    uint8_t trace_valid;
+    uint8_t trace_in_command;
+    uint8_t trace_pending_int;
+    uint8_t trace_params[4];
+    uint8_t trace_resp[8];
 } psx_cdrom_t;
 
 enum {
@@ -291,6 +354,10 @@ int cdrom_get_pause_delay(psx_cdrom_t* cdrom);
 int cdrom_get_read_delay(psx_cdrom_t* cdrom);
 void cdrom_set_int(psx_cdrom_t* cdrom, int n);
 void cdrom_process_setloc(psx_cdrom_t* cdrom);
+/* Put the head at `lba` and re-anchor it to the transport position. Only a seek that lands
+   somewhere other than its target needs this; every other transport move is picked up by
+   psx_cdrom_update() on its own. */
+void cdrom_anchor_report_position(psx_cdrom_t* cdrom, uint32_t lba);
 
 psx_cdrom_t* psx_cdrom_create(void);
 void psx_cdrom_init(psx_cdrom_t* cdrom, psx_ic_t* ic);
@@ -307,6 +374,25 @@ void psx_cdrom_write16(psx_cdrom_t* cdrom, uint32_t addr, uint32_t value);
 void psx_cdrom_write8(psx_cdrom_t* cdrom, uint32_t addr, uint32_t value);
 void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles);
 void psx_cdrom_get_audio_samples(psx_cdrom_t* cdrom, void* buf, size_t size);
+/* CdlGetstat, CdlSetmode, ... for the `audio_diag` command log. Never NULL. */
+const char* psx_cdrom_command_name(uint8_t cmd);
 void psx_cdrom_destroy(psx_cdrom_t* cdrom);
+
+/* --- save-state support (see psx/state.h) -------------------------------------------------
+   The disc is a HOST resource: it is never serialised. Instead a state records the disc's
+   identity (path + fingerprint + track count) and only the controller's logical state, so
+   loading re-seeks the disc that is already open. */
+const char* psx_cdrom_get_disc_path(psx_cdrom_t* cdrom);
+int psx_cdrom_get_disc_track_count(psx_cdrom_t* cdrom);
+uint64_t psx_cdrom_get_disc_fingerprint(psx_cdrom_t* cdrom);
+void psx_cdrom_save_state(psx_cdrom_t*, psx_state_writer_t*);
+int psx_cdrom_load_state(psx_cdrom_t*, psx_state_reader_t*);
+
+/* CD-ROM speedup. Divisors on the emulated drive's read and seek delays; 1 = authentic timing.
+   Read speedup is the one that can break streamed XA audio and FMV — see cdrom.c. */
+void psx_cdrom_set_read_speedup(unsigned factor);
+void psx_cdrom_set_seek_speedup(unsigned factor);
+unsigned psx_cdrom_get_read_speedup(void);
+unsigned psx_cdrom_get_seek_speedup(void);
 
 #endif

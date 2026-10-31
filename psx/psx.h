@@ -14,7 +14,9 @@
 #define PSXE_COMMIT STR(REP_COMMIT_HASH)
 #define PSXE_BUILD_OS STR(OS_INFO)
 
-typedef struct {
+/* Named (rather than anonymous) so headers that only need a handle — state.h —
+   can forward declare `struct psx_t` without pulling the whole core in. */
+typedef struct psx_t {
     psx_bios_t* bios;
     psx_ram_t* ram;
     psx_dma_t* dma;
@@ -41,10 +43,37 @@ int psx_load_expansion(psx_t*, const char*);
 int psx_load_bios(psx_t*, const char*);
 void psx_hard_reset(psx_t*);
 void psx_soft_reset(psx_t*);
-void psx_load_state(psx_t*, const char*);
-void psx_save_state(psx_t*, const char*);
+/* Save states. Return PSX_STATE_OK (0) or a negative PSX_STATE_ERR_* code from
+   psx/state.h; psx_state_strerror() turns one into a message. Both must run on
+   the emulation thread — hosts on another thread go through
+   psx_state_request_slot(). psx_save_state_to_memory() hands back a malloc()ed
+   buffer the caller frees. */
+int psx_load_state(psx_t*, const char*);
+int psx_save_state(psx_t*, const char*);
+int psx_load_state_from_memory(psx_t*, const void*, size_t);
+int psx_save_state_to_memory(psx_t*, void**, size_t*);
+/* Load with PSX_STATE_LOAD_* flags (psx/state.h). The two plain loaders above
+   are these with flags == 0, so they keep refusing a state whose memory-card
+   fingerprint has diverged; pass PSX_STATE_LOAD_IGNORE_CARD_DIVERGENCE once the
+   user has been asked. The refusal happens before the machine is touched. */
+int psx_load_state_ex(psx_t*, const char* path, unsigned flags);
+int psx_load_state_from_memory_ex(psx_t*, const void*, size_t, unsigned flags);
+/* Capture with options, and with buffer reuse. *io_data / *io_capacity may carry
+   a buffer a previous call returned (NULL/0 for a fresh one); it is grown in
+   place when needed and handed back updated, and the caller always frees it.
+   Used by rewind/runahead, which capture continuously and must not churn the
+   allocator — see psx/rewind.h. `flags` is a mask of PSX_STATE_SAVE_*. */
+int psx_save_state_to_memory_ex(psx_t*, void** io_data, size_t* io_capacity,
+                                size_t* out_size, unsigned flags);
 void psx_load_exe(psx_t*, const char*);
+
+/* CPU overclock, as a percentage of the real R3000A. 100 = stock. Clamped to 10..1000.
+   Implemented by charging the devices fewer cycles per instruction — see psx.c. */
+void psx_set_cpu_overclock(unsigned percent);
+unsigned psx_get_cpu_overclock(void);
 void psx_update(psx_t*);
+/* Same machine update, timed only when the frontend selects a sparse sample. */
+void psx_update_profiled(psx_t*);
 void psx_run_frame(psx_t*);
 void* psx_get_display_buffer(psx_t*);
 void* psx_get_vram(psx_t*);

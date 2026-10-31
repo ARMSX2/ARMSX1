@@ -5,6 +5,7 @@
 
 #include "ic.h"
 #include "gpu.h"
+#include "../state.h"
 
 #define PSX_TIMER_BEGIN 0x1f801100
 #define PSX_TIMER_SIZE  0x30
@@ -127,6 +128,9 @@ void psx_timer_write32(psx_timer_t*, uint32_t, uint32_t);
 void psx_timer_write16(psx_timer_t*, uint32_t, uint16_t);
 void psx_timer_write8(psx_timer_t*, uint32_t, uint8_t);
 void psx_timer_update(psx_timer_t*, int);
+/* The three root counters and the blank-edge latches. ic/gpu are pointers. */
+void psx_timer_save_state(psx_timer_t*, psx_state_writer_t*);
+int psx_timer_load_state(psx_timer_t*, psx_state_reader_t*);
 void psx_timer_destroy(psx_timer_t*);
 
 // GPU event handlers

@@ -42,7 +42,7 @@
 // #define COM_DLY(dev)
 
 psx_mc1_t* psx_mc1_create(void) {
-    return (psx_mc1_t*)malloc(sizeof(psx_mc1_t));
+    return (psx_mc1_t*)calloc(1, sizeof(psx_mc1_t));
 }
 
 /*
@@ -239,6 +239,32 @@ uint32_t psx_mc1_get_cdrom_write_delay(psx_mc1_t* mc1) {
 
 uint32_t psx_mc1_get_pad_write_delay(psx_mc1_t* mc1) {
     return DEFAULT_DLY;
+}
+
+void psx_mc1_save_state(psx_mc1_t* mc1, psx_state_writer_t* w) {
+    psx_sw_u32(w, mc1->exp1_base);
+    psx_sw_u32(w, mc1->exp2_base);
+    psx_sw_u32(w, mc1->exp1_delay);
+    psx_sw_u32(w, mc1->exp3_delay);
+    psx_sw_u32(w, mc1->bios_delay);
+    psx_sw_u32(w, mc1->spu_delay);
+    psx_sw_u32(w, mc1->cdrom_delay);
+    psx_sw_u32(w, mc1->exp2_delay);
+    psx_sw_u32(w, mc1->com_delay);
+}
+
+int psx_mc1_load_state(psx_mc1_t* mc1, psx_state_reader_t* r) {
+    mc1->exp1_base = psx_sr_u32(r);
+    mc1->exp2_base = psx_sr_u32(r);
+    mc1->exp1_delay = psx_sr_u32(r);
+    mc1->exp3_delay = psx_sr_u32(r);
+    mc1->bios_delay = psx_sr_u32(r);
+    mc1->spu_delay = psx_sr_u32(r);
+    mc1->cdrom_delay = psx_sr_u32(r);
+    mc1->exp2_delay = psx_sr_u32(r);
+    mc1->com_delay = psx_sr_u32(r);
+
+    return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
 }
 
 void psx_mc1_destroy(psx_mc1_t* mc1) {

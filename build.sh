@@ -15,40 +15,44 @@ MODE="$1"
 BUILD_JOBS="${BUILD_JOBS:-4}"
 export USE_CHD="${USE_CHD:-1}"
 
-resolve_fsui_python() {
-    if [ -n "${FSUI_PYTHON_EXECUTABLE:-}" ]; then
-        if [ ! -x "${FSUI_PYTHON_EXECUTABLE}" ] ||
-            ! "${FSUI_PYTHON_EXECUTABLE}" -c "import jinja2" >/dev/null 2>&1; then
-            echo "FSUI_PYTHON_EXECUTABLE must name an executable Python with jinja2 installed." >&2
-            return 1
-        fi
-        printf '%s\n' "${FSUI_PYTHON_EXECUTABLE}"
-        return 0
-    fi
-
-    for candidate_name in python3 python; do
-        candidate="$(command -v "${candidate_name}" 2>/dev/null || true)"
-        if [ -n "${candidate}" ] &&
-            "${candidate}" -c "import jinja2" >/dev/null 2>&1; then
-            printf '%s\n' "${candidate}"
-            return 0
-        fi
-    done
-
-    echo "fsui requires a Python with jinja2. Set FSUI_PYTHON_EXECUTABLE to an existing interpreter." >&2
-    return 1
-}
+# Profile-guided optimisation. Off unless asked for; forwarded verbatim to make by the android
+# branch below, which is the only target wired for it today. See the PGO block in Makefile for
+# what each value does, frontend/pgo.c for how the profile is collected on-device, and
+# tools/pgo.sh for the loop that drives all of it.
+#
+#   PGO=generate ./build.sh android     instrumented build (slow; for collecting a profile)
+#   PGO=use      ./build.sh android     optimised build against build/pgo/armsx.profdata
+#
+# PGO_PROFILE / PGO_ALLOW_STALE / PGO_STRICT ride along for the staleness guard. PGO_ALLOW_STALE
+# is NOT defaulted here on purpose: the Makefile's default of 0 is what makes a stale profile a
+# build failure instead of a silent slowdown, and defaulting it in two places is how that kind of
+# guard ends up accidentally disabled.
+#
+# Written as if-blocks rather than `[ -n "$x" ] && ...`: under `set -e` that idiom evaluates to a
+# non-zero status on the common path (the variable being unset), which is a footgun waiting for
+# whoever adds the next one.
+PGO="${PGO:-off}"
+PGO_MAKE_ARGS="PGO=${PGO}"
+if [ -n "${PGO_PROFILE:-}" ]; then
+    PGO_MAKE_ARGS="${PGO_MAKE_ARGS} PGO_PROFILE=${PGO_PROFILE}"
+fi
+if [ -n "${PGO_ALLOW_STALE:-}" ]; then
+    PGO_MAKE_ARGS="${PGO_MAKE_ARGS} PGO_ALLOW_STALE=${PGO_ALLOW_STALE}"
+fi
+if [ -n "${PGO_STRICT:-}" ]; then
+    PGO_MAKE_ARGS="${PGO_MAKE_ARGS} PGO_STRICT=${PGO_STRICT}"
+fi
 
 build_fsui_native() {
     if [ "$(uname -s)" = "Darwin" ]; then
         MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-10.15}"
-        cmake -S third_party/fuse-lib -B build/fsui/native \
+        cmake -S third_party/fsui-lib -B build/fsui/native \
             -DFSUI_BUILD_SAMPLES=OFF \
             -DFSUI_PLATFORM_BACKEND=SDL2 \
             -DFSUI_USE_SYSTEM_SDL2=ON \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}"
     else
-        cmake -S third_party/fuse-lib -B build/fsui/native \
+        cmake -S third_party/fsui-lib -B build/fsui/native \
             -DFSUI_BUILD_SAMPLES=OFF \
             -DFSUI_PLATFORM_BACKEND=SDL2 \
             -DFSUI_USE_SYSTEM_SDL2=ON
@@ -58,7 +62,7 @@ build_fsui_native() {
 
 build_fsui_wasm() {
     if ! command -v emcmake >/dev/null 2>&1 || ! command -v emcc >/dev/null 2>&1; then
-        for candidate in "${EMSCRIPTEN_ROOT:-}" "${EMSDK:-}" "$HOME/emsdk" "/opt/emsdk" "/Volumes/FastDrive/linkertools/emsdk"; do
+        for candidate in "${EMSCRIPTEN_ROOT:-}" "${EMSDK:-}" "$HOME/emsdk" "/opt/emsdk"; do
             if [ -z "${candidate}" ] || [ ! -d "${candidate}" ]; then
                 continue
             fi
@@ -88,7 +92,7 @@ build_fsui_wasm() {
         exit 1
     fi
 
-    emcmake cmake -S third_party/fuse-lib -B build/fsui/wasm \
+    emcmake cmake -S third_party/fsui-lib -B build/fsui/wasm \
         -DFSUI_BUILD_SAMPLES=OFF \
         -DFSUI_PLATFORM_BACKEND=SDL2
     cmake --build build/fsui/wasm -j"${BUILD_JOBS}"
@@ -112,8 +116,8 @@ build_fsui_psvita() {
     cmake --build build/fsui/psvita -j"${BUILD_JOBS}"
 
     # The Vita Rust wrapper expects the FSUI archives in the CMake root output
-    # directory, so stage the real archives out of the nested fuse-lib build.
-    cp build/fsui/psvita/fuse-lib/libfsui*.a build/fsui/psvita/
+    # directory, so stage the real archives out of the nested fsui-lib build.
+    cp build/fsui/psvita/fsui-lib/libfsui*.a build/fsui/psvita/
 }
 
 bundle_macos_app() {
@@ -177,10 +181,9 @@ if [ "$MODE" = "ios" ]; then
     fi
 
     IOS_SDL2_DIR="$(prepare_ios_sdl_package "${IOS_SDL_FRAMEWORK}")"
-    FSUI_PYTHON="$(resolve_fsui_python)"
 
     echo "Building iOS dylib with SDK ${IOS_SDK} (${IOS_SDKROOT})"
-    cmake -S third_party/fuse-lib -B build/fsui/ios \
+    cmake -S third_party/fsui-lib -B build/fsui/ios \
         -DFSUI_BUILD_SAMPLES=OFF \
         -DFSUI_PLATFORM_BACKEND=SDL2 \
         -DFSUI_USE_SYSTEM_SDL2=ON \
@@ -188,7 +191,6 @@ if [ "$MODE" = "ios" ]; then
         -DCMAKE_OSX_ARCHITECTURES=arm64 \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET}" \
         -DCMAKE_OSX_SYSROOT="${IOS_SDKROOT}" \
-        -DPython_EXECUTABLE="${FSUI_PYTHON}" \
         -DSDL2_DIR="${IOS_SDL2_DIR}"
     cmake --build build/fsui/ios -j"${BUILD_JOBS}"
     make clean
@@ -204,6 +206,7 @@ elif [ "$MODE" = "shared" ]; then
 
 elif [ "$MODE" = "android" ]; then
 	    stage_android_runtime_icons
+	    ANDROID_MAKE="${MAKE:-make}"
 	    ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-${NDK_HOME:-}}}"
     if [ -z "${ANDROID_NDK_ROOT}" ]; then
         echo "ANDROID_NDK_ROOT (or ANDROID_NDK_HOME / NDK_HOME) must be set to a valid NDK path."
@@ -269,6 +272,11 @@ elif [ "$MODE" = "android" ]; then
 
     echo "Using Android NDK at ${ANDROID_NDK_ROOT} (toolchain ${HOST_TAG}, ABI ${ANDROID_ABI}, API ${ANDROID_API})"
 
+    # Android 15 devices may use 16 KB system pages.  Every ELF shared object shipped by the
+    # APK must therefore advertise 16 KB PT_LOAD alignment; ZIP alignment alone is not enough.
+    # Keep this in the Android branch so desktop/iOS linkers retain their existing flags.
+    ANDROID_16K_PAGE_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
     ANDROID_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake"
     if [ ! -f "${ANDROID_TOOLCHAIN_FILE}" ]; then
         echo "Android toolchain file not found at ${ANDROID_TOOLCHAIN_FILE}"
@@ -287,12 +295,12 @@ elif [ "$MODE" = "android" ]; then
         -DANDROID_ABI="${ANDROID_ABI}" \
         -DANDROID_PLATFORM="${ANDROID_PLATFORM}" \
         -DANDROID_STL=c++_shared \
-        -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=ON \
         -DSDL_STATIC=OFF \
         -DSDL_TEST=OFF \
-        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,common-page-size=16384" \
+        -DCMAKE_SHARED_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
+        -DCMAKE_MODULE_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
         -DCMAKE_INSTALL_PREFIX="${SDL_INSTALL_DIR}"
 
     cmake --build "${SDL_BUILD_ROOT}" --config Release
@@ -321,55 +329,235 @@ elif [ "$MODE" = "android" ]; then
     TOOLCHAIN_BIN="${TOOLCHAIN_DIR}/bin"
     CC="${TOOLCHAIN_BIN}/${ANDROID_TRIPLE}${ANDROID_API}-clang"
     CXX="${TOOLCHAIN_BIN}/${ANDROID_TRIPLE}${ANDROID_API}-clang++"
-    AR="${TOOLCHAIN_BIN}/llvm-ar"
-    RANLIB="${TOOLCHAIN_BIN}/llvm-ranlib"
     export CC
     export CXX
-    export AR
-    export RANLIB
 
-    SDL_CFLAGS="-D_REENTRANT -DANDROID -D__BIONIC_NO_PAGE_SIZE_MACRO -I${SDL_INCLUDE_PATH}"
+    SDL_CFLAGS="-D_REENTRANT -DANDROID -I${SDL_INCLUDE_PATH}"
+    # -lEGL/-lGLESv3 are what the GLES 3.0 present path (frontend/render_gl.cpp) binds to when
+    # it attaches EGL directly to the Compose host's ANativeWindow. There is deliberately no
+    # -lvulkan: frontend/render_vk.cpp dlopen()s the loader through a replaceable function
+    # pointer so an adrenotools custom driver can be substituted at runtime.
     SDL_LIBS="-L${SDL_LIB_PATH} -lSDL2 -llog -landroid -lGLESv3 -lEGL -lOpenSLES -lm -lc++_shared"
-    ANDROID_FLEXIBLE_PAGE_LDFLAGS="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
-    FSUI_BUILD_ROOT="${REPO_ROOT}/build/fsui/android/${ANDROID_ABI}"
-    FSUI_PYTHON="$(resolve_fsui_python)"
-    cmake -S third_party/fuse-lib -B "${FSUI_BUILD_ROOT}" \
-        -DFSUI_BUILD_SAMPLES=OFF \
-        -DFSUI_PLATFORM_BACKEND=SDL2 \
-        -DFSUI_USE_SYSTEM_SDL2=ON \
-        -DFSUI_IMGUI_OPENGL_ES3=ON \
-        -DPython_EXECUTABLE="${FSUI_PYTHON}" \
-        -DCMAKE_TOOLCHAIN_FILE="${ANDROID_TOOLCHAIN_FILE}" \
+    # Presentation backends. Vulkan is EXPERIMENTAL (compile-verified only) and is never
+    # selected unless settings.toml asks for gpu_backend = "vulkan"; set
+    # ARMSX_ENABLE_VULKAN=0 to leave it out of the build entirely.
+    ARMSX_ENABLE_GL="${ARMSX_ENABLE_GL:-1}"
+    ARMSX_ENABLE_VULKAN="${ARMSX_ENABLE_VULKAN:-1}"
+
+    # RetroArch (.slangp) shader chains (frontend/render_shaders.cpp). librashader is
+    # dlopen()ed, never linked, so this adds nothing to libarmsx.so's DT_NEEDED — but the
+    # .so has to be in jniLibs for dlopen("liblibrashader_capi.so") to resolve by SONAME.
+    # If it is not vendored, build with shaders compiled out rather than shipping a feature
+    # that can only fail at runtime.
+    LIBRASHADER_SO="${REPO_ROOT}/third_party/librashader/prebuilt/${ANDROID_ABI}/liblibrashader_capi.so"
+    ARMSX_ENABLE_SHADERS="${ARMSX_ENABLE_SHADERS:-1}"
+    if [ "${ARMSX_ENABLE_SHADERS}" = "1" ] && [ ! -f "${LIBRASHADER_SO}" ]; then
+        echo "librashader is not vendored at ${LIBRASHADER_SO};"
+        echo "building without shader chains. Run third_party/librashader/build-android.sh to add it."
+        ARMSX_ENABLE_SHADERS=0
+    fi
+
+    # ---- adrenotools (BSD 2-Clause) --------------------------------------------------------
+    #
+    # Custom Vulkan drivers CANNOT be loaded with a plain dlopen: a Turnip pack links against
+    # system libraries (libcutils and friends) that are not resolvable from an app's
+    # classloader namespace, so the load fails with
+    #   dlopen failed: library "libcutils.so" not found ... in namespace classloader-namespace
+    # adrenotools exists to solve exactly that — it loads the driver inside a patched linker
+    # namespace where the vendor ICD resolves.
+    #
+    # Static lib linked into libarmsx.so, plus FOUR hook .so files that must be PACKAGED (the
+    # loader hands adrenotools their directory at runtime and it dlopens them by name).
+    ADRENOTOOLS_BUILD_DIR="${REPO_ROOT}/build/adrenotools/android/${ANDROID_ABI}"
+    cmake -S "${REPO_ROOT}/third_party/libadrenotools" -B "${ADRENOTOOLS_BUILD_DIR}" \
+        -DCMAKE_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI="${ANDROID_ABI}" \
-        -DANDROID_PLATFORM="${ANDROID_PLATFORM}" \
-        -DANDROID_STL=c++_shared \
-        -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+        -DANDROID_PLATFORM="android-${ANDROID_API}" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH="${SDL_INSTALL_DIR}" \
-        -DSDL2_DIR="${SDL_INSTALL_DIR}/lib/cmake/SDL2"
-    cmake --build "${FSUI_BUILD_ROOT}" --config Release -j"${BUILD_JOBS}"
+        -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_SHARED_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
+        -DCMAKE_MODULE_LINKER_FLAGS="${ANDROID_16K_PAGE_LDFLAGS}"
+    cmake --build "${ADRENOTOOLS_BUILD_DIR}" -j"${BUILD_JOBS}"
 
-    make clean
-    make \
+    # FSUI cut: the Jetpack Compose front-end owns all menus, so fsui-lib is no longer built or
+    # linked. FSUI_INCLUDE_FLAGS/COMPILE_DEFS/LIBS are overridden empty (keeping only
+    # -DSDL_MAIN_HANDLED, which the Android external_main entry still needs).
+    if [ "${PGO}" != "off" ]; then
+        echo "pgo: building with PGO=${PGO} (see tools/pgo.sh for the full loop)"
+    fi
+
+    # ${PGO_MAKE_ARGS} is intentionally unquoted: it is a list of make variable assignments and
+    # has to word-split. It is "PGO=off" and nothing else unless PGO was asked for, so the normal
+    # build is byte-identical to what it was before PGO existed.
+    "${ANDROID_MAKE}" clean
+    "${ANDROID_MAKE}" \
+        ${PGO_MAKE_ARGS} \
         SDL_STATIC=0 \
+        ARMSX_ENABLE_GL="${ARMSX_ENABLE_GL}" \
+        ARMSX_ENABLE_VULKAN="${ARMSX_ENABLE_VULKAN}" \
+        ARMSX_ENABLE_SHADERS="${ARMSX_ENABLE_SHADERS}" \
         SDL_CFLAGS="${SDL_CFLAGS}" \
         SDL_LIBS_DYNAMIC="${SDL_LIBS}" \
-        FSUI_BUILD_DIR="${FSUI_BUILD_ROOT}" \
+        FSUI_INCLUDE_FLAGS= \
+        FSUI_COMPILE_DEFS=-DSDL_MAIN_HANDLED \
+        FSUI_LIBS= \
+        AR="${TOOLCHAIN_BIN}/llvm-ar" \
+        RANLIB="${TOOLCHAIN_BIN}/llvm-ranlib" \
+        LIBCHDR_EXTRA_CMAKE_ARGS="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64" \
         LIBCHDR_BUILD_DIR="${REPO_ROOT}/build/libchdr/android/${ANDROID_ABI}" \
-        LIBCHDR_CMAKE_TOOLCHAIN_FILE="${ANDROID_TOOLCHAIN_FILE}" \
-        LIBCHDR_ANDROID_ABI="${ANDROID_ABI}" \
-        LIBCHDR_ANDROID_PLATFORM="${ANDROID_PLATFORM}" \
-        LIBCHDR_ANDROID_FLEXIBLE_PAGE_SIZES=ON \
         PLATFORM=Android \
         OS_INFO=Android \
-        PLATFORM_EXTRA_LDFLAGS="${ANDROID_FLEXIBLE_PAGE_LDFLAGS}" \
-        PLATFORM_EXTRA_LIBS= \
+        PLATFORM_EXTRA_LDFLAGS="${ANDROID_16K_PAGE_LDFLAGS}" \
+        PLATFORM_EXTRA_LIBS="${ADRENOTOOLS_BUILD_DIR}/libadrenotools.a ${ADRENOTOOLS_BUILD_DIR}/lib/linkernsbypass/liblinkernsbypass.a" \
+        ADRENOTOOLS_FLAGS="-I${REPO_ROOT}/third_party/libadrenotools/include -DARMSX_HAVE_ADRENOTOOLS=1" \
         shared
+
+    # The hook libraries adrenotools dlopens at runtime. They must sit in the app's
+    # nativeLibraryDir, which is what CustomDriver.kt passes as hookLibDir.
+    for hook in main_hook hook_impl file_redirect_hook gsl_alloc_hook; do
+        if [ -f "${ADRENOTOOLS_BUILD_DIR}/src/hook/lib${hook}.so" ]; then
+            cp "${ADRENOTOOLS_BUILD_DIR}/src/hook/lib${hook}.so" "${JNI_LIB_DIR}/"
+        fi
+    done
 
     cp "${SDL_SHARED_LIB}" "${JNI_LIB_DIR}/"
     cp "${CXX_SHARED_RUNTIME}" "${JNI_LIB_DIR}/"
     cp bin/libarmsx.so "${JNI_LIB_DIR}/"
+
+    # librashader rides along as a plain payload: nothing links against it, the app never
+    # System.loadLibrary()s it, and frontend/render_shaders.cpp dlopen()s it by SONAME the
+    # first time a shader chain is actually switched on. A stale copy left behind after
+    # ARMSX_ENABLE_SHADERS=0 would be 13 MB of dead weight in the APK, so remove it then.
+    if [ "${ARMSX_ENABLE_SHADERS}" = "1" ]; then
+        cp "${LIBRASHADER_SO}" "${JNI_LIB_DIR}/"
+    else
+        rm -f "${JNI_LIB_DIR}/liblibrashader_capi.so"
+    fi
+
+    # ---- Discord rich presence helper (libarmsx_discord.so) --------------------------------
+    #
+    # Its OWN shared library, linked against the Discord Social SDK and nothing else — not
+    # libarmsx, not SDL. That is the whole point: it is loaded only in the :discord process
+    # (see AndroidManifest), so with the feature off the proprietary SDK is not merely idle,
+    # it is never mapped, and an SDK crash cannot take the emulator down mid-game.
+    #
+    # The application id and callback scheme come from android/app/src/main/assets/discord_creds.env
+    # — the SAME file app/build.gradle reads for the manifest's intent-filter scheme. One source,
+    # so the redirect the SDK sends and the scheme the OS routes back can never disagree.
+    #
+    # Absent SDK or absent id => the stub half of discord_bridge.cpp is built instead. It still
+    # exports every JNI entry point, so DiscordNative loads, available() answers false, and the
+    # Friends UI hides itself. A missing .so would instead be an UnsatisfiedLinkError per call.
+    DISCORD_AAR="${REPO_ROOT}/android/app/libs/discord_partner_sdk.aar"
+    DISCORD_ENV="${REPO_ROOT}/android/app/src/main/assets/discord_creds.env"
+    DISCORD_SRC="${REPO_ROOT}/android/app/src/main/cpp/discord_bridge.cpp"
+    DISCORD_STAGE="${REPO_ROOT}/build/android/discord/${ANDROID_ABI}"
+
+    # Read one KEY=VALUE out of the .env, ignoring comments. The key must start the line, so the
+    # explanatory comments in that file (which name the keys) cannot be picked up as values.
+    discord_env_value() {
+        [ -f "${DISCORD_ENV}" ] || return 0
+        sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\(.*\)\$/\1/p" "${DISCORD_ENV}" \
+            | tail -n 1 | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+    }
+
+    # Mirrors the sanitizeScheme closure in app/build.gradle: accept a bare scheme, or anything
+    # written as a URI, and keep only the scheme part.
+    discord_sanitize_scheme() {
+        printf '%s' "$1" | sed -e 's|://.*$||' -e 's|:.*$||' -e 's|/.*$||' \
+            -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+    }
+
+    DISCORD_APP_ID="$(discord_env_value APPLICATION_ID)"
+    DISCORD_SCHEME="$(discord_sanitize_scheme "$(discord_env_value APPLICATION_SCHEME)")"
+
+    # An id that is not a plain integer would compile into a nonsense constant, so reject it here
+    # rather than shipping a client that authorizes against garbage.
+    DISCORD_WHY=""
+    case "${DISCORD_APP_ID}" in
+        ''|*[!0-9]*)
+            if [ -n "${DISCORD_APP_ID}" ]; then
+                DISCORD_WHY="APPLICATION_ID '${DISCORD_APP_ID}' is not numeric"
+            fi
+            DISCORD_APP_ID=""
+            ;;
+    esac
+    if [ -z "${DISCORD_SCHEME}" ] && [ -n "${DISCORD_APP_ID}" ]; then
+        DISCORD_SCHEME="discord-${DISCORD_APP_ID}"
+    fi
+
+    # -nostdlib++ then libc++_shared.so BY PATH: the NDK's clang driver otherwise links
+    # libc++_static.a AND honours the -l, putting TWO C++ runtimes in one process and re-exporting
+    # ~1000 libc++ symbols out of this .so. libc++_shared.so is already staged above for libarmsx,
+    # so sharing it costs no APK bytes and saves ~700 KB over the static runtime.
+    #
+    # ★ By path, NOT "-L<sysroot>/usr/lib/<triple> -lc++_shared". That directory holds
+    # libc.a / libm.a / libdl.a next to libc++_shared.so, and an explicit -L is searched BEFORE the
+    # API-level directory the driver adds — so the driver's own implicit -lc/-lm/-ldl resolved to
+    # the STATIC archives. This .so then carried a whole second copy of bionic and no DT_NEEDED on
+    # libc.so at all, and compiler-rt's outline-atomics constructor called that copy's getauxval()
+    # from .init_array at dlopen: a static libc's __libc_shared_globals are filled in by its own
+    # process startup, which never runs inside a .so, so it read a null auxv and took SIGSEGV.
+    # The :discord process died inside System.loadLibrary, before DiscordService.onCreate could
+    # return — presenting as "The Discord helper didn't start", on a loop. libc++_shared.so carries
+    # a SONAME, so DT_NEEDED still reads "libc++_shared.so"; same trick as the SDK .so below.
+    #
+    # Safe against the SDK because nothing but the C API crosses that boundary: the shipped .so
+    # exports zero discordpp:: symbols (discordpp.h is a header-only wrapper over Discord_*), and
+    # its own libc++ is ABI-namespaced as std::__Cr so it cannot collide with ours.
+    #
+    # --exclude-libs,ALL keeps static-archive symbols out of the dynamic table; with it and
+    # -fvisibility=hidden this .so exports 15 symbols, 11 of them the JNI entry points.
+    DISCORD_CXXFLAGS="-std=c++20 -fPIC -O2 -g0 -fvisibility=hidden -fvisibility-inlines-hidden -Wall -ffunction-sections -fdata-sections"
+    DISCORD_LDFLAGS="-nostdlib++ ${TOOLCHAIN_DIR}/sysroot/usr/lib/${ANDROID_CXX_RUNTIME_TRIPLE}/libc++_shared.so -llog -Wl,--exclude-libs,ALL -Wl,--gc-sections ${ANDROID_16K_PAGE_LDFLAGS}"
+    if [ -f "${DISCORD_AAR}" ] && [ -n "${DISCORD_APP_ID}" ]; then
+        # The .aar carries a prefab module: headers AND a per-ABI .so, so nothing else has to be
+        # vendored. Extracted for LINKING ONLY — the .so is deliberately not copied into jniLibs,
+        # because gradle already packages it from the same .aar and two copies fail the merger.
+        rm -rf "${DISCORD_STAGE}"
+        mkdir -p "${DISCORD_STAGE}"
+        unzip -o -q "${DISCORD_AAR}" \
+            "prefab/modules/discord_partner_sdk/include/*" \
+            "jni/${ANDROID_ABI}/libdiscord_partner_sdk.so" \
+            -d "${DISCORD_STAGE}"
+
+        DISCORD_INCLUDE="${DISCORD_STAGE}/prefab/modules/discord_partner_sdk/include"
+        DISCORD_SDK_SO="${DISCORD_STAGE}/jni/${ANDROID_ABI}/libdiscord_partner_sdk.so"
+        if [ ! -f "${DISCORD_INCLUDE}/discordpp.h" ] || [ ! -f "${DISCORD_SDK_SO}" ]; then
+            DISCORD_WHY="${DISCORD_AAR} has no ${ANDROID_ABI} slice or no headers"
+            DISCORD_APP_ID=""
+        fi
+    fi
+
+    if [ -f "${DISCORD_AAR}" ] && [ -n "${DISCORD_APP_ID}" ]; then
+        echo "discord: application ${DISCORD_APP_ID}, callback scheme ${DISCORD_SCHEME}://"
+        # -fvisibility=hidden keeps discordpp.h's thousands of inline symbols out of the dynamic
+        # table; JNIEXPORT is visibility("default") in the NDK's jni.h, so the entry points survive.
+        # Linked against the extracted .so by path; it carries a SONAME, so what lands in
+        # DT_NEEDED is "libdiscord_partner_sdk.so" and the loader finds gradle's copy at runtime.
+        "${CXX}" ${DISCORD_CXXFLAGS} -shared \
+            -DARMSX_HAS_DISCORD=1 \
+            -DARMSX_DISCORD_APPLICATION_ID="${DISCORD_APP_ID}" \
+            -DARMSX_DISCORD_CALLBACK_SCHEME="\"${DISCORD_SCHEME}\"" \
+            -I"${DISCORD_INCLUDE}" \
+            -o "${JNI_LIB_DIR}/libarmsx_discord.so" \
+            "${DISCORD_SRC}" \
+            "${DISCORD_SDK_SO}" \
+            ${DISCORD_LDFLAGS}
+    else
+        if [ -n "${DISCORD_WHY}" ]; then
+            echo "discord: ${DISCORD_WHY}; building the stub helper (feature reports unavailable)."
+        elif [ ! -f "${DISCORD_AAR}" ]; then
+            echo "discord: ${DISCORD_AAR} not staged; building the stub helper (feature reports unavailable)."
+        else
+            echo "discord: no APPLICATION_ID in ${DISCORD_ENV}; building the stub helper."
+        fi
+        "${CXX}" ${DISCORD_CXXFLAGS} -shared \
+            -o "${JNI_LIB_DIR}/libarmsx_discord.so" \
+            "${DISCORD_SRC}" \
+            ${DISCORD_LDFLAGS}
+    fi
 
 elif [ "$MODE" = "psvita" ]; then
     if [ -z "${VITASDK:-}" ]; then

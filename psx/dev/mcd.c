@@ -1,19 +1,25 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "mcd.h"
 #include "../log.h"
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
 #include <string.h>
-#include <limits.h>
+#include <time.h>
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 static void psx_mcd_ensure_parent(const char* path) {
     if (!path)
         return;
 
-#ifdef PSVITA_TARGET
     const size_t path_len = strlen(path);
     if (path_len == 0)
         return;
@@ -23,11 +29,6 @@ static void psx_mcd_ensure_parent(const char* path) {
         return;
 
     memcpy(tmp, path, path_len + 1);
-#else
-    char tmp[PATH_MAX];
-    strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-#endif
 
     char* slash = strrchr(tmp, '/');
 #ifdef _WIN32
@@ -36,9 +37,7 @@ static void psx_mcd_ensure_parent(const char* path) {
         slash = bslash;
 #endif
     if (!slash || slash == tmp) {
-#ifdef PSVITA_TARGET
         free(tmp);
-#endif
         return;
     }
 
@@ -46,9 +45,7 @@ static void psx_mcd_ensure_parent(const char* path) {
 
     struct stat st;
     if (stat(tmp, &st) == 0) {
-#ifdef PSVITA_TARGET
         free(tmp);
-#endif
         return;
     }
 
@@ -58,13 +55,104 @@ static void psx_mcd_ensure_parent(const char* path) {
     mkdir(tmp, 0755);
 #endif
 
-#ifdef PSVITA_TARGET
     free(tmp);
-#endif
 }
 
 psx_mcd_t* psx_mcd_create(void) {
-    return (psx_mcd_t*)malloc(sizeof(psx_mcd_t));
+    return (psx_mcd_t*)calloc(1, sizeof(psx_mcd_t));
+}
+
+/*
+    Session nonce for the divergence check.
+
+    write_generation only means anything relative to another sample of the SAME
+    card instance: it starts at 0 on every attach, so comparing a generation
+    across two runs of the app would happily "prove" that a fresh card is older
+    than a state taken last week. Stamping each attach with a nonce lets the
+    comparison say "these two numbers are not comparable" instead of guessing —
+    which is the difference between the confident warning and the soft one.
+
+    Mixes a clock reading (distinct across processes) with a counter (distinct
+    within one process, where two cards attach in the same second).
+*/
+static uint64_t g_mcd_session_seq = 0;
+
+static uint64_t psx_mcd_new_session_id(void) {
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t seq = ++g_mcd_session_seq;
+
+    return psx_state_fnv1a(&now, sizeof(now), PSX_STATE_FNV_SEED) ^
+           (seq * 0x9e3779b97f4a7c15ull);
+}
+
+static void psx_mcd_format(uint8_t* image) {
+    memset(image, 0xff, MCD_MEMORY_SIZE);
+    memset(image, 0, 128);
+    image[0] = 'M';
+    image[1] = 'C';
+    image[127] = 'M' ^ 'C';
+    for (unsigned sector = 1; sector < 36; ++sector) {
+        uint8_t* frame = image + sector * 128;
+        memset(frame, 0, 128);
+        if (sector < 16)
+            frame[0] = 0xa0;
+        else
+            memset(frame, 0xff, 4);
+        frame[8] = frame[9] = 0xff;
+        for (unsigned i = 0; i < 127; ++i)
+            frame[127] ^= frame[i];
+    }
+    memcpy(image + 63 * 128, image, 128);
+}
+
+int psx_mcd_flush(psx_mcd_t* mcd) {
+    if (!mcd || !mcd->initialized || !mcd->dirty || !mcd->path)
+        return 0;
+
+    size_t size = strlen(mcd->path) + 5;
+    char* temp = malloc(size);
+    if (!temp)
+        return 1;
+    snprintf(temp, size, "%s.tmp", mcd->path);
+    FILE* file = fopen(temp, "wb");
+    int failed = !file;
+    if (file) {
+        failed = fwrite(mcd->buf, 1, MCD_MEMORY_SIZE, file) != MCD_MEMORY_SIZE;
+        if (fflush(file) != 0)
+            failed = 1;
+#ifndef _WIN32
+        if (!failed && fsync(fileno(file)) != 0)
+            failed = 1;
+#endif
+        if (fclose(file) != 0)
+            failed = 1;
+    }
+    if (!failed) {
+#ifdef _WIN32
+        failed = !MoveFileExA(temp, mcd->path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+#else
+        failed = rename(temp, mcd->path) != 0;
+#endif
+    }
+    if (failed) {
+        log_error("memory card save failed: %s (errno=%d)", mcd->path, errno);
+        if (file)
+            remove(temp);
+    } else {
+        mcd->dirty = 0;
+    }
+    free(temp);
+    return failed;
+}
+
+void psx_mcd_update(psx_mcd_t* mcd, int cycles) {
+    if (!mcd || !mcd->dirty || !mcd->path || cycles <= 0)
+        return;
+    mcd->flush_cycles += (uint32_t)cycles;
+    if (mcd->flush_cycles >= 33868800u) {
+        mcd->flush_cycles = 0;
+        psx_mcd_flush(mcd);
+    }
 }
 
 int psx_mcd_init(psx_mcd_t* mcd, const char* path) {
@@ -72,43 +160,78 @@ int psx_mcd_init(psx_mcd_t* mcd, const char* path) {
 
     mcd->state = MCD_STATE_TX_HIZ;
     mcd->flag = 0x08;
-    mcd->path = path;
+
+    /* Fresh instance: generation 0, no cached hash, new session. */
+    mcd->session_id = psx_mcd_new_session_id();
+    mcd->write_generation = 0;
+    mcd->hash_valid = 0;
+
+    /*
+        OWN the path. This used to store the caller's pointer.
+
+        The frontend built its slot paths as local std::strings and passed .c_str(); the moment
+        that scope ended the pointer dangled, and the next flush did fopen(mcd->path, "wb") on
+        whatever had since been written to that memory. What had been written to it was the disc
+        path — so saving a memory card OVERWROTE THE USER'S .cue FILE with 128 KB of card image,
+        destroying the game. Confirmed on device: a 97-byte cue replaced by exactly
+        MCD_MEMORY_SIZE bytes.
+
+        A borrowed string is never safe here: this pointer outlives every caller, is used on a
+        different thread's schedule, and is opened for WRITING.
+    */
+    mcd->path = NULL;
+
+    if (path) {
+        size_t len = strlen(path) + 1;
+        char* owned = malloc(len);
+
+        if (owned) {
+            memcpy(owned, path, len);
+            mcd->path = owned;
+        }
+    }
     mcd->buf = malloc(MCD_MEMORY_SIZE);
     mcd->tx_data_ready = 0;
+    if (!mcd->buf || (path && !mcd->path))
+        return 1;
+    psx_mcd_format(mcd->buf);
 
-    memset(mcd->buf, 0, MCD_MEMORY_SIZE);
-
-    if (!path)
+    if (!path) {
+        mcd->initialized = 1;
         return 0;
+    }
 
     psx_mcd_ensure_parent(path);
 
     FILE* file = fopen(path, "rb");
 
     if (!file) {
-        // Create a blank card if missing
-        file = fopen(path, "wb");
-        if (!file)
+        if (errno != ENOENT)
             return 1;
-
-        fwrite(mcd->buf, 1, MCD_MEMORY_SIZE, file);
-        fclose(file);
-
-        // Re-open for read so subsequent logic flows
-        file = fopen(path, "rb");
-        if (!file)
-            return 1;
+        mcd->initialized = 1;
+        mcd->dirty = 1;
+        int result = psx_mcd_flush(mcd);
+        if (result)
+            mcd->initialized = 0;
+        return result;
     }
-
-    if (!fread(mcd->buf, 1, MCD_MEMORY_SIZE, file))
+    size_t count = fread(mcd->buf, 1, MCD_MEMORY_SIZE, file);
+    int extra = fgetc(file);
+    int failed = count != MCD_MEMORY_SIZE || extra != EOF || ferror(file);
+    if (fclose(file) != 0)
+        failed = 1;
+    if (failed) {
+        log_error("memory card load failed: %s (expected %u bytes)", path, MCD_MEMORY_SIZE);
         return 2;
-
-    fclose(file);
-
+    }
+    mcd->initialized = 1;
     return 0;
 }
 
-uint8_t psx_mcd_read(psx_mcd_t* mcd) {
+/* The pending/latched reply is packed into the existing serialized FIFO
+   field: bit 0 ready, bit 1 pending TX, bit 2 valid latch, bits 8..15 reply.
+   Old states contain only 0/1, so their next read follows the legacy path. */
+static uint8_t psx_mcd_clock_response(psx_mcd_t* mcd) {
     switch (mcd->state) {
         case MCD_STATE_TX_HIZ: mcd->tx_data = 0xff; break;
         case MCD_STATE_TX_FLG:
@@ -120,7 +243,11 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
             }
 
             mcd->tx_data = mcd->flag;
-            mcd->flag = 0x00;
+            if (mcd->mode != 'R' && mcd->mode != 'W' && mcd->mode != 'S') {
+                mcd->tx_data_ready = 0;
+                mcd->state = MCD_STATE_TX_HIZ;
+                return mcd->tx_data;
+            }
             break;
         case MCD_STATE_TX_ID1: mcd->tx_data = 0x5a; break;
         case MCD_STATE_TX_ID2: {
@@ -152,13 +279,19 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
         case MCD_R_STATE_RX_LSB: mcd->tx_data = mcd->msb; break;
         case MCD_R_STATE_TX_ACK1: mcd->tx_data = 0x5c; break;
         case MCD_R_STATE_TX_ACK2: mcd->tx_data = 0x5d; break;
-        case MCD_R_STATE_TX_MSB: mcd->tx_data = mcd->msb; mcd->checksum  = mcd->msb; break;
-        case MCD_R_STATE_TX_LSB: mcd->tx_data = mcd->lsb; mcd->checksum ^= mcd->lsb;
+        case MCD_R_STATE_TX_MSB: mcd->tx_data = mcd->msb < 4 ? mcd->msb : 0xff; mcd->checksum = mcd->msb; break;
+        case MCD_R_STATE_TX_LSB:
+            if (mcd->msb >= 4) {
+                mcd->tx_data_ready = 0;
+                mcd->state = MCD_STATE_TX_HIZ;
+                return 0xff;
+            }
+            mcd->tx_data = mcd->lsb; mcd->checksum ^= mcd->lsb;
                                  mcd->pending_bytes = 128; break;
         case MCD_R_STATE_TX_DATA: {
             --mcd->pending_bytes;
 
-            uint8_t data = mcd->buf[mcd->addr++];
+            uint8_t data = mcd->buf[mcd->addr++ & (MCD_MEMORY_SIZE - 1)];
 
             mcd->checksum ^= data;
 
@@ -193,16 +326,37 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
         /* Write states */
         case MCD_W_STATE_RX_MSB: mcd->tx_data = 0x00; break;
         case MCD_W_STATE_RX_LSB: mcd->tx_data = mcd->msb;
+                                 mcd->checksum = mcd->msb ^ mcd->lsb;
                                  mcd->pending_bytes = 128; break;
         case MCD_W_STATE_RX_DATA: {
+            uint8_t previous = mcd->pending_bytes == 128 ? (uint8_t)mcd->lsb : mcd->tx_data;
              --mcd->pending_bytes;
+            mcd->checksum ^= mcd->rx_data;
+            if (mcd->msb < 4) {
+                mcd->buf[mcd->addr++ & (MCD_MEMORY_SIZE - 1)] = mcd->rx_data;
+                mcd->dirty = 1;
+                mcd->flush_cycles = 0;
+                mcd->flag &= ~0x08;
+            }
 
-            mcd->buf[mcd->addr++] = mcd->rx_data;
+            /*
+                The card image just changed, so any cached content hash is stale.
+                Two stores on a path that already does a bounds-free byte write;
+                nothing here reads mcd->path, touches the file, or can alter what
+                the game observes on the wire.
+
+                The generation counts COMPLETED 128-byte sectors rather than
+                bytes, because a sector is what the card protocol calls a write
+                and what a game's save actually consists of.
+            */
+            mcd->hash_valid = 0;
 
             if (!mcd->pending_bytes) {
+                if (mcd->msb < 4)
+                    mcd->write_generation++;
                 mcd->tx_data = mcd->rx_data;
-
-                break;
+                mcd->state = MCD_W_STATE_RX_CHK;
+                return previous;
             }
 
             // printf("mcd read %02x\n", mcd->rx_data);
@@ -211,10 +365,15 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
             // log_fatal("mcd read %02x", mcd->rx_data);
             // log_set_quiet(1);
 
-            return mcd->rx_data;
+            mcd->tx_data = mcd->rx_data;
+            return previous;
         } break;
-        case MCD_W_STATE_RX_CHK: mcd->tx_data = mcd->rx_data; break;
-        case MCD_W_STATE_RX_CHK2: mcd->tx_data = mcd->rx_data; break;
+        case MCD_W_STATE_RX_CHK: {
+            mcd->checksum ^= mcd->rx_data;
+            mcd->state = MCD_W_STATE_TX_ACK1;
+            return mcd->tx_data;
+        }
+        case MCD_W_STATE_RX_CHK2: mcd->tx_data = 0x5c; mcd->state = MCD_W_STATE_TX_ACK2; return mcd->tx_data;
         case MCD_W_STATE_TX_ACK1: mcd->tx_data = 0x5c; break;
         case MCD_W_STATE_TX_ACK2: mcd->tx_data = 0x5d; break;
         case MCD_W_STATE_TX_MEB: {
@@ -227,8 +386,18 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
 
             // printf("mcd read %02x\n", 'G');
 
-            return 'G';
+            const int result = mcd->msb >= 4 ? 0xff : (mcd->checksum ? 'N' : 'G');
+            return result;
         } break;
+        case MCD_S_STATE_TX_ACK1: mcd->tx_data = 0x5c; break;
+        case MCD_S_STATE_TX_ACK2: mcd->tx_data = 0x5d; break;
+        case MCD_S_STATE_TX_DAT0: mcd->tx_data = 0x04; break;
+        case MCD_S_STATE_TX_DAT1: mcd->tx_data = 0x00; break;
+        case MCD_S_STATE_TX_DAT2: mcd->tx_data = 0x00; break;
+        case MCD_S_STATE_TX_DAT3:
+            mcd->tx_data_ready = 0;
+            mcd->state = MCD_STATE_TX_HIZ;
+            return 0x80;
     }
 
     mcd->tx_data_ready = 1;
@@ -243,7 +412,24 @@ uint8_t psx_mcd_read(psx_mcd_t* mcd) {
     return mcd->tx_data;
 }
 
+uint8_t psx_mcd_read(psx_mcd_t* mcd) {
+    if ((mcd->tx_data_ready & 4) && !(mcd->tx_data_ready & 2)) {
+        return (uint8_t)(mcd->tx_data_ready >> 8);
+    }
+    const uint8_t reply = psx_mcd_clock_response(mcd);
+    mcd->tx_data_ready = (mcd->tx_data_ready & 1) | 4 | ((unsigned)reply << 8);
+    return reply;
+}
+
 void psx_mcd_write(psx_mcd_t* mcd, uint8_t data) {
+    /* The card advances on serial clocks, not on CPU reads of RX. Complete an
+       unread transfer before replacing its input (notably the checksum echo).
+       Keep this pending bit in the already-serialized FIFO field so a state
+       taken between TX and RX retains it without changing the state layout. */
+    if (mcd->tx_data_ready & 2) {
+        (void)psx_mcd_read(mcd);
+    }
+    mcd->tx_data_ready |= 2;
     mcd->rx_data = data;
 
     switch (mcd->state) {
@@ -262,24 +448,178 @@ void psx_mcd_write(psx_mcd_t* mcd, uint8_t data) {
         case MCD_W_STATE_RX_CHK: /* Don't care */ break;
         case MCD_W_STATE_RX_CHK2: /* Don't care */ break;
     }
+#ifdef ARMSX_DIAGNOSTIC_BUILD
+    if (mcd->state == MCD_R_STATE_RX_LSB || mcd->state == MCD_W_STATE_RX_LSB) {
+        uint32_t count = ++mcd->diagnostic_transfers;
+        if (count <= 16 || (count & (count - 1)) == 0 || mcd->msb >= 4)
+            log_info("memory card command=%c sector=%u transfers=%u generation=%u",
+                     mcd->mode, ((unsigned)mcd->msb << 8) | mcd->lsb,
+                     count, mcd->write_generation);
+    }
+#endif
 }
 
 int psx_mcd_query(psx_mcd_t* mcd) {
-    return mcd->tx_data_ready;
+    return mcd->tx_data_ready & 1;
 }
 
 void psx_mcd_reset(psx_mcd_t* mcd) {
     mcd->state = MCD_STATE_TX_HIZ;
+    mcd->tx_data_ready = 0;
+    mcd->pending_bytes = 0;
+}
+
+
+/*
+    Save state.
+
+    Two halves, and they are deliberately separable:
+
+      * The serial transfer state machine (state/mode/addr/checksum/...). Always
+        restored — a state captured mid-card-access must resume mid-access or
+        the game's card driver sees a protocol violation.
+
+      * The 128 KiB card image. Restored by default, because game RAM and the
+        card have to agree: a state that rewinds the game but not the card can
+        leave the in-RAM directory cache describing blocks that no longer look
+        like that. The consequence — loading a state rewinds any card writes
+        made after it was taken, and psx_mcd_destroy() then persists the
+        rewound image — is the standard emulator behaviour, but it IS data loss
+        from the user's point of view, so it can be switched off with
+        psx_mcd_set_state_restores_image(0). The image is always WRITTEN either
+        way, so toggling the setting does not change the file format.
+
+    mcd->path is a borrowed pointer to the host's filename and is never saved.
+*/
+
+static int g_psx_mcd_state_restores_image = 1;
+
+void psx_mcd_set_state_restores_image(int enabled) {
+    g_psx_mcd_state_restores_image = enabled ? 1 : 0;
+}
+
+void psx_mcd_save_state(psx_mcd_t* mcd, psx_state_writer_t* w) {
+    psx_sw_u8(w, mcd->flag);
+    psx_sw_u16(w, mcd->msb);
+    psx_sw_u16(w, mcd->lsb);
+    psx_sw_u16(w, mcd->addr);
+    psx_sw_u8(w, mcd->rx_data);
+    psx_sw_i32(w, mcd->pending_bytes);
+    psx_sw_u8(w, (uint8_t)mcd->mode);
+    psx_sw_i32(w, mcd->state);
+    psx_sw_u8(w, mcd->tx_data);
+    psx_sw_i32(w, mcd->tx_data_ready);
+    psx_sw_u8(w, mcd->checksum);
+
+    psx_sw_u32(w, MCD_MEMORY_SIZE);
+    psx_sw_bytes(w, mcd->buf, MCD_MEMORY_SIZE);
+}
+
+int psx_mcd_load_state(psx_mcd_t* mcd, psx_state_reader_t* r) {
+    uint32_t image_size;
+
+    mcd->flag = psx_sr_u8(r);
+    mcd->msb = psx_sr_u16(r);
+    mcd->lsb = psx_sr_u16(r);
+    mcd->addr = psx_sr_u16(r);
+    mcd->rx_data = psx_sr_u8(r);
+    mcd->pending_bytes = psx_sr_i32(r);
+    mcd->mode = (char)psx_sr_u8(r);
+    mcd->state = psx_sr_i32(r);
+    mcd->tx_data = psx_sr_u8(r);
+    mcd->tx_data_ready = psx_sr_i32(r);
+    mcd->checksum = psx_sr_u8(r);
+
+    image_size = psx_sr_u32(r);
+
+    if (r->error)
+        return PSX_STATE_ERR_TRUNCATED;
+
+    if (image_size != MCD_MEMORY_SIZE)
+        return PSX_STATE_ERR_GEOMETRY;
+
+    if (mcd->state < MCD_STATE_TX_HIZ || mcd->state > MCD_S_STATE_TX_DAT3)
+        return PSX_STATE_ERR_TRUNCATED;
+    if (mcd->pending_bytes < 0 || mcd->pending_bytes > 128 || mcd->msb > 255 || mcd->lsb > 255)
+        return PSX_STATE_ERR_TRUNCATED;
+    if ((mcd->state == MCD_R_STATE_TX_DATA || mcd->state == MCD_W_STATE_RX_DATA) && !mcd->pending_bytes)
+        return PSX_STATE_ERR_TRUNCATED;
+    /* The legacy payload stores the low 16 address bits; sector MSB supplies bit 16. */
+    if (mcd->state == MCD_R_STATE_TX_DATA || mcd->state == MCD_W_STATE_RX_DATA)
+        mcd->addr = (((uint32_t)mcd->msb << 8) | mcd->lsb) * 128 + 128 - mcd->pending_bytes;
+    else
+        mcd->addr |= ((uint32_t)mcd->msb & 2u) << 15;
+
+    if (g_psx_mcd_state_restores_image) {
+        /* Validate the entire image before comparing or replacing it. */
+        if (r->offset > r->size || r->size - r->offset < MCD_MEMORY_SIZE) {
+            r->error = 1;
+            return PSX_STATE_ERR_TRUNCATED;
+        }
+        const uint8_t* image = r->buf + r->offset;
+        /* Runahead usually restores exactly the same card bytes. Retain their
+           cached fingerprint instead of hashing 128 KiB again on the next save.
+           Compare bytes, not hashes, so changed saves still restore exactly. */
+        if (!mcd->hash_valid || memcmp(mcd->buf, image, MCD_MEMORY_SIZE) != 0) {
+            memcpy(mcd->buf, image, MCD_MEMORY_SIZE);
+            mcd->hash_valid = 0;
+        }
+        psx_sr_skip(r, MCD_MEMORY_SIZE);
+
+        mcd->dirty = 1;
+        mcd->flush_cycles = 0;
+        /* Never rewind write_generation: it counts writes this card instance
+           has seen, rather than state loads, and prevents repeated warnings. */
+    } else {
+        psx_sr_skip(r, MCD_MEMORY_SIZE);
+    }
+
+    return r->error ? PSX_STATE_ERR_TRUNCATED : PSX_STATE_OK;
+}
+
+/* --------------------------------------------------------------------------
+   Fingerprint accessors. Read-only: see the contract in mcd.h.
+   -------------------------------------------------------------------------- */
+
+uint64_t psx_mcd_content_hash(psx_mcd_t* mcd) {
+    if (!mcd || !mcd->buf)
+        return 0;
+
+    if (!mcd->hash_valid) {
+        mcd->hash_cached = psx_state_fnv1a(mcd->buf, MCD_MEMORY_SIZE, PSX_STATE_FNV_SEED);
+        mcd->hash_valid = 1;
+    }
+
+    return mcd->hash_cached;
+}
+
+uint32_t psx_mcd_write_generation(const psx_mcd_t* mcd) {
+    return mcd ? mcd->write_generation : 0;
+}
+
+uint64_t psx_mcd_session_id(const psx_mcd_t* mcd) {
+    return mcd ? mcd->session_id : 0;
+}
+
+int64_t psx_mcd_file_mtime(const psx_mcd_t* mcd) {
+    struct stat info;
+
+    if (!mcd || !mcd->path || !*mcd->path)
+        return 0;
+
+    /* stat() only. The path is read, never re-owned, freed or opened here. */
+    if (stat(mcd->path, &info) != 0)
+        return 0;
+
+    return (int64_t)info.st_mtime;
 }
 
 void psx_mcd_destroy(psx_mcd_t* mcd) {
-    FILE* file = mcd->path ? fopen(mcd->path, "wb") : NULL;
-
-    if (file) {
-        fwrite(mcd->buf, 1, MCD_MEMORY_SIZE, file);
-        fclose(file);
-    }
+    if (!mcd)
+        return;
+    psx_mcd_flush(mcd);
 
     free(mcd->buf);
+    free(mcd->path);
     free(mcd);
 }

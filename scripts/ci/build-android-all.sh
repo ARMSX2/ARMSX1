@@ -29,5 +29,12 @@ done
 (
     cd "$repo_root"
     export ARMSX_SKIP_NATIVE_PREPARE=1
-    "$GRADLE_BIN" -p android --no-daemon assembleDebug
+    # assembleGithubDebug, NOT assembleDebug. The app has a "store" flavor dimension
+    # (github = sideload APK with the in-app updater, play = updater-free, for an app bundle), so
+    # bare `assembleDebug` is now an aggregate that builds BOTH and the output moved from
+    # app/build/outputs/apk/debug/app-debug.apk to
+    # app/build/outputs/apk/github/debug/app-github-debug.apk. CI publishes the sideload APK, so it
+    # wants the github flavor specifically. Anything still pointing at the old path silently
+    # publishes a stale artifact left over from before the split.
+    "$GRADLE_BIN" -p android --no-daemon assembleGithubDebug
 )

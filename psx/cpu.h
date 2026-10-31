@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "bus.h"
+#include "state.h"
 
 #define PSX_CPU_CPS 33868800 // 33868800 Clocks/s
 #define PSX_CPU_FREQ 33.868800f // 33.868800 MHz
@@ -166,6 +167,8 @@ struct __attribute__((__packed__)) psx_cpu_t {
     psx_cpu_kcall_hook_t a_function_hook;
     psx_cpu_kcall_hook_t b_function_hook;
     psx_cpu_execution_mode_t execution_mode;
+    /* Host compatibility policy, not serialized emulated machine state. */
+    unsigned base_instruction_cycles;
     struct psx_cpu_cache_t* cache;
 };
 
@@ -242,17 +245,44 @@ void psx_cpu_init(psx_cpu_t*, psx_bus_t*);
 void psx_cpu_destroy(psx_cpu_t*);
 void psx_cpu_cycle(psx_cpu_t*);
 void psx_cpu_set_irq_pending(psx_cpu_t*);
-void psx_cpu_load_state(psx_cpu_t*, FILE*);
-void psx_cpu_save_state(psx_cpu_t*, FILE*);
+/* Save state. Everything up to (not including) psx_cpu_t::bus is machine
+   state; the bus pointer, the kcall hooks, the execution mode and the
+   cached-interpreter block cache are host/derived and are preserved in place
+   across a load. */
+void psx_cpu_save_state(psx_cpu_t*, psx_state_writer_t*);
+int psx_cpu_load_state(psx_cpu_t*, psx_state_reader_t*);
+int psx_cpu_load_state_keep_decode_cache(psx_cpu_t*, psx_state_reader_t*);
 void psx_cpu_fetch(psx_cpu_t*);
 void psx_cpu_set_a_kcall_hook(psx_cpu_t*, psx_cpu_kcall_hook_t);
 void psx_cpu_set_b_kcall_hook(psx_cpu_t*, psx_cpu_kcall_hook_t);
 void psx_cpu_set_execution_mode(psx_cpu_t*, psx_cpu_execution_mode_t);
+void psx_cpu_set_base_instruction_cycles(psx_cpu_t*, unsigned);
 psx_cpu_execution_mode_t psx_cpu_get_execution_mode(const psx_cpu_t*);
 void psx_cpu_invalidate_cache(psx_cpu_t*);
 void psx_cpu_invalidate_range(psx_cpu_t*, uint32_t, uint32_t);
 psx_cpu_cache_stats_t psx_cpu_get_cache_stats(const psx_cpu_t*);
 int psx_cpu_execute(psx_cpu_t*);
+
+/*
+    Widescreen hack ([video] widescreen_hack).
+
+    The GTE projects with OFX + IR1*(H/SZ3): OFX is the screen centre, so scaling ONLY the
+    IR1 product shrinks projected X about that centre without moving it. Shrinking by
+    (4/3)/(16/9) = 3/4 and then presenting the result stretched to 16:9 puts every 3D
+    proportion back where it started and widens the visible field instead — which is the
+    whole point. It is a HACK, not emulation: 2D and UI elements are not projected through
+    the GTE at all, so they still stretch with the display aspect.
+
+    Process-global, matching psx/pgxp.c's reasoning (one machine per process in every
+    frontend here) and cheap enough to test per RTPS/RTPT: one predictable branch on a
+    global that is 0 in the shipping default. Read directly by the GTE macros in cpu.c.
+*/
+extern int g_psx_widescreen_hack;
+
+#define psx_widescreen_active() (g_psx_widescreen_hack)
+
+void psx_cpu_set_widescreen_hack(int enabled);
+int  psx_cpu_widescreen_hack(void);
 
 /*
     00h INT     Interrupt

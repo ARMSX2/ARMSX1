@@ -20,7 +20,7 @@ if (!(Test-Path $SDL2_ROOT)) {
 mkdir -Force -Path bin > $null
 mkdir -Force -Path "bin\icons" > $null
 
-cmake -S third_party/fuse-lib -B $FSUI_BUILD_DIR -G "MinGW Makefiles" `
+cmake -S third_party/fsui-lib -B $FSUI_BUILD_DIR -G "MinGW Makefiles" `
     -DFSUI_BUILD_SAMPLES=OFF `
     -DFSUI_PLATFORM_BACKEND=SDL2 `
     -DFSUI_USE_SYSTEM_SDL2=ON `
