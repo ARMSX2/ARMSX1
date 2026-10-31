@@ -15,6 +15,10 @@ import static org.junit.Assert.*;
 /** Private output buffers: validates allocation policy and real posted pixels. */
 @RunWith(AndroidJUnit4.class)
 public class GpuEfficiencyTest {
+    @Test public void textureFeedbackAndHdRasterMatchIndependentPixels(){
+        assertTrue(HardwareRasterizer.verify().contains("match Java VRAM"));
+        assertTrue(HardwareRasterizer.verifyEnhanced(null).contains("Canonical VRAM matches"));
+    }
     @Test public void drawBatchesCombineWithoutChangingTransferOrder(){
         for(int scale:new int[]{1,3})try(HardwareRasterizer hardware=new HardwareRasterizer(scale)){
             int[] expected=new int[1024*512],actual=new int[expected.length],environment={0,0,0,0,1023|(511<<10),0,0};

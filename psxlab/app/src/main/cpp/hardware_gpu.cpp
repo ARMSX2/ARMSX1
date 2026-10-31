@@ -30,6 +30,14 @@ GLuint program(const char* compute,const char* vertex=nullptr,const char* fragme
 std::string scaledShader(const char* source,int scale){std::string text(source),uniform="uniform int scale;";size_t at=text.find(uniform);if(at==std::string::npos)throw std::runtime_error("HD scale declaration missing");text.replace(at,uniform.size(),"const int scale="+std::to_string(scale)+";");return text;}
 void glCheck(){GLenum error=glGetError();if(error!=GL_NO_ERROR)throw std::runtime_error("OpenGL ES error "+std::to_string(error));}
 struct Rect {int x0,y0,x1,y1;bool valid()const{return x0<=x1&&y0<=y1;}bool intersects(const Rect& b)const{return valid()&&b.valid()&&x0<=b.x1&&x1>=b.x0&&y0<=b.y1&&y1>=b.y0;}};
+// A wrapped texture rectangle and CLUT each split into at most four regions.
+// This fixed scratch storage avoids a heap allocation for each primitive.
+struct RectList {
+    std::array<Rect,8> values{};size_t count=0;
+    void push_back(const Rect& value){if(count==values.size())throw std::runtime_error("GPU texture region capacity exceeded");values[count++]=value;}
+    const Rect* begin()const{return values.data();}
+    const Rect* end()const{return values.data()+count;}
+};
 struct Primitive {int q[64]{};Rect bounds()const{return{q[4],q[5],q[6],q[7]};}};
 class HardwareGpu {
     // Uniform locations belong to a linked program and remain valid for its lifetime.
@@ -62,7 +70,7 @@ class HardwareGpu {
     void barrier(){glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT|GL_FRAMEBUFFER_BARRIER_BIT|GL_TEXTURE_FETCH_BARRIER_BIT);}
     void download(){flush();resolveNative();readbacks++;barrier();glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);void* p=glMapBufferRange(GL_SHADER_STORAGE_BUFFER,0,sizeof(cpu),GL_MAP_READ_BIT);if(!p)throw std::runtime_error("VRAM readback failed");std::memcpy(cpu.data(),p,sizeof(cpu));glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);}
     void uploadCpu(bool seedHd=true){softwareUploadKnown=false;uploadBytes+=sizeof(cpu);contentRevision++;displayChanged=true;flushHd();nativeDirty={1023,511,0,0};nativeDirtyTiles.fill(0);glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,sizeof(cpu),cpu.data());barrier();if(seedHd&&scale>1)transferHd(4,0,0,1024,512,0,0,0,0);}
-    static void split(std::vector<Rect>& out,int x,int y,int w,int h){int firstW=std::min(w,1024-x),firstH=std::min(h,512-y);out.push_back({x,y,x+firstW-1,y+firstH-1});if(w>firstW)out.push_back({0,y,w-firstW-1,y+firstH-1});if(h>firstH){out.push_back({x,0,x+firstW-1,h-firstH-1});if(w>firstW)out.push_back({0,0,w-firstW-1,h-firstH-1});}}
+    template<class Regions> static void split(Regions& out,int x,int y,int w,int h){int firstW=std::min(w,1024-x),firstH=std::min(h,512-y);out.push_back({x,y,x+firstW-1,y+firstH-1});if(w>firstW)out.push_back({0,y,w-firstW-1,y+firstH-1});if(h>firstH){out.push_back({x,0,x+firstW-1,h-firstH-1});if(w>firstW)out.push_back({0,0,w-firstW-1,h-firstH-1});}}
     static std::pair<int,int> textureRange(const Primitive& p,int component,int mask,int offset,bool enhanced){
         i64 a=p.q[28+component],dx=i64(p.q[33+component])*(p.q[6]-p.q[4]+int(enhanced)),dy=i64(p.q[38+component])*(p.q[7]-p.q[5]+int(enhanced));
         i64 lo=std::min({a,a+dx,a+dy,a+dx+dy})>>16,hi=std::max({a,a+dx,a+dy,a+dx+dy})>>16;
@@ -70,12 +78,12 @@ class HardwareGpu {
         if(mask==0&&(lo>>8)==(hi>>8))return{int(lo)&255,int(hi)&255};
         int low=255,high=0;for(i64 v=lo;v<=hi;v++){int mapped=((int(v)&255)&~mask)|offset;low=std::min(low,mapped);high=std::max(high,mapped);}return{low,high};
     }
-    std::vector<Rect> textureReads(const Primitive& p)const{std::vector<Rect> out;if(!(p.q[1]&4)||!p.bounds().valid())return out;int page=p.q[9],depth=(page>>7)&3,window=p.q[10],mx=(window&31)*8,my=((window>>5)&31)*8,shift=depth>=2?0:depth==1?1:2;
+    RectList textureReads(const Primitive& p)const{RectList out;if(!(p.q[1]&4)||!p.bounds().valid())return out;int page=p.q[9],depth=(page>>7)&3,window=p.q[10],mx=(window&31)*8,my=((window>>5)&31)*8,shift=depth>=2?0:depth==1?1:2;
         auto [u0,u1]=textureRange(p,3,mx,((window>>10)&31)*8&mx,scale>1);auto [v0,v1]=textureRange(p,4,my,((window>>15)&31)*8&my,scale>1);
         split(out,((page&15)*64+(u0>>shift))&1023,(((page>>4)&1)*256+v0)&511,(u1>>shift)-(u0>>shift)+1,v1-v0+1);
         if(depth<2){int clut=p.q[2];split(out,(clut&63)*16,(clut>>6)&511,depth==0?16:256,1);}return out;}
-    bool feedback(const Primitive& p)const{for(const Rect& r:textureReads(p))if(r.intersects(p.bounds()))return true;return false;}
-    void add(const Primitive& p){if(!p.bounds().valid())return;std::vector<Rect> newReads=textureReads(p);bool hazard=false;for(const auto& r:newReads)for(const auto& w:writes)hazard|=r.intersects(w);for(const auto& w:reads)hazard|=w.intersects(p.bounds());if(hazard||pendingCount==32)flush();pending[pendingCount++]=p;reads.insert(reads.end(),newReads.begin(),newReads.end());writes.push_back(p.bounds());}
+    bool feedback(const Primitive& p,const RectList& ranges)const{for(const Rect& r:ranges)if(r.intersects(p.bounds()))return true;return false;}
+    void add(const Primitive& p,const RectList& newReads){if(!p.bounds().valid())return;bool hazard=false;for(const auto& r:newReads)for(const auto& w:writes)hazard|=r.intersects(w);for(const auto& w:reads)hazard|=w.intersects(p.bounds());if(hazard||pendingCount==32)flush();pending[pendingCount++]=p;reads.insert(reads.end(),newReads.begin(),newReads.end());writes.push_back(p.bounds());}
     Primitive base(int op,int clut,bool dither,const int* env,Rect bounds,int type){Primitive p;p.q[0]=type;p.q[1]=op;p.q[2]=clut;p.q[3]=dither;p.q[4]=bounds.x0;p.q[5]=bounds.y0;p.q[6]=bounds.x1;p.q[7]=bounds.y1;std::copy_n(env,7,p.q+8);return p;}
     static Rect clip(Rect bounds,const int* env){return{std::max(bounds.x0,env[3]&1023),std::max(bounds.y0,(env[3]>>10)&511),std::min(bounds.x1,env[4]&1023),std::min(bounds.y1,(env[4]>>10)&511)};}
     Primitive triangle(Vertex a,Vertex b,Vertex c,int op,int clut,const int* env){Rect bounds{std::min({a.x,b.x,c.x}),std::min({a.y,b.y,c.y}),std::max({a.x,b.x,c.x})-1,std::max({a.y,b.y,c.y})-1};i64 area=edge(a,b,c.x,c.y);if(!area||bounds.x1-bounds.x0+1>=1024||bounds.y1-bounds.y0+1>=512){Primitive p;p.q[6]=-1;return p;}if(area<0){std::swap(b,c);area=-area;}bounds=clip(bounds,env);bool shade=op&16,tex=op&4;Primitive p=base(op,clut,(env[1]&512)&&(shade||(tex&&!(op&1))),env,bounds,0);
@@ -131,7 +139,7 @@ public:
         pendingCount=0;reads.clear();writes.clear();
     }
     void draw(const int* packet,const int* env){current();int op=uint32_t(packet[0])>>24;Primitive p[2];int n=1;if(op<0x40){int at=1,color=packet[0],clut=0;bool shade=op&16,tex=op&4;Vertex v[4];int vertices=(op&8)?4:3;for(int i=0;i<vertices;i++){if(i&&shade)color=packet[at++];int xy=packet[at++],uv=tex?packet[at++]:0;if(tex&&i==0)clut=uint32_t(uv)>>16;v[i]=Vertex(xy,color,uv,env[5]);}p[0]=triangle(v[0],v[1],v[2],op,clut,env);if(vertices==4){p[1]=triangle(v[1],v[2],v[3],op,clut,env);n=2;}}else if(op<0x60)p[0]=line(packet,op,env);else p[0]=rectangle(packet,op,env);
-        draws++;contentRevision++;for(int i=0;i<n;i++)dirtyDisplay(p[i].bounds());bool overlap=false;for(int i=0;i<n;i++)if(p[i].bounds().valid())overlap|=this->feedback(p[i]);if(overlap){feedbackDraws++;flush();serialDispatch=true;for(int i=0;i<n;i++)if(p[i].bounds().valid()){pending[0]=p[i];pendingCount=1;flush();}serialDispatch=false;}else for(int i=0;i<n;i++)add(p[i]);
+        draws++;contentRevision++;for(int i=0;i<n;i++)dirtyDisplay(p[i].bounds());RectList ranges[2];bool overlap=false;for(int i=0;i<n;i++)if(p[i].bounds().valid()){ranges[i]=textureReads(p[i]);overlap|=this->feedback(p[i],ranges[i]);}if(overlap){feedbackDraws++;flush();serialDispatch=true;for(int i=0;i<n;i++)if(p[i].bounds().valid()){pending[0]=p[i];pendingCount=1;flush();}serialDispatch=false;}else for(int i=0;i<n;i++)add(p[i],ranges[i]);
     }
     void batch(const int* words,int length){for(int at=0;at<length;){int n=words[at++];if(n<2||n>12||at+n+7>length)throw std::runtime_error("Invalid hardware raster batch");int op=uint32_t(words[at])>>24,expected=op>=0x20&&op<0x40?((op&16)?((op&8)?4:3)*(2+((op>>2)&1)):1+((op&8)?4:3)*(1+((op>>2)&1))):op>=0x40&&op<0x60?((op&16)?4:3):op>=0x60&&op<0x80?2+((op>>2)&1)+((op&24)==0?1:0):0;if(n!=expected)throw std::runtime_error("Invalid hardware packet length");draw(words+at,words+at+n);at+=n+7;}} // Keep pending primitives across JNI batches; hazards, capacity, transfers and scanout flush them.
     void readRam(int* out){current();download();std::copy(cpu.begin(),cpu.end(),out);}
@@ -158,7 +166,7 @@ public:
     void verifyComputePath(){current();flush();resolveNative();fastHd=false;}
     void fill(int color,int xy,int wh){current();flush();int x=xy&0x3f0,y=(uint32_t(xy)>>16)&511,w=((wh&1023)+15)&~15,h=(uint32_t(wh)>>16)&511;if(!w||!h)return;int value=((color&255)>>3)|(((color>>8)&255)>>3<<5)|(((color>>16)&255)>>3<<10);transfer(0,x,y,w,h,value,0,0,0);}
     void upload(const int* words,int n,int start,int x,int y,int w,int total,int mask){current();flush();int count=std::min(n*2,total-start);if(count<=0)return;dirtyDisplayRegion(x,y,w,(total+w-1)/w);glBindBuffer(GL_SHADER_STORAGE_BUFFER,commandBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,n*4,words);transfer(1,x,y,w,(count+w-1)/w,0,mask,start,count);}
-    void copy(int from,int to,int wh,int mask){current();flush();int x=to&1023,y=(uint32_t(to)>>16)&511,sx=from&1023,sy=(uint32_t(from)>>16)&511,w=((wh-1)&1023)+1,h=(((uint32_t(wh)>>16)-1)&511)+1;std::vector<Rect> source,dest;split(source,sx,sy,w,h);split(dest,x,y,w,h);bool overlap=false;for(const auto& a:source)for(const auto& b:dest)overlap|=a.intersects(b);if(overlap&&(sx==x||sy==y)){transfer(3,x,y,w,h,sx,sy,mask,0);}else if(overlap){download();for(int row=0;row<h;row++)for(int col=0;col<w;col++){int at=((y+row)&511)*1024+((x+col)&1023);if(!(mask&2)||!(cpu[at]&32768))cpu[at]=cpu[((sy+row)&511)*1024+((sx+col)&1023)]|((mask&1)<<15);}uploadCpu(false);transferHd(4,x,y,w,h,0,0,0,0);}else transfer(2,x,y,w,h,sx,sy,mask,0);}
+    void copy(int from,int to,int wh,int mask){current();flush();int x=to&1023,y=(uint32_t(to)>>16)&511,sx=from&1023,sy=(uint32_t(from)>>16)&511,w=((wh-1)&1023)+1,h=(((uint32_t(wh)>>16)-1)&511)+1;RectList source,dest;split(source,sx,sy,w,h);split(dest,x,y,w,h);bool overlap=false;for(const auto& a:source)for(const auto& b:dest)overlap|=a.intersects(b);if(overlap&&(sx==x||sy==y)){transfer(3,x,y,w,h,sx,sy,mask,0);}else if(overlap){download();for(int row=0;row<h;row++)for(int col=0;col<w;col++){int at=((y+row)&511)*1024+((x+col)&1023);if(!(mask&2)||!(cpu[at]&32768))cpu[at]=cpu[((sy+row)&511)*1024+((sx+col)&1023)]|((mask&1)<<15);}uploadCpu(false);transferHd(4,x,y,w,h,0,0,0,0);}else transfer(2,x,y,w,h,sx,sy,mask,0);}
     void setCounting(bool on){current();flush();resolveNative();countEnabled=on;fallbackPixels=0;uint32_t zero=0;glBindBuffer(GL_SHADER_STORAGE_BUFFER,counterBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,4,&zero);}
     i64 pixels(){current();flush();barrier();glBindBuffer(GL_SHADER_STORAGE_BUFFER,counterBuffer);auto* p=static_cast<uint32_t*>(glMapBufferRange(GL_SHADER_STORAGE_BUFFER,0,4,GL_MAP_READ_BIT));if(!p)throw std::runtime_error("Counter readback failed");uint32_t v=*p;glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);return fallbackPixels+v;}
     std::pair<int,int> scanout(const int* state){
