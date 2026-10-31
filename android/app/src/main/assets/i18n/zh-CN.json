@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (zh-CN); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "返回上一级文件夹",
+  "renderer.shaderChain.scanning": "正在搜索预设…",
+  "renderer.shaderPack.indexing": "正在索引预设…",
   "settings.changedFromDefault": "非默认",
   "tab.app": "应用",
   "tab.performance": "性能",

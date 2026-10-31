@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (pl); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Folder wyżej",
+  "renderer.shaderChain.scanning": "Wyszukiwanie presetów…",
+  "renderer.shaderPack.indexing": "Indeksowanie presetów…",
   "settings.changedFromDefault": "Niedomyślne",
   "tab.app": "Aplikacja",
   "tab.performance": "Wydajność",

@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (tr); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Bir klasör yukarı",
+  "renderer.shaderChain.scanning": "Hazır ayarlar aranıyor…",
+  "renderer.shaderPack.indexing": "Hazır ayarlar dizinleniyor…",
   "settings.changedFromDefault": "Varsayılan değil",
   "tab.app": "Uygulama",
   "tab.performance": "Performans",

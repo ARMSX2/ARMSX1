@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (ko); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "상위 폴더로",
+  "renderer.shaderChain.scanning": "프리셋 검색 중…",
+  "renderer.shaderPack.indexing": "프리셋 색인 중…",
   "settings.changedFromDefault": "기본값 아님",
   "tab.app": "앱",
   "tab.performance": "성능",

@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (vi); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Lên một thư mục",
+  "renderer.shaderChain.scanning": "Đang tìm preset…",
+  "renderer.shaderPack.indexing": "Đang lập chỉ mục preset…",
   "settings.changedFromDefault": "Không mặc định",
   "tab.app": "Ứng dụng",
   "tab.performance": "Hiệu năng",

@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (es); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Subir una carpeta",
+  "renderer.shaderChain.scanning": "Buscando presets…",
+  "renderer.shaderPack.indexing": "Indexando presets…",
   "settings.changedFromDefault": "No predeterminado",
   "tab.app": "App",
   "tab.performance": "Rendimiento",

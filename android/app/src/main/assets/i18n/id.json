@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (id); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Naik satu folder",
+  "renderer.shaderChain.scanning": "Mencari preset…",
+  "renderer.shaderPack.indexing": "Mengindeks preset…",
   "settings.changedFromDefault": "Bukan bawaan",
   "tab.app": "Aplikasi",
   "tab.performance": "Performa",

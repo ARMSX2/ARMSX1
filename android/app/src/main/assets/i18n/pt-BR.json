@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (pt-BR); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Acima de uma pasta",
+  "renderer.shaderChain.scanning": "Procurando predefinições…",
+  "renderer.shaderPack.indexing": "Indexando predefinições…",
   "settings.changedFromDefault": "Não padrão",
   "tab.app": "App",
   "tab.performance": "Desempenho",

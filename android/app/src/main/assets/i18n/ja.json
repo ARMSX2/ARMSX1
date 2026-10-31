@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (ja); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "1つ上のフォルダへ",
+  "renderer.shaderChain.scanning": "プリセットを検索中…",
+  "renderer.shaderPack.indexing": "プリセットをインデックス中…",
   "settings.changedFromDefault": "デフォルト以外",
   "tab.app": "アプリ",
   "tab.performance": "パフォーマンス",

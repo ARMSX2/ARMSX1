@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (th); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "ย้อนขึ้นหนึ่งโฟลเดอร์",
+  "renderer.shaderChain.scanning": "กำลังค้นหาพรีเซ็ต…",
+  "renderer.shaderPack.indexing": "กำลังจัดทำดัชนีพรีเซ็ต…",
   "settings.changedFromDefault": "ไม่ใช่ค่าเริ่มต้น",
   "tab.app": "แอป",
   "tab.performance": "ประสิทธิภาพ",

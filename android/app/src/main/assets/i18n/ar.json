@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (ar); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "الصعود مجلداً واحداً",
+  "renderer.shaderChain.scanning": "جارٍ البحث عن الإعدادات المسبقة…",
+  "renderer.shaderPack.indexing": "جارٍ فهرسة الإعدادات المسبقة…",
   "settings.changedFromDefault": "ليس الافتراضي",
   "tab.app": "التطبيق",
   "tab.performance": "الأداء",

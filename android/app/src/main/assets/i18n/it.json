@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (it); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Cartella superiore",
+  "renderer.shaderChain.scanning": "Ricerca dei preset…",
+  "renderer.shaderPack.indexing": "Indicizzazione dei preset…",
   "settings.changedFromDefault": "Non predefinito",
   "tab.app": "App",
   "tab.performance": "Prestazioni",

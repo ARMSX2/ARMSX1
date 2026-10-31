@@ -1,5 +1,8 @@
 {
   "_note": "Machine-translated (fr); report bad strings to fix.",
+  "renderer.shaderChain.folder.up": "Dossier parent",
+  "renderer.shaderChain.scanning": "Recherche de préréglages…",
+  "renderer.shaderPack.indexing": "Indexation des préréglages…",
   "settings.changedFromDefault": "Non par défaut",
   "tab.app": "Appli",
   "tab.performance": "Performance",
