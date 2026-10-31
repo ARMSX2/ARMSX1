@@ -217,6 +217,9 @@ fun HomeScreen(
     val shortcutScope = rememberCoroutineScope()
     var showClearRecentsConfirm by remember { mutableStateOf(false) }
     val editFolderLabel = str("collections.edit")
+    // Read here, in composition, so toggling it recomposes the library (a read inside the
+    // SideEffect below would not subscribe to it).
+    val showCollections = LibraryChromePreferences.showCollections.value
     val folderEntries = buildList {
         fun addFolder(item: com.armsx2.data.library.GameCollection) {
             val members = state.allGames.filter { it.uri.toString() in item.gameUris }
@@ -247,7 +250,7 @@ fun HomeScreen(
     }
     SideEffect {
         HomeInputController.setCollectionActions(
-            if (state.initialized) folderEntries.map { it.action } else emptyList(),
+            if (state.initialized && showCollections) folderEntries.map { it.action } else emptyList(),
             folderEntries.map { it.edit }, keys = folderEntries.map { it.key }, collapse = {
                 when {
                     expandedCollectionId != null -> {
@@ -586,16 +589,23 @@ fun HomeScreen(
                                 customNames = com.armsx2.CustomNames.enabled.value,
                                 englishTitles = EnglishTitles.enabled.value,
                                 showHidden = com.armsx2.HiddenGames.showHidden.value,
+                                showCollections = showCollections,
                                 hasCustomBackground = LibraryBackground.uri.value != null,
                                 onDismiss = { overflowMenu = false },
                                 onOpenNavigation = onOpenMenu,
                                 onSort = viewModel::setSort,
-                                onCollections = { foldersExpanded = true; com.armsx2.data.library.GameCollections.select(null) },
+                                // Opening Collections also reveals them: with the row hidden it would
+                                // otherwise expand something that is not on screen.
+                                onCollections = {
+                                    LibraryChromePreferences.setShowCollections(true)
+                                    foldersExpanded = true; com.armsx2.data.library.GameCollections.select(null)
+                                },
                                 onToggleCoverStyle = { CoverArtStyle.set(!CoverArtStyle.use3d.value) },
                                 onToggleGridNames = { GridLabels.set(!GridLabels.show.value) },
                                 onToggleCustomNames = { com.armsx2.CustomNames.set(!com.armsx2.CustomNames.enabled.value) },
                                 onToggleEnglishTitles = { EnglishTitles.set(!EnglishTitles.enabled.value) },
                                 onToggleShowHidden = { viewModel.setShowHidden(!com.armsx2.HiddenGames.showHidden.value) },
+                                onToggleShowCollections = { LibraryChromePreferences.setShowCollections(!showCollections) },
                                 onChooseBackground = { backgroundPicker.launch(arrayOf("image/*")) },
                                 onClearBackground = LibraryBackground::clear,
                                 onExitApp = { showExitConfirm = true },
@@ -652,7 +662,7 @@ fun HomeScreen(
                     }
                 }
 
-                if (state.initialized) {
+                if (state.initialized && showCollections) {
                     item(key = "home-collections", span = { GridItemSpan(maxLineSpan) }) {
                         val focused = libraryFocus && HomeInputController.zone.value == HomeZone.Collections
                         Column {
@@ -1040,6 +1050,7 @@ private fun LibraryOverflowMenu(
     customNames: Boolean,
     englishTitles: Boolean,
     showHidden: Boolean,
+    showCollections: Boolean,
     hasCustomBackground: Boolean,
     onDismiss: () -> Unit,
     onOpenNavigation: () -> Unit,
@@ -1050,6 +1061,7 @@ private fun LibraryOverflowMenu(
     onToggleCustomNames: () -> Unit,
     onToggleEnglishTitles: () -> Unit,
     onToggleShowHidden: () -> Unit,
+    onToggleShowCollections: () -> Unit,
     onChooseBackground: () -> Unit,
     onClearBackground: () -> Unit,
     onExitApp: () -> Unit,
@@ -1077,6 +1089,13 @@ private fun LibraryOverflowMenu(
             fontWeight = FontWeight.Bold,
         )
         LibraryOverflowItem("▤", str("collections.title")) { closeThen(onCollections) }
+        LibraryOverflowItem(
+            glyph = "◫",
+            label = str("games.overflow.showCollections"),
+            trailing = if (showCollections) str("common.on") else str("common.off"),
+        ) {
+            closeThen(onToggleShowCollections)
+        }
         OverflowSeparator()
         LibraryOverflowItem(
             glyph = "A–Z",
