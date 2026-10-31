@@ -6,6 +6,13 @@ import java.util.*;
 /** Original GLES integer rasterizer; all calls belong to the GPU worker thread. */
 public final class HardwareRasterizer implements AutoCloseable {
     private long handle;
+    private boolean profiling;
+    private final NativeTiming timing=new NativeTiming();
+    void configureProfiling(boolean enabled){if(handle!=0&&profiling!=enabled){setProfilingNative(handle,enabled);profiling=enabled;if(enabled)timing.reset();}}
+    java.util.Map<String,Object> nativeTimings(){return timing.sample(timingsNative(handle));}
+    private static native void setProfilingNative(long handle,boolean enabled);
+    private static native long[] timingsNative(long handle);
+
     private final int scale;
     public HardwareRasterizer(){this(1);}
     public HardwareRasterizer(int scale){if(!NativeRasterizer.AVAILABLE)throw new IllegalStateException("Native GPU unavailable");if(scale<1||scale>5)throw new IllegalArgumentException("Internal scale must be 1–5");this.scale=scale;handle=create(scale);}

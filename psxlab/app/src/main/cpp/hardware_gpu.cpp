@@ -1,4 +1,5 @@
 #include "display_layout.h"
+#include "native_timing.h"
 // Original OpenGL ES compute backend for PSX Lab's integer raster rules.
 #include "raster_core.h"
 #include "gpu_shaders.h"
@@ -40,6 +41,7 @@ struct RectList {
 };
 struct Primitive {int q[64]{};Rect bounds()const{return{q[4],q[5],q[6],q[7]};}};
 class HardwareGpu {
+    NativeTiming timing;
     // Uniform locations belong to a linked program and remain valid for its lifetime.
     struct Uniforms { GLint dirtyRows=-1,bounds=-1,count=-1,countPixels=-1,data=-1,dimensions=-1,display=-1,enhanced=-1,flip=-1,frameTexture=-1,operation=-1,serialMode=-1,shape=-1,smoothImage=-1,status=-1; };
     Uniforms transferProgramUniforms,hdNativeResolveProgramUniforms,hdTransferProgramUniforms,hdDrawProgramUniforms,drawProgramUniforms,hdPresentProgramUniforms,presentProgramUniforms,scanoutProgramUniforms,hdScanoutProgramUniforms;
@@ -68,7 +70,7 @@ class HardwareGpu {
     void current(){if(eglGetCurrentContext()!=context&&!eglMakeCurrent(display,pbuffer,pbuffer,context))throw std::runtime_error("EGL context unavailable");}
     void bindBuffers(){glBindBufferBase(GL_SHADER_STORAGE_BUFFER,0,ramBuffer);glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,commandBuffer);glBindBufferBase(GL_SHADER_STORAGE_BUFFER,2,counterBuffer);if(hdTexture)glBindImageTexture(1,hdTexture,0,GL_FALSE,0,GL_READ_WRITE,GL_R32UI);}
     void barrier(){glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT|GL_FRAMEBUFFER_BARRIER_BIT|GL_TEXTURE_FETCH_BARRIER_BIT);}
-    void download(){flush();resolveNative();readbacks++;barrier();glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);void* p=glMapBufferRange(GL_SHADER_STORAGE_BUFFER,0,sizeof(cpu),GL_MAP_READ_BIT);if(!p)throw std::runtime_error("VRAM readback failed");std::memcpy(cpu.data(),p,sizeof(cpu));glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);}
+    void download(){NativeTiming::Scope measured(timing,NativeTiming::GPU_READBACK);flush();resolveNative();readbacks++;barrier();glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);void* p=glMapBufferRange(GL_SHADER_STORAGE_BUFFER,0,sizeof(cpu),GL_MAP_READ_BIT);if(!p)throw std::runtime_error("VRAM readback failed");std::memcpy(cpu.data(),p,sizeof(cpu));glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);}
     void uploadCpu(bool seedHd=true){softwareUploadKnown=false;uploadBytes+=sizeof(cpu);contentRevision++;displayChanged=true;flushHd();nativeDirty={1023,511,0,0};nativeDirtyTiles.fill(0);glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,sizeof(cpu),cpu.data());barrier();if(seedHd&&scale>1)transferHd(4,0,0,1024,512,0,0,0,0);}
     template<class Regions> static void split(Regions& out,int x,int y,int w,int h){int firstW=std::min(w,1024-x),firstH=std::min(h,512-y);out.push_back({x,y,x+firstW-1,y+firstH-1});if(w>firstW)out.push_back({0,y,w-firstW-1,y+firstH-1});if(h>firstH){out.push_back({x,0,x+firstW-1,h-firstH-1});if(w>firstW)out.push_back({0,0,w-firstW-1,h-firstH-1});}}
     static std::pair<int,int> textureRange(const Primitive& p,int component,int mask,int offset,bool enhanced){
@@ -92,12 +94,12 @@ class HardwareGpu {
     }
     Primitive rectangle(const int* packet,int op,const int* env){int size=(op>>3)&3;bool tex=op&4;int uv=tex?packet[2]:0,wh=size==0?packet[tex?3:2]:0,w=size==0?wh&1023:size==1?1:size==2?8:16,h=size==0?(uint32_t(wh)>>16)&511:size==1?1:size==2?8:16;Vertex a(packet[1],packet[0],uv,env[5]);Rect bounds=clip({a.x,a.y,a.x+w-1,a.y+h-1},env);Primitive p=base(op,uint32_t(uv)>>16,false,env,bounds,1);int dx=(env[1]&4096)?-1:1,dy=(env[1]&8192)?-1:1;p.q[28]=a.r*65536;p.q[29]=a.g*65536;p.q[30]=a.b*65536;p.q[31]=(a.u+(bounds.x0-a.x)*dx)*65536;p.q[32]=(a.v+(bounds.y0-a.y)*dy)*65536;p.q[36]=dx*65536;p.q[42]=dy*65536;return p;}
     Primitive line(const int* packet,int op,const int* env){bool shade=op&16;Vertex a(packet[1],packet[0],0,env[5]),b(packet[shade?3:2],shade?packet[2]:packet[0],0,env[5]);int dx=b.x-a.x,dy=b.y-a.y;Rect bounds=clip({std::min(a.x,b.x),std::min(a.y,b.y),std::max(a.x,b.x),std::max(a.y,b.y)},env);if(std::abs(dx)>=1024||std::abs(dy)>=512)bounds.x1=-1;Primitive p=base(op&~4,0,env[1]&512,env,bounds,2);p.q[16]=a.x;p.q[17]=a.y;p.q[18]=dx;p.q[19]=dy;p.q[20]=std::max(std::abs(dx),std::abs(dy));p.q[28]=a.r;p.q[29]=a.g;p.q[30]=a.b;p.q[33]=b.r-a.r;p.q[34]=b.g-a.g;p.q[35]=b.b-a.b;return p;}
-    void transfer(int op,int x,int y,int w,int h,int a,int b,int c,int d){contentRevision++;if(op!=1)dirtyDisplayRegion(x,y,w,h);resolveNative();glUseProgram(transferProgram);bindBuffers();glUniform4i(transferProgramUniforms.shape,x,y,w,h);glUniform4i(transferProgramUniforms.data,a,b,c,d);glUniform1i(transferProgramUniforms.operation,op);glDispatchCompute(op==3?(std::max(w,h)+7)/8:(w+7)/8,op==3?1:(h+7)/8,1);barrier();transferHd(op,x,y,w,h,a,b,c,d);}
+    void transfer(int op,int x,int y,int w,int h,int a,int b,int c,int d){NativeTiming::Scope measured(timing,NativeTiming::GPU_TRANSFER);contentRevision++;if(op!=1)dirtyDisplayRegion(x,y,w,h);resolveNative();glUseProgram(transferProgram);bindBuffers();glUniform4i(transferProgramUniforms.shape,x,y,w,h);glUniform4i(transferProgramUniforms.data,a,b,c,d);glUniform1i(transferProgramUniforms.operation,op);glDispatchCompute(op==3?(std::max(w,h)+7)/8:(w+7)/8,op==3?1:(h+7)/8,1);barrier();transferHd(op,x,y,w,h,a,b,c,d);}
     void flushHd(){
         if(!fastHd||hdPending.empty())return;current();bindBuffers();glBindBuffer(GL_SHADER_STORAGE_BUFFER,hdCommandBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,hdPending.size()*sizeof(Primitive),hdPending.data());glBindBufferBase(GL_SHADER_STORAGE_BUFFER,1,hdCommandBuffer);glBindFramebuffer(GL_FRAMEBUFFER,hdFramebuffer);glViewport(0,0,1024*scale,512*scale);glDisable(GL_BLEND);glDisable(GL_DEPTH_TEST);glDisable(GL_STENCIL_TEST);glDisable(GL_SCISSOR_TEST);glUseProgram(hdRasterProgram);glBindVertexArray(vao);glDrawArraysInstanced(GL_TRIANGLES,0,6,int(hdPending.size()));glBindFramebuffer(GL_FRAMEBUFFER,0);barrier();for(const auto& bounds:hdWrites)markNativeDirty(bounds);hdPending.clear();hdReads.clear();hdWrites.clear();bindBuffers();
     }
     void resolveNative(){
-        flushHd();if(!nativeDirty.valid())return;current();bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,nativeDirty.x0,nativeDirty.y0,nativeDirty.x1,nativeDirty.y1);std::array<GLuint,64> rows;for(int row=0;row<32;row++){rows[row*2]=GLuint(nativeDirtyTiles[row]);rows[row*2+1]=GLuint(nativeDirtyTiles[row]>>32);}glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((nativeDirty.x1-nativeDirty.x0+8)/8,(nativeDirty.y1-nativeDirty.y0+8)/8,1);barrier();nativeDirty={1023,511,0,0};nativeDirtyTiles.fill(0);nativeCopies++;
+        flushHd();if(!nativeDirty.valid())return;NativeTiming::Scope measured(timing,NativeTiming::GPU_RESOLVE);current();bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,nativeDirty.x0,nativeDirty.y0,nativeDirty.x1,nativeDirty.y1);std::array<GLuint,64> rows;for(int row=0;row<32;row++){rows[row*2]=GLuint(nativeDirtyTiles[row]);rows[row*2+1]=GLuint(nativeDirtyTiles[row]>>32);}glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((nativeDirty.x1-nativeDirty.x0+8)/8,(nativeDirty.y1-nativeDirty.y0+8)/8,1);barrier();nativeDirty={1023,511,0,0};nativeDirtyTiles.fill(0);nativeCopies++;
     }
     void queueHd(){
         bool textureHazard=false,writeHazard=false;
@@ -110,6 +112,8 @@ class HardwareGpu {
     void transferHd(int op,int x,int y,int w,int h,int a,int b,int c,int d){if(scale==1)return;flushHd();glUseProgram(hdTransferProgram);bindBuffers();glUniform4i(hdTransferProgramUniforms.shape,x,y,w,h);glUniform4i(hdTransferProgramUniforms.data,a,b,c,d);glUniform1i(hdTransferProgramUniforms.operation,op);glDispatchCompute(op==3?(std::max(w,h)*scale+7)/8:(w*scale+7)/8,op==3?1:(h*scale+7)/8,1);barrier();}
     void detachWindow(){windowSwapConfigured=false;if(windowSurface!=EGL_NO_SURFACE){eglMakeCurrent(display,pbuffer,pbuffer,context);eglDestroySurface(display,windowSurface);windowSurface=EGL_NO_SURFACE;}if(window){ANativeWindow_release(window);window=nullptr;}}
 public:
+    void profile(bool enabled){timing.enabled.store(enabled);}
+    jlongArray timings(JNIEnv* env){return timing.snapshot(env);}
     void configureDisplay(float aspect,bool stretch,bool integerScale){
         double next=std::isfinite(aspect)&&aspect>=0.1f&&aspect<=10.f?aspect:4.0/3.0;
         if(outputAspect==next&&outputStretch==stretch&&outputInteger==integerScale)return;
@@ -128,7 +132,7 @@ public:
     ~HardwareGpu(){destroy();}
     void destroy(){if(display==EGL_NO_DISPLAY)return;if(context!=EGL_NO_CONTEXT){if(pbuffer!=EGL_NO_SURFACE)eglMakeCurrent(display,pbuffer,pbuffer,context);detachWindow();sharedOutput.destroy(display);sharedOutputNext.destroy(display);GLuint buffers[]={ramBuffer,commandBuffer,counterBuffer,hdCommandBuffer};glDeleteBuffers(4,buffers);GLuint programs[]={drawProgram,transferProgram,scanoutProgram,presentProgram,hdDrawProgram,hdTransferProgram,hdScanoutProgram,hdRasterProgram,hdPresentProgram,hdNativeResolveProgram};for(GLuint p:programs)if(p)glDeleteProgram(p);if(frameTexture)glDeleteTextures(1,&frameTexture);if(hdTexture)glDeleteTextures(1,&hdTexture);if(hdFramebuffer)glDeleteFramebuffers(1,&hdFramebuffer);if(resolveFramebuffer)glDeleteFramebuffers(1,&resolveFramebuffer);if(softwareWindow){ANativeWindow_release(softwareWindow);softwareWindow=nullptr;}if(vao)glDeleteVertexArrays(1,&vao);eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);eglDestroyContext(display,context);context=EGL_NO_CONTEXT;}if(pbuffer!=EGL_NO_SURFACE)eglDestroySurface(display,pbuffer);display=EGL_NO_DISPLAY;releaseDisplay();}
     void flush(){
-        current();if(!pendingCount)return;passes++;
+        current();if(!pendingCount)return;NativeTiming::Scope measured(timing,NativeTiming::GPU_DRAW);passes++;
         if(scale>1&&fastHd&&!serialDispatch){queueHd();if(deferredNative()){pendingCount=0;reads.clear();writes.clear();return;}}if(scale>1&&serialDispatch)resolveNative();
         bindBuffers();glBindBuffer(GL_SHADER_STORAGE_BUFFER,commandBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,pendingCount*sizeof(Primitive),pending.data());
         Rect bounds{1023,511,0,0};for(int i=0;i<pendingCount;i++)include(bounds,pending[i].bounds());
@@ -188,7 +192,7 @@ public:
         if(w>frameWidth||h>frameHeight){frameWidth=std::max(w,frameWidth);frameHeight=std::max(h,frameHeight);glDeleteTextures(1,&frameTexture);glGenTextures(1,&frameTexture);glBindTexture(GL_TEXTURE_2D,frameTexture);glTexStorage2D(GL_TEXTURE_2D,1,GL_RGBA8,frameWidth,frameHeight);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);}
         if(!resolveFramebuffer)glGenFramebuffers(1,&resolveFramebuffer);glBindFramebuffer(GL_FRAMEBUFFER,resolveFramebuffer);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,frameTexture,0);if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)throw std::runtime_error("HD output framebuffer unavailable");glViewport(0,0,w,h);drawEnhanced(state,false);resolved.resize(size_t(w)*h);glReadPixels(0,0,w,h,GL_RGBA,GL_UNSIGNED_BYTE,resolved.data());glBindFramebuffer(GL_FRAMEBUFFER,0);glCheck();
     }
-    bool renderShared(const int* state,int w,int h,bool cpu,bool asynchronous){
+    bool renderShared(const int* state,int w,int h,bool cpu,bool asynchronous){NativeTiming::Scope measured(timing,NativeTiming::GPU_SCANOUT);
         current();flush();flushHd();if(!activeShared->ensure(display,w,h,cpu))return false;
         if(scale==1){
             auto native=scanout(state);
@@ -198,7 +202,7 @@ public:
         glCheck();sharedReadyFd=-1;
         if(asynchronous){auto create=reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(eglGetProcAddress("eglCreateSyncKHR"));auto duplicate=reinterpret_cast<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(eglGetProcAddress("eglDupNativeFenceFDANDROID"));auto release=reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(eglGetProcAddress("eglDestroySyncKHR"));if(create&&duplicate&&release){EGLSyncKHR fence=create(display,EGL_SYNC_NATIVE_FENCE_ANDROID,nullptr);if(fence!=EGL_NO_SYNC_KHR){glFlush();sharedReadyFd=duplicate(display,fence);release(display,fence);}}}
         // A sync fd lets Vulkan wait on the GPU; older drivers retain the blocking fallback.
-        if(sharedReadyFd<0)glFinish();return true;
+        if(sharedReadyFd<0){NativeTiming::Scope measured(timing,NativeTiming::GL_PRODUCER);glFinish();}return true;
     }
     bool presentResolved(JNIEnv* env,jobject surface,const int* state,jlong vulkan){
         ANativeWindow* target=ANativeWindow_fromSurface(env,surface);if(!target)return false;int sw=ANativeWindow_getWidth(target),sh=ANativeWindow_getHeight(target);auto dimensions=enhancedDimensions(state);auto rect=psxDisplayRect(sw,sh,dimensions.first,dimensions.second,outputAspect,outputStretch,outputInteger);int w=scale==1&&vulkan?dimensions.first:rect.w,h=scale==1&&vulkan?dimensions.second:rect.h;if(w<1||h<1){ANativeWindow_release(target);throw std::runtime_error("HD target surface has no dimensions");}
@@ -220,7 +224,7 @@ public:
         if(!eglMakeCurrent(display,windowSurface,windowSurface,context)){detachWindow();return false;}if(!windowSwapConfigured){eglSwapInterval(display,outputVsync?1:0);windowSwapConfigured=true;}
 return true;}
     bool presentBlack(JNIEnv* env,jobject surface){if(!beginWindow(env,surface))return false;EGLint w=0,h=0;eglQuerySurface(display,windowSurface,EGL_WIDTH,&w);eglQuerySurface(display,windowSurface,EGL_HEIGHT,&h);glDisable(GL_SCISSOR_TEST);glViewport(0,0,w,h);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);if(!eglSwapBuffers(display,windowSurface)){detachWindow();return false;}displayChanged=true;presented++;return true;}
-    bool present(JNIEnv* env,jobject surface,const int* state){if(!beginWindow(env,surface))return false;
+    bool present(JNIEnv* env,jobject surface,const int* state){NativeTiming::Scope measured(timing,NativeTiming::GLES_PRESENT);if(!beginWindow(env,surface))return false;
         EGLint sw=0,sh=0;eglQuerySurface(display,windowSurface,EGL_WIDTH,&sw);eglQuerySurface(display,windowSurface,EGL_HEIGHT,&sh);if(unchanged(env,surface,window,state,sw,sh)){reusedFrames++;return true;}
         std::pair<int,int> size;if(scale>1){flushHd();size=enhancedDimensions(state);}else size=scanout(state);auto [width,height]=size;
         auto rect=psxDisplayRect(sw,sh,width,height,outputAspect,outputStretch,outputInteger);int dw=rect.w,dh=rect.h;glViewport(0,0,sw,sh);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);glViewport((sw-dw)/2,(sh-dh)/2,dw,dh);if(scale>1)drawEnhanced(state,true);else{glUseProgram(presentProgram);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,frameTexture);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,state[7]?GL_LINEAR:GL_NEAREST);glUniform1i(presentProgramUniforms.frameTexture,0);glUniform2f(presentProgramUniforms.dimensions,float(width),float(height));glBindVertexArray(vao);glDrawArrays(GL_TRIANGLES,0,3);}glCheck();if(!eglSwapBuffers(display,windowSurface)){detachWindow();return false;}remember(env,surface,window,state,sw,sh);presented++;return true;
@@ -252,3 +256,6 @@ extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_config
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_setVsyncNative(JNIEnv*,jclass,jlong h,jboolean enabled){gpu(h)->setOutputVsync(enabled);}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_detachPresentationNative(JNIEnv*,jclass,jlong h){gpu(h)->detachPresentation();}
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_HardwareRasterizer_presentBlackNative(JNIEnv* env,jclass,jlong h,jobject surface){try{return gpu(h)->presentBlack(env,surface);}catch(const std::exception& e){failure(env,e);return false;}}
+
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_setProfilingNative(JNIEnv*,jclass,jlong handle,jboolean enabled){gpu(handle)->profile(enabled);}
+extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_HardwareRasterizer_timingsNative(JNIEnv* env,jclass,jlong handle){return gpu(handle)->timings(env);}

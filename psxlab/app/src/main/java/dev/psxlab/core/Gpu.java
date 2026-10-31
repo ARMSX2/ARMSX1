@@ -66,6 +66,9 @@ public final class Gpu implements AutoCloseable {
         performance=new Performance(System.nanoTime()-start,width,height,internalScale);
     }
     private volatile EngineLog journal;
+    private long nextNativeSnapshot;
+    private volatile java.util.Map<String,Object> lastNativeTiming=java.util.Map.of();
+    public java.util.Map<String,Object> nativeTimings(){return lastNativeTiming;}
     public void setJournal(EngineLog value){journal=value;}
     private volatile VulkanPresenter vulkan;
     private boolean hardwareDirty;
@@ -323,6 +326,12 @@ public final class Gpu implements AutoCloseable {
             long perfStart=performanceEnabled?System.nanoTime():0;
             java.util.function.Consumer<Frame> completed=perfStart==0?receiver:frame->{measurePresentation(perfStart,state);receiver.accept(frame);};
             reconcileShaderPresentation();
+            boolean profiling=journal!=null&&journal.enabled();
+            if(hardware!=null)hardware.configureProfiling(profiling);if(vulkan!=null)vulkan.configureProfiling(profiling);
+            if(profiling){long now=System.nanoTime();if(now>=nextNativeSnapshot){
+                lastNativeTiming=java.util.Map.of("hardware",hardware==null?java.util.Map.of("available",false):hardware.nativeTimings(),"presentation",vulkan==null?java.util.Map.of("available",false):vulkan.nativeTimings());
+                journal.event(EngineLog.INFO,"gpu.native.snapshot",lastNativeTiming);nextNativeSnapshot=now+500000000L;
+            }}
             if(timing!=null)timing.gpuBegin(renderer,state);
             int decision=presentationDecision(state,extras);
             ShaderChain.phase(decision==PresentationPolicy.SHADER?highRefresh.multiple:1,1,presentationRate,shaderAspect);

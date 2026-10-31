@@ -3,6 +3,13 @@ import android.view.Surface;
 /** Vulkan upload/scaling/presentation; game primitives use our native software rasterizer. */
 public final class VulkanPresenter implements AutoCloseable {
     private long handle;
+    private boolean profiling;
+    private final NativeTiming timing=new NativeTiming();
+    void configureProfiling(boolean enabled){if(handle!=0&&profiling!=enabled){setProfilingNative(handle,enabled);profiling=enabled;if(enabled)timing.reset();}}
+    java.util.Map<String,Object> nativeTimings(){return timing.sample(timingsNative(handle));}
+    private static native void setProfilingNative(long handle,boolean enabled);
+    private static native long[] timingsNative(long handle);
+
     public VulkanPresenter(){this(1);}
     public VulkanPresenter(int scale){if(!NativeRasterizer.AVAILABLE)throw new IllegalStateException("Native display unavailable");if(scale<1||scale>5)throw new IllegalArgumentException("Invalid HD scale");handle=create(1024*512*scale*scale);}
     boolean present(Surface surface,Gpu.Frame frame,boolean filter){return present(surface,frame,filter,0);}

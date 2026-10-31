@@ -1,6 +1,7 @@
 package dev.psxlab.core;
 
 import java.nio.*;
+import java.util.*;
 
 /** Original native CPU block runner; buffers stay owned by this Java object. */
 final class NativeCpu implements AutoCloseable {
@@ -10,6 +11,13 @@ final class NativeCpu implements AutoCloseable {
     private final Bus bus;
     private final boolean ramWaitStates;
     private long handle;
+    private boolean profiling;
+    private final NativeTiming timing=new NativeTiming();
+    void configureProfiling(boolean enabled){if(handle!=0&&profiling!=enabled){setProfilingNative(handle,enabled);profiling=enabled;if(enabled)timing.reset();}}
+    Map<String,Object> nativeTimings(){long[] s=statisticsNative(handle);return Map.of("timing",timing.sample(timingsNative(handle)),"cache",Map.of("compiled",s[0],"page_generation_misses",s[5],"unchanged_blocks_reused",s[8],"process_jit_mapped_bytes",s[9],"changed_block_pc",String.format(Locale.ROOT,"%08X",s[10]),"changed_instruction_address",String.format(Locale.ROOT,"%08X",s[11]),"previous_instruction",String.format(Locale.ROOT,"%08X",s[12]),"replacement_instruction",String.format(Locale.ROOT,"%08X",s[13]),"capacity_clears",s[14]));}
+    private static native void setProfilingNative(long handle,boolean enabled);
+    private static native long[] timingsNative(long handle);
+
     private boolean widescreen;
     NativeCpu(Bus bus,boolean recompile,boolean ramWaitStates){this.bus=bus;this.ramWaitStates=ramWaitStates;memory=bus.enableNativeMemory();handle=create(bus,state,memory,(recompile?1:0)|(ramWaitStates?2:0));if(handle==0)throw new IllegalStateException("Native CPU initialization failed");}
     void importState(Cpu cpu){

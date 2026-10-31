@@ -111,6 +111,23 @@ public final class EngineLog implements AutoCloseable {
         String text=value.toString();out.append('"');for(int i=0;i<Math.min(text.length(),8192);i++){char c=text.charAt(i);switch(c){case '"'->out.append("\\\"");case '\\'->out.append("\\\\");case '\n'->out.append("\\n");case '\r'->out.append("\\r");case '\t'->out.append("\\t");default->{if(c<32)out.append(String.format(Locale.ROOT,"\\u%04x",(int)c));else out.append(c);}}}out.append('"');
     }
     public static String source(String path){
+        if(path.equals("cpu.compile"))return "psxlab/app/src/main/cpp/cpu_arm64.cpp#compileArm64";
+        if(path.equals("cpu.cache.check"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::revalidate";
+        if(path.equals("cpu.cache.clear"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::clearCache";
+        if(path.equals("cpu.block.build"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::findBlock";
+        if(path.equals("gpu.raster.dispatch"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::flush";
+        if(path.equals("gpu.vram.transfer"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::transfer";
+        if(path.equals("gpu.vram.readback"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::download";
+        if(path.equals("gpu.vram.resolve"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::resolveNative";
+        if(path.equals("gpu.scanout.native"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::renderShared";
+        if(path.equals("gpu.present.gles.api"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::present";
+        if(path.equals("gpu.sync.producer"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::renderShared/glFinish";
+        if(path.equals("gpu.vulkan.fence_wait"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::waitFence";
+        if(path.equals("gpu.vulkan.acquire"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::acquireImage";
+        if(path.equals("gpu.vulkan.submit"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::submit";
+        if(path.equals("gpu.vulkan.present"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::presentImage";
+        if(path.equals("gpu.memory.staging_allocate"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::ensureStaging";
+
         if(path.startsWith("dma.gpu.linked"))return "psxlab/app/src/main/java/dev/psxlab/core/Dma.java#transfer/tick";
         if(path.equals("gpu.present.bfi"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::presentStored or hardware_gpu.cpp#HardwareGpu::presentBlack";
         if(path.equals("gpu.present.shader_subframe"))return "psxlab/app/src/main/cpp/shader_chain.cpp#armsx_shader_vk_render + vulkan_output.cpp#Output::presentStored";
