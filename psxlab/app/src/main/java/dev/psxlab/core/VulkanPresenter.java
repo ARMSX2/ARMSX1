@@ -7,8 +7,8 @@ public final class VulkanPresenter implements AutoCloseable {
     public VulkanPresenter(int scale){if(!NativeRasterizer.AVAILABLE)throw new IllegalStateException("Native display unavailable");if(scale<1||scale>5)throw new IllegalArgumentException("Invalid HD scale");handle=create(1024*512*scale*scale);}
     boolean present(Surface surface,Gpu.Frame frame,boolean filter){return present(surface,frame,filter,0);}
     boolean present(Surface surface,Gpu.Frame frame,boolean filter,long token){return presentNative(handle,surface,frame.pixels(),frame.width(),frame.height(),filter,token);}
-    synchronized long[] counters(){long[] out=new long[6];if(handle!=0)statisticsNative(handle,out);return out;}
-    synchronized String statistics(){long[] s=counters();return "Vulkan presented="+s[0]+" reusedSurface="+s[1]+" uploadBytes="+s[2]+" swapchains="+s[3]+" suboptimal="+s[4]+" outdated="+s[5];}
+    synchronized long[] counters(){long[] out=new long[9];if(handle!=0)statisticsNative(handle,out);return out;}
+    synchronized String statistics(){long[] s=counters();return "Vulkan presented="+s[0]+" reusedSurface="+s[1]+" uploadBytes="+s[2]+" swapchains="+s[3]+" suboptimal="+s[4]+" outdated="+s[5]+" stagingBytes="+s[6]+" stagingAllocated="+s[7]+" stagingAllocations="+s[8];}
     long nativeHandle(){return handle;}
     boolean presentBlack(Surface surface){return presentExtraNative(handle,surface,true);}
     boolean presentSubframe(Surface surface){return presentExtraNative(handle,surface,false);}

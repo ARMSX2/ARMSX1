@@ -21,7 +21,8 @@ class Output {
     VkInstance instance=VK_NULL_HANDLE;VkPhysicalDevice physical=VK_NULL_HANDLE;VkDevice device=VK_NULL_HANDLE;VkQueue queue=VK_NULL_HANDLE;uint32_t family=0;
     VkSurfaceKHR surface=VK_NULL_HANDLE;ANativeWindow* window=nullptr;VkSwapchainKHR chain=VK_NULL_HANDLE;VkExtent2D extent{};VkSurfaceCapabilitiesKHR chainCapabilities{};std::vector<VkImage> images;std::vector<VkSemaphore> hdFinished;
     VkCommandPool pool=VK_NULL_HANDLE;VkCommandBuffer command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;VkSemaphore acquired=VK_NULL_HANDLE,rendered=VK_NULL_HANDLE;
-    VkBuffer staging=VK_NULL_HANDLE;VkDeviceMemory stagingMemory=VK_NULL_HANDLE;void* mapped=nullptr;const int maxPixels;
+    VkBuffer staging=VK_NULL_HANDLE;VkDeviceMemory stagingMemory=VK_NULL_HANDLE;void* mapped=nullptr;const int maxPixels;VkDeviceSize stagingCapacity=0;
+    std::atomic<uint64_t> stagingBytes{0},stagingAllocated{0},stagingAllocations{0};
     VkImage source=VK_NULL_HANDLE;VkDeviceMemory sourceMemory=VK_NULL_HANDLE;int sourceW=0,sourceH=0;bool sourceReady=false,linear=true;
     bool sharedSupported=false,sharedAsync=false;VkSemaphore producerReady=VK_NULL_HANDLE;PFN_vkImportSemaphoreFdKHR importReadyFd=nullptr;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID getHardwareProperties=nullptr;
@@ -50,6 +51,30 @@ class Output {
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};barrier.image=sharedImage;barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};barrier.srcQueueFamilyIndex=acquire?VK_QUEUE_FAMILY_FOREIGN_EXT:family;barrier.dstQueueFamilyIndex=acquire?family:VK_QUEUE_FAMILY_FOREIGN_EXT;barrier.oldLayout=acquire?VK_IMAGE_LAYOUT_GENERAL:VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;barrier.newLayout=acquire?VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:VK_IMAGE_LAYOUT_GENERAL;barrier.srcAccessMask=acquire?0:VK_ACCESS_TRANSFER_READ_BIT;barrier.dstAccessMask=acquire?VK_ACCESS_TRANSFER_READ_BIT:0;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
     }
     uint32_t memoryType(uint32_t bits,VkMemoryPropertyFlags flags){VkPhysicalDeviceMemoryProperties p{};vkGetPhysicalDeviceMemoryProperties(physical,&p);for(uint32_t i=0;i<p.memoryTypeCount;i++)if((bits&(1u<<i)) && (p.memoryTypes[i].propertyFlags&flags)==flags)return i;throw std::runtime_error("Vulkan memory type unavailable");}
+    void dropStaging(){
+        if(mapped)vkUnmapMemory(device,stagingMemory);mapped=nullptr;
+        if(staging)vkDestroyBuffer(device,staging,nullptr);staging=VK_NULL_HANDLE;
+        if(stagingMemory)vkFreeMemory(device,stagingMemory,nullptr);stagingMemory=VK_NULL_HANDLE;
+        stagingCapacity=0;stagingBytes=0;stagingAllocated=0;
+    }
+    void ensureStaging(VkDeviceSize required){
+        if(required<=stagingCapacity)return;
+        // CPU uploads alone need this buffer. Shared AHardwareBuffer frames do
+        // not reserve an HD-sized host-visible allocation. Grow geometrically
+        // for software resolution changes, bounded by the existing frame limit.
+        VkDeviceSize capacity=65536;while(capacity<required)capacity*=2;
+        capacity=std::min(capacity,VkDeviceSize(maxPixels)*4);
+        VkBuffer next=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;void* data=nullptr;VkMemoryRequirements requirements{};
+        try{
+            VkBufferCreateInfo b{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};b.size=capacity;b.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;b.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+            checked(vkCreateBuffer(device,&b,nullptr,&next),"Create upload buffer");vkGetBufferMemoryRequirements(device,next,&requirements);
+            VkMemoryAllocateInfo m{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};m.allocationSize=requirements.size;m.memoryTypeIndex=memoryType(requirements.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            checked(vkAllocateMemory(device,&m,nullptr,&memory),"Allocate upload buffer");checked(vkBindBufferMemory(device,next,memory,0),"Bind upload buffer");checked(vkMapMemory(device,memory,0,VK_WHOLE_SIZE,0,&data),"Map upload buffer");
+        }catch(...){if(data)vkUnmapMemory(device,memory);if(next)vkDestroyBuffer(device,next,nullptr);if(memory)vkFreeMemory(device,memory,nullptr);throw;}
+        // Every upload caller has waited the previous submission's fence.
+        dropStaging();staging=next;stagingMemory=memory;mapped=data;stagingCapacity=capacity;
+        stagingBytes=capacity;stagingAllocated=requirements.size;stagingAllocations++;
+    }
     void idle(){if(device){if(shadersTouched)armsx_shader_vk_queue_lock();vkDeviceWaitIdle(device);if(shadersTouched)armsx_shader_vk_queue_unlock();}}
     void dropChain(){previousJavaToken=0;idle();for(VkSemaphore s:hdFinished)if(s)vkDestroySemaphore(device,s,nullptr);hdFinished.clear();if(chain)vkDestroySwapchainKHR(device,chain,nullptr);chain=VK_NULL_HANDLE;images.clear();}
     void detach(){dropChain();if(surface)vkDestroySurfaceKHR(instance,surface,nullptr);surface=VK_NULL_HANDLE;if(window)ANativeWindow_release(window);window=nullptr;}
@@ -58,6 +83,7 @@ class Output {
     void begin(){checked(vkWaitForFences(device,1,&fence,VK_TRUE,UINT64_MAX),"Display fence");checked(vkResetFences(device,1,&fence),"Reset fence");checked(vkResetCommandBuffer(command,0),"Reset command buffer");VkCommandBufferBeginInfo info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};info.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;checked(vkBeginCommandBuffer(command,&info),"Begin display commands");}
     void submit(bool present,VkSemaphore finished=VK_NULL_HANDLE,VkSemaphore producer=VK_NULL_HANDLE){if(!finished)finished=rendered;checked(vkEndCommandBuffer(command),"End display commands");VkPipelineStageFlags stages[2]={VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};VkSemaphore waits[2]={acquired,producer};VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&command;if(present){info.waitSemaphoreCount=producer?2:1;info.signalSemaphoreCount=1;info.pWaitSemaphores=waits;info.pWaitDstStageMask=stages;info.pSignalSemaphores=&finished;}if(shadersTouched)armsx_shader_vk_queue_lock();VkResult result=vkQueueSubmit(queue,1,&info,fence);if(shadersTouched)armsx_shader_vk_queue_unlock();checked(result,"Submit display");}
     void upload(const jint* pixels,int w,int h,bool rgba=false){if(w<1||h<1||int64_t(w)*h>maxPixels)throw std::runtime_error("Vulkan frame exceeds its upload buffer");
+        ensureStaging(VkDeviceSize(w)*h*4);
         // Upload callers have waited the submission fence; presentation owns swapchain images, not this source.
         if(!source || w!=sourceW || h!=sourceH){dropSource();VkImageCreateInfo image{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};image.imageType=VK_IMAGE_TYPE_2D;image.format=VK_FORMAT_R8G8B8A8_UNORM;image.extent={uint32_t(w),uint32_t(h),1};image.mipLevels=image.arrayLayers=1;image.samples=VK_SAMPLE_COUNT_1_BIT;image.tiling=VK_IMAGE_TILING_OPTIMAL;image.usage=VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;image.sharingMode=VK_SHARING_MODE_EXCLUSIVE;checked(vkCreateImage(device,&image,nullptr,&source),"Create source image");VkMemoryRequirements r{};vkGetImageMemoryRequirements(device,source,&r);VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=r.size;alloc.memoryTypeIndex=memoryType(r.memoryTypeBits,0);checked(vkAllocateMemory(device,&alloc,nullptr,&sourceMemory),"Allocate source image");checked(vkBindImageMemory(device,source,sourceMemory,0),"Bind source image");sourceW=w;sourceH=h;}
         if(!pixels)return;
@@ -101,7 +127,6 @@ public:
         if(sharedAsync){auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(vkGetInstanceProcAddr(instance,"vkGetPhysicalDeviceExternalSemaphoreProperties"));VkPhysicalDeviceExternalSemaphoreInfo info{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO};info.handleType=VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;VkExternalSemaphoreProperties result{VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES};if(query)query(physical,&info,&result);sharedAsync=query&&(result.externalSemaphoreFeatures&VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT);}
 
         VkCommandPoolCreateInfo p{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};p.queueFamilyIndex=family;p.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;checked(vkCreateCommandPool(device,&p,nullptr,&pool),"Create command pool");VkCommandBufferAllocateInfo a{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};a.commandPool=pool;a.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;a.commandBufferCount=1;checked(vkAllocateCommandBuffers(device,&a,&command),"Allocate command buffer");VkFenceCreateInfo f{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};f.flags=VK_FENCE_CREATE_SIGNALED_BIT;checked(vkCreateFence(device,&f,nullptr,&fence),"Create fence");VkSemaphoreCreateInfo s{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};checked(vkCreateSemaphore(device,&s,nullptr,&acquired),"Create acquire semaphore");checked(vkCreateSemaphore(device,&s,nullptr,&rendered),"Create present semaphore");if(sharedAsync)checked(vkCreateSemaphore(device,&s,nullptr,&producerReady),"Create shared producer semaphore");
-        VkBufferCreateInfo b{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};b.size=VkDeviceSize(maxPixels)*4;b.usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;b.sharingMode=VK_SHARING_MODE_EXCLUSIVE;checked(vkCreateBuffer(device,&b,nullptr,&staging),"Create upload buffer");VkMemoryRequirements r{};vkGetBufferMemoryRequirements(device,staging,&r);VkMemoryAllocateInfo m{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};m.allocationSize=r.size;m.memoryTypeIndex=memoryType(r.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);checked(vkAllocateMemory(device,&m,nullptr,&stagingMemory),"Allocate upload buffer");checked(vkBindBufferMemory(device,staging,stagingMemory,0),"Bind upload buffer");checked(vkMapMemory(device,stagingMemory,0,VK_WHOLE_SIZE,0,&mapped),"Map upload buffer");
         armsx_shader_vk_device_t shaderDevice{vkGetInstanceProcAddr,instance,physical,device,queue,family};armsx_shader_vk_attach(&shaderDevice);
     }catch(...){destroy();throw;}}
     void configureDisplay(float aspect,bool stretch,bool integerScale){
@@ -110,7 +135,7 @@ public:
         outputAspect=next;outputStretch=stretch;outputInteger=integerScale;previousJavaToken=0;
     }
     ~Output(){destroy();}
-    void destroy(){if(device)psx_shader_detach(device);idle();detach();if(device){dropShared();dropSource();if(mapped)vkUnmapMemory(device,stagingMemory);if(staging)vkDestroyBuffer(device,staging,nullptr);if(stagingMemory)vkFreeMemory(device,stagingMemory,nullptr);if(producerReady)vkDestroySemaphore(device,producerReady,nullptr);if(acquired)vkDestroySemaphore(device,acquired,nullptr);if(rendered)vkDestroySemaphore(device,rendered,nullptr);if(fence)vkDestroyFence(device,fence,nullptr);if(pool)vkDestroyCommandPool(device,pool,nullptr);vkDestroyDevice(device,nullptr);device=VK_NULL_HANDLE;}if(instance){vkDestroyInstance(instance,nullptr);instance=VK_NULL_HANDLE;}}
+    void destroy(){if(device)psx_shader_detach(device);idle();detach();if(device){dropShared();dropSource();dropStaging();if(producerReady)vkDestroySemaphore(device,producerReady,nullptr);if(acquired)vkDestroySemaphore(device,acquired,nullptr);if(rendered)vkDestroySemaphore(device,rendered,nullptr);if(fence)vkDestroyFence(device,fence,nullptr);if(pool)vkDestroyCommandPool(device,pool,nullptr);vkDestroyDevice(device,nullptr);device=VK_NULL_HANDLE;}if(instance){vkDestroyInstance(instance,nullptr);instance=VK_NULL_HANDLE;}}
     bool present(JNIEnv* env,jobject target,const jint* pixels,int w,int h,bool filter,bool rgba=false,jintArray javaPixels=nullptr,jlong frameToken=0){
         // Android may resize a newly attached surface between creation and acquisition.
         for(int attempt=0;attempt<2;attempt++)if(presentOnce(env,target,pixels,w,h,filter,rgba,javaPixels,frameToken))return true;
@@ -182,7 +207,7 @@ public:
         // The next call waits this fence; ping-pong allocations let GL render concurrently.
         bool accepted=finishPresent(r,"Present shared image");if(accepted){lastDisplayedShader=usedShader;displayedBlack=false;lastInputShared=true;lastInputValid=true;lastW=w;lastH=h;}return accepted;
     }
-    void statistics(jlong* values)const{values[0]=presented.load();values[1]=reused.load();values[2]=javaUploadBytes.load();values[3]=chainBuilds.load();values[4]=suboptimalPresents.load();values[5]=outdatedPresents.load();}
+    void statistics(jlong* values)const{values[0]=presented.load();values[1]=reused.load();values[2]=javaUploadBytes.load();values[3]=chainBuilds.load();values[4]=suboptimalPresents.load();values[5]=outdatedPresents.load();values[6]=stagingBytes.load();values[7]=stagingAllocated.load();values[8]=stagingAllocations.load();}
     void verify(JNIEnv* env){
         for(bool javaPath:{false,true})for(auto dimensions:{std::pair<int,int>{32,24},{320,240},{17,31}}){
             int w=dimensions.first,h=dimensions.second;std::vector<jint> pixels(w*h);
@@ -200,7 +225,7 @@ void failure(JNIEnv* e,const std::exception& error){e->ThrowNew(e->FindClass("ja
 extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_VulkanPresenter_create(JNIEnv* e,jclass,jint capacity){try{return reinterpret_cast<jlong>(new Output(capacity));}catch(const std::exception& x){failure(e,x);return 0;}}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_destroy(JNIEnv*,jclass,jlong h){delete reinterpret_cast<Output*>(h);}
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_VulkanPresenter_presentNative(JNIEnv* e,jclass,jlong handle,jobject surface,jintArray data,jint w,jint h,jboolean filter,jlong token){try{if(w<1||w>5120||h<1||h>2560||e->GetArrayLength(data)!=w*h)throw std::runtime_error("Invalid Vulkan frame");return reinterpret_cast<Output*>(handle)->present(e,surface,nullptr,w,h,filter,false,data,token);}catch(const std::exception& x){failure(e,x);return false;}}
-extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_statisticsNative(JNIEnv* e,jclass,jlong handle,jlongArray out){if(e->GetArrayLength(out)!=6){e->ThrowNew(e->FindClass("java/lang/IllegalArgumentException"),"Vulkan statistics length");return;}jlong values[6];reinterpret_cast<Output*>(handle)->statistics(values);e->SetLongArrayRegion(out,0,6,values);}
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_statisticsNative(JNIEnv* e,jclass,jlong handle,jlongArray out){if(e->GetArrayLength(out)!=9){e->ThrowNew(e->FindClass("java/lang/IllegalArgumentException"),"Vulkan statistics length");return;}jlong values[9];reinterpret_cast<Output*>(handle)->statistics(values);e->SetLongArrayRegion(out,0,9,values);}
 extern "C" JNIEXPORT jstring JNICALL Java_dev_psxlab_core_VulkanPresenter_verifyNative(JNIEnv* e,jclass){try{Output output;output.verify(e);std::string text="Vulkan native/Java staging upload/readback: six fixtures with source resizing match on "+output.name+".\n";return e->NewStringUTF(text.c_str());}catch(const std::exception& x){failure(e,x);return nullptr;}}
 
 bool psxVulkanPresentRgba(JNIEnv* env,jlong handle,jobject surface,const uint32_t* pixels,int w,int h,bool filter){return reinterpret_cast<Output*>(handle)->present(env,surface,reinterpret_cast<const jint*>(pixels),w,h,filter,true);}
