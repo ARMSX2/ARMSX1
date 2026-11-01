@@ -23,6 +23,27 @@ public class BootTest {
     @Test public void initializesCpuAndExecutesLoadedCode()throws Exception{
         try(Gpu g=new Gpu(false)){Cpu c=ExeLoader.load(executable(),new Bus(g));assertEquals(0x80015000,c.r[28]);assertEquals(0x801ff020,c.r[29]);c.step();assertEquals(42,c.r[1]);}
     }
+    @Test public void fastLoadedGamesCanCallCodeInTheBiosExecutableHeaderBuffer()throws Exception{
+        byte[] exe=executable();int headerBuffer=0x8000b070,helper=headerBuffer+0x100;
+        // A translated game may call a helper embedded in the nominally unused EXE header.
+        word(exe,0x100,0x2402002a);word(exe,0x104,0x03e00008);word(exe,0x108,0);
+        word(exe,2048,0x0c000000|((helper>>>2)&0x03ffffff));word(exe,2052,0);
+        word(exe,2056,0x24430001);word(exe,2060,0x1000ffff);word(exe,2064,0);
+        try(Gpu g=new Gpu(false)){
+            Bus bus=new Bus(g,new PadState(),false);Cpu cpu=new Cpu(bus);cpu.cop0[12]=0x401;bus.write32(0x80,0x12345678);
+            ExeLoader.loadInto(exe,bus,cpu);
+            for(int i=0;i<2048;i++)assertEquals("header byte "+i,exe[i]&255,bus.read8(headerBuffer+i));
+            assertEquals(0x401,cpu.cop0[12]);assertEquals(0x12345678,bus.read32(0x80));
+            cpu.run(32);assertEquals(42,cpu.r[2]);assertEquals(43,cpu.r[3]);assertEquals(0,cpu.exceptions);
+        }
+    }
+    @Test public void rejectedExecutableDoesNotOverwriteTheBiosHeaderOrKernel()throws Exception{
+        byte[] exe=executable();word(exe,28,exe.length);
+        try(Gpu g=new Gpu(false)){
+            Bus bus=new Bus(g,new PadState(),false);bus.write32(0xb070,0x12345678);
+            assertThrows(IOException.class,()->ExeLoader.load(exe,bus));assertEquals(0x12345678,bus.read32(0xb070));
+        }
+    }
     @Test public void isoFindsConfiguredExecutable()throws Exception{IsoDisc disc=new IsoDisc(source(iso()));assertArrayEquals(executable(),disc.bootExecutable());assertEquals("\\GAME.EXE;1",disc.bootPath);}
     @Test public void rawMode2AndChdUnitLayoutsWork()throws Exception{
         byte[] iso=iso();for(int stride:new int[]{2352,2448}){byte[] raw=new byte[32*stride];for(int i=0;i<32;i++)System.arraycopy(iso,i*2048,raw,i*stride+24,2048);assertArrayEquals(executable(),new IsoDisc(source(raw)).bootExecutable());}
