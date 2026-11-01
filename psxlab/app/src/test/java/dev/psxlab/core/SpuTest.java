@@ -5,6 +5,33 @@ import static org.junit.Assert.*;
 import java.util.*;
 
 public class SpuTest {
+    @Test public void streamedRefillBetweenBlocksMustNotCacheTheOldStopFlag(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);voice(b,0,7);block(b,0x1000,0,0x1111);block(b,0x1010,1,0x2222);
+            b.write16(0x1f801c0e,0x200);frames(b.spu,32);
+            assertEquals("The following block is not fetched on the preceding block's last sample",1,b.spu.decodedBlocks);
+            block(b,0x1010,3,0x3333);frames(b.spu,100);
+            assertTrue("A refill's new repeat flag must keep the stream alive",b.read16(0x1f801c0c)>0);
+        }
+    }
+    @Test public void nextBlockReadIrqWaitsUntilTheFollowingOutputFrame(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);voice(b,0,7);block(b,0x1000,0,0x1111);block(b,0x1010,3,0x2222);
+            b.write16(0x1f801da4,0x202);b.write16(0x1f801daa,0xc040);frames(b.spu,32);
+            assertEquals("Block-read IRQ fired one sample early",0,b.read16(0x1f801dae)&64);
+            frames(b.spu,1);assertEquals(64,b.read16(0x1f801dae)&64);
+        }
+    }
+    @Test public void staticStreamPcmReferenceAtFractionalAndHighPitches(){
+        List<Long> actual=new ArrayList<>();
+        for(int pitch:new int[]{0x400,0x800,0x1000,0x1234,0x3fff,0x4000})try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);voice(b,0,7);block(b,0x1000,4,0x1234);block(b,0x1010,3,0x8f76);b.write16(0x1f801c04,pitch);
+            java.util.zip.CRC32 crc=new java.util.zip.CRC32();b.spu.setAudioSink((pcm,n)->{for(int i=0;i<n;i++){crc.update(pcm[i]&255);crc.update((pcm[i]>>>8)&255);}});
+            frames(b.spu,2048);b.spu.flushAudio();actual.add(crc.getValue());
+        }
+        // Frozen before the read-timing fix: static streams must remain bit-identical.
+        assertEquals(List.of(1194320044L,2213971421L,329282818L,743243591L,3987942357L,162771275L),actual);
+    }
     @Test public void audioSnapshotsDistinguishMutedRoutingWithoutChangingPcm(){
         try(Gpu g=new Gpu(false)){
             Bus a=new Bus(g,new PadState(),false),b=new Bus(g,new PadState(),false);

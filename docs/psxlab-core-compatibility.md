@@ -245,3 +245,20 @@ commas/escaped quotes survive settings parsing. Each game's boot loads a fresh
 catalogue; master-off disarms it. Diagnostics expose armed groups and missing
 selection names. This does not implement encrypted codes or arbitrary GameShark
 extensions beyond the listed types.
+
+## Streamed SPU block reads
+
+Java and native SPUs defer a next-block read until the following output frame,
+instead of prefetching it when the previous block's sample index wraps. This
+keeps DMA refill data/flags visible until the actual read and places the block-read
+IRQ on that frame. Fractional/high pitch carries its sample index and rebuilds
+interpolation history after the deferred read. Voice/state memory layouts are unchanged.
+
+A synthetic refill that replaces an old end/mute flag with end/repeat reproduces
+premature stopping in the previous implementation; the deferred read keeps it
+running. A separate IRQ timing test fails on the old eager fetch. Six frozen PCM
+checksums cover quarter, half, normal, fractional and maximum pitches and retain
+the prior static-stream output. Android integration runs both Java and real JNI
+paths, plus full native PCM/register/IRQ/sound-RAM parity. The Harry Potter music
+and dialogue reports prompted this check, but game-specific resolution requires
+a fresh playback test; these synthetic results alone do not establish its cause.

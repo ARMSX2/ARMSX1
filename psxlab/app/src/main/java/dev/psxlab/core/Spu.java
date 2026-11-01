@@ -218,16 +218,23 @@ public final class Spu {
         void start(int start){address=start&0x7fff0;index=phase=0;history[0]=history[1]=0;java.util.Arrays.fill(recent,0);envelope.level=envelope.counter=0;stage=0;delay=4;loaded=false;manualLoop=false;}
         void release(){stage=3;envelope.counter=0;}
         void decode(int voice){
+            int carried=index;
             checkIrq(address);checkIrq(address+8);decodeBlock(ram,address,samples,history);decodedBlocks++;
             blockFlags=ram[(address+1)&0x7ffff]&7;if((blockFlags&4)!=0){if(!manualLoop)registers[voice*8+7]=address/8;else protectedLoopStarts++;}
             index=0;loaded=true;recent[3]=samples[0];
+            // Pitch can cross the boundary by up to three more samples. Rebuild
+            // interpolation history now, after the new block has actually been read.
+            for(int i=0;i<carried;i++)advance(voice);
         }
         void advance(int voice){
+            if(!loaded){index++;return;}
             recent[0]=recent[1];recent[1]=recent[2];recent[2]=recent[3];index++;
             if(index>=28){
                 if((blockFlags&1)!=0){ended|=1<<voice;address=(registers[voice*8+7]*8)&0x7fff0;if((blockFlags&2)==0){stage=3;envelope.level=0;}}
                 else address=(address+16)&0x7ffff;
-                decode(voice);
+                // Fetch on the next output frame, leaving the CPU/DMA refill
+                // window open and raising the read IRQ at the read, not early.
+                index=0;loaded=false;
             }else recent[3]=samples[index];
         }
         int interpolate(){int i=(phase>>>4)&255;int[] g=SpuGaussian.TABLE;return clamp(mul(g[255-i],recent[0])+mul(g[511-i],recent[1])+mul(g[256+i],recent[2])+mul(g[i],recent[3]));}
