@@ -148,6 +148,8 @@ public final class EngineLog implements AutoCloseable {
         if(path.equals("cd.cue.mounted")||path.equals("cd.pbp.mounted"))return "psxlab/app/src/main/java/dev/psxlab/ArmSxBackend.java#openMedia";
         if(path.startsWith("cd.chd"))return "psxlab/app/src/main/java/dev/psxlab/ChdSource.java#read";
         if(path.startsWith("cd"))return "psxlab/app/src/main/java/dev/psxlab/FileSource.java#read";
+        if(path.startsWith("host.thermal"))return "psxlab/app/src/main/java/dev/psxlab/ArmSxBackend.java#sampleHostUsage";
+        if(path.equals("media.boot"))return "psxlab/app/src/main/java/dev/psxlab/ArmSxBackend.java#openMedia";
         if(path.startsWith("pacing"))return "psxlab/app/src/main/java/dev/psxlab/core/AudioAwareFramePacer.java#waitNanos";
         if(path.startsWith("audio"))return "psxlab/app/src/main/java/dev/psxlab/AudioOutput.java#process/play";
         return "psxlab/app/src/main/java/dev/psxlab/ArmSxBackend.java#loop";
