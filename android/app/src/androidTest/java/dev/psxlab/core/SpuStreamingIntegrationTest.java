@@ -6,6 +6,26 @@ import static org.junit.Assert.*;
 
 /** Exercise the real JNI SPU as well as the Java reference with a streaming refill. */
 public class SpuStreamingIntegrationTest {
+    @Test public void multiBlockSpuDmaCompletionSeesThePublishedRequestState(){
+        for(int mode=0;mode<(NativeCore.AVAILABLE?3:1);mode++)try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu);Cpu cpu=new Cpu(bus);
+            int[] handler={0x3c1a0001,0x8f5b0000,0,0xaf5b0004,0x241b0001,0xaf5b0008,
+                    0x3c1a1f80,0x241bfff7,0xaf5b1070,0x3c1b1090,0xaf5b10f4,0x401a7000,0,0x03400008,0x42000010};
+            for(int i=0;i<handler.length;i++)bus.write32(0x80+i*4,handler[i]);
+            int[] program={0xad090000,0xad4b0000,0x1000ffff,0};
+            for(int i=0;i<program.length;i++)bus.write32(0x20000+i*4,program[i]);
+            for(int i=0;i<16;i++)bus.write32(0x18000+i*4,0x12345678+i);
+            bus.write32(0x1f8010f0,0x076d4321);bus.write32(0x1f8010f4,0x00900000);
+            bus.write16(0x1f801da6,0x200);bus.write16(0x1f801daa,0x8020);
+            bus.write32(0x1f8010c0,0x18000);bus.write32(0x1f8010c4,0x00800010);
+            bus.write32(0x1f801074,8);cpu.cop0[12]=0x401;
+            cpu.r[8]=0x1f8010c8;cpu.r[9]=0x01000201;cpu.r[10]=0x10000;cpu.r[11]=1;
+            if(mode>0)assertTrue(cpu.enableNative(mode==2,true,true));cpu.jump(0x80020000);
+            try{cpu.run(100000);bus.flushClocks();assertEquals("DMA callback was never reached, mode="+mode,1,bus.read32(0x10008));
+                assertEquals("Completion ran before the following request-state store, mode="+mode,1,bus.read32(0x10004));}
+            finally{cpu.closeNative();}
+        }
+    }
 
     @Test public void nativeAndJavaCheckTransferAndCachedBlockIrqsAtRegisterBoundaries(){
         for(boolean nativeSpu:new boolean[]{false,true}){

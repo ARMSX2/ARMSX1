@@ -65,6 +65,7 @@ final class StateCodec {
             case "dev.psxlab.core.CdRom$Event":type=Class.forName(n.type);return make(type,new Class[]{int.class,int.class,int[].class},integer(n,"ticks"),integer(n,"irq"),apply(n.fields.get("bytes"),null));
             case "dev.psxlab.core.Mdec$Output":type=Class.forName(n.type);return make(type,new Class[]{int[].class,int.class,int.class},apply(n.fields.get("words"),null),integer(n,"block"),integer(n,"depth"));
             case "dev.psxlab.core.Dma$OutputTransfer":type=Class.forName(n.type);return make(type,new Class[]{int.class,int.class,int.class},integer(n,"address"),integer(n,"words"),integer(n,"control"));
+            case "dev.psxlab.core.Dma$SpuRequest":type=Class.forName(n.type);return make(type,new Class[]{int.class,int.class,int.class,int.class},integer(n,"address"),integer(n,"remaining"),integer(n,"blockWords"),integer(n,"control"));
             case "dev.psxlab.core.Dma$Chopped":type=Class.forName(n.type);return make(type,new Class[]{int.class,int.class,int.class,int.class},integer(n,"address"),integer(n,"remaining"),integer(n,"control"),integer(n,"wordCycles"));
             default:throw new IOException("State object cannot be constructed: "+n.type);
         }
@@ -94,6 +95,7 @@ final class StateCodec {
         if(existing instanceof Dma && !n.fields.containsKey("linkedDelay")){
             Node delay=new Node(1);delay.scalar=0;n.fields.put("linkedDelay",delay);
         }
+        if(existing instanceof Dma && !n.fields.containsKey("spuRequest"))n.fields.put("spuRequest",new Node(0));
         List<Field> fs=fields(existing.getClass());if(fs.size()!=n.fields.size())throw new IOException("State schema differs from this engine");
         // Records are immutable; their constructor already consumed every field.
         if(n.type.equals("dev.psxlab.core.Mdec$Output"))return existing;

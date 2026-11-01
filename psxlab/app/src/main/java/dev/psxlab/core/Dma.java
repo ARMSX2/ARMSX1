@@ -10,6 +10,7 @@ public final class Dma {
     private final Chopped[] chopped=new Chopped[7];
     private int choppedMask;
     private OutputTransfer mdecOutput;
+    private SpuRequest spuRequest;
     // Keep cyclic transfers live so the CPU can repair or cancel the list.
     // Ordinary lists retain their existing atomic transfer behaviour.
     private static final int LINKED_RETRY_CLOCKS=1024;
@@ -26,6 +27,11 @@ public final class Dma {
         final int address,words,control;
         int delay;
         OutputTransfer(int address,int words,int control){this.address=address;this.words=words;this.control=control;delay=words;}
+    }
+    private static final class SpuRequest {
+        int address,remaining,delay;
+        final int blockWords,control;
+        SpuRequest(int address,int words,int blockWords,int control){this.address=address;remaining=words;this.blockWords=blockWords;this.control=control;}
     }
     private static final class Chopped {
         int address,remaining,window,cpuCycles,wordCycles,delay;
@@ -47,7 +53,7 @@ public final class Dma {
     }
     public void write(int address,int value,int mask){
         int offset=address-0x1f801080;
-        if(offset<0x70){int ch=offset/16,reg=(offset&15)/4;if(reg<3){channels[ch][reg]=(channels[ch][reg]&~mask)|(value&mask);if(reg==0)channels[ch][reg]&=0xffffff;if(reg==2){chopped[ch]=null;choppedMask&=~(1<<ch);if(ch==1)mdecOutput=null;if(ch==2)linkedDelay=0;start(ch);}}}
+        if(offset<0x70){int ch=offset/16,reg=(offset&15)/4;if(reg<3){channels[ch][reg]=(channels[ch][reg]&~mask)|(value&mask);if(reg==0)channels[ch][reg]&=0xffffff;if(reg==2){chopped[ch]=null;choppedMask&=~(1<<ch);if(ch==1)mdecOutput=null;if(ch==2)linkedDelay=0;if(ch==4)spuRequest=null;start(ch);}}}
         else if((offset&~3)==0x70){priority=(priority&~mask)|(value&mask);for(int ch=0;ch<7;ch++)start(ch);}
         else if((offset&~3)==0x74){int controls=mask&0xffffff;interrupt=(interrupt&~controls)|(value&controls);interrupt&=~(value&mask&0x7f000000);updateInterrupt();}
     }
@@ -62,7 +68,7 @@ public final class Dma {
         try{transfer(ch);}finally{running[ch]=false;}
     }
     private void transfer(int ch){
-        if(chopped[ch]!=null || ch==1 && mdecOutput!=null || ch==2 && linkedDelay>0)return;
+        if(chopped[ch]!=null || ch==1 && mdecOutput!=null || ch==2 && linkedDelay>0 || ch==4 && spuRequest!=null)return;
         int control=channels[ch][2],mode=(control>>>9)&3;
         if((priority&(8<<(ch*4)))==0 || (control&0x1000000)==0 || mode==0 && (control&0x10000000)==0)return;
         if(ch==5)throw new UnsupportedOperationException("DMA channel "+ch+" is not implemented");
@@ -121,6 +127,17 @@ public final class Dma {
                 chopped[ch]=new Chopped(address,(int)words,control,wordCycles);choppedMask|=1<<ch;
                 channels[ch][2]&=~0x10000000;choppedTransfers++;return;
             }
+            if(ch==4 && mode==1){
+                int blockWords=channels[ch][1]&65535;if(blockWords==0)blockWords=65536;
+                // Request DMA yields while the SPU drains its transfer FIFO.
+                // Completing all blocks in the CHCR store can invoke the game's
+                // completion callback before it publishes its in-flight state.
+                // RAM bus stalls and unusual FIFO/block sizes remain approximate.
+                SpuRequest state=new SpuRequest(address,(int)words,blockWords,control);
+                transferSpuBlock(state);
+                if(state.remaining>0)spuRequest=state;else complete(4);
+                return;
+            }
             for(long i=0;i<words;i++){
                 transferWord(ch,address,control,i==words-1);
                 address=(address+step)&0x1ffffc;
@@ -128,6 +145,13 @@ public final class Dma {
             if(mode==1)channels[ch][0]=address;
         }
         complete(ch);
+    }
+    private void transferSpuBlock(SpuRequest state){
+        int count=Math.min(state.blockWords,state.remaining),step=(state.control&2)!=0?-4:4;
+        for(int i=0;i<count;i++){transferWord(4,state.address,state.control,false);state.address=(state.address+step)&0x1ffffc;}
+        state.remaining-=count;state.delay=count*32; // 16 CPU clocks per SPU halfword.
+        channels[4][0]=state.address;
+        channels[4][1]=(channels[4][1]&65535)|((state.remaining/state.blockWords)<<16);
     }
     private void transferWord(int ch,int address,int control,boolean last){
         if(performanceEnabled)performanceWords[ch]++;
@@ -143,6 +167,13 @@ public final class Dma {
     }
     /** Advance DMA/CPU windows without skipping devices or completing the DMA early. */
     public void tick(int cycles){
+        int spuElapsed=cycles;
+        while(spuRequest!=null && (priority&0x80000)!=0){
+            SpuRequest state=spuRequest;
+            if(spuElapsed<state.delay){state.delay-=spuElapsed;break;}
+            spuElapsed-=state.delay;transferSpuBlock(state);
+            if(state.remaining==0){spuRequest=null;complete(4);}
+        }
         int linkedElapsed=cycles;
         while(linkedDelay>0 && (priority&0x800)!=0){
             if(linkedElapsed<linkedDelay){linkedDelay-=linkedElapsed;break;}
@@ -191,6 +222,6 @@ public final class Dma {
         if((interrupt&0x800000)!=0 && (interrupt&(1<<(16+ch)))!=0)interrupt|=1<<(24+ch);
         updateInterrupt();
     }
-    int clocksToEvent(){int n=mdecOutput!=null&&(priority&0x80)!=0?Math.max(1,mdecOutput.delay):Integer.MAX_VALUE;if(linkedDelay>0&&(priority&0x800)!=0)n=Math.min(n,linkedDelay);for(int ch=0;ch<7;ch++)if(chopped[ch]!=null&&(priority&(8<<(ch*4)))!=0)n=Math.min(n,Math.max(1,chopped[ch].delay));return n;}
+    int clocksToEvent(){int n=mdecOutput!=null&&(priority&0x80)!=0?Math.max(1,mdecOutput.delay):Integer.MAX_VALUE;if(spuRequest!=null&&(priority&0x80000)!=0)n=Math.min(n,Math.max(1,spuRequest.delay));if(linkedDelay>0&&(priority&0x800)!=0)n=Math.min(n,linkedDelay);for(int ch=0;ch<7;ch++)if(chopped[ch]!=null&&(priority&(8<<(ch*4)))!=0)n=Math.min(n,Math.max(1,chopped[ch].delay));return n;}
     public String diagnostic(){return "DMA chopped="+choppedTransfers+" windows="+choppedWindows+String.format(java.util.Locale.ROOT," active=%02X CD-MADR=%06X BCR=%08X CHCR=%08X; GPU-MADR=%06X CHCR=%08X linked-yields=%d resume=%d last=%06X header=%08X",choppedMask,channels[3][0],channels[3][1],channels[3][2],channels[2][0],channels[2][2],linkedYields,linkedDelay,linkedLastAddress,linkedLastHeader);}
 }
