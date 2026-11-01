@@ -15,7 +15,8 @@ static i64 edge(Vertex a,Vertex b,int x,int y){return i64(b.x-a.x)*(y-a.y)-i64(b
 static bool topLeft(Vertex a,Vertex b){return b.y<a.y||(b.y==a.y&&b.x>a.x);}
 static int gx(Vertex a,Vertex b,Vertex c,int va,int vb,int vc,i64 area){return int((i64(vb-va)*(c.y-a.y)-i64(vc-va)*(b.y-a.y))*65536/area);}
 static int gy(Vertex a,Vertex b,Vertex c,int va,int vb,int vc,i64 area){return int((i64(b.x-a.x)*(vc-va)-i64(c.x-a.x)*(vb-va))*65536/area);}
-static int start(i64 wa,i64 wb,i64 wc,int a,int b,int c,i64 area){return int((wa*a+wb*b+wc*c)*65536/area);}
+// Shared polygon attribute bias for software and compute packets; sprites bypass it.
+static int start(i64 wa,i64 wb,i64 wc,int a,int b,int c,i64 area){return int((wa*a+wb*b+wc*c)*65536/area)+32768;}
 static int floorDiv(i64 a,int b){i64 q=a/b,r=a%b;return int(q-(r<0));}
 struct Raster {
  int* ram;const int* e;i64 pixels=0;

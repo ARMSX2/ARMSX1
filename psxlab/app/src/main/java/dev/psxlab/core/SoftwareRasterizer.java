@@ -41,7 +41,8 @@ final class SoftwareRasterizer {
     private static boolean topLeft(Vertex a,Vertex b){return b.y<a.y || b.y==a.y && b.x>a.x;}
     private static int gradientX(Vertex a,Vertex b,Vertex c,int va,int vb,int vc,long area){return (int)((((long)(vb-va)*(c.y-a.y)-(long)(vc-va)*(b.y-a.y))<<16)/area);}
     private static int gradientY(Vertex a,Vertex b,Vertex c,int va,int vb,int vc,long area){return (int)((((long)(b.x-a.x)*(vc-va)-(long)(c.x-a.x)*(vb-va))<<16)/area);}
-    private static int start(long wa,long wb,long wc,int a,int b,int c,long area){return (int)(((wa*a+wb*b+wc*c)<<16)/area);}
+    // Polygon attributes begin at half an attribute unit; sprites keep exact UVs.
+    private static int start(long wa,long wb,long wc,int a,int b,int c,long area){return (int)(((wa*a+wb*b+wc*c)<<16)/area)+32768;}
     private void triangle(Vertex a,Vertex b,Vertex c,int op,int clut,int[] e){
         int minX=Math.min(a.x,Math.min(b.x,c.x)),maxX=Math.max(a.x,Math.max(b.x,c.x));
         int minY=Math.min(a.y,Math.min(b.y,c.y)),maxY=Math.max(a.y,Math.max(b.y,c.y));

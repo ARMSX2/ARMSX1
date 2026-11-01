@@ -3,6 +3,20 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class GpuRasterTest {
+    @Test public void polygonTextureCoordinatesRoundToTheNearestTexelWithoutSpriteBias(){
+        try(Gpu g=new Gpu(false)){
+            area(g);put(g,640,0,0,31);put(g,1,1,0x7c00);
+            send(g,0x25000000,xy(0,0),0,xy(3,0),0x010a0002,xy(0,3),0);
+            assertEquals("U=2/3 selects texel 1, not transparent texel 0",31,raw(g,1,1));
+            send(g,0x65000000,xy(10,0),0,xy(1,1));assertEquals(0,raw(g,10,0));
+        }
+    }
+    @Test public void gouraudChannelsRoundBeforeFifteenBitQuantization(){
+        try(Gpu g=new Gpu(false)){
+            area(g);send(g,0x30000007,xy(0,0),9,xy(3,0),7,xy(0,3));
+            assertEquals("7+2/3 rounds to 8 before five-bit conversion",1,raw(g,1,1));
+        }
+    }
     @Test public void fillWrapsBothEdgesAndEmptyFillsPreserveVram(){
         for(boolean threaded:new boolean[]{false,true})try(Gpu g=new Gpu(threaded)){
             send(g,0x020000ff,xy(1008,511),xy(17,2));

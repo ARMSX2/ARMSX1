@@ -15,6 +15,17 @@ import static org.junit.Assert.*;
 /** Private output buffers: validates allocation policy and real posted pixels. */
 @RunWith(AndroidJUnit4.class)
 public class GpuEfficiencyTest {
+    @Test public void nativeAndHdPathsRoundPolygonAttributesWithoutTransparentHoles(){
+        for(int scale:new int[]{1,3})for(int output:new int[]{0,1,2})try(Gpu gpu=new Gpu(true,output,scale,output!=0)){
+            gpu.write(0xe4000000|127|(127<<10));
+            gpu.write(0xa0000000);gpu.write(640);gpu.write(0x10002);gpu.write(31<<16);
+            gpu.write(0xa0000000);gpu.write(1|(1<<16));gpu.write(0x10001);gpu.write(0x7c00);
+            for(int word:new int[]{0x25000000,0,0,3,0x010a0002,3<<16,0})gpu.write(word);
+            int[] pixels=gpu.snapshot();assertEquals("output="+output+" scale="+scale,0xffff0000,pixels[1025]);
+            for(int word:new int[]{0x30000007,10,9,13,7,10|(3<<16)})gpu.write(word);
+            pixels=gpu.snapshot();assertEquals(0xff080000,pixels[1024+11]);
+        }
+    }
     @Test public void softwareClearsPreserveWrappedPixels(){
         for(int trial=0;trial<4;trial++)try(Gpu gpu=new Gpu(false)){
             long start=System.nanoTime();
