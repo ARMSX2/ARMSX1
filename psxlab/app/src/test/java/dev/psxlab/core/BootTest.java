@@ -57,7 +57,21 @@ public class BootTest {
     @Test public void rawMode2AndChdUnitLayoutsWork()throws Exception{
         byte[] iso=iso();for(int stride:new int[]{2352,2448}){byte[] raw=new byte[32*stride];for(int i=0;i<32;i++)System.arraycopy(iso,i*2048,raw,i*stride+24,2048);assertArrayEquals(executable(),new IsoDisc(source(raw)).bootExecutable());}
     }
-    @Test public void rejectsPayloadOutsideRam()throws Exception{byte[] exe=executable();word(exe,24,0x801ffff0);try(Gpu g=new Gpu(false)){assertThrows(IOException.class,()->ExeLoader.load(exe,new Bus(g)));}}
+    @Test public void acceptsExecutableAndEntryInAnActualRamMirror()throws Exception{
+        byte[] exe=executable();word(exe,16,0x80210000);word(exe,24,0x80210000);
+        try(Gpu g=new Gpu(false)){Bus b=new Bus(g);Cpu cpu=ExeLoader.load(exe,b);assertEquals(0x2401002a,b.read32(0x10000));cpu.step();assertEquals(42,cpu.r[1]);}
+    }
+    @Test public void payloadCanCrossBetweenDecodedRamMirrors()throws Exception{
+        byte[] exe=executable();word(exe,16,0x801ffff0);word(exe,24,0x801ffff0);exe[2048+64]=0x5a;
+        try(Gpu g=new Gpu(false)){Bus b=new Bus(g);Cpu cpu=ExeLoader.load(exe,b);assertEquals(0x5a,b.read8(0x30));cpu.step();assertEquals(42,cpu.r[1]);}
+    }
+    @Test public void rejectsPayloadOutsideRam()throws Exception{byte[] exe=executable();word(exe,24,0x807ffff0);try(Gpu g=new Gpu(false)){assertThrows(IOException.class,()->ExeLoader.load(exe,new Bus(g)));}}
+    @Test public void discBootCanReadDeclaredPaddingInTheLastPhysicalSector()throws Exception{
+        byte[] image=iso();
+        // Locate the executable's directory record without assuming the CNF name length.
+        int at=20*2048+(image[20*2048]&255);word(image,at+10,4092);
+        IsoDisc disc=new IsoDisc(source(image));assertArrayEquals(executable(),disc.bootExecutable());
+    }
     @Test public void rejectsTruncatedExe()throws Exception{try(Gpu g=new Gpu(false)){assertThrows(IOException.class,()->ExeLoader.load(java.util.Arrays.copyOf(executable(),2050),new Bus(g)));}}
     @Test public void rejectsBrokenIsoRecords()throws Exception{byte[] iso=iso();iso[20*2048]=2;assertThrows(IOException.class,()->new IsoDisc(source(iso)).bootExecutable());}
     @Test public void rejectsOversizedDirectory()throws Exception{byte[] iso=iso();word(iso,16*2048+156+10,1000000000);assertThrows(IOException.class,()->new IsoDisc(source(iso)).bootExecutable());}

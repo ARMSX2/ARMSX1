@@ -72,7 +72,14 @@ public final class IsoDisc implements SectorSource {
             bootPath=match.group(1).trim().split("\\s+",2)[0];
         }catch(FileNotFoundException ignored){}
         Record exe=find(bootPath);if(exe.directory)throw new IOException("Boot entry is a directory");
-        return contents(exe,2*1024*1024+2048);
+        int maximum=2*1024*1024+2048;byte[] bytes=contents(exe,maximum);
+        // BIOS CD reads operate in complete sectors. Some mastered executables
+        // omit file-length padding even though t_size includes those final bytes.
+        if(bytes.length>=2048&&new String(bytes,0,8,StandardCharsets.US_ASCII).equals("PS-X EXE")){
+            long required=Integer.toUnsignedLong(ExeLoader.le(bytes,28))+2048,aligned=((long)exe.size+2047)&~2047L;
+            if(required>bytes.length&&required<=aligned&&aligned<=maximum)return contents(new Record(exe.sector,(int)aligned,false),maximum);
+        }
+        return bytes;
     }
     @Override public int sectorCount(){return mapped==null?sectors:mapped.sectorCount();}
     @Override public int lastTrack(){return mapped==null?1:mapped.lastTrack();}

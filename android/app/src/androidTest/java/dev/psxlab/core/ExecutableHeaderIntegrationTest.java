@@ -9,6 +9,14 @@ import static org.junit.Assert.*;
 
 /** Original fixture models a translation calling into the full BIOS EXE header buffer. */
 public class ExecutableHeaderIntegrationTest {
+    @Test public void executableEntryInRamMirrorWorksWithBothNativeCpuModes()throws Exception{
+        byte[] exe=new byte[4096];System.arraycopy("PS-X EXE".getBytes(java.nio.charset.StandardCharsets.US_ASCII),0,exe,0,8);
+        word(exe,16,0x80210000);word(exe,24,0x80210000);word(exe,28,2048);word(exe,2048,0x2402002a);word(exe,2052,0x1000ffff);
+        for(boolean recompile:new boolean[]{false,true})try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu);Cpu cpu=ExeLoader.load(exe,bus);assertTrue(cpu.enableNative(recompile,true,true));
+            try{cpu.run(128);assertEquals(42,cpu.r[2]);assertEquals(0x2402002a,bus.read32(0x10000));}finally{cpu.closeNative();}
+        }
+    }
     private static void word(byte[] data,int at,int value){for(int i=0;i<4;i++)data[at+i]=(byte)(value>>>(8*i));}
     @Test public void fastBootPreservesHeaderHelpersWithARealBiosInEveryCpuMode()throws Exception{
         var context=InstrumentationRegistry.getInstrumentation().getTargetContext();
