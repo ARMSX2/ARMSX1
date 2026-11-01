@@ -551,7 +551,7 @@ public class NativeApp {
 	/** Overscan crop: 0 = none (default), 1 = small, 2 = full. Trims the blanking
 	 *  border and zooms the kept region to the same rect. Negative clears back to
 	 *  settings.toml ({@code [video] overscan_crop}). Next presented frame. */
-	public static void setOverscanCrop(int mode) { unsupported("setOverscanCrop"); }
+	public static void setOverscanCrop(int mode) { if(lab!=null)lab.overscanCrop(mode); }
 
 	/** Display rotation in DEGREES clockwise: 0 / 90 / 180 / 270. Anything else clears
 	 *  the override back to settings.toml ({@code [video] display_rotation}). Applied by

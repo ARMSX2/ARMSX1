@@ -6,10 +6,35 @@ import android.media.ImageReader;
 import android.os.SystemClock;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.lang.reflect.Field;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class MoviePresentationIntegrationTest {
+    @Test public void croppedBorderIsRemovedAcrossSoftwareOpenGlVulkanAndHd()throws Exception{
+        ShaderChain.request(false,"");Field field=Gpu.class.getDeclaredField("vram");field.setAccessible(true);
+        for(int api:new int[]{0,1,2})for(int scale:new int[]{1,4})
+            try(Gpu gpu=new Gpu(true,api,scale,api!=0);ImageReader reader=ImageReader.newInstance(192,144,PixelFormat.RGBA_8888,4)){
+                gpu.configureDisplay(4f/3f,false,false);
+                for(boolean rgb24:new boolean[]{false,true}){
+                    gpu.sync();int[] ram=(int[])field.get(gpu);Arrays.fill(ram,0);
+                    for(int y=0;y<244;y++)for(int x=0;x<320;x++){
+                        boolean stale=y>=240;
+                        if(rgb24){byteAt(ram,x*3,y,stale?255:0);byteAt(ram,x*3+1,y,stale?0:255);byteAt(ram,x*3+2,y,stale?255:0);}
+                        else ram[y*1024+x]=stale?0x7c1f:0x3e0;
+                    }
+                    gpu.restoreSnapshot();gpu.control(rgb24?0x08000011:0x08000001);gpu.control(0x05001000);
+                    gpu.control(0x06000000|615|(3175<<12));gpu.control(0x07000000|16|(256<<10));gpu.control(0x03000000);
+                    for(boolean filter:new boolean[]{false,true})for(int crop:new int[]{0,1,2,0}){
+                        gpu.configureCrop(crop);gpu.requestSurfaceFrame(reader.getSurface(),filter,frame->{if(frame!=null)throw new AssertionError("Texture presenter unavailable");});gpu.sync();
+                        int[] pixels=image(reader);String context="api="+api+" scale="+scale+" rgb24="+rgb24+" crop="+crop+" filter="+filter;
+                        assertEquals(context,0xff00ff00,pixels[72*192+96]);
+                        assertEquals(context,crop==0?0xffff00ff:0xff00ff00,pixels[143*192+96]);
+                        if(crop!=0)for(int p:pixels)assertEquals(context,0xff00ff00,p);
+                    }
+                }
+            }
+    }
     private static int[] image(ImageReader reader)throws Exception{
         long end=SystemClock.uptimeMillis()+5000;
         while(SystemClock.uptimeMillis()<end){try(Image image=reader.acquireLatestImage()){

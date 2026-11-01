@@ -63,7 +63,7 @@ public final class ArmSxBackend {
     private Restore restart;
     private final ArrayDeque<String> events=new ArrayDeque<>();
     private volatile Map<String,String> options=Map.of();
-    private volatile int aspectOverride=-1,volumeOverride=-1,presentationModeOverride=-1,presentationMultipleOverride=2;
+    private volatile int aspectOverride=-1,volumeOverride=-1,presentationModeOverride=-1,presentationMultipleOverride=2,cropOverride=-1;
     private volatile float customAspectOverride,fastSpeedOverride=-1,outputAspect=4f/3f;
     private volatile Boolean stretchOverride,integerOverride,mutedOverride,wideOverride;
     private volatile boolean outputStretch,outputInteger;
@@ -72,13 +72,14 @@ public final class ArmSxBackend {
     public void displayAspectCustom(float value){customAspectOverride=value;updateDisplay();}
     public void stretchDisplay(boolean enabled){stretchOverride=enabled;updateDisplay();}
     public void integerDisplay(boolean enabled){integerOverride=enabled;updateDisplay();}
+    public void overscanCrop(int mode){cropOverride=mode>=0&&mode<=2?mode:-1;updateDisplay();}
     private void updateDisplay(){
         String configured=options.getOrDefault("video.display_aspect","classic");int mode=aspectOverride>=0?aspectOverride:switch(configured){case "square"->1;case "wide16x9","16:9"->2;case "custom"->3;default->0;};
         float custom=customAspectOverride>0?customAspectOverride:decimal(options.get("video.display_aspect_custom"),4f/3f);
         outputAspect=switch(mode){case 1->1;case 2->16f/9f;case 3->Math.max(0.1f,Math.min(10,custom));default->4f/3f;};
         outputStretch=stretchOverride!=null?stretchOverride:Boolean.parseBoolean(options.getOrDefault("video.stretch_mode","false"));
         outputInteger=integerOverride!=null?integerOverride:Boolean.parseBoolean(options.getOrDefault("video.integer_scaling","false"));
-        Gpu target=gpu;if(target!=null)target.configureDisplay(outputAspect,outputStretch,outputInteger);
+        Gpu target=gpu;if(target!=null){target.configureDisplay(outputAspect,outputStretch,outputInteger);target.configureCrop(cropOverride>=0?cropOverride:switch(options.getOrDefault("video.overscan_crop","none")){case "small"->1;case "full"->2;default->0;});}
     }
     public void widescreenHack(boolean enabled){wideOverride=enabled;commands.add(()->{if(cpu!=null)cpu.gte.setWidescreen(enabled);});wake();}
     private boolean widescreenEnabled(){return wideOverride!=null?wideOverride:Boolean.parseBoolean(options.getOrDefault("video.widescreen_hack","false"));}

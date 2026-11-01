@@ -18,6 +18,9 @@ public final class Gpu implements AutoCloseable {
     private final boolean baseVulkanOutput;
     private volatile boolean shaderPresenterFailed;
     private boolean displayStretch,displayInteger;
+    private volatile int displayCrop;
+    public void configureCrop(int mode){displayCrop=Math.max(0,Math.min(2,mode));}
+    private int[] displayState(boolean filter){return DisplayCrop.apply(new int[]{gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,filter?1:0},displayCrop);}
     private String baseRenderer;
     private volatile String shaderPresenterError="";
     private volatile HardwareRasterizer hardware;
@@ -337,13 +340,13 @@ public final class Gpu implements AutoCloseable {
     public record Frame(int width,int height,int[] pixels){}
     /** Selected display buffer, including packed 24-bit video frames. */
     public Frame displayFrame(){
-        if(internalScale>1||textureMetrics()[1]!=0){flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,0};FutureTask<Frame> task=new FutureTask<>(()->hardware.capture(state));submit(task::run);try{return task.get();}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}catch(ExecutionException e){throw new IllegalStateException(e.getCause());}}
-        sync(true);return captureFrame(gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd);
+        if(internalScale>1||textureMetrics()[1]!=0){flushUpload();int[] state=displayState(false);FutureTask<Frame> task=new FutureTask<>(()->hardware.capture(state));submit(task::run);try{return task.get();}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}catch(ExecutionException e){throw new IllegalStateException(e.getCause());}}
+        sync(true);int[] s=displayState(false);return captureFrame(s[0],s[1],s[2],s[3],s[4],s[5],s[6]);
     }
     /** Ordered scanout without making the CPU wait for rasterization or the pixel copy. */
     public void requestDisplayFrame(java.util.function.Consumer<Frame> receiver){
         flushUpload();
-        int status=gpuStatus,x=displayX,y=displayY,hs=horizontalStart,he=horizontalEnd,vs=verticalStart,ve=verticalEnd;
+        int[] s=displayState(false);int status=s[0],x=s[1],y=s[2],hs=s[3],he=s[4],vs=s[5],ve=s[6];
         submit(()->{long before=diagnosticsEnabled?System.nanoTime():0;Frame frame;if(internalScale>1||textureMetrics()[1]!=0)frame=hardware.capture(new int[]{status,x,y,hs,he,vs,ve,0});else{readHardware();frame=captureFrame(status,x,y,hs,he,vs,ve);}if(diagnosticsEnabled)diagnosticScanout+=System.nanoTime()-before;receiver.accept(frame);});
     }
     /** GPU scanout into a persistent texture and an Android window surface; null means no host pixel copy. */
@@ -351,7 +354,7 @@ public final class Gpu implements AutoCloseable {
     public void restorePresentation(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver){requestSurfaceFrame(surface,filter,receiver,null,false);}
     public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing){requestSurfaceFrame(surface,filter,receiver,timing,true);}
     private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
-        flushUpload();int[] state={gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,filter?1:0};
+        flushUpload();int[] state=displayState(filter);
         submit(()->{
             long perfStart=performanceEnabled?System.nanoTime():0;
             java.util.function.Consumer<Frame> completed=perfStart==0?receiver:frame->{measurePresentation(perfStart,state);receiver.accept(frame);};
