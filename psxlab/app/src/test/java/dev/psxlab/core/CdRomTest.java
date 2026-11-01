@@ -127,7 +127,7 @@ public class CdRomTest {
     }
     @Test public void interruptEnableAndAcknowledgmentDriveCpuLine(){
         try(Gpu g=new Gpu(false)){
-            Bus b=new Bus(g);b.write16(0x1f801074,4);command(b,1);assertFalse(b.interruptPending());b.write8(BASE,1);b.write8(BASE+2,31);assertTrue(b.interruptPending());b.write16(0x1f801070,0xfffb);assertFalse(b.interruptPending());b.cdrom.tick(1);assertTrue(b.interruptPending());ack(b);b.write16(0x1f801070,0xfffb);b.cdrom.tick(1);assertFalse(b.interruptPending());
+            Bus b=new Bus(g);b.write16(0x1f801074,4);command(b,1);assertFalse(b.interruptPending());b.write8(BASE,1);b.write8(BASE+2,31);assertTrue(b.interruptPending());b.write16(0x1f801070,0xfffb);assertFalse(b.interruptPending());b.cdrom.tick(1);assertFalse("A CD IRQ already high must not produce another edge",b.interruptPending());b.write8(BASE+2,0);b.write8(BASE+2,31);assertTrue(b.interruptPending());ack(b);b.write16(0x1f801070,0xfffb);b.cdrom.tick(1);assertFalse(b.interruptPending());
         }
     }
     @Test public void invalidParametersAndUnknownCommandsReturnControllerErrors(){

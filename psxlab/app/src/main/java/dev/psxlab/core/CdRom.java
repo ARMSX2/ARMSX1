@@ -27,6 +27,7 @@ public final class CdRom {
     private byte[] lastSector,lastDataSector,data=new byte[0];
     private int dataPosition;
     private boolean sectorPending;
+    private boolean irqAsserted;
     public long commands,commandOverwrites,sectorsRead,dmaBytes,xaSectors,xaFrames,xaDroppedFrames,cddaSectors,cddaFrames;
     private final XaDecoder xa=new XaDecoder();
     private final short[] audio=new short[65536];
@@ -83,7 +84,7 @@ public final class CdRom {
     /** Host tray-open event. The host retains the old source until replacement is installed. */
     public void eject(){
         stopRead();disc=null;motor=false;driveTicks=seekTicks=0;readAfterSeek=explicitSeek=seekReady=false;
-        pendingCommand=-1;commandTicks=0;parameterCount=0;events.clear();response.clear();interrupt=0;
+        pendingCommand=-1;commandTicks=0;parameterCount=0;events.clear();response.clear();interrupt=0;irqLine();
         lastSector=lastDataSector=null;data=new byte[0];dataPosition=0;resetAudio();initializeScex();
         event(0,5,0x10,8);
     }
@@ -93,7 +94,7 @@ public final class CdRom {
     public static int bcd(int n){return (n/10<<4)|(n%10);}
     private int binary(int n){if((n&15)>9 || (n>>>4)>9)return -1;return (n>>>4)*10+(n&15);}
     private int status(){return (disc==null?0x10:0)|(motor?2:0)|(seekTicks>0?0x40:0)|(reading?0x20:0)|(playing?0x80:0);}
-    private void irqLine(){if((interrupt&enable&31)!=0)bus.raiseInterrupt(2);}
+    private void irqLine(){boolean active=(interrupt&enable&31)!=0;if(active && !irqAsserted)bus.raiseInterrupt(2);irqAsserted=active;}
     private void event(int ticks,int irq,int... bytes){if(events.size()>=16)throw new IllegalStateException("CD-ROM response queue overflow");events.add(new Event(ticks,irq,bytes));}
     private void error(int code){event(0,5,status()|1,code);}
     private boolean media(){if(disc==null){error(0x80);return false;}return true;}
@@ -208,7 +209,6 @@ public final class CdRom {
     }
     int clocksToEvent(){
         int n=Integer.MAX_VALUE;
-        if((interrupt&enable&31)!=0 && !bus.interruptRaised(2))return 1;
         if(pendingCommand>=0 && (commandTicks>0 || interrupt==0))n=Math.min(n,Math.max(1,commandTicks));
         if(!events.isEmpty() && (events.peekFirst().ticks>0 || interrupt==0))n=Math.min(n,Math.max(1,events.peekFirst().ticks));
         if(reading || playing)n=Math.min(n,Math.max(1,sectorTicks));

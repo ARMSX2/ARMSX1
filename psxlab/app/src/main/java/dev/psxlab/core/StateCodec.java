@@ -86,6 +86,7 @@ final class StateCodec {
         if(!existing.getClass().getName().equals(n.type))throw new IOException("State object type mismatch");
         // Version-1 states made before drive mechanics had no operation in flight.
         if(existing instanceof CdRom){
+            if(!n.fields.containsKey("irqAsserted")){Node asserted=new Node(3);asserted.scalar=(integer(n,"interrupt")&integer(n,"enable")&31)!=0;n.fields.put("irqAsserted",asserted);}
             for(String key:new String[]{"driveTicks","seekTicks","seekTarget","readAfterSeek","explicitSeek","seekReady"})if(!n.fields.containsKey(key)){boolean flag=key.equals("readAfterSeek")||key.equals("explicitSeek")||key.equals("seekReady");Node value=new Node(flag?3:1);value.scalar=flag?Boolean.FALSE:Integer.valueOf(0);n.fields.put(key,value);}
         }
         // Older states could only capture completed GPU lists. No deferred slice

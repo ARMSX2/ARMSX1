@@ -2,6 +2,17 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class SaveStateTest {
+    @Test public void oldCdStatesRestoreTheExistingInterruptLevelWithoutANewEdge()throws Exception{
+        for(boolean pending:new boolean[]{false,true})try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);b.write16(0x1f801074,4);
+            b.cdrom.write(0,1);b.cdrom.write(2,31);b.cdrom.write(0,0);
+            if(pending)CdRomTest.command(b,1);
+            StateCodec.Node legacy=StateCodec.capture(b.cdrom);legacy.fields.remove("irqAsserted");
+            b.write16(0x1f801070,0xfffb);StateCodec.apply(legacy,b.cdrom);b.cdrom.tick(32);
+            assertFalse("Restoring a latched CD response must not create a new IRQ edge",b.interruptPending());
+            CdRomTest.ack(b);CdRomTest.command(b,1);assertTrue(b.interruptPending());
+        }
+    }
     @Test public void deferredGpuListSurvivesSaveAndRestore()throws Exception{
         try(Gpu ga=new Gpu(false);Gpu gb=new Gpu(false)){
             Bus a=new Bus(ga,new PadState(),false),b=new Bus(gb,new PadState(),false);Cpu ca=new Cpu(a),cb=new Cpu(b);
