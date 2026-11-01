@@ -56,10 +56,11 @@ public class FastForwardSpeedTest {
                 assertEquals("Actual presentation API",renderer.equals("vulkan")?"Vulkan":"OpenGL",b.displayRenderer());
                 double normal=speed(b,2000);
                 for(float requested:allSpeeds?new float[]{1.5f,2,3,4,0}:new float[]{multiplier}){
-                    b.fastForwardSpeed(requested);b.fastForward(true);SystemClock.sleep(2000);double fast=speed(b,3000);
+                    b.fastForwardSpeed(requested);b.fastForward(true);SystemClock.sleep(2000);int beforeFastUnderruns=underruns(b);double fast=speed(b,3000);
                     String report=renderer+" normal="+normal+" fast"+requested+"x="+fast+" muteFast="+muteFast+"\n"+b.diagnosticReport();Files.write(new File(dir,"speed-"+requested+".json").toPath(),report.getBytes(StandardCharsets.UTF_8));android.util.Log.i("FastSpeedTest",report);
                     assertEquals("",b.lastError());
                     if(!baseline)assertTrue(renderer+" expected "+requested+"x; actual="+fast,requested==0?fast>(ownedGame==null?4.5:1.2):fast>requested*.87&&fast<requested*1.1);
+                    if(!baseline)assertEquals("Steady fast-forward audio underruns: "+b.audioDiagnostic(),beforeFastUnderruns,underruns(b));
                 }
                 b.fastForward(false);SystemClock.sleep(3000);int beforeUnderruns=underruns(b);double recovered=speed(b,2000);
                 android.util.Log.i("FastSpeedTest",renderer+" recovered="+recovered+" "+b.audioDiagnostic());

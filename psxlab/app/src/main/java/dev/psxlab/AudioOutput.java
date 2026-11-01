@@ -38,7 +38,12 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private String lastDiagnostic="Audio starting";
     private volatile RuntimeException failure;
     private volatile float appliedSpeed=1f,tempoFactor=1f,configuredGain=1f;
-    void setTempoFactor(float value){float next=Float.isFinite(value)?Math.max(1,Math.min(16,value)):1;tempoFactor=next;appliedSpeed=next;}
+    private volatile boolean unlimitedTempo;
+    synchronized void setFastForwardTempo(float value){
+        if(value>0){unlimitedTempo=false;setTempoFactor(value);}
+        else if(!unlimitedTempo){setTempoFactor(2);unlimitedTempo=true;}
+    }
+    synchronized void setTempoFactor(float value){float next=Float.isFinite(value)?Math.max(1,Math.min(16,value)):1;tempoFactor=next;appliedSpeed=next;}
     synchronized void setGain(float gain){if(!trackReleased){configuredGain=Math.max(0,Math.min(1,gain));track.setVolume(configuredGain);}}
     volatile long writtenFrames,droppedFrames;
     volatile long recoveries,rateChanges;
@@ -127,6 +132,7 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private void play(){
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
         short[] block=new short[512];
+        dev.psxlab.core.UnlimitedAudioTempo uncapped=new dev.psxlab.core.UnlimitedAudioTempo();boolean wasUnlimited=false;
         try{
             // Queue about 93 ms before starting, to absorb CPU/GPU scheduling jitter.
             synchronized(this){while(size<8192 && running && !(dspFinished && size>0))wait();if(!running)return;
@@ -136,19 +142,25 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
                 synchronized(this){if(paused){track.pause();while(paused && running)wait();if(!running)break;productionAt=0;productionRate=1;rateControl.recovered();track.play();}}
                 long queued=bufferedFrames();
                 long now=System.nanoTime();
+                if(unlimitedTempo){
+                    if(!wasUnlimited)uncapped.reset(now,sourceFrames,sourceBlockedNanos);
+                    float next=uncapped.update(now,sourceFrames,sourceBlockedNanos);
+                    synchronized(this){if(unlimitedTempo)tempoFactor=next;}
+                    wasUnlimited=true;
+                }else wasUnlimited=false;
                 if(productionAt==0){productionAt=now;productionFrames=sourceFrames;}
                 else if(now-productionAt>=250000000){
                     double observed=(sourceFrames-productionFrames)*1000000000d/(44100d*(now-productionAt));
                     productionRate+=(Math.max(0.5,Math.min(1,observed))-productionRate)*0.5;
                     productionAt=now;productionFrames=sourceFrames;
                 }
-                float requested=tempoFactor*(lockTempo?1:rateControl.update(queued,productionRate,now));
-                if(Math.abs(requested-appliedSpeed)>=0.0049f){
-                    appliedSpeed=requested;rateChanges++;
-                    // Tempo changes are handled by SoundTouch; Android stays at fixed 44.1 kHz.
-                }
                 int count;
                 synchronized(this){
+                    float requested=tempoFactor*(lockTempo?1:rateControl.update(queued,productionRate,now));
+                    if(Math.abs(requested-appliedSpeed)>=0.0049f){
+                        appliedSpeed=requested;rateChanges++;
+                        // Tempo changes are handled by SoundTouch; Android stays at fixed 44.1 kHz.
+                    }
                     while(size==0 && running){
                         if(paused){track.pause();while(paused && running)wait();if(!running)break;productionAt=0;productionRate=1;rateControl.recovered();track.play();}
                         long pending=writtenFrames-Integer.toUnsignedLong(track.getPlaybackHeadPosition());

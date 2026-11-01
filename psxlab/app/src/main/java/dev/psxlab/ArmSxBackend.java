@@ -154,9 +154,8 @@ public final class ArmSxBackend {
     public void fastForwardSpeed(float speed){fastSpeedOverride=Float.isFinite(speed)?speed:2;updateAudio();}
     private boolean muteFast(){return fast&&Boolean.parseBoolean(options.getOrDefault("audio.mute_fast_forward","false"));}
     private float fastSpeed(){float configured=fastSpeedOverride>=0?fastSpeedOverride:decimal(options.get("runtime.fast_forward_speed"),2);return configured<=0?0:Math.max(1,Math.min(16,configured));}
-    private float fastTempo(){float speed=fastSpeed();return speed==0?16:speed;}
     private void updateAudio(){
-        AudioOutput output=audio;if(output==null)return;output.setTempoFactor(fast&&!muteFast()?fastTempo():1);
+        AudioOutput output=audio;if(output==null)return;output.setFastForwardTempo(fast&&!muteFast()?fastSpeed():1);
         boolean muted=mutedOverride!=null?mutedOverride:Boolean.parseBoolean(options.getOrDefault("audio.muted","false"));
         float normal=volumeOverride>=0?volumeOverride:decimal(options.get("audio.volume"),100);
         float volume=fast?decimal(options.get("audio.fast_forward_volume"),100):normal;

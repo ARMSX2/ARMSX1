@@ -21,6 +21,13 @@ public class FastForwardAudioTest {
             b.fastForward(false);assertEquals(1f,output.playbackSpeed(),0.001);assertEquals(1f,((Number)output.loggingSnapshot().get("gain")).floatValue(),0.001);
             options.set(b,Map.of("audio.mute_fast_forward","true"));b.fastForward(true);assertEquals(0f,((Number)output.loggingSnapshot().get("gain")).floatValue(),0.001);
             b.fastForward(false);assertEquals(1f,((Number)output.loggingSnapshot().get("gain")).floatValue(),0.001);b.audioMuted(true);assertEquals(0f,((Number)output.loggingSnapshot().get("gain")).floatValue(),0.001);
+            b.audioMuted(false);options.set(b,Map.of());
+            for(float speed:new float[]{1.5f,2,3,4,0}){
+                b.fastForwardSpeed(speed);b.fastForward(true);
+                assertEquals("Fast-forward is audible by default",1f,((Number)output.loggingSnapshot().get("gain")).floatValue(),0.001);
+                assertEquals(speed==0?2:speed,output.playbackSpeed(),0.001);
+                b.fastForward(false);assertEquals(1f,output.playbackSpeed(),0.001);
+            }
         }finally{audio.set(b,null);}
     }
     @Test public void doubleTempoProducesPcmAtHalfTheDurationWithFixedAndroidRate()throws Exception{
@@ -42,6 +49,10 @@ public class FastForwardAudioTest {
         try{
             SystemClock.sleep(10000);assertTrue(b.lastError(),b.lastError().isEmpty());assertTrue(b.frames()>200);Field field=ArmSxBackend.class.getDeclaredField("audio");field.setAccessible(true);AudioOutput output=(AudioOutput)field.get(b);assertNotNull(output);
             long before=output.writtenFrames;b.fastForward(true);SystemClock.sleep(3000);assertEquals(2f,output.playbackSpeed(),0.01);assertTrue("PCM writes stopped while fast-forwarding",output.writtenFrames-before>44100);assertTrue(((Number)output.loggingSnapshot().get("gain")).floatValue()>0);
+            b.fastForwardSpeed(0);SystemClock.sleep(2000);int under=output.underruns();before=output.writtenFrames;SystemClock.sleep(3000);
+            assertTrue("Unlimited fast-forward continues PCM playback",output.writtenFrames-before>100000);
+            assertEquals("Unlimited audio keeps up with available speed",under,output.underruns());
+            assertTrue("Unlimited audio remains audible",((Number)output.loggingSnapshot().get("gain")).floatValue()>0);
             b.fastForward(false);SystemClock.sleep(2000);assertEquals(1f,output.playbackSpeed(),0.01);assertTrue(b.audioNonzero()>100);assertTrue(b.lastError(),b.lastError().isEmpty());
             java.nio.file.Files.write(new java.io.File(dir,"report.json").toPath(),b.diagnosticReport().getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }finally{b.stop();vm.join(10000);assertFalse(vm.isAlive());inst.runOnMainSync(a::finish);}
