@@ -4,6 +4,34 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class MdecTest {
+    @Test public void partiallyStreamedOutputSurvivesSnapshotAndLegacyPendingStates()throws Exception{
+        try(Gpu g=new Gpu(false);Gpu restoredGpu=new Gpu(false)){
+            Bus b=new Bus(g),restored=new Bus(restoredGpu);tables(b);b.write32(STATUS,0x60000000);b.write32(0x1f8010f0,0x076543a9);
+            b.write32(DATA,0x3800000c);for(int i=0;i<12;i++)block(b,0);
+            b.write32(0x1f801090,0x1000);b.write32(0x1f801094,(8<<16)|32);b.write32(0x1f801098,0x01000200);b.dma.tick(48);
+            StateCodec.Node decoder=StateCodec.capture(b.mdec),dmaState=StateCodec.capture(b.dma);
+            StateCodec.apply(decoder,restored.mdec);StateCodec.apply(dmaState,restored.dma);restored.dma.tick(208);
+            assertEquals(0,restored.mdec.availableWords());assertEquals(0x42104210,restored.read32(0x1010));assertEquals(0,restored.read32(0x1f801098)&0x1000000);
+            // Legacy states have one whole-transfer completion delay and no chunk field.
+            b.write32(0x1f801098,0);b.write32(STATUS,0x80000000);tables(b);b.write32(STATUS,0x60000000);b.write32(DATA,0x38000006);for(int i=0;i<6;i++)block(b,0);
+            dma(b,1,0x3000,128,0);dmaState=StateCodec.capture(b.dma);dmaState.fields.get("mdecOutput").fields.remove("chunkWords");
+            StateCodec.apply(StateCodec.capture(b.mdec),restored.mdec);StateCodec.apply(dmaState,restored.dma);restored.dma.tick(128);
+            assertEquals(0x42104210,restored.read32(0x3000));assertEquals(0,restored.mdec.availableWords());
+        }
+    }
+    @Test public void outputRequestStreamsBlocksBeforeTheWholeMovieTransferIsDecoded(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);tables(b);b.write32(STATUS,0x60000000);b.write32(0x1f8010f0,0x076543a9);b.write32(0x1f8010f4,0x00820000);
+            b.write32(0x1f801090,0x1000);b.write32(0x1f801094,(8<<16)|32);b.write32(0x1f801098,0x01000200);
+            b.write32(DATA,0x3800000c);for(int i=0;i<6;i++)block(b,0);b.dma.tick(128);
+            assertEquals("First macroblock must drain while more compressed input is pending",0,b.mdec.availableWords());
+            assertEquals(0x42104210,b.read32(0x1000));assertEquals(0x1200,b.read32(0x1f801090));assertEquals(4,b.read32(0x1f801094)>>>16);
+            assertNotEquals(0,b.read32(0x1f801098)&0x1000000);assertEquals(0,b.read32(0x1f8010f4)&0x02000000);
+            assertEquals("No one-clock polling while waiting for decoder data",Integer.MAX_VALUE,b.dma.clocksToEvent());
+            block(b,0);block(b,0);for(int i=0;i<4;i++)block(b,64);b.dma.tick(128);
+            assertEquals(0x46314631,b.read32(0x1200));assertEquals(0,b.read32(0x1f801098)&0x1000000);assertEquals(0,b.mdec.availableWords());assertNotEquals(0,b.read32(0x1f8010f4)&0x02000000);
+        }
+    }
     @Test public void commandStaysBusyWhileMovieColumnsStillNeedProcessing(){
         for(int depth=0;depth<4;depth++)try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);tables(b);b.write32(STATUS,0x60000000);b.write32(0x1f8010f0,0x076543a9);

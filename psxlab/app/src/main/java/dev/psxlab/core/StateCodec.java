@@ -96,6 +96,11 @@ final class StateCodec {
             Node delay=new Node(1);delay.scalar=0;n.fields.put("linkedDelay",delay);
         }
         if(existing instanceof Dma && !n.fields.containsKey("spuRequest"))n.fields.put("spuRequest",new Node(0));
+        // Legacy output DMA waited for its entire transfer before copying. Its
+        // saved delay therefore belongs to one chunk covering all saved words.
+        if(n.type.equals("dev.psxlab.core.Dma$OutputTransfer")&&!n.fields.containsKey("chunkWords")){
+            Node chunk=new Node(1);chunk.scalar=integer(n,"words");n.fields.put("chunkWords",chunk);
+        }
         List<Field> fs=fields(existing.getClass());if(fs.size()!=n.fields.size())throw new IOException("State schema differs from this engine");
         // Records are immutable; their constructor already consumed every field.
         if(n.type.equals("dev.psxlab.core.Mdec$Output"))return existing;

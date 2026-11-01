@@ -24,8 +24,9 @@ public final class Dma {
     public boolean performanceEnabled;
     public final long[] performanceWords=new long[7];
     private static final class OutputTransfer {
-        final int address,words,control;
-        int delay;
+        int address,words;
+        final int control;
+        int delay,chunkWords;
         OutputTransfer(int address,int words,int control){this.address=address;this.words=words;this.control=control;delay=words;}
     }
     private static final class SpuRequest {
@@ -45,7 +46,7 @@ public final class Dma {
     }
     Dma(Bus bus){this.bus=bus;}
     public void resumeCdrom(){start(3);}
-    public void resumeMdec(){start(0);start(1);}
+    public void resumeMdec(){start(0);start(1);armMdecOutput();}
     public int read(int address){
         int offset=address-0x1f801080;
         if(offset<0x70){int reg=(offset&15)/4;return reg<3?channels[offset/16][reg]:0;}
@@ -107,14 +108,14 @@ public final class Dma {
             }
             if(ch==1){
                 if((control&1)!=0 || step!=4)throw new UnsupportedOperationException("Unsupported MDEC output DMA direction");
-                if(!bus.mdec.outputRequest() || bus.mdec.availableWords()<words)return;
                 if(!chopping){
                     // Output DMA must not finish inside the CHCR write. Movie callbacks
                     // publish their in-flight state after starting the transfer.
                     // One clock/word models RAM bus time; decoder stalls/arbitration
                     // remain approximate, as does the synchronous input decoder.
-                    mdecOutput=new OutputTransfer(address,(int)words,control);return;
+                    mdecOutput=new OutputTransfer(address,(int)words,control);mdecOutput.delay=0;armMdecOutput();return;
                 }
+                if(!bus.mdec.outputRequest())return;
             }
             if(ch==3){
                 if(mode!=0 || (control&1)!=0)throw new UnsupportedOperationException("Unsupported CD-ROM DMA mode");
@@ -154,6 +155,13 @@ public final class Dma {
         channels[4][0]=state.address;
         channels[4][1]=(channels[4][1]&65535)|((state.remaining/state.blockWords)<<16);
     }
+    private void armMdecOutput(){
+        OutputTransfer state=mdecOutput;
+        if(state==null||state.chunkWords!=0||!bus.mdec.outputRequest())return;
+        int block=channels[1][1]&65535;if(block==0)block=65536;
+        state.chunkWords=Math.min(state.words,Math.min(block,bus.mdec.availableWords()));
+        state.delay=state.chunkWords;
+    }
     private void transferWord(int ch,int address,int control,boolean last){
         if(performanceEnabled)performanceWords[ch]++;
         if(ch==0)bus.mdec.write(bus.read32(address));
@@ -180,15 +188,21 @@ public final class Dma {
             if(linkedElapsed<linkedDelay){linkedDelay-=linkedElapsed;break;}
             linkedElapsed-=linkedDelay;linkedDelay=0;start(2);
         }
-        if(mdecOutput!=null && (priority&0x80)!=0){
+        int mdecElapsed=cycles;
+        while(mdecOutput!=null && (priority&0x80)!=0 && bus.mdec.outputRequest()){
             OutputTransfer state=mdecOutput;
-            state.delay=Math.max(0,state.delay-cycles);
-            if(state.delay==0 && bus.mdec.outputRequest() && bus.mdec.availableWords()>=state.words){
-                int address=state.address;
-                for(int i=0;i<state.words;i++){transferWord(1,address,state.control,i==state.words-1);address=(address+4)&0x1ffffc;}
-                if(((state.control>>>9)&3)==1)channels[1][0]=address;
-                mdecOutput=null;complete(1);
+            armMdecOutput();if(state.chunkWords==0)break;
+            if(mdecElapsed<state.delay){state.delay-=mdecElapsed;break;}
+            mdecElapsed-=state.delay;
+            int count=Math.min(state.chunkWords,Math.min(state.words,bus.mdec.availableWords()));
+            for(int i=0;i<count;i++){transferWord(1,state.address,state.control,state.words==1);state.address=(state.address+4)&0x1ffffc;state.words--;}
+            state.chunkWords=state.delay=0;
+            if(((state.control>>>9)&3)==1){
+                channels[1][0]=state.address;int block=channels[1][1]&65535;if(block==0)block=65536;
+                channels[1][1]=(channels[1][1]&65535)|(((state.words+block-1)/block)<<16);
             }
+            if(state.words==0){mdecOutput=null;complete(1);break;}
+            armMdecOutput();
         }
         if(choppedMask==0)return;
         for(int ch=0;ch<7;ch++){
@@ -223,6 +237,6 @@ public final class Dma {
         if((interrupt&0x800000)!=0 && (interrupt&(1<<(16+ch)))!=0)interrupt|=1<<(24+ch);
         updateInterrupt();
     }
-    int clocksToEvent(){int n=mdecOutput!=null&&(priority&0x80)!=0?Math.max(1,mdecOutput.delay):Integer.MAX_VALUE;if(spuRequest!=null&&(priority&0x80000)!=0)n=Math.min(n,Math.max(1,spuRequest.delay));if(linkedDelay>0&&(priority&0x800)!=0)n=Math.min(n,linkedDelay);for(int ch=0;ch<7;ch++)if(chopped[ch]!=null&&(priority&(8<<(ch*4)))!=0)n=Math.min(n,Math.max(1,chopped[ch].delay));return n;}
-    public String diagnostic(){return "DMA chopped="+choppedTransfers+" windows="+choppedWindows+String.format(java.util.Locale.ROOT," active=%02X CD-MADR=%06X BCR=%08X CHCR=%08X; GPU-MADR=%06X CHCR=%08X linked-yields=%d resume=%d last=%06X header=%08X",choppedMask,channels[3][0],channels[3][1],channels[3][2],channels[2][0],channels[2][2],linkedYields,linkedDelay,linkedLastAddress,linkedLastHeader);}
+    int clocksToEvent(){int n=mdecOutput!=null&&(priority&0x80)!=0&&bus.mdec.outputRequest()?Math.max(1,mdecOutput.delay):Integer.MAX_VALUE;if(spuRequest!=null&&(priority&0x80000)!=0)n=Math.min(n,Math.max(1,spuRequest.delay));if(linkedDelay>0&&(priority&0x800)!=0)n=Math.min(n,linkedDelay);for(int ch=0;ch<7;ch++)if(chopped[ch]!=null&&(priority&(8<<(ch*4)))!=0)n=Math.min(n,Math.max(1,chopped[ch].delay));return n;}
+    public String diagnostic(){return "DMA chopped="+choppedTransfers+" windows="+choppedWindows+String.format(java.util.Locale.ROOT," active=%02X CD-MADR=%06X BCR=%08X CHCR=%08X; GPU-MADR=%06X CHCR=%08X linked-yields=%d resume=%d last=%06X header=%08X",choppedMask,channels[3][0],channels[3][1],channels[3][2],channels[2][0],channels[2][2],linkedYields,linkedDelay,linkedLastAddress,linkedLastHeader)+"; MDEC FIFO="+bus.mdec.availableWords()+" remaining="+(mdecOutput==null?0:mdecOutput.words)+" chunk="+(mdecOutput==null?0:mdecOutput.chunkWords)+" delay="+(mdecOutput==null?0:mdecOutput.delay);}
 }
