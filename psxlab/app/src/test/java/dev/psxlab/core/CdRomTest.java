@@ -24,6 +24,15 @@ public class CdRomTest {
             assertEquals(10,b.read8(0x10000));assertEquals(0,b.read8(0x107ff));assertEquals(0,b.read32(0x1f8010b8)&0x1000000);
         }
     }
+    @Test public void choppedCdOverreadFinishesItsWindowsAfterDrainingTheBuffer()throws Exception{
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);readFirst(b,9,0);b.write8(BASE+3,0x80);
+            b.write32(0x1f8010f0,0x0765c321);b.write32(0x1f8010b0,0x10000);b.write32(0x1f8010b4,600);b.write32(0x1f8010b8,0x11000100|(2<<16)|(3<<20));
+            b.dma.tick(160);assertEquals(16,b.cdrom.dmaBytes);assertNotEquals(0,b.read32(0x1f8010b8)&0x1000000);
+            b.dma.tick(100000);assertEquals(2400,b.cdrom.dmaBytes);assertEquals(0,b.read32(0x1f8010b8)&0x1000000);
+            assertEquals(9,b.read8(0x10000));for(int i=2048;i<2400;i++)assertEquals(0,b.read8(0x10000+i));
+        }
+    }
     @Test public void openingTrayStopsDmaAndReadAndSignalsShellOpenUntilReplacement(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);readFirst(b,7,0);b.write8(BASE+3,0x80);assertEquals(2048,b.cdrom.availableBytes());

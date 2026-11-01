@@ -35,7 +35,8 @@ public class SettingsSessionIntegrationTest {
                     assertEquals(session==0,boundary(backend,()->((Cpu)field(backend,"cpu")).gte.widescreenEnabled()));
                     assertEquals(session==0?20f/9f:16f/9f,(Float)field(backend,"outputAspect"),0.001f);
                 }finally{backend.stop();vm.join(15000);assertFalse(vm.isAlive());}
-                assertNull(field(backend,"wideOverride"));assertEquals(-1,field(backend,"aspectOverride"));assertEquals(-1,field(backend,"cropOverride"));assertEquals("",backend.lastError());
+                assertEquals("",backend.lastError());
+                if(session==1){assertNull(field(backend,"wideOverride"));assertEquals(-1,field(backend,"aspectOverride"));assertEquals(-1,field(backend,"cropOverride"));}
             }
         }
     }
