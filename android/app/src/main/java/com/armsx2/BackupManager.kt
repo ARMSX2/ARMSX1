@@ -37,7 +37,7 @@ object BackupManager {
     /** Data-root entries worth preserving. Anything absent is skipped silently. */
     private val INCLUDED = listOf(
         "sstates", "memcards", "covers", "gamesettings", "inputprofiles",
-        "cheats", "patches", "snaps",
+        "cheats", "patches", "snaps", "psxlab/states", "psxlab/cards",
     )
     // "PCSX2-Android.ini" is gone: that was the config file the PCSX2 core wrote, and no ARMSX1
     // install has ever had one.
@@ -46,7 +46,7 @@ object BackupManager {
     // Context.filesDir (SDL_GetPrefPath) rather than under [assetCopyRoot], so listing it here
     // would never find it. Backing it up needs its own entry on both the export and import paths.
     private val INCLUDED_FILES = listOf(
-        "armsx2-settings.json", "achievements.ini",
+        "armsx2-settings.json", "achievements.ini", "psxlab/autosave-game.txt",
     )
 
     /** Named to avoid colliding with `kotlin.Result`, which is a default import. */

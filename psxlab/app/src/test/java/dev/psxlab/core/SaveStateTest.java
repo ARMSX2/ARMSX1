@@ -2,6 +2,17 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class SaveStateTest {
+    @Test public void loadingKeepsCurrentMemoryCardContentsInsteadOfRollingBackInGameSaves()throws Exception{
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);
+            for(int slot=0;slot<2;slot++)bus.sio0.insertCard(slot,new MemoryCard(MemoryCard.formatted(),null));
+            byte[] state=SaveState.capture(cpu,bus,gpu,"cards");
+            byte[] latest=MemoryCard.formatted();latest[8192]=42;
+            MemoryCard card=new MemoryCard(latest,null);bus.sio0.insertCard(0,card);
+            SaveState.restore(state,cpu,bus,gpu,"cards");assertArrayEquals(latest,card.image());
+            assertEquals("cards",SaveState.identity(state));
+        }
+    }
     @Test public void oldCdStatesRestoreTheExistingInterruptLevelWithoutANewEdge()throws Exception{
         for(boolean pending:new boolean[]{false,true})try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g,new PadState(),false);b.write16(0x1f801074,4);

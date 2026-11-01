@@ -144,6 +144,10 @@ public class NativeApp {
         if (context == null) throw new IllegalStateException("Backend context is unavailable");
         String config = new File(context.getFilesDir(), "settings.toml").getAbsolutePath();
         if (lab == null) lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice);
+        lab.mediaResolver(source -> {
+            com.armsx2.core.Ps1SafAccess.Session prepared = com.armsx2.core.Ps1SafAccess.INSTANCE.prepare(context, source, () -> !hasActiveVM());
+            return new dev.psxlab.ArmSxBackend.PreparedMedia(prepared.getLaunchPath(), prepared);
+        });
         if (!lab.initialize(path, biosFolder, config)) throw new IllegalStateException(lab.lastError());
         lab.captureDiagnostics(context.getSharedPreferences("ARMSX2",Context.MODE_PRIVATE).getBoolean("diagnostics.generateLog",false));
         if (labSurface != null) lab.surface(labSurface);
@@ -329,8 +333,9 @@ public class NativeApp {
 	public static int getStatistics(double[] out) { return lab==null?0:lab.statistics(out); }
 
 	/** Stable original URI/key, rather than a disposable SAF cache path. Call before boot. */
-	public static void configureSwanSession(String identity, String originalPath) { unsupported("configureSwanSession"); }
-	public static String getSwanStatePath(int slot) { return lab == null ? "" : lab.stateFile(slot).getAbsolutePath(); }
+	public static void configureSwanSession(String identity, String originalPath) { if (lab != null) lab.configureSession(originalPath); }
+    public static void registerDiscSource(String runtime, String source) { if (lab != null) lab.discSource(runtime, source); }
+	public static String getSwanStatePath(int slot) { try { return lab == null ? "" : lab.stateFile(slot).getAbsolutePath(); } catch (IllegalArgumentException e) { return ""; } }
 	public static String getSwanCardPath(int slot) { return lab == null ? "" : lab.cardPath(slot - 1); }
 	public static int getSwanGuestFrame() { return lab == null ? 0 : (int)lab.frames(); }
 	public static int getSwanMemoryByte(int address) { unsupported("getSwanMemoryByte"); return 0; }
@@ -1386,7 +1391,11 @@ public class NativeApp {
 	 *  ignoreCardDivergence = true. Any other negative value is a real failure.
 	 *
 	 *  Same blocking contract as {@link #saveStateToSlot(int)}. */
-	public static int loadStateFromSlotChecked(int slot, boolean ignoreCardDivergence) { if (lab == null) { return -1; } return !ignoreCardDivergence ? -16 : lab.load(slot, true) ? 0 : -1;  }
+	public static int loadStateFromSlotChecked(int slot, boolean ignoreCardDivergence) {
+        // Own-engine snapshots exclude card contents (StateCodec.MemoryCard.data).
+        // The previous unconditional divergence result blocked every cold/automatic load.
+        return lab != null && lab.load(slot, true) ? STATE_OK : -1;
+    }
 
 	/** psx/state.h PSX_STATE_OK. */
 	public static final int STATE_OK = 0;
@@ -1408,7 +1417,7 @@ public class NativeApp {
 	 *  {@link #getGamePathSlot} names the game, not the state file, so this asks the backend for it. */
 	public static long getStateTimeSlot(int slot) { if (lab == null) { return 0; } try { File state = lab.stateFile(slot); return state.isFile() ? state.lastModified() : 0; } catch (RuntimeException e) { return 0; } }
 	/** PNG preview read straight from a state file. Empty array when it has none. Never null. */
-	public static byte[] getSaveStateImage(String path) { if (lab == null) { return new byte[0]; } try { return path.endsWith(".psxlabstate") ? java.nio.file.Files.readAllBytes(new File(path + ".png").toPath()) : new byte[0]; } catch (java.io.IOException e) { return new byte[0]; }  }
+	public static byte[] getSaveStateImage(String path) { try { return path.endsWith(".psxlabstate") ? java.nio.file.Files.readAllBytes(new File(path + ".png").toPath()) : new byte[0]; } catch (java.io.IOException e) { return new byte[0]; }  }
 
 	// Hot-swap the CDVD disc on the running VM (keeps the session alive, cycles
 	// the tray so the game detects the new disc). Returns false if there's no

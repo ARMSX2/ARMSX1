@@ -10,41 +10,10 @@ import kr.co.iefriends.pcsx2.NativeApp
 import kotlin.coroutines.resume
 
 /**
- * The one place a user-driven save-state load goes through.
- *
- * ## What it is guarding against
- *
- * A save state and a memory card are two timelines of the same playthrough, and the player can
- * move one without the other. Save a state, keep playing, save to the card in-game, then load
- * that old state: the console is now *behind* its own card. Real PS1 games notice — the save
- * file they are told to expect does not match the directory they cached, and depending on the
- * title they cope, refuse to load their own save, or misbehave in ways that look like a corrupt
- * card. The player can lose hours without ever being told why.
- *
- * In this core it is worse than an inconsistency. Loading a state restores the card image along
- * with the machine, and the card is flushed back to `slot1.mcd` / `slot2.mcd` at shutdown, so the
- * in-game save made after the state is *silently discarded*. That is the sentence the dialog has
- * to get across, and it is why the warning is worth interrupting for.
- *
- * ## How the answer is arrived at
- *
- * The core does the detecting, in [NativeApp.loadStateFromSlotChecked]. Every state records a
- * fingerprint of both cards (content hash, plus a write counter and a per-attach nonce so the
- * *direction* is knowable and not just the difference), and the load compares it against the
- * cards as they are now — during its identity phase, before a single byte of the machine has been
- * written. So a refusal is free: cancelling leaves the session exactly as it was, and "load
- * anyway" is a second call with the check waived rather than an unwind.
- *
- * Three outcomes reach here:
- *  - [NativeApp.STATE_ERR_CARD_NEWER] — the card carries writes the state does not. The
- *    dangerous direction, and the one worth a firm warning.
- *  - [NativeApp.STATE_ERR_CARD_DIVERGED] — different, but nothing establishes which way (a card
- *    imported, erased, or written by another session). Softer wording; same choice.
- *  - anything else — either a clean load or a genuine failure, both passed straight back.
- *
- * A state written before fingerprints existed has none, and is loaded in silence. That is
- * deliberate: "no fingerprint" is not evidence of anything, and a warning the user cannot act on
- * teaches them to dismiss the dialog without reading it, which costs more than it saves.
+ * Shared load result and confirmation flow. PSX Lab states restore the card protocol,
+ * but deliberately exclude card contents, so its checked adapter preserves current
+ * in-game saves and reports success/failure directly. Retain advisory handling for
+ * any future format that embeds card contents and can establish real divergence.
  */
 object SaveStateGuard {
 

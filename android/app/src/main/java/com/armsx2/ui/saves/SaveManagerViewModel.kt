@@ -7,7 +7,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.armsx2.i18n.I18n
 import com.armsx2.runtime.MainActivityRuntime
-import com.armsx2.core.SwanStateFiles
+import com.armsx2.core.PsxStateFiles
+import dev.psxlab.BackendStateStore
+import com.armsx2.data.library.GameLibraryRepository
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -21,6 +23,8 @@ data class SaveStateItem(
     val serial: String,
     val preview: Bitmap?,
     val canUseWithActiveGame: Boolean,
+    val gameSource: String? = null,
+    val canLoad: Boolean = canUseWithActiveGame,
 )
 
 data class SaveManagerUiState(
@@ -64,7 +68,7 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
 
     fun load(item: SaveStateItem) {
         val slot = item.slot ?: return
-        if (!item.canUseWithActiveGame) return
+        if (!item.canLoad) return
         viewModelScope.launch {
             val hasActiveVm = withContext(Dispatchers.IO) {
                 runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
@@ -75,7 +79,10 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
             // retry loop would ask the same question sixty times.
             val outcome = if (hasActiveVm) {
                 SaveStateGuard.load(slot)
-            } else if (MainActivityRuntime.launchCurrentGameFromSaveSlot(slot)) {
+            } else if (item.gameSource?.let { source ->
+                    val game = withContext(Dispatchers.IO) { MainActivityRuntime.resolveSavedGame(source) }
+                    game != null && MainActivityRuntime.launchGameFromSaveSlot(game, slot)
+                } == true) {
                 SaveStateGuard.Outcome.Loaded
             } else {
                 SaveStateGuard.Outcome.Failed
@@ -95,7 +102,7 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) { runCatching {
                 check(item.file.delete()) { "Unable to delete state" }
-                SwanStateFiles.companions(item.file.name).forEach { name ->
+                PsxStateFiles.companions(item.file.name).forEach { name ->
                     val sidecar = File(item.file.parentFile, name)
                     if (sidecar.exists()) check(sidecar.delete()) { "Unable to delete $name" }
                 }
@@ -122,7 +129,7 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
                 files.count { file ->
                     runCatching {
                         file.copyTo(File(destination, file.name), overwrite = true)
-                        SwanStateFiles.companions(file.name).forEach { name ->
+                        PsxStateFiles.companions(file.name).forEach { name ->
                             val sidecar = File(file.parentFile, name)
                             if (sidecar.isFile) sidecar.copyTo(File(destination, name), overwrite = false)
                         }
@@ -153,28 +160,34 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
                 ?.takeIf(File::exists)
         }
 
-        val roots = listOf("swanstation/states")
-            .map { File(MainActivityRuntime.assetCopyRoot(getApplication()), it) }
-        val discovered = roots.flatMap { root ->
-            if (!root.isDirectory) emptyList()
-            else root.listFiles()?.filter { it.isFile && SwanStateFiles.slot(it.name) != null }.orEmpty()
-        }
-        val allFiles = (activePaths + discovered)
-            .distinctBy { it.absolutePath.lowercase() }
-            .filter { file -> active == null || activePaths.any { it.absolutePath == file.absolutePath } }
-
-        val saves = allFiles.map { file ->
-            val serial = serialFrom(file)
+        val root = File(MainActivityRuntime.assetCopyRoot(getApplication()), "psxlab/states")
+        val library = GameLibraryRepository(getApplication()).loadCached().games
+        val sources = (library.map { it.uri.toString() } + listOfNotNull(active?.uri?.toString())).distinct()
+        val files = (activePaths + root.listFiles().orEmpty().filter { it.isFile })
+            .distinctBy { it.absolutePath }
+        val hasActiveVm = runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
+        val saves = files.mapNotNull { file ->
+            val metadata = runCatching { BackendStateStore.metadata(file) }.getOrNull() ?: return@mapNotNull null
             val belongsToActiveGame = active != null && activePaths.any { it.absolutePath == file.absolutePath }
+            if (active != null && !belongsToActiveGame) return@mapNotNull null
+            val source = PsxStateFiles.source(metadata.game(), sources)
+            val game = library.firstOrNull { BackendStateStore.normalize(it.uri.toString()) == source?.let(BackendStateStore::normalize) }
+            val name = source?.let { android.net.Uri.decode(it).substringAfterLast('/').substringAfterLast(':').substringBeforeLast('.') }
             SaveStateItem(
-                slot = slotFrom(file),
+                slot = metadata.slot(),
                 file = file,
-                gameTitle = if (belongsToActiveGame) active?.title.orEmpty().ifBlank { serial } else serial,
-                serial = serial,
+                gameTitle = if (belongsToActiveGame) active?.title.orEmpty() else game?.title ?: name ?: "Existing save (select its game to load)",
+                serial = game?.serial.orEmpty(),
                 preview = decodePreview(file),
-                canUseWithActiveGame = belongsToActiveGame,
+                canUseWithActiveGame = belongsToActiveGame && hasActiveVm,
+                gameSource = source,
+                canLoad = belongsToActiveGame || (!hasActiveVm && source != null),
             )
-        }.sortedWith(compareBy<SaveStateItem> { it.slot == null }.thenBy { it.slot ?: Int.MAX_VALUE }.thenByDescending { it.file.lastModified() })
+        }.sortedWith(compareByDescending<SaveStateItem> { item ->
+                item.gameSource?.let { source -> BackendStateStore.file(root.parentFile, source, item.slot!!) == item.file } ?: false
+            }.thenByDescending { it.file.lastModified() })
+            .distinctBy { (it.gameSource ?: it.file.absolutePath) to it.slot }
+            .sortedWith(compareBy<SaveStateItem> { it.gameTitle }.thenBy { it.slot })
 
         return ReadResult(
             gameTitle = active?.title,
@@ -193,10 +206,6 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
             inPreferredConfig = Bitmap.Config.RGB_565
         })
     }
-
-    private fun slotFrom(file: File): Int? = SwanStateFiles.slot(file.name)
-
-    private fun serialFrom(file: File): String = SwanStateFiles.identity(file.name)
 
     private companion object {
         const val SLOT_COUNT = 10

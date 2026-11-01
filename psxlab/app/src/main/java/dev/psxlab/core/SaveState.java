@@ -10,6 +10,14 @@ public final class SaveState {
     private static final int MAGIC=0x50535853,VERSION=1,MAXIMUM=24*1024*1024;
     private static byte[] hash(byte[] bytes){try{return MessageDigest.getInstance("SHA-256").digest(bytes);}catch(NoSuchAlgorithmException e){throw new AssertionError(e);}}
     private static Object[] roots(Cpu cpu,Bus bus,Gpu gpu){return new Object[]{cpu,bus,gpu,bus.dma,bus.mdec,bus.spu,bus.timers,bus.cdrom,bus.sio0,cpu.gte};}
+    /** Read legacy identity for discovery only; restore still validates the complete payload. */
+    public static String identity(byte[] file)throws IOException{
+        if(file.length>MAXIMUM)throw new IOException("Save state exceeds size limit");
+        DataInputStream header=new DataInputStream(new ByteArrayInputStream(file));
+        if(header.readInt()!=MAGIC||header.readInt()!=VERSION)throw new IOException("Unsupported save state version");
+        header.readUTF();int length=header.readInt();if(length<0||length>MAXIMUM)throw new IOException("Invalid state length");header.readFully(new byte[32]);
+        try(DataInputStream data=new DataInputStream(new GZIPInputStream(header))){return data.readUTF();}
+    }
     /** Validate every device against a disposable machine while the real session is paused. */
     public static void validate(byte[] bytes,String game,byte[] bios)throws IOException{
         try(Gpu gpu=new Gpu(false)){Bus bus=new Bus(gpu);bus.loadBios(bios);for(int i=0;i<2;i++)bus.sio0.insertCard(i,new MemoryCard(MemoryCard.formatted(),null));restore(bytes,new Cpu(bus),bus,gpu,game);}

@@ -52,6 +52,17 @@ public final class ArmSxBackend {
     private volatile Map<String,Object> lastCpuTiming=Map.of(),lastGpuTiming=Map.of();
     private String biosPin;
     private volatile String renderer="Stopped",lastError="",gamePath="",discPath="";
+    private String configuredGame="",bootPath="";
+    private final Map<String,String> discSources=new ConcurrentHashMap<>();
+    private final List<PreparedMedia> restoredMedia=new ArrayList<>();
+    public record PreparedMedia(String path,AutoCloseable owner) implements AutoCloseable {
+        public void close()throws Exception{if(owner!=null)owner.close();}
+    }
+    public interface MediaResolver { PreparedMedia prepare(String source)throws Exception; }
+    private MediaResolver mediaResolver;
+    public void mediaResolver(MediaResolver resolver){mediaResolver=resolver;}
+    public synchronized void configureSession(String source){if(!active){configuredGame=BackendStateStore.normalize(source);discSources.clear();}}
+    public void discSource(String runtime,String source){discSources.put(runtime,source);}
     private File root,biosFolder,config;
     private byte[] bios;
     private Cpu cpu;
@@ -141,7 +152,7 @@ public final class ArmSxBackend {
         float volume=fast?decimal(options.get("audio.fast_forward_volume"),100):normal;
         output.setGain(muted||muteFast()?0:volume/100f);
     }
-    private record Restore(byte[] state,String disc,CompletableFuture<Boolean> ready) {}
+    private record Restore(byte[] state,String disc,String identity,CompletableFuture<Boolean> ready) {}
     private static final class Media implements AutoCloseable {
         final ByteSource source; final CueDisc cue; final IsoDisc disc; final byte[] executable;
         Media(ByteSource source)throws IOException{
@@ -261,7 +272,7 @@ public final class ArmSxBackend {
     public boolean run(String path){return run(path, () -> true);}
     /** The host's session cancellation and this active/stop transition share this monitor. */
     public boolean run(String path,java.util.function.BooleanSupplier allowed){
-        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=discPath=path;lastError="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
+        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;configuredGame="";bootPath=discPath=path;lastError="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
         boolean booted=false;Restore restore=null;startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=0;hostCpuPercent=hostRssMb=hostAvailableMb=-1;event("launch");
         try{
             options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();configureCheats();
@@ -277,7 +288,7 @@ public final class ArmSxBackend {
                         String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
                             cpu=new Cpu(bus);cpu.reset();guestAudioTracing=false;updateGuestAudioTracing();
-                            if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,gamePath);
+                            if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,restore.identity());
                             else if(media!=null&&(media.disc==null||Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
                             cpu.gte.setWidescreen(widescreenEnabled());cpu.enableNative(true,true,true);
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
@@ -289,10 +300,14 @@ public final class ArmSxBackend {
                         }finally{if(media!=null){media.close();media=null;}if(pendingMedia!=null){pendingMedia.close();pendingMedia=null;}}
                     }finally{clearSurface();}
                 }finally{displayGpu=null;gpu=null;bus=null;cpu=null;}
+                // Retain only a staged disc needed by the next machine, after the old
+                // CD readers have closed. Repeated loads must not accumulate game copies.
+                String keep=restart==null?"":restart.disc();
+                for(Iterator<PreparedMedia> it=restoredMedia.iterator();it.hasNext();){PreparedMedia prepared=it.next();if(!prepared.path().equals(keep)){discSources.remove(prepared.path());try{prepared.close();}finally{it.remove();}}}
                 restore=restart;
             }while(!stop&&restore!=null);
         }catch(Exception e){booted=false;error(e);if(restore!=null)restore.ready().complete(false);if(restart!=null)restart.ready().complete(false);}
-        finally{performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);gamePath=discPath="";serial="";}
+        finally{performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();gamePath=discPath=bootPath="";serial="";}
         return booted;
     }
     private boolean blocked(){Surface target=surface;return paused||audioSuspended||presentationSuspended||target==null||!target.isValid();}
@@ -356,14 +371,26 @@ public final class ArmSxBackend {
         if(!active)return failed;CompletableFuture<T> result=new CompletableFuture<>();commands.add(()->{if(result.isCancelled())return;try{result.complete(!stop&&bus!=null?action.call():failed);}catch(Exception e){error(e);result.complete(failed);}});wake();
         try{return result.get(15,TimeUnit.SECONDS);}catch(Exception e){result.cancel(false);error(e);return failed;}
     }
-    public boolean save(int slot){return call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before saving");File file=stateFile(slot);BackendStateStore.write(file,discPath,SaveState.capture(cpu,bus,gpu,gamePath));screenshotNow(file+".png");if(slot==-1)atomic(new File(root,"autosave-game.txt"),gamePath.getBytes(StandardCharsets.UTF_8));event("save-slot="+slot);return true;},false);}
+    public boolean save(int slot){return call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before saving");File file=BackendStateStore.file(root,gamePath,slot);String disc=discPath.equals(bootPath)?"":discSources.getOrDefault(discPath,discPath);if(disc.contains("/cache/saf-launch/"))throw new IOException("Cannot save a temporary disc without its original source");BackendStateStore.write(file,gamePath,disc,SaveState.capture(cpu,bus,gpu,gamePath));screenshotNow(file+".png");if(slot==-1)atomic(new File(root,"autosave-game.txt"),gamePath.getBytes(StandardCharsets.UTF_8));event("save-slot="+slot);return true;},false);}
     public boolean load(int slot,boolean acknowledgeCards){
         if(!acknowledgeCards){notice.accept("Loading restores machine state using the current memory cards. Back up your cards first.");return false;}
         CompletableFuture<Boolean> ready=new CompletableFuture<>();
-        boolean accepted=call(()->{BackendStateStore.Stored stored=BackendStateStore.read(stateFile(slot));SaveState.validate(stored.payload(),gamePath,bios);try(Media checked=openMedia(stored.disc())){}restart=new Restore(stored.payload(),stored.disc(),ready);event("load-slot="+slot);return true;},false);
-        if(!accepted)return false;try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
+        if(!active)return false;
+        PreparedMedia prepared=null;
+        try{
+            BackendStateStore.Stored stored=BackendStateStore.read(stateFile(slot));
+            if(!BackendStateStore.sameGame(stored.game(),gamePath,bootPath))throw new IOException("Save state belongs to a different game");
+            String disc=stored.disc();
+            // v1 states recorded the deleted SAF boot copy. Match only its generated URI hash.
+            if(disc.isEmpty()||BackendStateStore.sameGame(disc,gamePath,bootPath))disc=bootPath;
+            else if(mediaResolver!=null)prepared=mediaResolver.prepare(disc);
+            String mounted=prepared==null?disc:prepared.path();PreparedMedia retained=prepared;
+            boolean accepted=call(()->{SaveState.validate(stored.payload(),stored.game(),bios);try(Media checked=openMedia(mounted)){}if(retained!=null){restoredMedia.add(retained);discSources.put(mounted,stored.disc());}restart=new Restore(stored.payload(),mounted,stored.game(),ready);event("load-slot="+slot);return true;},false);
+            if(!accepted){if(prepared!=null)prepared.close();return false;}
+        }catch(Exception e){if(prepared!=null)try{prepared.close();}catch(Exception closing){e.addSuppressed(closing);}error(e);return false;}
+        try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
     }
-    public void reset(){call(()->{restart=new Restore(null,discPath,new CompletableFuture<>());return true;},false);}
+    public void reset(){call(()->{restart=new Restore(null,discPath,gamePath,new CompletableFuture<>());return true;},false);}
     /** Apply internal resolution and rasterizer changes to the running game. Both are fixed when a session's Gpu is
      *  created, so an in-game change used to wait for a restart. This snapshots the machine and goes round the same
      *  restart path a state load uses, with the settings read again; the state format skips those Gpu fields, so the
@@ -373,11 +400,11 @@ public final class ArmSxBackend {
         boolean accepted=call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before changing the resolution");
             byte[] state=SaveState.capture(cpu,bus,gpu,gamePath);Map<String,String> next=readConfig();String api=options.get("video.gpu_backend");
             if(api==null)next.remove("video.gpu_backend");else next.put("video.gpu_backend",api);options=next;
-            restart=new Restore(state,discPath,ready);event("reload-video");return true;},false);
+            restart=new Restore(state,discPath,gamePath,ready);event("reload-video");return true;},false);
         if(!accepted)return false;try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
     }
     private String stateIdentity(int slot){if(!gamePath.isEmpty()||slot!=-1||root==null)return gamePath;File index=new File(root,"autosave-game.txt");try{return index.length()<=65536?new String(Files.readAllBytes(index.toPath()),StandardCharsets.UTF_8):"";}catch(IOException e){return "";}}
-    public File stateFile(int slot){return BackendStateStore.file(root,stateIdentity(slot),slot);}
+    public File stateFile(int slot){return BackendStateStore.find(root,stateIdentity(slot),bootPath,slot);}
     public String stateGame(int slot){try{return stateFile(slot).isFile()?stateIdentity(slot):"";}catch(IllegalArgumentException e){return "";}}
     public byte[] preview(int slot){try{return Files.readAllBytes(new File(stateFile(slot)+".png").toPath());}catch(IOException|IllegalArgumentException e){return new byte[0];}}
     public void screenshot(String path){Gpu.Frame frame=call(()->gpu.displayFrame(),null);if(frame!=null)try{writeScreenshot(path,frame);}catch(IOException e){error(e);}}

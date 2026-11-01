@@ -523,6 +523,7 @@ open class MainActivityRuntime : ComponentActivity() {
                     prepared = com.armsx2.core.Ps1SafAccess.prepare(context, path) {
                         vmStopInProgress || synchronized(discSessionLock) { discSessionToken !== token }
                     }
+                    NativeApp.registerDiscSource(prepared!!.launchPath, path)
                     synchronized(discSessionLock) {
                         if (discSessionToken !== token || vmStopInProgress || !NativeApp.hasActiveVM()) false
                         else if (NativeApp.changeDisc(prepared!!.launchPath)) {
@@ -2089,6 +2090,13 @@ open class MainActivityRuntime : ComponentActivity() {
 
         fun launchCurrentGameFromSaveSlot(slot: Int): Boolean {
             val game = currentGame.value ?: contextGame.value ?: return false
+            return launchGameFromSaveSlot(game, slot)
+        }
+
+        /** Resolve on an IO thread; unlike contextGame this survives process death. */
+        fun resolveSavedGame(source: String): GameInfo? = externalGameInfo(source)
+
+        fun launchGameFromSaveSlot(game: GameInfo, slot: Int): Boolean {
             val launchPath = if (game.uri.scheme == "file") {
                 game.uri.path ?: game.uri.toString()
             } else {

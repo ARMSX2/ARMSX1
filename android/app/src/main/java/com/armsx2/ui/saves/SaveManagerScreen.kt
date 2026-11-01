@@ -229,6 +229,8 @@ private fun SaveStateCard(
                         Text(str("action.save"))
                     }
                     Spacer(Modifier.width(7.dp))
+                }
+                if (save.canLoad && save.slot != null) {
                     OutlinedButton(
                         onClick = onLoad,
                         contentPadding = PaddingValues(horizontal = 14.dp),
