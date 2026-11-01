@@ -4665,19 +4665,10 @@ open class MainActivityRuntime : ComponentActivity() {
     /**
      * Push fast-forward to the ARMSX1 core, and only there.
      *
-     * ★ Every fast-forward path used to end in `NativeApp.speedhackLimitermode(...)`, which is a
-     * PCSX2 (PS2) entry point and is a STUB with an empty body in this port — so fast-forward was
-     * a no-op end to end: the latch flipped, the menu row lit up, and the emulation thread never
-     * heard about it. `NativeApp.setFastForward(boolean)` is the real one; it reaches
-     * psxe_host_set_fast_forward() → ArmsxSession::setFastForwardEnabled().
-     *
-     * What the core does with it (frontend/main.cpp):
-     *  - `targetFrameRate()` returns `frameRate() * fast_forward_speed`, or an unreachable rate
-     *    when the speed is Unlimited. It is a cap, not a promise: a title the device cannot run
-     *    at the chosen multiplier simply runs as fast as it can.
-     *  - audio keeps playing. `queueAudioForFrame` still pulls the SPU at the emulated rate and
-     *    resamples the result down to the output rate, so nothing overruns; the pitch rises with
-     *    the speed. The Audio tab's "Mute during fast-forward" is the opt-out.
+     * NativeApp routes this to ArmSxBackend. Guest-clock deadlines follow the requested
+     * multiplier while excess host scanouts are omitted; guest GPU commands still execute.
+     * The multiplier is a cap, not a promise on devices that cannot keep up. Audio uses
+     * time compression at a fixed Android sample rate unless mute during fast-forward is on.
      *
      * The speed itself is pushed first, so a multiplier changed while the game was running (or
      * while no game was) applies to this engage rather than the next one.

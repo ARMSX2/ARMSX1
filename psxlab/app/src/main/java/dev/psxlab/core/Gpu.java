@@ -353,6 +353,15 @@ public final class Gpu implements AutoCloseable {
     public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver){requestSurfaceFrame(surface,filter,receiver,null);}
     public void restorePresentation(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver){requestSurfaceFrame(surface,filter,receiver,null,false);}
     public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing){requestSurfaceFrame(surface,filter,receiver,timing,true);}
+    /** Finish every guest draw in order, without waiting for an unnecessary host display buffer. */
+    public void completeFrameWithoutPresentation(java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing){
+        flushUpload();int[] state=timing==null?null:displayState(false);
+        submit(()->{
+            if(performanceEnabled){Performance previous=performance;performance=new Performance(0,previous.width(),previous.height(),previous.scale());}
+            if(timing!=null){timing.gpuBegin(renderer,state);timing.presentationSequence("fast_forward_skip",0);}
+            try{receiver.accept(null);}finally{if(timing!=null)timing.complete();}
+        });
+    }
     private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
         flushUpload();int[] state=displayState(filter);
         submit(()->{

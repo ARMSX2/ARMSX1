@@ -153,7 +153,8 @@ public final class ArmSxBackend {
     public void audioMuted(boolean muted){mutedOverride=muted;updateAudio();}
     public void fastForwardSpeed(float speed){fastSpeedOverride=Float.isFinite(speed)?speed:2;updateAudio();}
     private boolean muteFast(){return fast&&Boolean.parseBoolean(options.getOrDefault("audio.mute_fast_forward","false"));}
-    private float fastTempo(){float configured=fastSpeedOverride>=0?fastSpeedOverride:decimal(options.get("runtime.fast_forward_speed"),2);return configured<=0?16:Math.max(1,Math.min(16,configured));}
+    private float fastSpeed(){float configured=fastSpeedOverride>=0?fastSpeedOverride:decimal(options.get("runtime.fast_forward_speed"),2);return configured<=0?0:Math.max(1,Math.min(16,configured));}
+    private float fastTempo(){float speed=fastSpeed();return speed==0?16:speed;}
     private void updateAudio(){
         AudioOutput output=audio;if(output==null)return;output.setTempoFactor(fast&&!muteFast()?fastTempo():1);
         boolean muted=mutedOverride!=null?mutedOverride:Boolean.parseBoolean(options.getOrDefault("audio.muted","false"));
@@ -322,13 +323,14 @@ public final class ArmSxBackend {
     }
     private boolean blocked(){Surface target=surface;return paused||audioSuspended||presentationSuspended||target==null||!target.isValid();}
     private void loop(AudioOutput output)throws Exception{
+        FastForwardPacer fastPacer=new FastForwardPacer();
         FrameRateMeter frameRate=new FrameRateMeter();AudioAwareFramePacer pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());long last=gpu.vblanks,measured=System.nanoTime();boolean wasBlocked=false,wasFast=false;EngineLog.Frame diagnosticFrame=null;long perfCpu=0,perfEpoch=0;
         while(!stop&&restart==null){
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
             updateGuestAudioTracing();
             if(blocked()){
                 if(!wasBlocked&&surface!=null&&surface.isValid()&&gpu.presentationNeedsRestore()){Surface target=surface;gpu.restorePresentation(target,true,frame->{if(frame!=null)draw(target,frame);});}
-                output.setPaused(true);wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
+                output.setPaused(true);fastPacer.reset();wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
             }
             if(wasBlocked){performance.reset();perfCpu=perfEpoch=0;output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
             if(fast!=wasFast){bus.spu.flushAudio();bus.spu.setAudioSink(muteFast()?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});updateAudio();output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
@@ -345,7 +347,8 @@ public final class ArmSxBackend {
             try(EngineLog.Span span=journal.begin("cpu.flush_devices",EngineLog.DEBUG)){bus.flushClocks();bus.spu.flushAudio();}
             if(flushStarted!=0)perfCpu+=System.nanoTime()-flushStarted;
             long paceStarted=diagnosticFrame==null&&ticket==0?0:System.nanoTime(),buffered=output.bufferedFrames();
-            long wait=fast?0:pacer.waitNanos(cpu.instructions,System.nanoTime(),buffered);if(wait>0)TimeUnit.NANOSECONDS.sleep(wait);
+            boolean accelerating=fast;if(!accelerating)fastPacer.reset();
+            long wait=accelerating?fastPacer.waitNanos(cpu.instructions,System.nanoTime(),fastSpeed()):pacer.waitNanos(cpu.instructions,System.nanoTime(),buffered);if(wait>0)TimeUnit.NANOSECONDS.sleep(wait);
             if(diagnosticFrame!=null)diagnosticFrame.pacing(wait,System.nanoTime()-paceStarted,buffered);
             long measuredIdle=ticket==0?0:System.nanoTime()-paceStarted,measuredCpu=perfCpu;perfCpu=0;
             int voices=0;if(ticket!=0)for(int voice=0;voice<24;voice++)if((bus.spu.read(0x1f801c0c+voice*16)&0x7fff)!=0)voices++;
@@ -357,9 +360,12 @@ public final class ArmSxBackend {
             Surface target=surface;
             if(target!=null&&target.isValid()){
                 boolean trace=traceStartup;long requested=trace?System.nanoTime():0,clock=cpu.instructions;
-                gpu.requestSurfaceFrame(target,true,frame->{long drawing=ticket==0?0:System.nanoTime();if(frame!=null)draw(target,frame);long completed=System.nanoTime();
+                boolean presentFrame=!accelerating||fastPacer.present(System.nanoTime(),displayRefreshHz);
+                java.util.function.Consumer<Gpu.Frame> completedFrame=frame->{try{long drawing=ticket==0?0:System.nanoTime();if(frame!=null)draw(target,frame);long completed=System.nanoTime();
                     if(ticket!=0){Gpu.Performance p=graphics.performance();performance.completed(ticket,completed,measuredCpu,measuredIdle,p.presentNanos()+(frame==null?0:completed-drawing),new PerformanceStatistics.Sample(clocks,triangles,rectangles,lines,mdec,sectors,dma,activeVoices,p.width(),p.height(),p.scale()));}
-                    frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);},submitted);
+                    frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);}finally{if(accelerating&&presentFrame)fastPacer.presentationComplete();}};
+                if(presentFrame)gpu.requestSurfaceFrame(target,true,completedFrame,submitted);
+                else gpu.completeFrameWithoutPresentation(completedFrame,submitted);
             }
             journal.leaveFrame();
             long now=System.nanoTime();if(now-measured>=500000000L){if(performance.enabled()||journal.enabled())sampleHostUsage(now);nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled()){guestAudioSnapshot();lastCpuTiming=cpu.nativeTimings();lastGpuTiming=gpu.nativeTimings();journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics(),"native_cpu",lastCpuTiming,"native_gpu",lastGpuTiming,"memory",Map.of("process_rss_mb",hostRssMb,"system_available_mb",hostAvailableMb,"java_heap_used_bytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"java_heap_limit_bytes",Runtime.getRuntime().maxMemory(),"native_heap_allocated_bytes",android.os.Debug.getNativeHeapAllocatedSize())));}measured=now;}
