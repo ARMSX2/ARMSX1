@@ -5,7 +5,7 @@ import static org.junit.Assert.*;
 
 public class NativeTimingTest {
     @Test public void snapshotsKeepCpuTimeWaitTimeContextAndCounterDeltas(){
-        NativeTiming timing=new NativeTiming();long[] raw=new long[16*8];
+        NativeTiming timing=new NativeTiming();long[] raw=new long[19*8];
         raw[0]=2;raw[1]=200;raw[2]=120;raw[3]=150;raw[4]=100;raw[5]=1234;raw[6]=42;raw[7]=0x80010000L;
         Map<String,Object> first=timing.sample(raw);assertEquals(true,first.get("first_sample"));
         Map<?,?> row=(Map<?,?>)((List<?>)first.get("stages")).get(0);

@@ -11,7 +11,7 @@
 struct NativeTiming {
     enum Path {CPU_COMPILE,CPU_CHECK,CPU_CLEAR,GPU_DRAW,GPU_TRANSFER,GPU_READBACK,
                GPU_SCANOUT,GLES_PRESENT,GL_PRODUCER,VK_FENCE,VK_ACQUIRE,VK_SUBMIT,
-               VK_PRESENT,VK_ALLOCATION,CPU_BUILD,GPU_RESOLVE,COUNT};
+               VK_PRESENT,VK_ALLOCATION,CPU_BUILD,GPU_RESOLVE,GL_COMMAND_UPLOAD,GL_WINDOW,GL_SWAP,COUNT};
     struct Counter {
         std::atomic<uint64_t> calls{0},wall{0},cpu{0},maximum{0},maximumCpu{0},at{0},tid{0},context{0};
     };

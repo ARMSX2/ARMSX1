@@ -12,6 +12,23 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class NativeTimingIntegrationTest {
+    @Test public void openGlSeparatesCommandUploadWindowAndSwapWaits()throws Exception{
+        try(ImageReader reader=ImageReader.newInstance(320,240,PixelFormat.RGBA_8888,4);HardwareRasterizer raster=new HardwareRasterizer(4)){
+            raster.configureProfiling(true);raster.fill(0xff,0,320|(240<<16));
+            raster.upload(new int[]{0x001f001f},0,0,0,2,2,0);
+            assertTrue(raster.present(reader.getSurface(),new int[]{0,0,0,0,3200,0,240,0}));
+            for(String path:new String[]{"gpu.commands.upload","gpu.present.gles.window","gpu.present.gles.swap"}){
+                Map<?,?> row=stage(raster.nativeTimings(),path);
+                assertTrue(path,((Number)row.get("calls")).longValue()>0);
+                assertTrue(path,((Number)row.get("wall_ns")).longValue()>0);
+                assertEquals((long)android.os.Process.myTid(),row.get("tid"));
+                assertTrue(row.get("source").toString().contains("hardware_gpu.cpp"));
+            }
+            long calls=((Number)stage(raster.nativeTimings(),"gpu.commands.upload").get("calls")).longValue();
+            raster.configureProfiling(false);raster.upload(new int[]{0x03e003e0},0,0,0,2,2,0);
+            assertEquals(calls,stage(raster.nativeTimings(),"gpu.commands.upload").get("calls"));
+        }
+    }
     private static Map<?,?> stage(Map<String,Object> profile,String path){
         for(Object entry:(List<?>)profile.get("stages")){Map<?,?> row=(Map<?,?>)entry;if(path.equals(row.get("path")))return row;}
         throw new AssertionError("Missing stage "+path+": "+profile);

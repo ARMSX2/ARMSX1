@@ -4,7 +4,7 @@ import java.util.*;
 
 /** Cumulative native scopes plus deltas since this owner's previous sample. */
 public final class NativeTiming {
-    private static final String[] PATHS={"cpu.compile","cpu.cache.check","cpu.cache.clear","gpu.raster.dispatch","gpu.vram.transfer","gpu.vram.readback","gpu.scanout.native","gpu.present.gles.api","gpu.sync.producer","gpu.vulkan.fence_wait","gpu.vulkan.acquire","gpu.vulkan.submit","gpu.vulkan.present","gpu.memory.staging_allocate","cpu.block.build","gpu.vram.resolve"};
+    private static final String[] PATHS={"cpu.compile","cpu.cache.check","cpu.cache.clear","gpu.raster.dispatch","gpu.vram.transfer","gpu.vram.readback","gpu.scanout.native","gpu.present.gles.api","gpu.sync.producer","gpu.vulkan.fence_wait","gpu.vulkan.acquire","gpu.vulkan.submit","gpu.vulkan.present","gpu.memory.staging_allocate","cpu.block.build","gpu.vram.resolve","gpu.commands.upload","gpu.present.gles.window","gpu.present.gles.swap"};
     private long[] previous;
     private long previousAt;
     public void reset(){previous=null;previousAt=0;}

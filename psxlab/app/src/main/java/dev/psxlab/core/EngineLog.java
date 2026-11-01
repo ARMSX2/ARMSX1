@@ -127,6 +127,9 @@ public final class EngineLog implements AutoCloseable {
         if(path.equals("gpu.vram.resolve"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::resolveNative";
         if(path.equals("gpu.scanout.native"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::renderShared";
         if(path.equals("gpu.present.gles.api"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::present";
+        if(path.equals("gpu.commands.upload"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::streamCommands";
+        if(path.equals("gpu.present.gles.window"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::beginWindow";
+        if(path.equals("gpu.present.gles.swap"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::swapWindow";
         if(path.equals("gpu.sync.producer"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::renderShared/glFinish";
         if(path.equals("gpu.vulkan.fence_wait"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::waitFence";
         if(path.equals("gpu.vulkan.acquire"))return "psxlab/app/src/main/cpp/vulkan_output.cpp#Output::acquireImage";
