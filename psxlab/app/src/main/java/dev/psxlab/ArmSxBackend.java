@@ -361,12 +361,13 @@ public final class ArmSxBackend {
             Surface target=surface;
             if(target!=null&&target.isValid()){
                 boolean trace=traceStartup;long requested=trace?System.nanoTime():0,clock=cpu.instructions;
-                boolean presentFrame=!accelerating||fastPacer.present(System.nanoTime(),displayRefreshHz);
+                boolean everyField=!accelerating&&gpu.requiresEveryFieldPresentation();
+                boolean presentFrame=everyField||(accelerating?fastPacer.present(System.nanoTime(),displayRefreshHz):fastPacer.presentNormally());
                 java.util.function.Consumer<Gpu.Frame> completedFrame=frame->{try{long drawing=ticket==0?0:System.nanoTime();if(frame!=null)draw(target,frame);long completed=System.nanoTime();
                     if(ticket!=0){Gpu.Performance p=graphics.performance();performance.completed(ticket,completed,measuredCpu,measuredIdle,p.presentNanos()+(frame==null?0:completed-drawing),new PerformanceStatistics.Sample(clocks,triangles,rectangles,lines,mdec,sectors,dma,activeVoices,p.width(),p.height(),p.scale()));}
-                    frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);}finally{if(accelerating&&presentFrame)fastPacer.presentationComplete();}};
+                    frames++;float rate=frameRate.completed(completed);if(!Float.isNaN(rate)&&!stop&&!paused&&!audioSuspended&&!presentationSuspended&&surface==target)fps=rate;if(trace)startupTiming.record(clock,requested,completed);}finally{if(presentFrame&&!everyField)fastPacer.presentationComplete();}};
                 if(presentFrame)gpu.requestSurfaceFrame(target,true,completedFrame,submitted);
-                else gpu.completeFrameWithoutPresentation(completedFrame,submitted);
+                else gpu.completeFrameWithoutPresentation(completedFrame,submitted,accelerating?"fast_forward_skip":"display_backpressure");
             }
             journal.leaveFrame();
             long now=System.nanoTime();if(now-measured>=500000000L){if(performance.enabled()||journal.enabled())sampleHostUsage(now);nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled()){guestAudioSnapshot();lastCpuTiming=cpu.nativeTimings();lastGpuTiming=gpu.nativeTimings();journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics(),"native_cpu",lastCpuTiming,"native_gpu",lastGpuTiming,"memory",Map.of("process_rss_mb",hostRssMb,"system_available_mb",hostAvailableMb,"java_heap_used_bytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"java_heap_limit_bytes",Runtime.getRuntime().maxMemory(),"native_heap_allocated_bytes",android.os.Debug.getNativeHeapAllocatedSize())));}measured=now;}

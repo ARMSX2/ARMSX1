@@ -13,7 +13,7 @@ import static org.junit.Assert.*;
 /** Changing guest frames on a real display: offscreen/static surfaces hide FIFO throttling. */
 public class FastForwardSpeedTest {
     private static void word(byte[] data,int at,int value){for(int i=0;i<4;i++)data[at+i]=(byte)(value>>>(8*i));}
-    private static byte[] animation(){
+    static byte[] animation(){
         byte[] exe=new byte[4096];System.arraycopy("PS-X EXE".getBytes(StandardCharsets.US_ASCII),0,exe,0,8);
         word(exe,16,0x80010000);word(exe,24,0x80010000);word(exe,28,2048);
         // Original guest program: change the entire 320x240 picture on each guest vblank.

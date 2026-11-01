@@ -3,6 +3,12 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class FastForwardPacerTest {
+    @Test public void normalPresentationCannotBuildAQueueBehindAStalledDisplay(){
+        FastForwardPacer p=new FastForwardPacer();assertTrue(p.presentNormally());
+        for(int field=0;field<120;field++){p.reset();assertFalse(p.presentNormally());}
+        p.presentationComplete();assertTrue(p.presentNormally());assertFalse(p.present(1_000_000_000,120));
+        p.presentationComplete();assertTrue(p.present(1_000_000_000,120));
+    }
     @Test public void allMenuMultipliersAndSupportedCustomSpeedsScaleDeadlines(){
         FastForwardPacer p=new FastForwardPacer();
         for(float speed:new float[]{1,1.5f,2,3,4,8,16}){

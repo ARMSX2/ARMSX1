@@ -31,4 +31,6 @@ public final class FastForwardPacer {
     }
     /** Called by the GPU worker after this host presentation completes. */
     public void presentationComplete(){presentationPending.set(false);}
+    /** Normal guest clocks continue even when a slow window still owns the last present. */
+    public boolean presentNormally(){return presentationPending.compareAndSet(false,true);}
 }

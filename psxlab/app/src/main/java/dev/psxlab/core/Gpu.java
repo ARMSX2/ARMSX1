@@ -32,6 +32,7 @@ public final class Gpu implements AutoCloseable {
     private boolean displayVsync;
     public void configurePresentation(int mode,int multiple,float hz,boolean allowed){highRefresh=new HighRefresh(Math.max(0,Math.min(2,mode)),Math.max(2,Math.min(4,multiple)),hz,allowed);}
     public boolean presentationNeedsRestore(){return presentationDecision==PresentationPolicy.BFI;}
+    public boolean requiresEveryFieldPresentation(){HighRefresh setting=highRefresh;return setting.mode!=0&&setting.allowed;}
     public String presentationStatus(){HighRefresh setting=highRefresh;int decision=PresentationPolicy.evaluate(setting.mode,setting.multiple,setting.hz,presentationRate,setting.allowed,hardware!=null||vulkan!=null,vulkan!=null,setting.mode==2&&ShaderChain.active());return PresentationPolicy.describe(decision,setting.multiple,setting.hz,presentationRate);}
     public long blackFramesPresented(){return blackPresented;}
     public long shaderSubframesPresented(){return shaderSubframes;}
@@ -355,10 +356,13 @@ public final class Gpu implements AutoCloseable {
     public void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing){requestSurfaceFrame(surface,filter,receiver,timing,true);}
     /** Finish every guest draw in order, without waiting for an unnecessary host display buffer. */
     public void completeFrameWithoutPresentation(java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing){
+        completeFrameWithoutPresentation(receiver,timing,"fast_forward_skip");
+    }
+    public void completeFrameWithoutPresentation(java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,String reason){
         flushUpload();int[] state=timing==null?null:displayState(false);
         submit(()->{
             if(performanceEnabled){Performance previous=performance;performance=new Performance(0,previous.width(),previous.height(),previous.scale());}
-            if(timing!=null){timing.gpuBegin(renderer,state);timing.presentationSequence("fast_forward_skip",0);}
+            if(timing!=null){timing.gpuBegin(renderer,state);timing.presentationSequence(reason,0);}
             try{receiver.accept(null);}finally{if(timing!=null)timing.complete();}
         });
     }
