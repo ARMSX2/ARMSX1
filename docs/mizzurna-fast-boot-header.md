@@ -9,3 +9,5 @@ The shared PS-X EXE loader now copies the entire validated header to that buffer
 An original regression fixture calls a helper in the header after entering its main code. It fails against the previous loader and passes after the change, checking every header byte and preserved kernel/COP0 values. Invalid/truncated payloads must leave the buffer untouched. `ExecutableHeaderIntegrationTest` repeats the handoff with a real user-supplied BIOS and portable/native interpreter/ARM64 compiler modes, without accessing player cards or saves. Host validation passes all 421 core tests.
 
 This fixes a demonstrated fast-loader compatibility defect and is a candidate for this report's earlier failure. The exact Mizzurna Falls image and New Game route still require a retest on the reporting device.
+
+Thor validation passed the real-BIOS header helper fixture in portable interpreter, native interpreter and ARM64 compiler modes on 0.3.26. This validates executable loading, not Mizzurna Falls' complete New Game route.

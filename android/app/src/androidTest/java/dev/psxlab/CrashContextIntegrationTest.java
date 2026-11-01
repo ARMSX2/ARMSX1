@@ -18,7 +18,7 @@ public class CrashContextIntegrationTest {
         var context=InstrumentationRegistry.getInstrumentation().getTargetContext();
         File root=new File(context.getExternalFilesDir(null),"performance/crash-context-"+System.currentTimeMillis());assertTrue(root.mkdirs());
         File config=new File(root,"settings.toml"),exeFile=new File(root,"fault.exe");
-        Files.write(config.toPath(),("[cpu]\nfast_boot=true\n[video]\ngpu_backend=\"opengl\"\nrenderer=\"hardware\"\ninternal_scale=1\n[audio]\nmuted=true\n").getBytes(StandardCharsets.UTF_8));
+        Files.write(config.toPath(),("[cpu]\nfast_boot=true\n[video]\ngpu_backend=\"opengl\"\nrenderer=\"hardware\"\ninternal_scale=1\n[audio]\nmuted=true\n[runtime]\nlogging_enabled=true\nlog_level=2\n").getBytes(StandardCharsets.UTF_8));
         byte[] exe=new byte[4096];System.arraycopy("PS-X EXE".getBytes(StandardCharsets.US_ASCII),0,exe,0,8);
         word(exe,16,0x80010000);word(exe,24,0x80010000);word(exe,28,2048);
         word(exe,2048,0x3c08ffff);word(exe,2052,0x3508ff00);word(exe,2056,0x81020000);Files.write(exeFile.toPath(),exe);
