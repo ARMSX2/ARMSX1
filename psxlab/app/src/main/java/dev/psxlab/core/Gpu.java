@@ -425,9 +425,15 @@ public final class Gpu implements AutoCloseable {
         if(hardware!=null && hardwareDrawing){hardware.fill(c,xy,wh);hardwareDirty=true;return;}
         int x = xy & 0x3f0, y = (xy >>> 16) & 511;
         int w = ((wh & 1023) + 15) & ~15, h = (wh >>> 16) & 511;
+        if(w==0||h==0)return;
         int r = (c & 255) >>> 3, g = ((c >>> 8) & 255) >>> 3, b = ((c >>> 16) & 255) >>> 3;
         int pixel=r|(g<<5)|(b<<10);
-        for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) vram[((y+j)&511)*1024+((x+i)&1023)] = pixel;
+        int first=Math.min(w,1024-x),wrapped=w-first;
+        for(int j=0;j<h;j++){
+            int row=((y+j)&511)*1024;
+            Arrays.fill(vram,row+x,row+x+first,pixel);
+            if(wrapped!=0)Arrays.fill(vram,row,row+wrapped,pixel);
+        }
         softwareVramRevision++;
     }
     public void sync(){sync(false);}

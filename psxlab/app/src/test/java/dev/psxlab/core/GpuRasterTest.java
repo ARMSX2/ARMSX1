@@ -3,6 +3,18 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class GpuRasterTest {
+    @Test public void fillWrapsBothEdgesAndEmptyFillsPreserveVram(){
+        for(boolean threaded:new boolean[]{false,true})try(Gpu g=new Gpu(threaded)){
+            send(g,0x020000ff,xy(1008,511),xy(17,2));
+            int[] image=g.snapshot();
+            for(int y=0;y<512;y++)for(int x=0;x<1024;x++)assertEquals(
+                    (y==0||y==511)&&(x<16||x>=1008)?0xffff0000:0xff000000,image[y*1024+x]);
+            send(g,0x0200ff00,xy(1008,511),xy(0,2));
+            send(g,0x0200ff00,xy(1008,511),xy(17,0));assertArrayEquals(image,g.snapshot());
+            send(g,0x0200ff00,xy(1008,511),xy(1023,1));
+            for(int x=0;x<1024;x++)assertEquals(0x3e0,raw(g,x,511));
+        }
+    }
     private static void send(Gpu g,int... words){for(int w:words)g.write(w);}
     private static int xy(int x,int y){return (x&65535)|(y<<16);}
     private static void area(Gpu g){send(g,0xe3000000,0xe407ffff);}
