@@ -52,11 +52,14 @@ public final class PbpDisc implements ByteSource,SectorSource {
         byte[] table=readFile(base+0x4000,blocks*32);offsets=new long[blocks];sizes=new int[blocks];
         for(int i=0;i<blocks;i++){
             offsets[i]=data+u32(table,i*32);sizes[i]=u16(table,i*32+4);
+            // Some conversions leave unused TOC-tail blocks absent. Keep the TOC
+            // intact and reject a missing block only if the game actually reads it.
+            if(sizes[i]==0&&i!=0)continue;
             if(sizes[i]==0||offsets[i]<data||offsets[i]>file.length()-sizes[i])throw new IOException("Invalid or missing PBP data block "+i);
         }
     }
     private void block(int index)throws IOException{
-        if(cachedBlock==index)return;cachedBlock=-1;byte[] compressed=readFile(offsets[index],sizes[index]);int expected=Math.min(BLOCK_SECTORS,sectors-index*BLOCK_SECTORS)*SECTOR;
+        if(cachedBlock==index)return;cachedBlock=-1;if(sizes[index]==0)throw new IOException("PBP has no stored data for block "+index+" (sectors "+index*BLOCK_SECTORS+"-"+(Math.min(sectors,(index+1)*BLOCK_SECTORS)-1)+")");byte[] compressed=readFile(offsets[index],sizes[index]);int expected=Math.min(BLOCK_SECTORS,sectors-index*BLOCK_SECTORS)*SECTOR;
         Arrays.fill(cache,(byte)0);
         if(compressed.length==BLOCK_BYTES){System.arraycopy(compressed,0,cache,0,compressed.length);}
         else{

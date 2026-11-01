@@ -51,6 +51,12 @@ public class CueLaunchIntegrationTest {
             try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,bin.getAbsolutePath())){assertEquals(1,disc(media).lastTrack());assertArrayEquals(exe(),disc(media).bootExecutable());}
             File eboot=new File(dir,"EBOOT.PBP");Files.write(eboot.toPath(),pbp(raw));
             try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,eboot.getAbsolutePath())){assertArrayEquals(exe(),disc(media).bootExecutable());assertEquals(1,disc(media).lastTrack());}
+            byte[] tail=pbp(raw);int leadout=0x100+0x800+27;tail[leadout]=0;tail[leadout+1]=2;tail[leadout+2]=0x48;
+            File tailFile=new File(dir,"EMPTY-TAIL.PBP");Files.write(tailFile.toPath(),tail);
+            try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,tailFile.getAbsolutePath())){
+                assertArrayEquals(exe(),disc(media).bootExecutable());
+                IOException missing=assertThrows(IOException.class,()->disc(media).readSector(32));assertTrue(missing.getMessage().contains("block 2"));
+            }
             File invalid=new File(dir,"bad.cue");Files.write(invalid.toPath(),"FILE missing.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00".getBytes(StandardCharsets.UTF_8));
             InvocationTargetException unsupported=assertThrows(InvocationTargetException.class,()->mount.invoke(backend,invalid.getAbsolutePath()));assertTrue(unsupported.getCause().getMessage().contains("Unsupported CUE file type"));assertTrue(invalid.delete());
         }finally{for(File f:dir.listFiles())if(f.isFile())assertTrue(f.delete());assertTrue(dir.delete());}

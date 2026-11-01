@@ -7,6 +7,16 @@ import java.util.zip.Deflater;
 import static org.junit.Assert.*;
 
 public class PbpDiscTest {
+    @Test public void unusedEmptyTailEntriesDoNotPreventBootButMissingSectorReadsStillFail()throws Exception{
+        byte[] image=fixture(true,false);msf(image,0x100+0x800+27,48+150);
+        // The TOC advertises a third block, but only the first two are stored.
+        try(PbpDisc disc=new PbpDisc(memory(image))){
+            assertEquals(48,disc.sectorCount());assertArrayEquals(BootTest.executable(),new IsoDisc((SectorSource)disc).bootExecutable());
+            byte[] last=disc.readSector(31);
+            IOException missing=assertThrows(IOException.class,()->disc.readSector(32));assertTrue(missing.getMessage(),missing.getMessage().contains("block 2"));
+            assertArrayEquals(last,disc.readSector(31));assertThrows(IOException.class,()->disc.readSector(47));
+        }
+    }
     private static ByteSource memory(byte[] b){return new ByteSource(){public long length(){return b.length;}public byte[] read(long o,int n)throws IOException{if(o<0||o+n>b.length)throw new EOFException();return Arrays.copyOfRange(b,(int)o,(int)o+n);}public void close(){}};}
     private static void word(byte[] b,int p,int n){BootTest.word(b,p,n);}
     private static void msf(byte[] b,int p,int frames){b[p]=(byte)CdRom.bcd(frames/4500);b[p+1]=(byte)CdRom.bcd(frames/75%60);b[p+2]=(byte)CdRom.bcd(frames%75);}
