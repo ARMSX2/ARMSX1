@@ -298,7 +298,8 @@ public final class ArmSxBackend {
                         try{
                             cpu=new Cpu(bus);cpu.reset();guestAudioTracing=false;updateGuestAudioTracing();
                             if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,restore.identity());
-                            else if(media!=null&&(media.disc==null||Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
+                            else if(media!=null&&(media.disc==null||media.disc.region()==' '&&Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
+                            else if(media!=null&&Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))cpu=BiosBoot.discBoot(bios,bus,()->stop);
                             cpu.gte.setWidescreen(widescreenEnabled(),projectionAspect);cpu.enableNative(true,true,true);
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
                                 audio=output;output.setJournal(journal);updateAudio();output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});

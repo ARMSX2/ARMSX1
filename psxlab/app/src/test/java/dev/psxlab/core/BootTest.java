@@ -5,6 +5,15 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.Assert.*;
 
 public class BootTest {
+    @Test public void fastDiscBootReturnsToTheFirmwareInsteadOfExecutingAnInjectedGame()throws Exception{
+        byte[] bios=new byte[512*1024];word(bios,0,0x3c1fbfc0);word(bios,4,0x37ff0040);word(bios,8,0x3c088003);word(bios,12,0x01000008);word(bios,16,0);word(bios,0x40,0x2402002a);
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu,new PadState(),false);bus.write32(0x80,0x3c1a0000);Cpu cpu=BiosBoot.discBoot(bios,bus,()->false);
+            assertEquals(BiosBoot.SHELL_ENTRY,cpu.pc);assertEquals(0xbfc00040,cpu.r[31]);
+            int status=cpu.cop0[12];for(int i=0;i<5;i++)cpu.step();assertEquals(0xbfc00040,cpu.pc);assertEquals(status,cpu.cop0[12]);
+            assertEquals(0,gpu.status()&0x800000);assertEquals(0x3c1a0000,bus.read32(0x80));cpu.step();assertEquals(42,cpu.r[2]);
+        }
+    }
     static void word(byte[] b,int p,int v){for(int i=0;i<4;i++)b[p+i]=(byte)(v>>>(8*i));}
     static byte[] executable(){
         byte[] b=new byte[4096];System.arraycopy("PS-X EXE".getBytes(StandardCharsets.US_ASCII),0,b,0,8);
