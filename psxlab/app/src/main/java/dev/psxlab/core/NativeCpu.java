@@ -18,10 +18,10 @@ final class NativeCpu implements AutoCloseable {
     private static native void setProfilingNative(long handle,boolean enabled);
     private static native long[] timingsNative(long handle);
 
-    private boolean widescreen;
+    private int projectionScale=65536;
     NativeCpu(Bus bus,boolean recompile,boolean ramWaitStates){this.bus=bus;this.ramWaitStates=ramWaitStates;memory=bus.enableNativeMemory();handle=create(bus,state,memory,(recompile?1:0)|(ramWaitStates?2:0));if(handle==0)throw new IllegalStateException("Native CPU initialization failed");}
     void importState(Cpu cpu){
-        boolean requested=cpu.gte.widescreenEnabled();if(requested!=widescreen){widescreen=requested;setProjectionNative(handle,requested);}
+        int requested=cpu.gte.projectionScale();if(requested!=projectionScale){projectionScale=requested;setProjectionNative(handle,requested);}
         words.position(0);words.put(cpu.r).put(cpu.cop0);cpu.exportPipeline(words);
         state.putLong(312,cpu.instructions);state.putLong(320,cpu.exceptions);
         words.position(82);words.put(cpu.gte.nativeState());
@@ -37,7 +37,7 @@ final class NativeCpu implements AutoCloseable {
     long[] statistics(){return statisticsNative(handle);}
     @Override public void close(){if(handle!=0){destroy(handle);handle=0;}}
     private static native long create(Bus bus,ByteBuffer state,ByteBuffer memory,int options);
-    private static native void setProjectionNative(long handle,boolean widescreen);
+    private static native void setProjectionNative(long handle,int projectionScale);
     private static native int runNative(long handle,int count,boolean stopAtFrame);
     private static native long[] statisticsNative(long handle);
     private static native void destroy(long handle);

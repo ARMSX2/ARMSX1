@@ -2,7 +2,7 @@ package dev.psxlab.core;
 
 /** Original functional GTE implementation. Command pipeline timing is not yet modeled. */
 final class ReferenceGte {
-    boolean widescreen;
+    int projectionScale=65536;
     private final int[] data=new int[32],control=new int[32];
     private int shift;
     private boolean limit;
@@ -86,7 +86,7 @@ final class ReferenceGte {
         control[31]=(control[31]&~(1<<22))|previousIr3Flag;saturate(transformed[2]>>12,-32768,32767,22);
         data[16]=data[17];data[17]=data[18];data[18]=data[19];data[19]=saturate(transformed[2]>>12,0,65535,18);
         int ratio=divide(control[26]&65535,data[19]);
-        long projected=(long)ratio*(short)data[9];if(widescreen)projected=projected*3/4;
+        long projected=(long)ratio*(short)data[9];if(projectionScale!=65536)projected=projected*projectionScale/65536;
         long x=projected+control[24],y=(long)ratio*(short)data[10]+control[25];
         mac0(x);int sx=saturate(x>>16,-1024,1023,14);mac0(y);int sy=saturate(y>>16,-1024,1023,13);
         data[12]=data[13];data[13]=data[14];data[14]=(sx&65535)|(sy<<16);

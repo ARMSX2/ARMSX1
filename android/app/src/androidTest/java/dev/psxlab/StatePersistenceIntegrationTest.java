@@ -47,6 +47,15 @@ public class StatePersistenceIntegrationTest {
                     assertEquals(MARKER,boundary(backend,()->bus(backend).read32(ADDRESS)));
                     assertArrayEquals(before,Files.readAllBytes(state.toPath()));
                     assertTrue(backend.lastError(),backend.load(-1,true));assertEquals(MARKER,boundary(backend,()->bus(backend).read32(ADDRESS)));
+                    backend.widescreenHack(true);backend.displayAspect(3);
+                    for(float aspect:new float[]{16f/10f,16f/9f,20f/9f,64f/27f}){
+                        backend.displayAspectCustom(aspect);
+                        Field cpu=ArmSxBackend.class.getDeclaredField("cpu");cpu.setAccessible(true);
+                        assertEquals(dev.psxlab.core.Gte.projectionScale(true,aspect),boundary(backend,()->((dev.psxlab.core.Cpu)cpu.get(backend)).gte.projectionScale()));
+                    }
+                    backend.displayMetadata(2000,900,60);backend.stretchDisplay(true);
+                    Field cpu=ArmSxBackend.class.getDeclaredField("cpu");cpu.setAccessible(true);
+                    assertEquals(dev.psxlab.core.Gte.projectionScale(true,20f/9f),boundary(backend,()->((dev.psxlab.core.Cpu)cpu.get(backend)).gte.projectionScale()));
                 }
             }finally{backend.stop();vm.join(15000);assertFalse(vm.isAlive());}
         }finally{assertTrue(staged.delete());}

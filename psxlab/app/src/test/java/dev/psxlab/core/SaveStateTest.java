@@ -2,6 +2,13 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class SaveStateTest {
+    @Test public void aspectSettingSurvivesLoadsWithoutChangingTheMachineStateSchema()throws Exception{
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);byte[] before=SaveState.capture(cpu,bus,gpu,"aspect");
+            cpu.gte.setWidescreen(true,20f/9f);assertArrayEquals(before,SaveState.capture(cpu,bus,gpu,"aspect"));
+            SaveState.restore(before,cpu,bus,gpu,"aspect");assertEquals(Gte.projectionScale(true,20f/9f),cpu.gte.projectionScale());
+        }
+    }
     @Test public void loadingKeepsCurrentMemoryCardContentsInsteadOfRollingBackInGameSaves()throws Exception{
         try(Gpu gpu=new Gpu(false)){
             Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);

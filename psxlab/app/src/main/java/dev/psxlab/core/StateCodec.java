@@ -13,9 +13,9 @@ final class StateCodec {
         skip(Gpu.class,"textures","textureConfiguration","textureStatus","textureMetrics","nextNativeSnapshot","lastNativeTiming","performanceEnabled","performanceTriangles","performanceRectangles","performanceLines","performance","journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","highRefresh","presentationDecision","presentationRate","shaderAspect","blackPresented","shaderSubframes","displayVsync","baseVulkanOutput","shaderPresenterFailed","displayStretch","displayInteger","displayCrop","baseRenderer","shaderPresenterError");
         skip(Dma.class,"performanceEnabled","performanceWords","journal","linkedYields","linkedLastAddress","linkedLastHeader");
         skip(Spu.class,"nativeCore","sink","output");
-        skip(Gte.class,"nativeCore","widescreen");
-        skip(NativeGte.class,"widescreen");
-        skip(ReferenceGte.class,"widescreen");
+        skip(Gte.class,"nativeCore","widescreen","projectionScale");
+        skip(NativeGte.class,"projectionScale");
+        skip(ReferenceGte.class,"projectionScale");
         skip(CdRom.class,"disc","xaSink","recentCommands","recentWrites","lastMediaError","cddaSectors","cddaFrames");
         skip(SerialPad.class,"state");
         skip(MemoryCard.class,"data","changed");

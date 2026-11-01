@@ -90,9 +90,17 @@ public final class ArmSxBackend {
         outputAspect=switch(mode){case 1->1;case 2->16f/9f;case 3->Math.max(0.1f,Math.min(10,custom));default->4f/3f;};
         outputStretch=stretchOverride!=null?stretchOverride:Boolean.parseBoolean(options.getOrDefault("video.stretch_mode","false"));
         outputInteger=integerOverride!=null?integerOverride:Boolean.parseBoolean(options.getOrDefault("video.integer_scaling","false"));
+        updateProjection();
         Gpu target=gpu;if(target!=null){target.configureDisplay(outputAspect,outputStretch,outputInteger);target.configureCrop(cropOverride>=0?cropOverride:switch(options.getOrDefault("video.overscan_crop","none")){case "small"->1;case "full"->2;default->0;});}
     }
-    public void widescreenHack(boolean enabled){wideOverride=enabled;commands.add(()->{if(cpu!=null)cpu.gte.setWidescreen(enabled);});wake();}
+    private volatile float projectionAspect=4f/3f;
+    public void widescreenHack(boolean enabled){wideOverride=enabled;updateProjection();}
+    private void updateProjection(){
+        float aspect=outputStretch&&surfaceWidth>0&&surfaceHeight>0?(float)surfaceWidth/surfaceHeight:outputAspect;
+        boolean enabled=widescreenEnabled();boolean changed=Gte.projectionScale(enabled,aspect)!=Gte.projectionScale(enabled,projectionAspect);
+        projectionAspect=aspect;
+        Cpu target=cpu;if(active&&(changed||target!=null&&target.gte.projectionScale()!=Gte.projectionScale(enabled,aspect))){commands.add(()->{if(cpu!=null)cpu.gte.setWidescreen(enabled,aspect);});wake();}
+    }
     private boolean widescreenEnabled(){return wideOverride!=null?wideOverride:Boolean.parseBoolean(options.getOrDefault("video.widescreen_hack","false"));}
     public void framePresentation(int mode,int multiple){presentationModeOverride=mode;presentationMultipleOverride=Math.max(2,Math.min(4,multiple));updatePresentation();}
     public String framePresentationStatus(){Gpu target=gpu;return target==null?"Inactive: no game is running":target.presentationStatus();}
@@ -194,7 +202,7 @@ public final class ArmSxBackend {
         journal.event(EngineLog.INFO,"audio.guest.snapshot",Map.of("guest_clocks",current==null?0:current.instructions,
                 "pc",Integer.toHexString(current==null?0:current.pc),"cd",bus.cdrom.loggingSnapshot(),"spu",bus.spu.loggingSnapshot()));
     }
-    public void displayMetadata(int width,int height,float hz){if(width>0){surfaceWidth=width;surfaceHeight=height;}if(hz>0)displayRefreshHz=hz;updatePresentation();journal.event(EngineLog.INFO,"presentation.display",Map.of("width",surfaceWidth,"height",surfaceHeight,"refresh_hz",displayRefreshHz));}
+    public void displayMetadata(int width,int height,float hz){if(width>0){surfaceWidth=width;surfaceHeight=height;}if(hz>0)displayRefreshHz=hz;updateProjection();updatePresentation();journal.event(EngineLog.INFO,"presentation.display",Map.of("width",surfaceWidth,"height",surfaceHeight,"refresh_hz",displayRefreshHz));}
     public boolean flushDiagnosticLog(long timeout){return journal.flush(timeout);}
     public String diagnosticDirectory(){return journal.directory().getAbsolutePath();}
     private void configureLogging(Map<String,String> settings){
@@ -290,7 +298,7 @@ public final class ArmSxBackend {
                             cpu=new Cpu(bus);cpu.reset();guestAudioTracing=false;updateGuestAudioTracing();
                             if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,restore.identity());
                             else if(media!=null&&(media.disc==null||Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
-                            cpu.gte.setWidescreen(widescreenEnabled());cpu.enableNative(true,true,true);
+                            cpu.gte.setWidescreen(widescreenEnabled(),projectionAspect);cpu.enableNative(true,true,true);
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
                                 audio=output;output.setJournal(journal);updateAudio();output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});
                                 renderer="PSX Lab / "+gpu.renderer();booted=true;

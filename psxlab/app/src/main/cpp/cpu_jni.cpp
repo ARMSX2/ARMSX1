@@ -13,7 +13,7 @@ struct Stop {};
 struct CpuCore {
     JNIEnv* env=nullptr;jobject bus; jmethodID clockMethod,finishMethod,readMethod,writeMethod,biosWaitMethod,cdWaitMethod;
     CpuState* s;uint8_t* memory;uint64_t* generations;
-    int elapsed=0,deadline=32,biosReadWaits=0,cdReadWaits=0;bool irq=false,recompile,frameBoundary=false,ramWaitStates,widescreen=false;
+    int elapsed=0,deadline=32,biosReadWaits=0,cdReadWaits=0;bool irq=false,recompile,frameBoundary=false,ramWaitStates;int projectionScale=65536;
     std::unordered_map<uint32_t,std::unique_ptr<CpuBlock>> blocks;
     CpuBlock* previous=nullptr;NativeTiming timing;
     uint64_t cacheClears=0;uint32_t changedPc=0,changedAddress=0,oldInstruction=0,newInstruction=0;
@@ -55,7 +55,7 @@ struct CpuCore {
         jvalue args[5]{};args[0].i=jint(address);args[1].i=width;args[2].i=jint(value);args[3].i=elapsed;args[4].i=int(s->cacheIsolated);status(env->CallLongMethodA(bus,writeMethod,args));
         if(a>=0x1f801000&&a<=0x1f801023){biosReadWaits=env->CallIntMethod(bus,biosWaitMethod);cdReadWaits=env->CallIntMethod(bus,cdWaitMethod);}
     }
-    GteCore geometry(){return GteCore{s->gte,s->gte+32,0,false,widescreen};}
+    GteCore geometry(){return GteCore{s->gte,s->gte+32,0,false,projectionScale};}
     int gteRead(int r){int32_t* d=s->gte;switch(r){case 1:case 3:case 5:case 8:case 9:case 10:case 11:return int16_t(d[r]);case 7:case 16:case 17:case 18:case 19:return d[r]&65535;case 15:return d[14];case 28:case 29:{int v=0;for(int i=0;i<3;i++)v|=std::max(0,std::min(31,int(int16_t(d[9+i]))>>7))<<(i*5);return v;}default:return d[r];}}
     void gteWrite(int r,int v){int32_t* d=s->gte;switch(r){case 1:case 3:case 5:case 8:case 9:case 10:case 11:d[r]=int16_t(v);break;case 7:case 16:case 17:case 18:case 19:d[r]=v&65535;break;case 15:d[12]=d[13];d[13]=d[14];d[14]=v;break;case 28:d[9]=(v&31)<<7;d[10]=((uint32_t(v)>>5)&31)<<7;d[11]=((uint32_t(v)>>10)&31)<<7;break;case 29:case 31:break;case 30:d[30]=v;d[31]=v==0||v==-1?32:__builtin_clz(v<0?uint32_t(~v):uint32_t(v));break;default:d[r]=v;}}
     void gteControl(int r,int v){switch(r){case 4:case 12:case 20:case 26:case 27:case 29:case 30:v=int16_t(v);break;case 31:v&=0x7ffff000;if(v&0x7f87e000)v|=int32_t(0x80000000u);break;default:break;}s->gte[32+r]=v;}
@@ -216,7 +216,7 @@ extern "C" JNIEXPORT jint JNICALL Java_dev_psxlab_core_NativeCpu_runNative(JNIEn
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_destroy(JNIEnv* env,jclass,jlong handle){auto* core=reinterpret_cast<CpuCore*>(handle);if(core){env->DeleteGlobalRef(core->bus);delete core;}}
 extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_statisticsNative(JNIEnv* env,jclass,jlong handle){auto* c=reinterpret_cast<CpuCore*>(handle);jlong values[]={jlong(c->compiled),jlong(c->jitInstructions),jlong(c->interpreted),jlong(c->cacheHits),jlong(c->linked),jlong(c->invalidations),jlong(c->bridges),jlong(c->compileFailures),jlong(c->revalidated),jlong(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)),jlong(c->changedPc),jlong(c->changedAddress),jlong(c->oldInstruction),jlong(c->newInstruction),jlong(c->cacheClears)};jlongArray result=env->NewLongArray(15);env->SetLongArrayRegion(result,0,15,values);return result;}
 
-extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProjectionNative(JNIEnv*,jclass,jlong handle,jboolean enabled){reinterpret_cast<CpuCore*>(handle)->widescreen=enabled;}
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProjectionNative(JNIEnv*,jclass,jlong handle,jint scale){reinterpret_cast<CpuCore*>(handle)->projectionScale=scale;}
 
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProfilingNative(JNIEnv*,jclass,jlong handle,jboolean enabled){reinterpret_cast<CpuCore*>(handle)->timing.enabled.store(enabled);}
 extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_timingsNative(JNIEnv* env,jclass,jlong handle){return reinterpret_cast<CpuCore*>(handle)->timing.snapshot(env);}
