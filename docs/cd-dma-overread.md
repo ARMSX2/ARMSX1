@@ -1,0 +1,7 @@
+# CD DMA requests larger than a sector
+
+The Ape Escape 0.3.21 report stops on `CD-ROM DMA larger than one sector is not implemented`. The manual DMA word count is not constrained to the available sector buffer. The old implementation imposed a 585-word ceiling and also waited for the entire requested byte count to fit, preventing partial-word and oversized requests from completing.
+
+A CD data request still must provide bytes before a DMA starts. Once started, the transfer consumes the current buffer and zero-fills the remaining requested words, consistent with the reference DMA reader: <https://github.com/stenzek/duckstation/blob/master/src/core/cdrom.cpp>. The CPU byte-read FIFO overread behavior is unchanged. Chopped transfers retain their DMA/CPU windows and can finish after draining the buffer rather than waiting indefinitely for another sector. The CD controller does not pull future sectors into an oversized burst.
+
+Regression tests exercise 586/1024/65536-word transfers (including a zero BCR word count), waiting for the initial data request, IRQ/completion flags, exact payload/padding and a DMA following one CPU byte read. Full core validation passes 425 tests together with the fast-boot changes. The report's Ape Escape image is not on Thor; the actual scene needs retesting.

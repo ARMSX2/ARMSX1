@@ -159,8 +159,8 @@ public final class CdRom {
     private void replaceResponse(int[] bytes){response.clear();Arrays.fill(responseHistory,0);responseReadPosition=0;for(int i=0;i<bytes.length;i++){response.add(bytes[i]&255);responseHistory[i]=bytes[i]&255;}}
     public int availableBytes(){return data.length-dataPosition;}
     public int readDmaWord(){
-        if(availableBytes()<4)throw new IllegalStateException("CD-ROM DMA requested unavailable data");
-        dmaBytes+=4;return readDataByte()|readDataByte()<<8|readDataByte()<<16|readDataByte()<<24;
+        int value=0;for(int i=0;i<4;i++)if(dataPosition<data.length)value|=(data[dataPosition++]&255)<<(i*8);
+        dmaBytes+=4;return value;
     }
     public void tick(int cycles){
         boolean wasSeeking=seekTicks>0,wasReading=reading;driveTicks=Math.max(0,driveTicks-cycles);

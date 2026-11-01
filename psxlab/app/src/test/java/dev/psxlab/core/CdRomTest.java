@@ -5,6 +5,25 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class CdRomTest {
+    @Test public void oversizedCdDmaDrainsOneBufferAndPadsTheRequestedTransfer()throws Exception{
+        for(int words:new int[]{586,1024,65536})try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);readFirst(b,9,0);
+            b.write32(0x1f8010f0,0x0765c321);b.write32(0x1f8010f4,0x00880000);
+            b.write32(0x1f8010b0,0x10000);b.write32(0x1f8010b4,words&65535);b.write32(0x1f8010b8,0x11000000);
+            assertNotEquals(0,b.read32(0x1f8010b8)&0x1000000);assertEquals(0,b.cdrom.dmaBytes);
+            b.write8(BASE+3,0x80);
+            assertEquals(0,b.read32(0x1f8010b8)&0x1000000);assertNotEquals(0,b.read32(0x1f8010f4)&0x08000000);
+            for(int i=0;i<words*4;i++)assertEquals("word count="+words+" byte="+i,i<2048?(9+i)&255:0,b.read8(0x10000+i));
+            assertEquals(words*4,b.cdrom.dmaBytes);assertEquals(0,b.cdrom.availableBytes());
+        }
+    }
+    @Test public void cdDmaPadsAPartialWordAfterByteReads()throws Exception{
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);readFirst(b,9,0);b.write8(BASE+3,0x80);assertEquals(9,b.read8(BASE+2));
+            b.write32(0x1f8010f0,0x0765c321);b.write32(0x1f8010b0,0x10000);b.write32(0x1f8010b4,512);b.write32(0x1f8010b8,0x11000000);
+            assertEquals(10,b.read8(0x10000));assertEquals(0,b.read8(0x107ff));assertEquals(0,b.read32(0x1f8010b8)&0x1000000);
+        }
+    }
     @Test public void openingTrayStopsDmaAndReadAndSignalsShellOpenUntilReplacement(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);readFirst(b,7,0);b.write8(BASE+3,0x80);assertEquals(2048,b.cdrom.availableBytes());

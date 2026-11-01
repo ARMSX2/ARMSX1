@@ -118,8 +118,9 @@ public final class Dma {
             }
             if(ch==3){
                 if(mode!=0 || (control&1)!=0)throw new UnsupportedOperationException("Unsupported CD-ROM DMA mode");
-                if(words>585)throw new UnsupportedOperationException("CD-ROM DMA larger than one sector is not implemented");
-                if(bus.cdrom.availableBytes()<words*4)return;
+                // DREQ starts a burst when the sector buffer has data. The DMA
+                // word count need not equal a sector; overreads are zero-filled.
+                if(bus.cdrom.availableBytes()==0)return;
             }
             if(chopping){
                 // Nominal transfer budgets; programmable memory wait states remain approximate.
@@ -200,7 +201,7 @@ public final class Dma {
                     state.cpuWindow=false;state.delay=Math.min(state.window,state.remaining)*state.wordCycles;
                 }else{
                     int count=Math.min(state.window,state.remaining);
-                    if(ch==3 && bus.cdrom.availableBytes()<count*4 || ch==0 && !bus.mdec.inputRequest() || ch==1 && (!bus.mdec.outputRequest() || bus.mdec.availableWords()<count)){
+                    if(ch==0 && !bus.mdec.inputRequest() || ch==1 && (!bus.mdec.outputRequest() || bus.mdec.availableWords()<count)){
                         state.delay=0;elapsed=0;break;
                     }
                     for(int i=0;i<count;i++){
