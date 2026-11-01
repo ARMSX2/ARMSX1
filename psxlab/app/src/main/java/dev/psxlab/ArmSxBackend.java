@@ -317,7 +317,7 @@ public final class ArmSxBackend {
                 restore=restart;
             }while(!stop&&restore!=null);
         }catch(Exception e){booted=false;error(e);if(restore!=null)restore.ready().complete(false);if(restart!=null)restart.ready().complete(false);}
-        finally{performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();gamePath=discPath=bootPath="";serial="";}
+        finally{performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
         return booted;
     }
     private boolean blocked(){Surface target=surface;return paused||audioSuspended||presentationSuspended||target==null||!target.isValid();}
@@ -427,6 +427,10 @@ public final class ArmSxBackend {
     public static int buttonBit(int key){return switch(key){case 109->0;case 106->1;case 107->2;case 108->3;case 19->4;case 22->5;case 20->6;case 21->7;case 104->8;case 105->9;case 102->10;case 103->11;case 100->12;case 97->13;case 96->14;case 99->15;default->-1;};}
     public void analog(int player,int stick,int x,int y){if(player<0||player>=pads.length||stick<0||stick>1)return;PadState p=pads[player];synchronized(p){PadState.State s=p.get();p.update(s.pressed(),stick==1?x:s.rightX(),stick==1?y:s.rightY(),stick==0?x:s.leftX(),stick==0?y:s.leftY());}}
     public void resetButtons(){for(PadState pad:pads)synchronized(pad){pad.clear();}}
+    private void clearSessionOverrides(){
+        aspectOverride=volumeOverride=presentationModeOverride=cropOverride=-1;presentationMultipleOverride=2;
+        customAspectOverride=0;fastSpeedOverride=-1;stretchOverride=integerOverride=mutedOverride=wideOverride=null;textureOptions=null;
+    }
     /** Explicit raw-card import. Never shares live card files with SwanStation. */
     public synchronized boolean importCard(int slot,File source){
         if(active||root==null||slot<0||slot>1)return false;
