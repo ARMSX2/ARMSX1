@@ -32,6 +32,16 @@ public class SpuTest {
         // Frozen before the read-timing fix: static streams must remain bit-identical.
         assertEquals(List.of(1194320044L,2213971421L,329282818L,743243591L,3987942357L,162771275L),actual);
     }
+    @Test public void savingWithADeferredBlockAndPitchCarryPreservesFollowingPcm()throws Exception{
+        try(Gpu ga=new Gpu(false);Gpu gb=new Gpu(false)){
+            Bus a=new Bus(ga,new PadState(),false),b=new Bus(gb,new PadState(),false);Cpu ca=new Cpu(a),cb=new Cpu(b);
+            voice(a,0,7);block(a,0x1000,4,0x1234);block(a,0x1010,3,0x8f76);a.write16(0x1f801c04,0x3fff);frames(a.spu,12);
+            byte[] state=SaveState.capture(ca,a,ga,"stream-boundary");
+            List<Integer> expected=collect(a.spu);frames(a.spu,512);
+            SaveState.restore(state,cb,b,gb,"stream-boundary");List<Integer> actual=collect(b.spu);frames(b.spu,512);
+            assertEquals(expected,actual);assertEquals(a.spu.frames,b.spu.frames);
+        }
+    }
     @Test public void audioSnapshotsDistinguishMutedRoutingWithoutChangingPcm(){
         try(Gpu g=new Gpu(false)){
             Bus a=new Bus(g,new PadState(),false),b=new Bus(g,new PadState(),false);

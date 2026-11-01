@@ -6,6 +6,7 @@ import static org.junit.Assert.*;
 
 /** Exercise the real JNI SPU as well as the Java reference with a streaming refill. */
 public class SpuStreamingIntegrationTest {
+
     private static void block(Bus b,int address,int flags,int packed){
         b.spu.write(0x1f801da6,address/8);b.spu.writeTransfer(flags<<8);
         for(int i=0;i<7;i++)b.spu.writeTransfer(packed);
@@ -43,4 +44,14 @@ public class SpuStreamingIntegrationTest {
         }
     }
     @Test public void nativeRegisterRamIrqAndPcmParityStillPass(){assertTrue(Spu.verifyNative().contains("match the original Java engine"));}
+    @Test public void savedDeferredBlocksAndPitchCarriesResumeWithMatchingPcm()throws Exception{
+        for(boolean nativeSpu:new boolean[]{false,true})try(Gpu ga=new Gpu(false);Gpu gb=new Gpu(false)){
+            Bus a=new Bus(ga,new PadState(),nativeSpu),b=new Bus(gb,new PadState(),nativeSpu);Cpu ca=new Cpu(a),cb=new Cpu(b);
+            block(a,0x1000,4,0x1234);block(a,0x1010,3,0x8f76);voice(a,0x3fff);frames(a.spu,12);
+            byte[] state=SaveState.capture(ca,a,ga,"stream-boundary");CRC32 expected=new CRC32(),actual=new CRC32();
+            a.spu.setAudioSink((pcm,n)->{for(int i=0;i<n;i++){expected.update(pcm[i]&255);expected.update((pcm[i]>>>8)&255);}});frames(a.spu,512);
+            SaveState.restore(state,cb,b,gb,"stream-boundary");b.spu.setAudioSink((pcm,n)->{for(int i=0;i<n;i++){actual.update(pcm[i]&255);actual.update((pcm[i]>>>8)&255);}});frames(b.spu,512);
+            assertEquals(expected.getValue(),actual.getValue());assertEquals(a.spu.frames,b.spu.frames);
+        }
+    }
 }
