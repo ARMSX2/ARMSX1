@@ -5,6 +5,16 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class CdRomTest {
+    @Test public void setlocAcknowledgesZeroAndPregapWithoutReadingTheImage(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.cdrom.insert(disc());
+            for(int[] location:new int[][]{{0,0,0},{0,1,0x74},{0,2,0}}){
+                command(b,2,location);assertEquals("Valid BCD positioning must acknowledge before seeking",3,irq(b));assertArrayEquals(new int[]{2},response(b));ack(b);
+            }
+            assertEquals(0,b.cdrom.sectorsRead);
+            command(b,2,0,0x60,0);assertEquals(5,irq(b));
+        }
+    }
     @Test public void oversizedCdDmaDrainsOneBufferAndPadsTheRequestedTransfer()throws Exception{
         for(int words:new int[]{586,1024,65536})try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g,new PadState(),false);readFirst(b,9,0);

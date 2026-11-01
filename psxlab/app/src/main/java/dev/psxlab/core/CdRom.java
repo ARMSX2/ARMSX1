@@ -270,7 +270,9 @@ public final class CdRom {
             case 2 -> {
                 if(!count(p,3))break;
                 int m=binary(p[0]),s=binary(p[1]),f=binary(p[2]);
-                if(m<0 || s<0 || s>=60 || f<0 || f>=75 || (m*60+s)*75+f<150){error(0x10);break;}
+                // Setloc only latches BCD coordinates. Pregap/lead-in positions
+                // are valid here; any unavailable-sector error belongs to a later read.
+                if(m<0 || s<0 || s>=60 || f<0 || f>=75){error(0x10);break;}
                 location=(m*60+s)*75+f-150;locationPending=true;if(location!=readLocation)seekReady=false;event(0,3,status());
             }
             case 3 -> {
