@@ -15,6 +15,42 @@ import static org.junit.Assert.*;
 /** Private output buffers: validates allocation policy and real posted pixels. */
 @RunWith(AndroidJUnit4.class)
 public class GpuEfficiencyTest {
+    @Test public void softwareClearsPreserveWrappedPixels(){
+        for(int trial=0;trial<4;trial++)try(Gpu gpu=new Gpu(false)){
+            long start=System.nanoTime();
+            for(int i=0;i<1000;i++){gpu.write(0x02000000|((i*123457)&0xffffff));gpu.write(0);gpu.write(320|(240<<16));}
+            long elapsed=System.nanoTime()-start;Gpu.Frame image=gpu.displayFrame();
+            assertNotNull(image);assertTrue(image.width()>0);
+            android.util.Log.i("GpuEfficiencyTest","software-clear trial="+trial+" elapsed_ns="+elapsed);
+        }
+        try(Gpu gpu=new Gpu(false)){
+            gpu.write(0x020000ff);gpu.write(1008|(511<<16));gpu.write(17|(2<<16));
+            int[] actual=gpu.snapshot();for(int y:new int[]{0,1,510,511})for(int x:new int[]{0,15,16,1007,1008,1023})
+                assertEquals((y==0||y==511)&&(x<16||x>=1008)?0xffff0000:0xff000000,actual[y*1024+x]);
+        }
+    }
+    @Test public void streamedDrawAndTransferCommandsKeepTheirOwnData(){
+        for(int scale:new int[]{1,4})for(int trial=0;trial<3;trial++)try(HardwareRasterizer hardware=new HardwareRasterizer(scale)){
+            int[] expected=new int[1024*512],actual=new int[expected.length],environment={0,0,0,0,1023|(511<<10),0,0};
+            SoftwareRasterizer reference=new SoftwareRasterizer(expected,false);hardware.setVram(expected);hardware.readVram(actual);
+            long start=System.nanoTime();
+            for(int burst=0;burst<256;burst++){
+                int[] words=new int[32*11];int at=0;
+                for(int i=0;i<32;i++){
+                    int n=burst*32+i,x=(n*13)&255,y=(n*7)&127;
+                    int[] packet={0x60000000|((n*123457)&0xffffff),x|(y<<16),8|(8<<16)};
+                    reference.draw(packet,environment);words[at++]=3;System.arraycopy(packet,0,words,at,3);at+=3;System.arraycopy(environment,0,words,at,7);at+=7;
+                }
+                hardware.drawBatch(words);
+                // Forces draw -> upload -> draw reuse of the same command SSBO while previous GPU work is pending.
+                int x=(burst*2)&511,y=256+(burst>>8),value=((burst*193)&0x7fff)|(((burst*389)&0x7fff)<<16);
+                hardware.upload(new int[]{value},0,x,y,2,2,0);expected[y*1024+x]=value&0xffff;expected[y*1024+x+1]=value>>>16;
+            }
+            hardware.readVram(actual);long elapsed=System.nanoTime()-start;
+            assertArrayEquals("streamed command data scale="+scale,expected,actual);
+            android.util.Log.i("GpuEfficiencyTest","command-stream scale="+scale+" trial="+trial+" elapsed_ns="+elapsed+" "+hardware.statistics());
+        }
+    }
     @Test public void textureFeedbackAndHdRasterMatchIndependentPixels(){
         assertTrue(HardwareRasterizer.verify().contains("match Java VRAM"));
         assertTrue(HardwareRasterizer.verifyEnhanced(null).contains("Canonical VRAM matches"));
