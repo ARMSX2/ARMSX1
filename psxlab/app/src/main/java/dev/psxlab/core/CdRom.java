@@ -120,8 +120,10 @@ public final class CdRom {
                 // unhandled command; pending IRQ/results still require acknowledgement.
                 // Keep the replacement's parameter snapshot and restart its receive delay.
                 if(pendingCommand>=0)commandOverwrites++;
+                int replaced=pendingCommand;
                 pendingCommand=value;commandTicks=COMMAND_TICKS;commandParameters=Arrays.copyOf(parameters,parameterCount);parameterCount=0;
                 commands++;recentCommands.add(value);if(recentCommands.size()>12)recentCommands.removeFirst();
+                if(traceSink!=null)traceSink.accept(String.format(Locale.ROOT,"COMMAND_WRITE command=%02X replaced=%02X irq=%d parameters=%s",value,replaced,interrupt,Arrays.toString(commandParameters)));
             }else if(port==2){if(parameterCount<16)parameters[parameterCount++]=value;}
             else{
                 if((value&0x20)!=0)throw new UnsupportedOperationException("CD-ROM sound-map writes are not implemented");
@@ -201,7 +203,9 @@ public final class CdRom {
                     }
                 }catch(IOException e){reading=false;lastMediaError=e.getMessage();error(0x80);}
             }
-            if(sectorPending && interrupt==0 && events.isEmpty()){
+            // An incoming command has priority over a queued data-ready IRQ.
+            // Keep the sector pending until its command response is acknowledged.
+            if(sectorPending && pendingCommand<0 && interrupt==0 && events.isEmpty()){
                 sectorPending=false;replaceResponse(new int[]{status()});interrupt=1;irqLine();
             }
         }
@@ -214,7 +218,7 @@ public final class CdRom {
         if(reading || playing)n=Math.min(n,Math.max(1,sectorTicks));
         if(seekTicks>0)n=Math.min(n,seekTicks);
         if(driveTicks>0)n=Math.min(n,driveTicks);
-        if(sectorPending && interrupt==0 && events.isEmpty())return 1;
+        if(sectorPending && pendingCommand<0 && interrupt==0 && events.isEmpty())return 1;
         return n;
     }
     /** Keep legacy command-to-child-event ordering at the final clock quantum. */

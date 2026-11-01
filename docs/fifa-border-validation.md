@@ -39,3 +39,6 @@ timing. The full-frame image with None can still expose game-generated border
 data. A separate brief EA graphic observed before the movie must not be treated
 as fixed by this change. Final visual confirmation of the reported movie-edge
 flicker is separate from the deterministic poisoned-border tests.
+
+The separate pre-movie flash is addressed in 0.3.23; see
+[FIFA intro command validation](fifa-intro-command-validation.md).

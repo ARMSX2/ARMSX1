@@ -82,6 +82,19 @@ public class CdRomTest {
     @Test public void repeatedDataRequestDoesNotRewindPartialSector(){
         try(Gpu g=new Gpu(false)){Bus b=new Bus(g);readFirst(b,7,32);b.write8(BASE+3,0x80);for(int i=0;i<12;i++)b.read8(BASE+2);assertEquals(2328,b.cdrom.availableBytes());b.write8(BASE+3,0x80);assertEquals(2328,b.cdrom.availableBytes());assertEquals(7,b.read8(BASE+2));}
     }
+    @Test public void incomingCommandPrecedesAQueuedDataReadyInterrupt(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);readFirst(b,7,0);ack(b);
+            b.cdrom.tick(SECTOR-CdRom.COMMAND_TICKS/2);
+            b.write8(BASE+2,0);b.write8(BASE+2,2);b.write8(BASE+2,0x30);b.write8(BASE+1,2);
+            b.cdrom.tick(CdRom.COMMAND_TICKS/2);
+            assertEquals("A sector must not interrupt command reception",0,irq(b));
+            assertNotEquals(0,b.read8(BASE)&128);
+            assertTrue("No busy loop for a data IRQ held behind a command",b.cdrom.clocksToEvent()>1);
+            b.cdrom.tick(CdRom.COMMAND_TICKS/2);assertEquals(3,irq(b));response(b);ack(b);
+            b.cdrom.tick(1);assertEquals("The held sector must still be delivered",1,irq(b));
+        }
+    }
     @Test public void responsePaddingWrapsAndAckDrainsIt(){
         try(Gpu g=new Gpu(false)){Bus b=new Bus(g);b.cdrom.insert(disc());command(b,1);assertEquals(2,b.read8(BASE+1));for(int i=1;i<16;i++)assertEquals(0,b.read8(BASE+1));assertEquals(2,b.read8(BASE+1));assertEquals(0,b.read8(BASE)&32);ack(b);assertEquals(0,b.read8(BASE+1));}
     }
