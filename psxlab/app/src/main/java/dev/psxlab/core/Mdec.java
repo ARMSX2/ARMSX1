@@ -37,7 +37,12 @@ public final class Mdec {
     public int status(){
         int current=output.isEmpty()?(block<2?block+4:block-2):output.peek().block;
         if((format>>>25&3)<2)current=4;
-        return (outputWords==0?0x80000000:0)|(remaining>0?0x20000000:0)
+        // Synchronous IDCT queues future macroblocks ahead of the hardware output
+        // stage. Accepting the last input word does not make that backlog ready.
+        // The final macroblock may remain in the output FIFO after busy clears.
+        int finalWords=switch(format>>>25&3){case 0->8;case 1->16;case 2->192;default->128;};
+        boolean busy=remaining>0||outputWords>finalWords;
+        return (outputWords==0?0x80000000:0)|(busy?0x20000000:0)
             |(inputRequest()?0x10000000:0)|(outputRequest()?0x08000000:0)
             |format|(current<<16)|(remaining>0?(remaining-1)&65535:idleCount);
     }

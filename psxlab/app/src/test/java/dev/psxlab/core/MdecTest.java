@@ -4,6 +4,36 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class MdecTest {
+    @Test public void commandStaysBusyWhileMovieColumnsStillNeedProcessing(){
+        for(int depth=0;depth<4;depth++)try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);tables(b);b.write32(STATUS,0x60000000);b.write32(0x1f8010f0,0x076543a9);
+            int wordsPerBlock=switch(depth){case 0->8;case 1->16;case 2->192;default->128;};
+            int blocksPerMacroblock=depth<2?1:6,macroblocksPerColumn=14,columns=3;
+            b.write32(DATA,0x20000000|(depth<<27)|(columns*macroblocksPerColumn*blocksPerMacroblock));
+            for(int i=0;i<columns*macroblocksPerColumn*blocksPerMacroblock;i++)block(b,0);
+            // All compressed input is accepted, but several columns are still behind
+            // the decoder's output stage. Movie callbacks must not start a new frame.
+            assertEquals(0xffff,b.read32(STATUS)&0xffff);
+            assertNotEquals("Premature ready at depth "+depth,0,b.read32(STATUS)&0x20000000);
+            for(int column=0;column<columns;column++){
+                int words=macroblocksPerColumn*wordsPerBlock;
+                dma(b,1,0x1000,words,0);b.dma.tick(words);
+                assertEquals(0,b.read32(0x1f801098)&0x1000000);
+                assertEquals("Movie callback after column "+column+" depth="+depth,column==columns-1?0:0x20000000,b.read32(STATUS)&0x20000000);
+            }
+            assertEquals(0,b.mdec.availableWords());
+        }
+    }
+    @Test public void finalMacroblockCanRemainReadableAfterCommandBecomesReady(){
+        for(int depth=0;depth<4;depth++)try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);tables(b);int blocks=depth<2?1:6,words=switch(depth){case 0->8;case 1->16;case 2->192;default->128;};
+            b.write32(DATA,0x20000000|(depth<<27)|(blocks*2));for(int i=0;i<blocks*2;i++)block(b,0);
+            assertNotEquals(0,b.read32(STATUS)&0x20000000);
+            for(int i=0;i<words;i++)b.read32(DATA);
+            assertEquals(words,b.mdec.availableWords());assertEquals(0,b.read32(STATUS)&0x20000000);assertEquals(0,b.read32(STATUS)&0x80000000);
+            for(int i=0;i<words;i++)b.read32(DATA);assertEquals(0,b.mdec.availableWords());assertNotEquals(0,b.read32(STATUS)&0x80000000);
+        }
+    }
     private static final int DATA=0x1f801820,STATUS=0x1f801824;
     private static void tables(Bus b){
         b.write32(DATA,0x40000001);
