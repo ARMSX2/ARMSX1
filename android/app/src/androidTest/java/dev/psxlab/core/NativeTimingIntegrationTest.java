@@ -52,6 +52,7 @@ public class NativeTimingIntegrationTest {
             Map<String,Object> gpu=output.nativeTimings();for(String path:new String[]{"gpu.vulkan.fence_wait","gpu.vulkan.acquire","gpu.vulkan.submit","gpu.vulkan.present"}){
                 Map<?,?> row=stage(gpu,path);assertTrue(((Number)row.get("calls")).longValue()>0);assertEquals((long)android.os.Process.myTid(),row.get("tid"));assertTrue(row.get("source").toString().contains("vulkan_output.cpp"));
             }
+            assertEquals("One previous-submission fence wait per shared frame",1L,stage(gpu,"gpu.vulkan.fence_wait").get("calls"));
             assertTrue(((Number)stage(raster.nativeTimings(),"gpu.vram.transfer").get("calls")).longValue()>0);
         }
     }
