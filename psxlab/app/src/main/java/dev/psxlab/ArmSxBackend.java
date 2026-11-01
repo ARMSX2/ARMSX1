@@ -166,7 +166,9 @@ public final class ArmSxBackend {
         final ByteSource source; final CueDisc cue; final IsoDisc disc; final byte[] executable;
         Media(ByteSource source)throws IOException{
             this.source=source;cue=null;
-            if(new String(source.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
+            // A decoded disc's system area may itself begin with executable data.
+            // Explicit PBP/CHD container identity takes precedence over that prefix.
+            if(!(source instanceof PbpDisc)&&!(source instanceof ChdSource)&&new String(source.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
                 disc=null;byte[] header=source.read(0,2048);int size=ExeLoader.le(header,28);
                 if(size<4||size>2*1024*1024)throw new IOException("Invalid executable size");executable=source.read(0,size+2048);
             }else{disc=source instanceof PbpDisc?new IsoDisc((SectorSource)source):new IsoDisc(source);executable=disc.bootExecutable();}

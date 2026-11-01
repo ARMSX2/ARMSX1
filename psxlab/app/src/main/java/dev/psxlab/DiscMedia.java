@@ -28,7 +28,7 @@ public final class DiscMedia implements AutoCloseable {
         }
         ByteSource bytes=source(context,uri);
         try{
-            if(new String(bytes.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
+            if(!(bytes instanceof PbpDisc)&&!(bytes instanceof ChdSource)&&new String(bytes.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
                 byte[] header=bytes.read(0,2048);int size=ExeLoader.le(header,28);
                 if(size<4||size>2*1024*1024)throw new IOException("Invalid executable size");
                 return new DiscMedia(bytes,null,bytes.read(0,size+2048),name);

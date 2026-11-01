@@ -51,6 +51,11 @@ public class CueLaunchIntegrationTest {
             try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,bin.getAbsolutePath())){assertEquals(1,disc(media).lastTrack());assertArrayEquals(exe(),disc(media).bootExecutable());}
             File eboot=new File(dir,"EBOOT.PBP");Files.write(eboot.toPath(),pbp(raw));
             try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,eboot.getAbsolutePath())){assertArrayEquals(exe(),disc(media).bootExecutable());assertEquals(1,disc(media).lastTrack());}
+            // A disc container must never become a raw EXE because its system area
+            // happens to start with that signature (including a misleading header).
+            byte[] prefixed=raw.clone();System.arraycopy(exe(),0,prefixed,0,2048);word(prefixed,24,0x1f800000);
+            File systemExe=new File(dir,"SYSTEM-EXE.PBP");Files.write(systemExe.toPath(),pbp(prefixed));
+            try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,systemExe.getAbsolutePath())){assertNotNull(disc(media));assertArrayEquals(exe(),disc(media).bootExecutable());}
             byte[] tail=pbp(raw);int leadout=0x100+0x800+27;tail[leadout]=0;tail[leadout+1]=2;tail[leadout+2]=0x48;
             File tailFile=new File(dir,"EMPTY-TAIL.PBP");Files.write(tailFile.toPath(),tail);
             try(AutoCloseable media=(AutoCloseable)mount.invoke(backend,tailFile.getAbsolutePath())){
