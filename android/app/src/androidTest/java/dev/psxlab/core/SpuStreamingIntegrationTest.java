@@ -7,6 +7,37 @@ import static org.junit.Assert.*;
 /** Exercise the real JNI SPU as well as the Java reference with a streaming refill. */
 public class SpuStreamingIntegrationTest {
 
+    @Test public void nativeAndJavaCheckTransferAndCachedBlockIrqsAtRegisterBoundaries(){
+        for(boolean nativeSpu:new boolean[]{false,true}){
+            try(Gpu gpu=new Gpu(false)){
+                Bus b=new Bus(gpu,new PadState(),nativeSpu);b.write16(0x1f801074,512);
+                b.spu.write(0x1f801da4,0x201);b.spu.write(0x1f801daa,0xc040);b.spu.write(0x1f801da6,0x200);
+                for(int i=0;i<3;i++)b.spu.writeTransfer(0);assertFalse(b.interruptPending());
+                b.spu.writeTransfer(0);assertTrue("Transfer end, native="+nativeSpu,b.interruptPending());
+            }
+            try(Gpu gpu=new Gpu(false)){
+                Bus b=new Bus(gpu,new PadState(),nativeSpu);block(b,0x1000,7,0x1111);voice(b,0x1000);frames(b.spu,5);
+                b.write16(0x1f801074,512);b.spu.write(0x1f801da4,0x300);b.spu.write(0x1f801daa,0xc040);assertFalse(b.interruptPending());
+                b.spu.write(0x1f801da4,0x201);assertTrue("Cached block, native="+nativeSpu,b.interruptPending());
+            }
+            try(Gpu gpu=new Gpu(false)){
+                Bus b=new Bus(gpu,new PadState(),nativeSpu);b.write16(0x1f801074,512);
+                b.spu.write(0x1f801da4,0x200);b.spu.write(0x1f801da6,0x200);assertFalse(b.interruptPending());
+                b.spu.write(0x1f801daa,0xc040);assertTrue("IRQ enable, native="+nativeSpu,b.interruptPending());
+            }
+        }
+    }
+    @Test public void nativeAndJavaLatchedIrqsEmitOnlyOneEdge(){
+        for(boolean nativeSpu:new boolean[]{false,true})try(Gpu gpu=new Gpu(false)){
+            Bus b=new Bus(gpu,new PadState(),nativeSpu);b.write16(0x1f801074,512);
+            b.spu.write(0x1f801da4,0x200);b.spu.write(0x1f801daa,0xc040);b.spu.write(0x1f801da6,0x200);
+            b.spu.writeTransfer(0);assertTrue(b.interruptPending());b.write16(0x1f801070,0xfdff);
+            b.spu.writeTransfer(0);assertFalse("Repeated SPU edge, native="+nativeSpu,b.interruptPending());
+            assertEquals(64,b.spu.read(0x1f801dae)&64);
+            b.spu.write(0x1f801daa,0xc000);b.spu.write(0x1f801da6,0x200);b.spu.write(0x1f801daa,0xc040);b.spu.writeTransfer(0);
+            assertTrue(b.interruptPending());
+        }
+    }
     private static void block(Bus b,int address,int flags,int packed){
         b.spu.write(0x1f801da6,address/8);b.spu.writeTransfer(flags<<8);
         for(int i=0;i<7;i++)b.spu.writeTransfer(packed);

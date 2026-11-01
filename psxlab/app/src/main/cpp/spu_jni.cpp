@@ -63,11 +63,12 @@ struct SpuCore {
     int registers[256]{};uint8_t ram[512*1024]{};Voice voices[24];Volume mainLeft,mainRight;ReverbFilter reverbFilter;
     int transferAddress=0,capture=0,ended=0,keyOn=0,keyOff=0,noise=0,noiseTimer=0,reverbAddress=0,reverbLeft=0,reverbRight=0;
     bool irq=false,raised=false;
-    void checkIrq(int address){if((registers[0xd5]&0x8040)==0x8040&&((address&0x7ffff)&~7)==registers[0xd2]*8){irq=raised=true;}}
+    void checkIrq(int address){if(!irq && (registers[0xd5]&0x8040)==0x8040&&(address&0x7ffff)==registers[0xd2]*8){irq=raised=true;}}
+    void checkLateIrq(){if(irq||(registers[0xd5]&0x8040)!=0x8040)return;checkIrq(transferAddress);for(const Voice& v:voices)if(v.loaded){checkIrq(v.address);checkIrq(v.address+8);}}
     int word(int address){address&=0x7fffe;checkIrq(address);return int16_t(ram[address]|(ram[address+1]<<8));}
     void word(int address,int value){address&=0x7fffe;checkIrq(address);ram[address]=uint8_t(value);ram[address+1]=uint8_t(uint32_t(value)>>8);}
-    void writeTransfer(int value){word(transferAddress,value);transferAddress=(transferAddress+2)&0x7ffff;}
-    int readTransfer(){int v=word(transferAddress)&65535;transferAddress=(transferAddress+2)&0x7ffff;return v;}
+    void writeTransfer(int value){word(transferAddress,value);transferAddress=(transferAddress+2)&0x7ffff;checkIrq(transferAddress);}
+    int readTransfer(){int v=word(transferAddress)&65535;transferAddress=(transferAddress+2)&0x7ffff;checkIrq(transferAddress);return v;}
     int read(int address){int index=(address-0x1f801c00)/2;
         if(index>=256){int voice=(address-0x1f801e00)/4;return voice<24?((address&2)?voices[voice].right.level:voices[voice].left.level)&65535:65535;}
         if(address==0x1f801dae){int control=registers[0xd5],mode=(control>>4)&3;return(control&63)|(irq?64:0)|(mode>=2?128:0)|(mode==2?256:0)|(mode==3?512:0)|((registers[0xd6]&12)&&capture>=512?2048:0);}
@@ -78,7 +79,7 @@ struct SpuCore {
     void write(int address,int value){value&=65535;int index=(address-0x1f801c00)/2;if(index>=256)return;
         if(address==0x1f801dae||address==0x1f801d9c||address==0x1f801d9e)return;registers[index]=value;
         if(index<0xc0){Voice& v=voices[index/8];if((index&7)==6)v.envelope.level=int16_t(value);if((index&7)==7){manualLoopWrites++;if(v.delay<=1)v.manualLoop=true;}return;}
-        switch(address){case 0x1f801d88:keyOn|=value;break;case 0x1f801d8a:keyOn|=(value&255)<<16;break;case 0x1f801d8c:keyOff|=value;break;case 0x1f801d8e:keyOff|=(value&255)<<16;break;case 0x1f801da2:reverbAddress=value*8;break;case 0x1f801da6:transferAddress=value*8;break;case 0x1f801da8:writeTransfer(value);break;case 0x1f801daa:if(!(value&64))irq=false;break;}
+        switch(address){case 0x1f801d88:keyOn|=value;break;case 0x1f801d8a:keyOn|=(value&255)<<16;break;case 0x1f801d8c:keyOff|=value;break;case 0x1f801d8e:keyOff|=(value&255)<<16;break;case 0x1f801da2:reverbAddress=value*8;break;case 0x1f801da4:checkLateIrq();break;case 0x1f801da6:transferAddress=value*8;checkIrq(transferAddress);break;case 0x1f801da8:writeTransfer(value);break;case 0x1f801daa:if(!(value&64))irq=false;else checkLateIrq();break;}
     }
     static void decodeBlock(const uint8_t* ram,int address,int* samples,int* history){static constexpr int f1[5]={0,60,115,98,122},f2[5]={0,0,-52,-55,-60};int header=ram[address&0x7ffff],shift=header&15,filter=header>>4;if(shift>12)shift=9;if(filter>4)filter=0;int first=history[0],second=history[1];
         for(int i=0;i<28;i++){int nibble=(ram[(address+2+i/2)&0x7ffff]>>((i&1)*4))&15;int sample=int16_t(nibble<<12)>>shift;sample=clamp16(sample+((first*f1[filter])>>6)+((second*f2[filter])>>6));samples[i]=sample;second=first;first=sample;}history[0]=first;history[1]=second;

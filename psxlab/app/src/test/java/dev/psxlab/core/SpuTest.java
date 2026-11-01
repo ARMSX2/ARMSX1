@@ -5,6 +5,42 @@ import static org.junit.Assert.*;
 import java.util.*;
 
 public class SpuTest {
+    @Test public void transferIrqOccursWhenThePointerReachesItsAddress(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);b.write16(0x1f801074,512);
+            b.spu.write(0x1f801da4,0x201);b.spu.write(0x1f801daa,0xc040);b.spu.write(0x1f801da6,0x200);
+            for(int i=0;i<3;i++)b.spu.writeTransfer(0);
+            assertFalse(b.interruptPending());b.spu.writeTransfer(0);
+            assertTrue("The fourth halfword reaches IRQ address 0x1008",b.interruptPending());
+        }
+    }
+    @Test public void movingTheIrqToAnAlreadyLoadedVoiceBlockTriggersImmediately(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);voice(b,0,7);frames(b.spu,5);
+            b.write16(0x1f801074,512);b.spu.write(0x1f801da4,0x300);b.spu.write(0x1f801daa,0xc040);
+            assertFalse(b.interruptPending());b.spu.write(0x1f801da4,0x201);
+            assertTrue("IRQ reprogramming must see a block already in the decoder",b.interruptPending());
+        }
+    }
+    @Test public void enablingTheIrqChecksAnExistingTransferPointer(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);b.write16(0x1f801074,512);
+            b.spu.write(0x1f801da4,0x200);b.spu.write(0x1f801da6,0x200);assertFalse(b.interruptPending());
+            b.spu.write(0x1f801daa,0xc040);assertTrue(b.interruptPending());
+        }
+    }
+    @Test public void latchedRamIrqDoesNotRaiseAnotherEdgeUntilSpuAcknowledgement(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);b.write16(0x1f801074,512);
+            b.spu.write(0x1f801da4,0x200);b.spu.write(0x1f801daa,0xc040);
+            b.spu.write(0x1f801da6,0x200);b.spu.writeTransfer(0);
+            assertTrue(b.interruptPending());assertEquals(64,b.spu.read(0x1f801dae)&64);
+            b.write16(0x1f801070,0xfdff);assertFalse(b.interruptPending());
+            b.spu.writeTransfer(0);assertFalse("A latched SPU must not emit another interrupt edge",b.interruptPending());
+            b.spu.write(0x1f801daa,0xc000);b.spu.write(0x1f801da6,0x200);b.spu.write(0x1f801daa,0xc040);
+            b.spu.writeTransfer(0);assertTrue("Acknowledging the SPU permits a new edge",b.interruptPending());
+        }
+    }
     @Test public void streamedRefillBetweenBlocksMustNotCacheTheOldStopFlag(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g,new PadState(),false);voice(b,0,7);block(b,0x1000,0,0x1111);block(b,0x1010,1,0x2222);

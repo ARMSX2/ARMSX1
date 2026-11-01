@@ -79,16 +79,22 @@ public final class Spu {
             case 0x1f801d8c:keyOff|=value;break;
             case 0x1f801d8e:keyOff|=(value&255)<<16;break;
             case 0x1f801da2:reverbAddress=value*8;break;
-            case 0x1f801da6:transferAddress=value*8;break;
+            case 0x1f801da4:checkLateIrq();break;
+            case 0x1f801da6:transferAddress=value*8;checkIrq(transferAddress);break;
             case 0x1f801da8:writeTransfer(value);break;
-            case 0x1f801daa:if((value&64)==0)irq=false;break;
+            case 0x1f801daa:if((value&64)==0)irq=false;else checkLateIrq();break;
         }
     }
-    private void checkIrq(int address){if((registers[0xd5]&0x8040)==0x8040 && ((address&0x7ffff)&~7)==registers[0xd2]*8){irq=true;bus.raiseInterrupt(9);}}
+    private void checkIrq(int address){if(!irq && (registers[0xd5]&0x8040)==0x8040 && (address&0x7ffff)==registers[0xd2]*8){irq=true;bus.raiseInterrupt(9);}}
+    private void checkLateIrq(){
+        if(irq || (registers[0xd5]&0x8040)!=0x8040)return;
+        checkIrq(transferAddress);
+        for(Voice voice:voices)if(voice.loaded){checkIrq(voice.address);checkIrq(voice.address+8);}
+    }
     private int word(int address){address&=0x7fffe;checkIrq(address);return (short)((ram[address]&255)|(ram[address+1]&255)<<8);}
     private void word(int address,int value){address&=0x7fffe;checkIrq(address);ram[address]=(byte)value;ram[address+1]=(byte)(value>>>8);}
-    public void writeTransfer(int value){if(nativeCore!=null){nativeCore.op(3,value,0);return;}word(transferAddress,value);transferAddress=(transferAddress+2)&0x7ffff;}
-    public int readTransfer(){if(nativeCore!=null)return nativeCore.op(2,0,0);int value=word(transferAddress)&65535;transferAddress=(transferAddress+2)&0x7ffff;return value;}
+    public void writeTransfer(int value){if(nativeCore!=null){nativeCore.op(3,value,0);return;}word(transferAddress,value);transferAddress=(transferAddress+2)&0x7ffff;checkIrq(transferAddress);}
+    public int readTransfer(){if(nativeCore!=null)return nativeCore.op(2,0,0);int value=word(transferAddress)&65535;transferAddress=(transferAddress+2)&0x7ffff;checkIrq(transferAddress);return value;}
     public void tick(int cycles){clock+=cycles;while(clock>=768){clock-=768;int cd=bus.cdrom.audioFrame();if(nativeCore!=null)sampleNative(cd);else sample(cd);}}
     int clocksToEvent(){return 768-clock;}
     private int sampleNative(int cd){int pcm=nativeCore.op(4,cd,0);frames++;if(pcm!=0)nonzeroFrames++;if(cd!=0)cdNonzeroFrames++;if(sink!=null){output[outputCount++]=(short)pcm;output[outputCount++]=(short)(pcm>>16);if(outputCount==output.length)flushAudio();}return pcm;}
