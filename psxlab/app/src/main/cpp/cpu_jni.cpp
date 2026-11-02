@@ -3,7 +3,7 @@
 #include "cpu_core.h"
 #include "hardware_register_counters.h"
 #include "native_timing.h"
-#include "gte_core.h"
+#include "cpu_gte.h"
 #include <stdexcept>
 #include <limits>
 
@@ -60,9 +60,9 @@ struct CpuCore {
         if(a>=0x1f801000&&a<=0x1f801023){biosReadWaits=env->CallIntMethod(bus,biosWaitMethod);cdReadWaits=env->CallIntMethod(bus,cdWaitMethod);}
     }
     GteCore geometry(){return GteCore{s->gte,s->gte+32,0,false,projectionScale};}
-    int gteRead(int r){int32_t* d=s->gte;switch(r){case 1:case 3:case 5:case 8:case 9:case 10:case 11:return int16_t(d[r]);case 7:case 16:case 17:case 18:case 19:return d[r]&65535;case 15:return d[14];case 28:case 29:{int v=0;for(int i=0;i<3;i++)v|=std::max(0,std::min(31,int(int16_t(d[9+i]))>>7))<<(i*5);return v;}default:return d[r];}}
-    void gteWrite(int r,int v){int32_t* d=s->gte;switch(r){case 1:case 3:case 5:case 8:case 9:case 10:case 11:d[r]=int16_t(v);break;case 7:case 16:case 17:case 18:case 19:d[r]=v&65535;break;case 15:d[12]=d[13];d[13]=d[14];d[14]=v;break;case 28:d[9]=(v&31)<<7;d[10]=((uint32_t(v)>>5)&31)<<7;d[11]=((uint32_t(v)>>10)&31)<<7;break;case 29:case 31:break;case 30:d[30]=v;d[31]=v==0||v==-1?32:__builtin_clz(v<0?uint32_t(~v):uint32_t(v));break;default:d[r]=v;}}
-    void gteControl(int r,int v){switch(r){case 4:case 12:case 20:case 26:case 27:case 29:case 30:v=int16_t(v);break;case 31:v&=0x7ffff000;if(v&0x7f87e000)v|=int32_t(0x80000000u);break;default:break;}s->gte[32+r]=v;}
+    int gteRead(int r){return cpuGteRead(s,r);}
+    void gteWrite(int r,int v){cpuGteWrite(s,r,v);}
+    void gteControl(int r,int v){cpuGteControl(s,r,v);}
     void gteExecute(uint32_t word){auto g=geometry();if(!g.execute(int(word))){env->ThrowNew(env->FindClass("java/lang/UnsupportedOperationException"),"Unsupported native CPU GTE command");throw Stop{};}}
     void commit(){if(s->loadReg)s->r[s->loadReg]=s->loadValue;s->loadReg=0;}
     void load(int r,int v){s->loadReg=r;s->loadValue=v;}
@@ -159,14 +159,14 @@ struct CpuCore {
             uint32_t p=s->pc&0x1fffffff;if((s->pc&3)||!(p<0x800000 || (p>=0x1fc00000&&p<0x1fc80000)))return nullptr;
             if(!block){if(blocks.size()>=65536){clearCache();}auto owner=std::make_unique<CpuBlock>(s->pc);block=owner.get();blocks.emplace(s->pc,std::move(owner));}
             block->page=p<0x800000?int((p&0x1fffff)>>12):-1;block->version=block->page<0?0:generations[block->page];
-            for(int i=0;i<32;i++){
+            for(int i=0;i<CpuBlock::MaximumInstructions;i++){
                 uint32_t at=s->pc+uint32_t(i*4),physical=at&0x1fffffff;if((physical>>12)!=(p>>12))break;
                 uint32_t word=0;uint32_t offset=p<0x800000?(physical&0x1fffff):Bios+physical-0x1fc00000;memcpy(&word,memory+offset,4);Decoded d(word,at);
                 if(p<0x800000)memory[CodeMask+(offset>>5)]|=uint8_t(1<<((offset>>2)&7));
                 if(!d.compilable()){
-                    if(d.branch()&&i<31&&((physical+4)>>12)==(p>>12)){
+                    if(d.branch()&&i<CpuBlock::MaximumInstructions-1&&((physical+4)>>12)==(p>>12)){
                         uint32_t slot;memcpy(&slot,memory+offset+4,4);
-                        if(slot==0){if(p<0x800000)memory[CodeMask+((offset+4)>>5)]|=uint8_t(1<<(((offset+4)>>2)&7));block->code.push_back(d);block->code.emplace_back(0,at+4);break;}
+                        Decoded delay(slot,at+4);if(delay.compilable()&&!delay.memory()&&!delay.gte()){if(p<0x800000)memory[CodeMask+((offset+4)>>5)]|=uint8_t(1<<(((offset+4)>>2)&7));block->code.push_back(d);block->code.push_back(delay);break;}
                     }
                     if(block->code.empty())block->code.push_back(d);break;
                 }
@@ -176,7 +176,7 @@ struct CpuCore {
             // exclude an instruction which exits to the interpreter for MMIO,
             // scratchpad or an address fault.
             block->ramReadClocks.assign(1,0);for(const Decoded& d:block->code)block->ramReadClocks.push_back(block->ramReadClocks.back()+((d.memory()&&!d.store()&&d.compilable())?6:0));
-            if(recompile&&(block->code.front().compilable()||(block->code.size()==2&&block->code.front().branch()))){NativeTiming::Scope compiling(timing,NativeTiming::CPU_COMPILE,s->pc);if(compileArm64(*block))compiled++;else compileFailures++;}
+            if(recompile&&(block->code.front().compilable()||(block->code.size()>=2&&block->code.front().branch()))){NativeTiming::Scope compiling(timing,NativeTiming::CPU_COMPILE,s->pc);if(compileArm64(*block))compiled++;else compileFailures++;}
         }
         if(previous){if(!previous->links[0]||previous->links[0]->pc==block->pc)previous->links[0]=block;else previous->links[1]=block;}
         return block;
@@ -192,15 +192,18 @@ struct CpuCore {
                 bool pendingIrq=(s->cop0[12]&1)&&(s->cop0[12]&cause&0xff00);
                 int instructionClocks=1+fetchWait(s->pc);
                 int blockClocks=block?int(block->code.size())*instructionClocks+(ramWaitStates?block->ramReadClocks.back():0):0;
-                if(block&&block->function&&block->codePage->executable&&!s->branchPending&&!s->cacheIsolated&&!pendingIrq&&remaining>=blockClocks&&deadline-elapsed>blockClocks){
+                if(block&&block->function&&block->codePage->executable&&!s->branchPending&&!s->cacheIsolated&&!pendingIrq&&remaining>0&&deadline-elapsed>instructionClocks){
                     if(irq)s->cop0[13]|=0x400;else s->cop0[13]&=~0x400;
-                    int count=block->function(s,memory,generations,memory+CodeMask);int clocks=count*instructionClocks+(ramWaitStates?block->ramReadClocks[size_t(count)]:0);s->instructions+=clocks;elapsed+=clocks;jitInstructions+=count;
-                    if(count<int(block->code.size()))step(&block->code[size_t(count)]);
+                    int available=std::min(remaining,deadline-elapsed-1),limit=int(block->code.size());
+                    if(blockClocks>available)limit=block->instructionLimit(available,instructionClocks,ramWaitStates);
+                    int count=block->function(s,memory,generations,memory+CodeMask,limit,projectionScale);int clocks=count*instructionClocks+(ramWaitStates?block->ramReadClocks[size_t(count)]:0);s->instructions+=clocks;elapsed+=clocks;jitInstructions+=count;
+                    if(count<int(block->code.size())&&s->instructions-start<uint64_t(budget)){if(elapsed+1>=deadline)step();else step(&block->code[size_t(count)]);}
                 }else if(block){
                     for(const Decoded& d:block->code){if(s->pc!=d.at||s->instructions-start>=uint64_t(budget))break;
+                        bool delay=s->branchPending;
                         // A device callback can DMA new code immediately before this instruction.
                         if(elapsed+1>=deadline)step();else step(&d);
-                        if((stopFrame&&frameBoundary)||d.store() || (block->page>=0&&block->version!=generations[block->page]))break;
+                        if(delay||(stopFrame&&frameBoundary)||d.store() || (block->page>=0&&block->version!=generations[block->page]))break;
                     }
                 }else step();
                 previous=block;

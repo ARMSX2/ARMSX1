@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <atomic>
+#include <algorithm>
 
 // Shared with NativeCpu.java. All state and memory belong to the core thread.
 struct CpuState {
@@ -23,8 +24,13 @@ struct Decoded {
     uint32_t word,at;int op,s,t,d,imm,u,fun,shift;
     Decoded(uint32_t w,uint32_t p):word(w),at(p),op(w>>26),s((w>>21)&31),t((w>>16)&31),d((w>>11)&31),imm(int16_t(w)),u(w&65535),fun(w&63),shift((w>>6)&31){}
     bool store()const{return op==40||op==41||op==42||op==43||op==46||op==58;}
+    bool gte()const {
+        if(op!=18)return false;if(s<16)return s==0||s==2||s==4||s==6;
+        switch(fun){case 1:case 6:case 0xc:case 0x10:case 0x11:case 0x12:case 0x13:case 0x14:case 0x16:case 0x1b:case 0x1c:case 0x1e:case 0x20:case 0x28:case 0x29:case 0x2a:case 0x2d:case 0x2e:case 0x30:case 0x3d:case 0x3e:case 0x3f:return true;default:return false;}
+    }
     bool compilable()const {
-        if(op==0)return fun==0||fun==2||fun==3||fun==4||fun==6||fun==7||fun==33||fun==35||fun==36||fun==37||fun==38||fun==39||fun==42||fun==43;
+        if(gte())return true;
+        if(op==0)return fun==0||fun==2||fun==3||fun==4||fun==6||fun==7||fun==16||fun==17||fun==18||fun==19||fun==24||fun==25||fun==26||fun==27||fun==33||fun==35||fun==36||fun==37||fun==38||fun==39||fun==42||fun==43;
         return op==9||op==10||op==11||op==12||op==13||op==14||op==15||op==32||op==33||op==35||op==36||op==37||op==40||op==41||op==43;
     }
     bool memory()const{return op>=32;}
@@ -37,13 +43,19 @@ struct CpuCodePage {
     ~CpuCodePage(){if(memory!=MAP_FAILED){munmap(memory,bytes);allocatedBytes.fetch_sub(bytes,std::memory_order_relaxed);}}
 };
 struct CpuBlock {
+    static constexpr int MaximumInstructions=64;
     uint32_t pc;uint64_t version;int page;
     std::vector<Decoded> code;
     std::vector<int> ramReadClocks;
     void* executable=nullptr;size_t executableBytes=0;
     std::shared_ptr<CpuCodePage> codePage;
-    using Function=int(*)(CpuState*,uint8_t*,uint64_t*,uint8_t*);
+    using Function=int(*)(CpuState*,uint8_t*,uint64_t*,uint8_t*,int,int);
     Function function=nullptr;
+    int instructionLimit(int clocks,int instructionClocks,bool ramWaitStates)const{
+        int lo=0,hi=std::min(int(code.size()),std::max(0,clocks/instructionClocks));
+        if(hi*instructionClocks+(ramWaitStates?ramReadClocks[size_t(hi)]:0)<=clocks)return hi;
+        while(lo<hi){int mid=(lo+hi+1)/2,cost=mid*instructionClocks+(ramWaitStates?ramReadClocks[size_t(mid)]:0);if(cost<=clocks)lo=mid;else hi=mid-1;}return lo;
+    }
     CpuBlock* links[2]={};
     explicit CpuBlock(uint32_t p):pc(p),version(0),page(-1){}
 };

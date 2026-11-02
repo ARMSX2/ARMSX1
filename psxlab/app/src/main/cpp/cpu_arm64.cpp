@@ -1,6 +1,6 @@
-// Original ARM64 translator for fault-free integer and fast-RAM blocks.
-// Control flow, exceptional operations and MMIO retain the native interpreter.
+// Original ARM64 translator. Guards preserve event deadlines, delay slots and MMIO fallback.
 #include "cpu_core.h"
+#include "cpu_gte.h"
 #include <algorithm>
 
 #if defined(__aarch64__)
@@ -9,6 +9,7 @@ struct Assembler {
     std::vector<uint32_t> words;
     void emit(uint32_t w){words.push_back(w);}
     void mov(int d,uint32_t v){emit(0x52800000|((v&65535)<<5)|d);if(v>>16)emit(0x72a00000|((v>>16)<<5)|d);}
+    void pointer(int d,uintptr_t value){emit(0xd2800000|((value&65535)<<5)|d);for(int part=1;part<4;part++)if((value>>(part*16))&65535)emit(0xf2800000|(part<<21)|(((value>>(part*16))&65535)<<5)|d);}
     void load(int d,int offset){emit(0xb9400000|((offset/4)<<10)|d);}
     void store(int r,int offset){emit(0xb9000000|((offset/4)<<10)|r);}
     void binary(uint32_t op,int d,int a,int b){emit(op|(b<<16)|(a<<5)|d);}
@@ -32,35 +33,43 @@ struct Assembler {
 
 bool compileArm64(CpuBlock& block){
 #if defined(__aarch64__)
-    if(block.code.empty() || (!block.code.front().compilable() && !(block.code.size()==2&&block.code.front().branch())))return false;
-    Assembler a;a.emit(0xd503245f); // BTI c; harmless hint on older ARM64 CPUs.
+    if(block.code.empty() || (!block.code.front().compilable() && !(block.code.size()>=2&&block.code.front().branch())))return false;
+    Assembler a;a.emit(0xd503245f);
     struct Exit {size_t branch;int count,pending;};std::vector<Exit> exits;
     int pending=-1,count=0;bool controlFinished=false;
-    for(const Decoded& d:block.code){
+    auto guard=[&](uint32_t op){exits.push_back({a.jump(op),count,pending});};
+    auto instruction=[&](const Decoded& d){
         a.load(9,d.s*4);a.load(10,d.t*4);
         if(d.memory()){
-            a.immediate(11,9,d.imm);a.emit(0x53007000|(11<<5)|11); // UBFM: physical address, 29 bits.
-            a.mov(12,0x800000);a.binary(0x6b000000,31,11,12);exits.push_back({a.jump(0x54000002),count,pending}); // B.HS slow.
+            a.immediate(11,9,d.imm);a.emit(0x53007000|(11<<5)|11);
+            a.mov(12,0x800000);a.binary(0x6b000000,31,11,12);guard(0x54000002);
             int width=(d.op==33||d.op==37||d.op==41)?2:(d.op==35||d.op==43)?4:1;
-            if(width>1){a.emit(0x53000000|((width==4?1:0)<<10)|(11<<5)|12);exits.push_back({a.jump(0x35000000|12),count,pending});}
-            a.emit(0x53005000|(11<<5)|11); // UBFM: 21-bit mirrored RAM offset.
+            if(width>1){a.emit(0x53000000|((width==4?1:0)<<10)|(11<<5)|12);guard(0x35000000|12);}
+            a.emit(0x53005000|(11<<5)|11);
         }
+        if(d.gte()){a.load(11,offsetof(CpuState,cop0)+12*4);a.mov(12,0x40000000);a.binary(0x6a000000,31,11,12);guard(0x54000000);}
         a.commit(pending);pending=0;
-        if(d.branch()){
-            if(d.op==0){a.binary(0x2a000000,16,31,9);a.mov(17,1);}
-            else if(d.op==2||d.op==3){a.mov(16,((d.at+4)&0xf0000000)|((d.word&0x3ffffff)<<2));a.mov(17,1);}
+        if(d.gte()){
+            // Save caller-owned arguments and LR around the shared, JNI-free geometry helper.
+            a.emit(0xa9bc07e0);a.emit(0xa9010fe2);a.emit(0xa90217e4);a.emit(0xf9001bfe);
+            a.mov(1,d.word);a.binary(0x2a000000,2,31,5);a.binary(0x2a000000,3,31,10);
+            a.pointer(16,reinterpret_cast<uintptr_t>(&executeCompiledGte));a.emit(0xd63f0200);
+            a.emit(0xf9401bfe);a.emit(0xa94217e4);a.emit(0xa9410fe2);a.emit(0xa8c407e0);
+            if(d.s==0||d.s==2){a.load(14,offsetof(CpuState,loadValue));pending=d.t;}
+            return;
+        }
+        if(d.op==0&&d.fun>=16&&d.fun<=27){
+            if(d.fun==16||d.fun==18){a.load(11,d.fun==16?offsetof(CpuState,hi):offsetof(CpuState,lo));if(d.d)a.store(11,d.d*4);}
+            else if(d.fun==17||d.fun==19)a.store(9,d.fun==17?offsetof(CpuState,hi):offsetof(CpuState,lo));
+            else if(d.fun==24||d.fun==25){a.binary(d.fun==24?0x9b207c00:0x9ba07c00,11,9,10);a.store(11,offsetof(CpuState,lo));a.emit(0xd360fc00|(11<<5)|12);a.store(12,offsetof(CpuState,hi));}
             else{
-                a.mov(16,d.at+4+uint32_t(d.imm*4));
-                if(d.op==4||d.op==5)a.compare(17,9,10,d.op==4?0:1);
-                else a.compare(17,9,31,d.op==6?13:d.op==7?12:(d.t&1)?10:11);
+                size_t nonzero=a.jump(0x35000000|10);a.mov(11,0xffffffff);
+                if(d.fun==26){a.mov(12,1);a.binary(0x6b000000,31,9,31);a.emit(0x1a800000|(12<<16)|(10<<12)|(11<<5)|11);}
+                a.store(11,offsetof(CpuState,lo));a.store(9,offsetof(CpuState,hi));size_t done=a.jump(0x14000000);a.patch(nonzero,a.words.size(),true);
+                a.binary(d.fun==26?0x1ac00c00:0x1ac00800,11,9,10);a.emit(0x1b008000|(10<<16)|(9<<10)|(11<<5)|12);
+                a.store(11,offsetof(CpuState,lo));a.store(12,offsetof(CpuState,hi));a.patch(done,a.words.size(),false);
             }
-            int link=d.op==3?31:d.op==0&&d.fun==9?d.d:d.op==1&&(d.t==16||d.t==17)?31:0;
-            if(link){a.mov(11,d.at+8);a.store(11,link*4);}
-            a.mov(11,d.at+8);a.binary(0x6b000000,31,17,31);
-            a.emit(0x1a800000|(11<<16)|(1<<12)|(16<<5)|12); // CSEL destination, target, fallthrough, NE.
-            a.store(12,offsetof(CpuState,pc));a.store(12,offsetof(CpuState,faultBranchTarget));a.immediate(12,12,4);a.store(12,offsetof(CpuState,next));
-            a.store(17,offsetof(CpuState,faultBranchTaken));a.store(31,offsetof(CpuState,loadReg));a.store(31,offsetof(CpuState,branchPending));a.store(31,offsetof(CpuState,branchTaken));
-            count+=2;a.mov(0,count);a.emit(0xd65f03c0);controlFinished=true;break;
+            return;
         }
         int dest=d.op==0?d.d:d.t;
         if(d.memory()){
@@ -107,7 +116,26 @@ bool compileArm64(CpuBlock& block){
             else{a.mov(12,uint32_t(d.op==10||d.op==11?d.imm:d.u));if(d.op==10||d.op==11)a.compare(11,9,12,d.op==10?11:3);else a.binary(d.op==12?0x0a000000:d.op==13?0x2a000000:0x4a000000,11,9,12);}
             if(dest)a.store(11,dest*4);
         }
-        count++;
+    };
+    for(size_t index=0;index<block.code.size();index++){
+        const Decoded& d=block.code[index];int needed=d.branch()?2:1;
+        if(!d.branch()&&!d.compilable())return false;
+        // A longer block can execute a prefix without crossing a device event or run budget.
+        a.emit(0x71000000|(needed<<10)|(4<<5)|4);guard(0x54000003);
+        if(!d.branch()){instruction(d);count++;continue;}
+        if(index+1>=block.code.size()||!block.code[index+1].compilable()||block.code[index+1].memory()||block.code[index+1].gte())return false;
+        a.load(9,d.s*4);a.load(10,d.t*4);a.commit(pending);pending=0;
+        if(d.op==0){a.binary(0x2a000000,16,31,9);a.mov(17,1);}
+        else if(d.op==2||d.op==3){a.mov(16,((d.at+4)&0xf0000000)|((d.word&0x3ffffff)<<2));a.mov(17,1);}
+        else{a.mov(16,d.at+4+uint32_t(d.imm*4));if(d.op==4||d.op==5)a.compare(17,9,10,d.op==4?0:1);else a.compare(17,9,31,d.op==6?13:d.op==7?12:(d.t&1)?10:11);}
+        int link=d.op==3?31:d.op==0&&d.fun==9?d.d:d.op==1&&(d.t==16||d.t==17)?31:0;
+        if(link){a.mov(11,d.at+8);a.store(11,link*4);}
+        a.mov(11,d.at+8);a.binary(0x6b000000,31,17,31);a.emit(0x1a800000|(11<<16)|(1<<12)|(16<<5)|12);
+        a.store(12,offsetof(CpuState,faultBranchTarget));a.store(17,offsetof(CpuState,faultBranchTaken));
+        instruction(block.code[index+1]);count+=2;
+        a.load(12,offsetof(CpuState,faultBranchTarget));a.store(12,offsetof(CpuState,pc));a.immediate(12,12,4);a.store(12,offsetof(CpuState,next));
+        a.store(31,offsetof(CpuState,loadReg));a.store(31,offsetof(CpuState,branchPending));a.store(31,offsetof(CpuState,branchTaken));
+        a.mov(0,count);a.emit(0xd65f03c0);controlFinished=true;break;
     }
     if(!controlFinished)a.finish(count,pending);
     for(const Exit& e:exits){a.patch(e.branch,a.words.size(),true);a.finish(e.count,e.pending);}
