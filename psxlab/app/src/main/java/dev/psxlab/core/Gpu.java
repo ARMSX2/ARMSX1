@@ -18,6 +18,7 @@ public final class Gpu implements AutoCloseable {
     private final int internalScale,presentationMode;
     private final boolean baseVulkanOutput;
     private volatile boolean shaderPresenterFailed;
+    private boolean failureReported;
     /** Linux thread id of the worker once it starts; zero before the first submission. */
     public volatile int workerTid;
     private boolean displayStretch,displayInteger;
@@ -187,7 +188,7 @@ public final class Gpu implements AutoCloseable {
             }) : null;
         if(texturePresentation && NativeRasterizer.AVAILABLE)submitDirect(()->{
             try{hardware=new HardwareRasterizer(scale);renderer=scale>1?scale+"× HD drawing / "+(presentationMode==2?"Vulkan":"OpenGL")+" display":hardwareDrawing?"OpenGL ES compute":"Native software + OpenGL display";}
-            catch(RuntimeException e){if(scale>1)throw e;android.util.Log.w("PSXGpu","GLES unavailable; using the software display",e);}
+            catch(RuntimeException e){if(scale>1)throw new IllegalStateException(scale+"x HD drawing is unavailable on this GPU ("+e.getMessage()+"). Set the internal resolution to 1x or choose another display output.",e);android.util.Log.w("PSXGpu","GLES unavailable; using the software display",e);}
         });
         if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer="Vulkan display / "+(scale>1?scale+"× OpenGL compute rasterizer":hardwareDrawing?"OpenGL compute rasterizer":"native software rasterizer");}catch(RuntimeException e){renderer=hardware!=null?"OpenGL display (Vulkan unavailable)":"Software (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
     }
@@ -226,11 +227,13 @@ public final class Gpu implements AutoCloseable {
     private void submitDirect(Runnable r) {
         check();
         EngineLog log=journal;Runnable guarded;
-        if(log!=null&&log.enabled()){long frame=log.currentFrame();guarded=()->{log.enterFrame(frame);try{r.run();}catch(RuntimeException e){failure=e;log.error("gpu.command",e);}finally{log.leaveFrame();}};}
-        else guarded = () -> { try { r.run(); } catch (RuntimeException e) { failure = e; } };
+        if(log!=null&&log.enabled()){long frame=log.currentFrame();guarded=()->{log.enterFrame(frame);try{r.run();}catch(RuntimeException e){fail(e);log.error("gpu.command",e);}finally{log.leaveFrame();}};}
+        else guarded = () -> { try { r.run(); } catch (RuntimeException e) { fail(e); } };
         if (worker == null) guarded.run(); else worker.execute(guarded);
     }
-    private void check() { if (failure != null) throw failure; }
+    /** Keep the first GPU-thread failure: later commands fail because of it and would otherwise hide the cause. */
+    private void fail(RuntimeException e){if(failure==null)failure=e;else if(failure!=e)try{android.util.Log.w("PSXGpu","Later GPU failure after "+failure,e);}catch(RuntimeException ignored){}}
+    private void check() { if (failure != null){failureReported=true;throw failure;} }
     private void draw(int[] p){draw(p,p.length);}
     private void draw(int[] p,int length){
         int op=p[0]>>>24;primitives++;vramDirty.addDrawingArea(environment[3],environment[4]);
@@ -510,7 +513,9 @@ public final class Gpu implements AutoCloseable {
         for(int i=0;i<out.length;i++){int p=vram[i],r=p&31,g=(p>>>5)&31,b=(p>>>10)&31;out[i]=0xff000000|((r<<3|r>>>2)<<16)|((g<<3|g>>>2)<<8)|(b<<3|b>>>2);}
         return out;
     }
-    @Override public void close() {try{sync();}finally{
+    // A failure the caller already received is not thrown again on close: rethrowing that same
+    // exception from try-with-resources replaced it with "Self-suppression not permitted".
+    @Override public void close() {boolean reported=failureReported;try{sync();}catch(RuntimeException e){if(e!=failure||!reported)throw e;}finally{
         Runnable cleanup=()->{if(textures!=null){textures.close();textures=null;}if(vulkan!=null){vulkan.close();vulkan=null;}if(hardware!=null){hardware.close();hardware=null;}};
         if(worker!=null){FutureTask<Void> close=new FutureTask<>(cleanup,null);try{worker.execute(close);close.get();}catch(InterruptedException e){Thread.currentThread().interrupt();}catch(ExecutionException e){throw new IllegalStateException(e);}finally{worker.shutdown();}}
         else cleanup.run();
