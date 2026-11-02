@@ -358,8 +358,11 @@ public final class ArmSxBackend {
     /** Disc format and track layout, so a report shows missing CD-audio tracks (a single data track). */
     private static String discLayout(Media value){
         if(value==null||value.disc==null)return "none (executable)";
-        IsoDisc disc=value.disc;StringBuilder out=new StringBuilder(value.source.getClass().getSimpleName()).append(value.cue!=null?" with CUE":"");
+        IsoDisc disc=value.disc;StringBuilder out=new StringBuilder();
         try{
+            // CUE media owns a CueDisc instead of a ByteSource. Diagnostics must
+            // describe either owner without preventing startup or a disc change.
+            out.append(value.cue!=null?"CUE/BIN":value.source!=null?value.source.getClass().getSimpleName():"disc image");
             int tracks=disc.lastTrack(),audio=0;out.append(", ").append(tracks).append(" track(s), ").append(disc.sectorCount()).append(" sectors");
             for(int track=1;track<=tracks;track++){int start=disc.trackStart(track);boolean sound=disc.audioTrack(start);if(sound)audio++;if(track<=16)out.append(track==1?": ":", ").append(track).append(sound?" audio @":" data @").append(start);}
             if(tracks>16)out.append(", ...");
