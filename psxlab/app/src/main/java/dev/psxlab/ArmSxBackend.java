@@ -322,7 +322,7 @@ public final class ArmSxBackend {
                 // Keep one graphics API attached to a retained Android Surface. Software
                 // still rasterizes on the CPU; its finished pixels use the texture presenter.
                 try(Gpu graphics=mode==0&&scale==1&&!selected.hardware()?new Gpu(true,false):new Gpu(true,mode,scale,selected.hardware())){
-                    gpu=graphics;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
+                    gpu=graphics;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();configurePads();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
                         String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);prepareStateIdentity();mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
@@ -556,9 +556,19 @@ public final class ArmSxBackend {
     // belong to the requesting host thread, so diagnosis does not starve audio.
     private void writeScreenshot(String path,Gpu.Frame frame)throws IOException{Bitmap image=Bitmap.createBitmap(frame.pixels(),frame.width(),frame.height(),Bitmap.Config.ARGB_8888);try(ByteArrayOutputStream bytes=new ByteArrayOutputStream()){if(!image.compress(Bitmap.CompressFormat.PNG,100,bytes))throw new IOException("Screenshot failed");atomic(new File(path),bytes.toByteArray());}finally{image.recycle();}}
     public boolean changeDisc(String path){return call(()->{Media next=openMedia(path);if(next.disc==null){next.close();throw new IOException("Disc replacement requires a CD image");}if(pendingMedia!=null)pendingMedia.close();bus.cdrom.eject();pendingMedia=next;insertAt=cpu.instructions+33868800L;discPath=path;event("disc-change");return true;},false);}
-    public void button(int player,int key,int range,boolean down){if(player<0||player>=pads.length)return;if((key>=110&&key<=113)||(key>=120&&key<=123)){int stick=key>=120?1:0,offset=key%10;PadState.State s=pads[player].get();int x=stick==0?s.leftX():s.rightX(),y=stick==0?s.leftY():s.rightY();int v=down?Math.min(127,Math.max(0,range)*127/32767):0;if(offset==0||offset==2)y=128+(offset==0?-v:v);else x=128+(offset==3?-v:v);analog(player,stick,x,y);return;}int bit=buttonBit(key);if(bit<0)return;PadState p=pads[player];synchronized(p){PadState.State s=p.get();int mask=1<<bit;p.update(down?s.pressed()|mask:s.pressed()&~mask,s.rightX(),s.rightY(),s.leftX(),s.leftY());}}
+    /** Frontend code for the DualShock Analog button (NativeApp.setPadButton). */
+    static final int ANALOG_BUTTON=200;
+    public void button(int player,int key,int range,boolean down){if(player<0||player>=pads.length)return;if(key==ANALOG_BUTTON){if(down){pads[player].toggleAnalog();event("analog-button player="+player);}return;}if((key>=110&&key<=113)||(key>=120&&key<=123)){int stick=key>=120?1:0,offset=key%10;PadState.State s=pads[player].get();int x=stick==0?s.leftX():s.rightX(),y=stick==0?s.leftY():s.rightY();int v=down?Math.min(127,Math.max(0,range)*127/32767):0;if(offset==0||offset==2)y=128+(offset==0?-v:v);else x=128+(offset==3?-v:v);analog(player,stick,x,y);return;}int bit=buttonBit(key);if(bit<0)return;PadState p=pads[player];synchronized(p){PadState.State s=p.get();int mask=1<<bit;p.update(down?s.pressed()|mask:s.pressed()&~mask,s.rightX(),s.rightY(),s.leftX(),s.leftY());}}
     public static int buttonBit(int key){return switch(key){case 109->0;case 106->1;case 107->2;case 108->3;case 19->4;case 22->5;case 20->6;case 21->7;case 104->8;case 105->9;case 102->10;case 103->11;case 100->12;case 97->13;case 96->14;case 99->15;default->-1;};}
     public void analog(int player,int stick,int x,int y){if(player<0||player>=pads.length||stick<0||stick>1)return;PadState p=pads[player];synchronized(p){PadState.State s=p.get();p.update(s.pressed(),stick==1?x:s.rightX(),stick==1?y:s.rightY(),stick==0?x:s.leftX(),stick==0?y:s.leftY());}}
+    /** Apply [input] settings before the pads are created: the DualShock otherwise always started in
+     * digital mode, so sticks only worked in games that switch the pad to analog themselves. Port 2 keeps
+     * its existing connection handling. */
+    private void configurePads(){
+        boolean analog=Boolean.parseBoolean(options.getOrDefault("input.analog_mode_default","false"));
+        for(PadState pad:pads)pad.startAnalog=analog;
+        pads[0].controllerType=switch(options.getOrDefault("input.controller1_type","AnalogController")){case "DigitalController"->1;case "AnalogJoystick"->2;case "None"->3;default->0;};
+    }
     public void resetButtons(){for(PadState pad:pads)synchronized(pad){pad.clear();}}
     private void clearSessionOverrides(){
         aspectOverride=volumeOverride=presentationModeOverride=cropOverride=-1;presentationMultipleOverride=2;
