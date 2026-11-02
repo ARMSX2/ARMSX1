@@ -1,6 +1,7 @@
 // Original PSX Lab native MIPS-I core and coherent block cache.
 #include <jni.h>
 #include "cpu_core.h"
+#include "hardware_register_counters.h"
 #include "native_timing.h"
 #include "gte_core.h"
 #include <stdexcept>
@@ -15,7 +16,7 @@ struct CpuCore {
     CpuState* s;uint8_t* memory;uint64_t* generations;
     int elapsed=0,deadline=32,biosReadWaits=0,cdReadWaits=0;bool irq=false,recompile,frameBoundary=false,ramWaitStates;int projectionScale=65536;
     std::unordered_map<uint32_t,std::unique_ptr<CpuBlock>> blocks;
-    CpuBlock* previous=nullptr;NativeTiming timing;
+    CpuBlock* previous=nullptr;NativeTiming timing;HardwareRegisterCounters registers;
     uint64_t cacheClears=0;uint32_t changedPc=0,changedAddress=0,oldInstruction=0,newInstruction=0;
     uint64_t cacheHits=0,compiled=0,jitInstructions=0,interpreted=0,invalidations=0,linked=0,bridges=0,compileFailures=0,revalidated=0;
     uint32_t currentAt=0,currentWord=0;
@@ -36,6 +37,7 @@ struct CpuCore {
         else if(a>=0x1fc00000&&a<0x1fc80000){offset=Bios+a-0x1fc00000;if(ramWaitStates&&!instruction)wait(biosWait(width));}
         else if(a>=0x1f800000&&a<0x1f800400)offset=Scratch+a-0x1f800000;
         else{
+            if(timing.enabled.load(std::memory_order_relaxed))registers.record(a,width,false,currentAt);
             if(ramWaitStates&&a>=0x1f801800&&a<0x1f801804){
                 wait((cdReadWaits>>(width==4?16:width==2?8:0))&255);
                 // Read-only status latches are refreshed at every device/MMIO
@@ -52,6 +54,7 @@ struct CpuCore {
         if(a<0x800000){if(!s->cacheIsolated){uint32_t offset=a&0x1fffff;bool changed=memcmp(memory+offset,&value,size_t(width))!=0;memcpy(memory+offset,&value,size_t(width));if(changed&&(memory[CodeMask+(offset>>5)]&(1<<((offset>>2)&7))))generations[offset>>12]++;}return;}
         if(a>=0x1f800000&&a<0x1f800400){memcpy(memory+Scratch+a-0x1f800000,&value,size_t(width));return;}
         if(a>=0x1fc00000&&a<0x1fc80000)return;
+        if(timing.enabled.load(std::memory_order_relaxed))registers.record(a,width,true,currentAt);
         if(ramWaitStates&&width==1&&a==0x1f801800&&(value&3)==(memory[CdStatus]&3))return;
         jvalue args[5]{};args[0].i=jint(address);args[1].i=width;args[2].i=jint(value);args[3].i=elapsed;args[4].i=int(s->cacheIsolated);status(env->CallLongMethodA(bus,writeMethod,args));
         if(a>=0x1f801000&&a<=0x1f801023){biosReadWaits=env->CallIntMethod(bus,biosWaitMethod);cdReadWaits=env->CallIntMethod(bus,cdWaitMethod);}
@@ -219,5 +222,7 @@ extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_statistic
 
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProjectionNative(JNIEnv*,jclass,jlong handle,jint scale){reinterpret_cast<CpuCore*>(handle)->projectionScale=scale;}
 
-extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProfilingNative(JNIEnv*,jclass,jlong handle,jboolean enabled){reinterpret_cast<CpuCore*>(handle)->timing.enabled.store(enabled);}
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProfilingNative(JNIEnv*,jclass,jlong handle,jboolean enabled){auto* c=reinterpret_cast<CpuCore*>(handle);if(enabled&&!c->timing.enabled.load())c->registers.reset();c->timing.enabled.store(enabled);}
 extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_timingsNative(JNIEnv* env,jclass,jlong handle){return reinterpret_cast<CpuCore*>(handle)->timing.snapshot(env);}
+
+extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_registersNative(JNIEnv* env,jclass,jlong handle){auto* c=reinterpret_cast<CpuCore*>(handle);auto values=c->registers.snapshot(c->timing.enabled.load());jlongArray out=env->NewLongArray(jsize(values.size()));if(out)env->SetLongArrayRegion(out,0,jsize(values.size()),reinterpret_cast<const jlong*>(values.data()));return out;}

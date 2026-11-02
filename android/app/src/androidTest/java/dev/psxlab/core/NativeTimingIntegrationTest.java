@@ -12,6 +12,13 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class NativeTimingIntegrationTest {
+    @Test public void hardwareRegisterCountsIncludeNativeShadowPaths(){
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu);Cpu cpu=new Cpu(bus);int[] code={0x3c011f80,0x90221800,0xa0201800,0x8c231814,0xac201074,0x08004000,0};
+            for(int i=0;i<code.length;i++)bus.write32(0x10000+i*4,code[i]);cpu.jump(0x80010000);assertTrue(cpu.enableNative(true,true,true));cpu.configureProfiling(true);
+            try{cpu.run(10000);Map<?,?> report=(Map<?,?>)cpu.nativeTimings().get("hardware_registers");assertEquals(true,report.get("available"));assertTrue(((Number)report.get("reads")).longValue()>0);assertTrue(((Number)report.get("writes")).longValue()>0);String rows=report.get("hot_registers").toString();assertTrue(rows,rows.contains("1F801800"));assertTrue(rows,rows.contains("1F801814"));}finally{cpu.closeNative();}
+        }
+    }
     @Test public void openGlSeparatesCommandUploadWindowAndSwapWaits()throws Exception{
         try(ImageReader reader=ImageReader.newInstance(320,240,PixelFormat.RGBA_8888,4);HardwareRasterizer raster=new HardwareRasterizer(4)){
             raster.configureProfiling(true);raster.fill(0xff,0,320|(240<<16));
