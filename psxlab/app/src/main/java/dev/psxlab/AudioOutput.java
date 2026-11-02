@@ -35,7 +35,7 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private int head,size,inFlightFrames,inputHead,inputSize;
     private boolean inputFinished,dspFinished;
     private volatile boolean running=true,paused;
-    private boolean trackReleased;
+    private volatile boolean trackReleased;
     private int stoppedPlayed,stoppedUnderruns;
     private String lastDiagnostic="Audio starting";
     private volatile RuntimeException failure;
@@ -210,10 +210,15 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     }
     record Diagnostic(long source,long dspInput,long written,long played,int inputQueue,long ready,long sourceWait,long dspCpu,int underruns,long refills){}
     synchronized Diagnostic snapshotDiagnostic(){return new Diagnostic(sourceFrames,dspInputFrames,writtenFrames,Integer.toUnsignedLong(playbackFrames()),inputSize/2,bufferedFrames(),sourceBlockedNanos,dspCpuNanos,underruns(),recoveries);}
-    synchronized java.util.Map<String,Object> loggingSnapshot(){
+    /** The routed device is a binder call; look it up before taking the monitor the audio threads need. */
+    java.util.Map<String,Object> loggingSnapshot(){
+        android.media.AudioDeviceInfo device=null;try{if(!trackReleased)device=track.getRoutedDevice();}catch(RuntimeException ignored){}
+        synchronized(this){return loggingSnapshot(device);}
+    }
+    private java.util.Map<String,Object> loggingSnapshot(android.media.AudioDeviceInfo device){
         java.util.Map<String,Object> values=new java.util.LinkedHashMap<>();int under=underruns(), delta=Math.max(0,under-loggedUnderruns);
         values.put("source_frames",sourceFrames);values.put("dsp_input_frames",dspInputFrames);values.put("written_frames",writtenFrames);values.put("played_frames",Integer.toUnsignedLong(playbackFrames()));values.put("input_queue_frames",inputSize/2);values.put("ready_queue_frames",size/2);values.put("in_flight_frames",inFlightFrames);values.put("buffered_frames",bufferedFrames());values.put("underruns",under);values.put("underrun_delta",delta);loggedUnderruns=under;values.put("refills",recoveries);values.put("dropped_frames",droppedFrames);values.put("stretch_ratio",appliedSpeed);values.put("tempo_factor",tempoFactor);values.put("gain",configuredGain);values.put("dsp_cpu_ns",dspCpuNanos);values.put("producer_blocked_ns",sourceBlockedNanos);values.put("worst_producer_gap_ns",maxProducerGapNanos);values.put("track_sample_rate",configuredRate);values.put("native_output_sample_rate",nativeOutputRate);values.put("track_buffer_frames",configuredBuffer);values.put("performance_mode",configuredPerformance);
-        if(!trackReleased){android.media.AudioDeviceInfo device=track.getRoutedDevice();if(device!=null){values.put("route_type",device.getType());values.put("route_id",device.getId());}}
+        if(device!=null){values.put("route_type",device.getType());values.put("route_id",device.getId());}
         if(journal!=null&&delta>0)journal.event(EngineLog.WARN,"audio.underrun_snapshot",java.util.Map.of("underruns",under));return values;
     }
     float playbackSpeed(){return appliedSpeed;}
