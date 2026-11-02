@@ -217,6 +217,7 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
         if(journal!=null&&delta>0)journal.event(EngineLog.WARN,"audio.underrun_snapshot",java.util.Map.of("underruns",under));return values;
     }
     float playbackSpeed(){return appliedSpeed;}
+    long dspCpuNanos(){return dspCpuNanos;}
     String diagnostic(){
         int underruns;long buffered;
         synchronized(this){if(trackReleased||flushedOnClose)return lastDiagnostic;underruns=track.getUnderrunCount();buffered=bufferedFrames();}
