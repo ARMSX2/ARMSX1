@@ -153,6 +153,8 @@ public final class Gpu implements AutoCloseable {
     private static volatile boolean threadCpuUnavailable;
     private static long threadCpu(){if(threadCpuUnavailable)return 0;try{return android.os.Debug.threadCpuTimeNanos();}catch(RuntimeException e){threadCpuUnavailable=true;return 0;}}
     /** The slowest presentation since the last call, if it took at least minimum: {total, wait, convert, present, present CPU}. */
+    /** Hardware renderer GPU stage totals, or null for the software renderer; see HardwareRasterizer.gpuTimes. */
+    public long[] gpuStageTimes(){HardwareRasterizer active=hardware;return active==null?null:active.gpuTimes();}
     public long[] takeSlowPresent(long minimum){long[] value=worstPresent.getAndSet(null);return value!=null&&value[0]>=minimum?value:null;}
     private void recordPresent(long queued,long started,long convert,long ended,long cpu){
         long present=Math.max(0,ended-started-convert);

@@ -57,6 +57,9 @@ public final class HardwareRasterizer implements AutoCloseable {
     private static native boolean presentResolvedNative(long handle,Surface surface,int[] state,long vulkan);
     private static native int[] captureNative(long handle,int[] state);
     private static native void statsNative(long handle,long[] out);
+    private static native void gpuTimesNative(long handle,long[] out);
+    /** GPU execution totals: {timer available, ns for draw/resolve/output/transfer/upload, spans for each, skipped, disjoint, frame-limit wait ns, waits}. Safe from any thread. */
+    long[] gpuTimes(){long[] out=new long[15];if(handle!=0)gpuTimesNative(handle,out);return out;}
 
     public static String verify(){return verifyRaster(1);}
     public static String verifySoftwareDisplayUploads(){
