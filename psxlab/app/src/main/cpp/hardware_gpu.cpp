@@ -229,10 +229,20 @@ public:
         glUniform1i(drawProgramUniforms.serialMode,0);glUniform1i(drawProgramUniforms.snapshot,serialDispatch);glDispatchCompute((bounds.x1-bounds.x0+8)/8,(bounds.y1-bounds.y0+8)/8,1);drawBarrier(false);
         // Self-feedback keeps exact native serial ordering; refresh just that region.
         if(enhanced()&&serialDispatch)transferHd(4,bounds.x0,bounds.y0,bounds.x1-bounds.x0+1,bounds.y1-bounds.y0+1,0,0,0,0);
-        pendingCount=0;reads.clear();writes.clear();
+        pendingCount=0;reads.clear();writes.clear();serialDispatch=false;
     }
     void draw(const int* packet,const int* env){current();int op=uint32_t(packet[0])>>24;Primitive p[2];int n=1;if(op<0x40){int at=1,color=packet[0],clut=0;bool shade=op&16,tex=op&4;Vertex v[4];int vertices=(op&8)?4:3;for(int i=0;i<vertices;i++){if(i&&shade)color=packet[at++];int xy=packet[at++],uv=tex?packet[at++]:0;if(tex&&i==0)clut=uint32_t(uv)>>16;v[i]=Vertex(xy,color,uv,env[5]);}p[0]=triangle(v[0],v[1],v[2],op,clut,env);if(vertices==4){p[1]=triangle(v[1],v[2],v[3],op,clut,env);n=2;}}else if(op<0x60)p[0]=line(packet,op,env);else p[0]=rectangle(packet,op,env);
-        draws++;contentRevision++;for(int i=0;i<n;i++)dirtyDisplay(p[i].bounds());RectList ranges[2];bool overlap=false;for(int i=0;i<n;i++)if(p[i].bounds().valid()){ranges[i]=textureReads(p[i]);overlap|=this->feedback(p[i],ranges[i]);}if(overlap){feedbackDraws++;flush();serialDispatch=true;for(int i=0;i<n;i++)if(p[i].bounds().valid()){pending[0]=p[i];pendingCount=1;flush();}serialDispatch=false;}else for(int i=0;i<n;i++)add(p[i],ranges[i]);
+        draws++;contentRevision++;for(int i=0;i<n;i++)dirtyDisplay(p[i].bounds());RectList ranges[2];bool overlap=false;for(int i=0;i<n;i++)if(p[i].bounds().valid()){ranges[i]=textureReads(p[i]);overlap|=this->feedback(p[i],ranges[i]);}if(overlap){
+            // Consecutive feedback primitives share one snapshot and one dispatch. Each pixel still applies them
+            // in order; a primitive reading pixels an earlier one in the group drew starts a new group. One
+            // dispatch per primitive cost CTR ~1,400 setups and 2 MB copies a frame after resuming a race.
+            feedbackDraws++;if(!serialDispatch)flush();
+            for(int i=0;i<n;i++)if(p[i].bounds().valid()){
+                bool dependent=false;for(const Rect& r:ranges[i])for(const Rect& w:writes)dependent|=r.intersects(w);
+                if(pendingCount==32||dependent)flush();
+                serialDispatch=true;pending[pendingCount++]=p[i];writes.push_back(p[i].bounds());
+            }
+        }else{if(serialDispatch)flush();for(int i=0;i<n;i++)add(p[i],ranges[i]);}
     }
     void batch(const int* words,int length){for(int at=0;at<length;){int n=words[at++];if(n<2||n>12||at+n+7>length)throw std::runtime_error("Invalid hardware raster batch");int op=uint32_t(words[at])>>24,expected=op>=0x20&&op<0x40?((op&16)?((op&8)?4:3)*(2+((op>>2)&1)):1+((op&8)?4:3)*(1+((op>>2)&1))):op>=0x40&&op<0x60?((op&16)?4:3):op>=0x60&&op<0x80?2+((op>>2)&1)+((op&24)==0?1:0):0;if(n!=expected)throw std::runtime_error("Invalid hardware packet length");draw(words+at,words+at+n);at+=n+7;}} // Keep pending primitives across JNI batches; hazards, capacity, transfers and scanout flush them.
     void readRam(int* out){current();download();std::copy(cpu.begin(),cpu.end(),out);}
