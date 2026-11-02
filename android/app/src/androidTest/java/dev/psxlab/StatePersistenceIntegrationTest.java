@@ -31,17 +31,18 @@ public class StatePersistenceIntegrationTest {
         var context=InstrumentationRegistry.getInstrumentation().getTargetContext();File root=root(),fixtures=new File(context.getExternalFilesDir(null),"fixtures");
         if(!reopen){assertFalse("Use a new auditId",root.exists());assertTrue(root.mkdirs());Files.write(new File(root,"settings.toml").toPath(),("[cpu]\nfast_boot=true\n[video]\ngpu_backend=\"opengl\"\nrenderer=\"hardware\"\ninternal_scale=1\n[audio]\nmuted=true\n").getBytes(StandardCharsets.UTF_8));}
         else assertTrue(root.isDirectory());
-        String source="content://state-persistence-audit/game.chd";
+        String source=reopen?"file:///storage/emulated/0/Frontend/Renamed.chd":"content://state-persistence-audit/library/game.chd";
         File staged=new File(root,reopen?"launch-2.chd":"launch-1.chd");Files.copy(new File(fixtures,"game.chd").toPath(),staged.toPath());
-        File state=BackendStateStore.file(new File(root,"psxlab"),source,3);byte[] before=reopen?Files.readAllBytes(state.toPath()):null;
         ArmSxBackend backend=new ArmSxBackend(context,p->{},m->{},new File(root,"logs"));assertTrue(backend.initialize(root.toString(),fixtures.toString(),new File(root,"settings.toml").toString()));backend.selectBios("SCPH1001.BIN");backend.configureSession(source);
         try(ImageReader reader=ImageReader.newInstance(320,240,PixelFormat.RGBA_8888,4)){
             backend.surface(reader.getSurface());reader.setOnImageAvailableListener(r->{try(Image image=r.acquireLatestImage()){}},new android.os.Handler(android.os.Looper.getMainLooper()));
             Thread vm=new Thread(()->backend.run(staged.toString()),"PSX-State-Persistence-Test");vm.start();
             try{
                 long deadline=SystemClock.uptimeMillis()+15000;while(backend.frames()<5&&SystemClock.uptimeMillis()<deadline){assertEquals("",backend.lastError());SystemClock.sleep(10);}assertTrue(backend.frames()>=5);backend.pause(true);
+                File state=backend.stateFile(3);byte[] before=reopen?Files.readAllBytes(state.toPath()):null;
+                assertNotEquals("Slot key must not depend on the launch URI",BackendStateStore.file(new File(root,"psxlab"),source,3),state);
                 assertEquals(Boolean.TRUE,boundary(backend,()->{bus(backend).write32(ADDRESS,reopen?0:MARKER);return true;}));
-                if(!reopen){assertTrue(backend.lastError(),backend.save(3));assertTrue(backend.save(-1));assertEquals(source,BackendStateStore.metadata(state).game());assertEquals("",BackendStateStore.metadata(state).disc());}
+                if(!reopen){assertTrue(backend.lastError(),backend.save(3));assertTrue(backend.save(-1));assertEquals(source,BackendStateStore.metadata(state).game());assertFalse(BackendStateStore.metadata(state).identity().isEmpty());assertEquals("",BackendStateStore.metadata(state).disc());}
                 else{
                     assertEquals(state,backend.stateFile(3));assertTrue(backend.lastError(),backend.load(3,true));
                     assertEquals(MARKER,boundary(backend,()->bus(backend).read32(ADDRESS)));

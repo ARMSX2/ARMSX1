@@ -46,7 +46,7 @@ object BackupManager {
     // Context.filesDir (SDL_GetPrefPath) rather than under [assetCopyRoot], so listing it here
     // would never find it. Backing it up needs its own entry on both the export and import paths.
     private val INCLUDED_FILES = listOf(
-        "armsx2-settings.json", "achievements.ini", "psxlab/autosave-game.txt",
+        "armsx2-settings.json", "achievements.ini", "psxlab/autosave-game.txt", "psxlab/autosave-key.txt",
     )
 
     /** Named to avoid colliding with `kotlin.Result`, which is a default import. */

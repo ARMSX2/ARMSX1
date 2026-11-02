@@ -652,6 +652,7 @@ open class MainActivityRuntime : ComponentActivity() {
                             NativeApp.configureSwanSession(
                                 if (kind == "BIOS") "BIOS" else currentGame.value?.settingsKey.orEmpty(),
                                 path,
+                                arrayOf(cardSource, prepared.discs.firstOrNull { it.exists }?.path ?: path),
                             )
                             com.armsx2.core.Ps1MemoryCards.configureImported(
                                 checkNotNull(instance?.applicationContext), if (kind == "BIOS") "" else cardSource,

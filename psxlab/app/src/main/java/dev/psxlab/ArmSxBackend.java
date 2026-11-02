@@ -66,6 +66,8 @@ public final class ArmSxBackend {
     private String biosPin;
     private volatile String renderer="Stopped",lastError="",gamePath="",discPath="";
     private String configuredGame="",bootPath="";
+    private volatile String stateId="";
+    private final Set<String> sessionAliases=new LinkedHashSet<>();
     private final Map<String,String> discSources=new ConcurrentHashMap<>();
     private final List<PreparedMedia> restoredMedia=new ArrayList<>();
     public record PreparedMedia(String path,AutoCloseable owner) implements AutoCloseable {
@@ -74,7 +76,8 @@ public final class ArmSxBackend {
     public interface MediaResolver { PreparedMedia prepare(String source)throws Exception; }
     private MediaResolver mediaResolver;
     public void mediaResolver(MediaResolver resolver){mediaResolver=resolver;}
-    public synchronized void configureSession(String source){if(!active){configuredGame=BackendStateStore.normalize(source);discSources.clear();}}
+    public synchronized void configureSession(String source){if(!active){configuredGame=BackendStateStore.normalize(source);discSources.clear();sessionAliases.clear();sessionAliases.add(configuredGame);}}
+    public synchronized void sessionAlias(String source){if(!active&&source!=null&&!source.isBlank())sessionAliases.add(BackendStateStore.normalize(source));}
     public void discSource(String runtime,String source){discSources.put(runtime,source);}
     private File root,biosFolder,config;
     private byte[] bios;
@@ -159,6 +162,18 @@ public final class ArmSxBackend {
         java.util.regex.Matcher match=java.util.regex.Pattern.compile("(?i)([A-Z]{4})[_-]([0-9]{3})[.]?([0-9]{2})").matcher(boot);
         serial=match.find()?match.group(1).toUpperCase(Locale.ROOT)+"-"+match.group(2)+match.group(3):"";
         updateTextures();
+    }
+    private void prepareStateIdentity()throws IOException{
+        if(!stateId.isEmpty()||media==null)return;
+        stateId=BackendStateStore.identity(media.disc==null?"":media.disc.bootPath,media.executable);
+        lastGameId=MigrationBackup.digest(stateId.getBytes(StandardCharsets.UTF_8));
+        int adopted=0;try{adopted=BackendStateStore.adoptLegacy(root,stateId,gamePath,bootPath,Set.copyOf(sessionAliases),source->{
+            if(stop)return "";
+            String lower=source.toLowerCase(Locale.ROOT);
+            PreparedMedia prepared=(lower.endsWith(".m3u")||lower.endsWith(".cue")&&source.startsWith("content://"))&&mediaResolver!=null?mediaResolver.prepare(source):new PreparedMedia(source,null);
+            try(prepared;Media old=openMedia(prepared.path())){return BackendStateStore.identity(old.disc==null?"":old.disc.bootPath,old.executable);}
+        });}catch(IOException failure){journal.error(EngineLog.WARN,"states.identity.migration",failure);}
+        journal.event(EngineLog.INFO,"states.identity",Map.of("game_id",stateId,"adopted_legacy_slots",adopted));
     }
     public void shadersChanged(){if(active&&blocked()){commands.add(()->{if(gpu!=null)gpu.prepareShaders();});wake();}}
     public void audioVolume(int volume){volumeOverride=volume;updateAudio();}
@@ -295,7 +310,7 @@ public final class ArmSxBackend {
     public boolean run(String path){return run(path, () -> true);}
     /** The host's session cancellation and this active/stop transition share this monitor. */
     public boolean run(String path,java.util.function.BooleanSupplier allowed){
-        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
+        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;stateId="";lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
         boolean booted=false;Restore restore=null;int priority=boostThread();startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=hostThermalSample=0;hostThermalStatus=-1;hostCpuPercent=hostRssMb=hostAvailableMb=-1;event("launch");
         try{
             options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();configureCheats();
@@ -308,7 +323,7 @@ public final class ArmSxBackend {
                 try(Gpu graphics=mode==0&&scale==1&&!selected.hardware()?new Gpu(true,false):new Gpu(true,mode,scale,selected.hardware())){
                     gpu=graphics;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
-                        String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
+                        String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);prepareStateIdentity();mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
                             cpu=new Cpu(bus);cpu.reset();guestAudioTracing=false;updateGuestAudioTracing();
                             if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,restore.identity());
@@ -427,7 +442,7 @@ public final class ArmSxBackend {
         if(!active)return failed;CompletableFuture<T> result=new CompletableFuture<>();commands.add(()->{if(result.isCancelled())return;try{result.complete(!stop&&bus!=null?action.call():failed);}catch(Exception e){error(e);result.complete(failed);}});wake();
         try{return result.get(15,TimeUnit.SECONDS);}catch(Exception e){result.cancel(false);error(e);return failed;}
     }
-    public boolean save(int slot){return call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before saving");File file=BackendStateStore.file(root,gamePath,slot);String disc=discPath.equals(bootPath)?"":discSources.getOrDefault(discPath,discPath);if(disc.contains("/cache/saf-launch/"))throw new IOException("Cannot save a temporary disc without its original source");BackendStateStore.write(file,gamePath,disc,SaveState.capture(cpu,bus,gpu,gamePath));screenshotNow(file+".png");if(slot==-1)atomic(new File(root,"autosave-game.txt"),gamePath.getBytes(StandardCharsets.UTF_8));event("save-slot="+slot);return true;},false);}
+    public boolean save(int slot){return call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before saving");File file=BackendStateStore.file(root,stateId.isEmpty()?gamePath:stateId,slot);String disc=discPath.equals(bootPath)?"":discSources.getOrDefault(discPath,discPath);if(disc.contains("/cache/saf-launch/"))throw new IOException("Cannot save a temporary disc without its original source");BackendStateStore.write(file,gamePath,disc,stateId,SaveState.capture(cpu,bus,gpu,gamePath));screenshotNow(file+".png");if(slot==-1){atomic(new File(root,"autosave-game.txt"),gamePath.getBytes(StandardCharsets.UTF_8));atomic(new File(root,"autosave-key.txt"),(stateId+"\n"+gamePath).getBytes(StandardCharsets.UTF_8));}event("save-slot="+slot);return true;},false);}
     public boolean load(int slot,boolean acknowledgeCards){
         if(!acknowledgeCards){notice.accept("Loading restores machine state using the current memory cards. Back up your cards first.");return false;}
         CompletableFuture<Boolean> ready=new CompletableFuture<>();
@@ -435,7 +450,7 @@ public final class ArmSxBackend {
         PreparedMedia prepared=null;
         try{
             BackendStateStore.Stored stored=BackendStateStore.read(stateFile(slot));
-            if(!BackendStateStore.sameGame(stored.game(),gamePath,bootPath))throw new IOException("Save state belongs to a different game");
+            if(stored.identity().isEmpty()?!BackendStateStore.sameGame(stored.game(),gamePath,bootPath):!stored.identity().equals(stateId))throw new IOException("Save state belongs to a different game");
             String disc=stored.disc();
             // v1 states recorded the deleted SAF boot copy. Match only its generated URI hash.
             if(disc.isEmpty()||BackendStateStore.sameGame(disc,gamePath,bootPath))disc=bootPath;
@@ -460,7 +475,13 @@ public final class ArmSxBackend {
         if(!accepted)return false;try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
     }
     private String stateIdentity(int slot){if(!gamePath.isEmpty()||slot!=-1||root==null)return gamePath;File index=new File(root,"autosave-game.txt");try{return index.length()<=65536?new String(Files.readAllBytes(index.toPath()),StandardCharsets.UTF_8):"";}catch(IOException e){return "";}}
-    public File stateFile(int slot){return BackendStateStore.find(root,stateIdentity(slot),bootPath,slot);}
+    public File stateFile(int slot){
+        String source=stateIdentity(slot),key=gamePath.isEmpty()?"":stateId;
+        if(gamePath.isEmpty()&&slot==-1&&root!=null)try{
+            File index=new File(root,"autosave-key.txt");if(index.length()<=66000){String text=new String(Files.readAllBytes(index.toPath()),StandardCharsets.UTF_8);int split=text.indexOf('\n');if(split>=0&&text.substring(split+1).equals(source)&&BackendStateStore.validIdentity(text.substring(0,split)))key=text.substring(0,split);}
+        }catch(IOException ignored){}
+        return BackendStateStore.find(root,key,source,bootPath,slot);
+    }
     public String stateGame(int slot){try{return stateFile(slot).isFile()?stateIdentity(slot):"";}catch(IllegalArgumentException e){return "";}}
     public byte[] preview(int slot){try{return Files.readAllBytes(new File(stateFile(slot)+".png").toPath());}catch(IOException|IllegalArgumentException e){return new byte[0];}}
     public void screenshot(String path){Gpu.Frame frame=call(()->gpu.displayFrame(),null);if(frame!=null)try{writeScreenshot(path,frame);}catch(IOException e){error(e);}}

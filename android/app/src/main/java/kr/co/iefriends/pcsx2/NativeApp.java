@@ -336,6 +336,7 @@ public class NativeApp {
 
 	/** Stable original URI/key, rather than a disposable SAF cache path. Call before boot. */
 	public static void configureSwanSession(String identity, String originalPath) { if (lab != null) lab.configureSession(originalPath); }
+    public static void configureSwanSession(String identity,String originalPath,String[] aliases){configureSwanSession(identity,originalPath);if(lab!=null&&aliases!=null)for(String alias:aliases)lab.sessionAlias(alias);}
     public static void registerDiscSource(String runtime, String source) { if (lab != null) lab.discSource(runtime, source); }
 	public static String getSwanStatePath(int slot) { try { return lab == null ? "" : lab.stateFile(slot).getAbsolutePath(); } catch (IllegalArgumentException e) { return ""; } }
 	public static String getSwanCardPath(int slot) { return lab == null ? "" : lab.cardPath(slot - 1); }

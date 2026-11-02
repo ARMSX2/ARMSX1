@@ -14,5 +14,12 @@ internal object PsxStateFiles {
                 name.substringBeforeLast('.') == Ps1SafText.launchFileName(source, "game.bin").substringBeforeLast('.')
         }
     }
+    fun source(saved: String, identity: String, serials: Map<String, String>): String? {
+        val sources = serials.keys.toList()
+        sources.firstOrNull { BackendStateStore.normalize(it) == BackendStateStore.normalize(saved) }?.let { return it }
+        val serial = BackendStateStore.serial(identity)
+        if (serial.isNotBlank()) serials.filterValues { it.equals(serial, ignoreCase = true) }.keys.singleOrNull()?.let { return it }
+        return source(saved, sources)
+    }
     fun companions(name: String) = listOf("$name.png")
 }

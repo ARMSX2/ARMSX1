@@ -25,6 +25,7 @@ data class SaveStateItem(
     val canUseWithActiveGame: Boolean,
     val gameSource: String? = null,
     val canLoad: Boolean = canUseWithActiveGame,
+    val gameIdentity: String = "",
 )
 
 data class SaveManagerUiState(
@@ -162,7 +163,7 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
 
         val root = File(MainActivityRuntime.assetCopyRoot(getApplication()), "psxlab/states")
         val library = GameLibraryRepository(getApplication()).loadCached().games
-        val sources = (library.map { it.uri.toString() } + listOfNotNull(active?.uri?.toString())).distinct()
+        val serials = (library + listOfNotNull(active)).associate { it.uri.toString() to it.serial.orEmpty() }
         val files = (activePaths + root.listFiles().orEmpty().filter { it.isFile })
             .distinctBy { it.absolutePath }
         val hasActiveVm = runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
@@ -170,7 +171,7 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
             val metadata = runCatching { BackendStateStore.metadata(file) }.getOrNull() ?: return@mapNotNull null
             val belongsToActiveGame = active != null && activePaths.any { it.absolutePath == file.absolutePath }
             if (active != null && !belongsToActiveGame) return@mapNotNull null
-            val source = PsxStateFiles.source(metadata.game(), sources)
+            val source = PsxStateFiles.source(metadata.game(), metadata.identity(), serials)
             val game = library.firstOrNull { BackendStateStore.normalize(it.uri.toString()) == source?.let(BackendStateStore::normalize) }
             val name = source?.let { android.net.Uri.decode(it).substringAfterLast('/').substringAfterLast(':').substringBeforeLast('.') }
             SaveStateItem(
@@ -182,11 +183,12 @@ class SaveManagerViewModel(application: Application) : AndroidViewModel(applicat
                 canUseWithActiveGame = belongsToActiveGame && hasActiveVm,
                 gameSource = source,
                 canLoad = belongsToActiveGame || (!hasActiveVm && source != null),
+                gameIdentity = metadata.identity(),
             )
         }.sortedWith(compareByDescending<SaveStateItem> { item ->
-                item.gameSource?.let { source -> BackendStateStore.file(root.parentFile, source, item.slot!!) == item.file } ?: false
+                (item.gameIdentity.takeIf(String::isNotBlank) ?: item.gameSource)?.let { key -> BackendStateStore.file(root.parentFile, key, item.slot!!) == item.file } ?: false
             }.thenByDescending { it.file.lastModified() })
-            .distinctBy { (it.gameSource ?: it.file.absolutePath) to it.slot }
+            .distinctBy { (it.gameIdentity.takeIf(String::isNotBlank) ?: it.gameSource ?: it.file.absolutePath) to it.slot }
             .sortedWith(compareBy<SaveStateItem> { it.gameTitle }.thenBy { it.slot })
 
         return ReadResult(
