@@ -10,8 +10,9 @@ public final class Gpu implements AutoCloseable {
     private final int[] vram = new int[1024 * 512];
     private final ThreadPoolExecutor worker;
     private final int[] packet = new int[12];
-    private final int[] drawBatch=new int[512];
+    private final int[] drawBatch=new int[2048];
     private int drawBatchWords,drawBatchCount;
+    private volatile long submittedDrawBatches,batchedPrimitives;
     private final SoftwareRasterizer raster=new SoftwareRasterizer(vram);
     private final boolean hardwareDrawing;
     private final int internalScale,presentationMode;
@@ -112,7 +113,7 @@ public final class Gpu implements AutoCloseable {
     public String renderer(){return renderer;}
     /** Active presentation objects, independent of the rasterizer or requested settings. */
     public String displayRenderer(){return vulkan!=null?"Vulkan":hardware!=null?"OpenGL":"Software";}
-    public String renderStatistics(){HardwareRasterizer active=hardware;VulkanPresenter output=vulkan;return "GPU queue="+queuedCommands()+" "+(active==null?renderer:active.statistics())+(output==null?"":" "+vulkanFrames.statistics()+" "+output.statistics())+" · "+presentationStatus()+" black="+blackPresented+" shader_subframes="+shaderSubframes;}
+    public String renderStatistics(){HardwareRasterizer active=hardware;VulkanPresenter output=vulkan;return "GPU queue="+queuedCommands()+" draw_queue_batches="+submittedDrawBatches+" batch_primitives="+batchedPrimitives+" "+(active==null?renderer:active.statistics())+(output==null?"":" "+vulkanFrames.statistics()+" "+output.statistics())+" · "+presentationStatus()+" black="+blackPresented+" shader_subframes="+shaderSubframes;}
     private boolean polyline,polyShaded,polyHalf;
     private int polyCommand,polyXy,polyColor,pendingPolyColor,displayX,displayY;
     private int count,expected,gpuStatus=0x14802000,gpuRead;
@@ -230,10 +231,11 @@ public final class Gpu implements AutoCloseable {
         if(drawBatchWords+length+8>drawBatch.length)flushDrawBatch();
         drawBatch[drawBatchWords++]=length;System.arraycopy(p,0,drawBatch,drawBatchWords,length);drawBatchWords+=length;
         System.arraycopy(environment,0,drawBatch,drawBatchWords,7);drawBatchWords+=7;drawBatchCount++;
-        if(drawBatchCount>=16)flushDrawBatch();
+        if(drawBatchCount>=64)flushDrawBatch();
     }
     private void flushDrawBatch(){
         if(drawBatchCount==0)return;
+        submittedDrawBatches++;batchedPrimitives+=drawBatchCount;
         int[] commands=Arrays.copyOf(drawBatch,drawBatchWords);int count=drawBatchCount;drawBatchWords=drawBatchCount=0;
         submitDirect(()->{long before=System.nanoTime();try(EngineLog.Span span=journal==null?null:journal.begin(hardwareDrawing?"gpu.raster.gles":"gpu.raster.software",EngineLog.TRACE)){if(hardware!=null && hardwareDrawing){hardware.drawBatch(commands);hardwareDirty=true;raster.primitives+=count;}else{raster.drawBatch(commands,count);softwareVramRevision++;}}long spent=System.nanoTime()-before;drawNanos+=spent;if(diagnosticsEnabled)diagnosticDraw+=spent;});
     }

@@ -2,6 +2,18 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class SaveStateTest {
+    @Test public void olderGpuScratchBuffersLoadWithoutRestoringHostMetrics()throws Exception{
+        try(Gpu gpu=new Gpu(false)){
+            StateCodec.Node saved=StateCodec.capture(gpu);
+            assertFalse(saved.fields.containsKey("submittedDrawBatches"));
+            assertFalse(saved.fields.containsKey("batchedPrimitives"));
+            int[] old=new int[512];old[0]=42;saved.fields.get("drawBatch").scalar=old;
+            StateCodec.apply(saved,gpu);
+            int[] restored=(int[])StateCodec.capture(gpu).fields.get("drawBatch").scalar;
+            assertEquals(2048,restored.length);assertEquals(42,restored[0]);assertEquals(0,restored[2047]);
+        }
+    }
+
     @Test public void aspectSettingSurvivesLoadsWithoutChangingTheMachineStateSchema()throws Exception{
         try(Gpu gpu=new Gpu(false)){
             Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);byte[] before=SaveState.capture(cpu,bus,gpu,"aspect");

@@ -9,7 +9,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_NativeRasterizer_draw(JN
 
 extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_NativeRasterizer_drawBatch(JNIEnv* env,jclass,jintArray vram,jintArray commands){
  const int length=env->GetArrayLength(commands);
- if(env->GetArrayLength(vram)!=1024*512||length<=0||length>512){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid raster batch");return 0;}
+ if(env->GetArrayLength(vram)!=1024*512||length<=0||length>2048){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid raster batch");return 0;}
  std::vector<jint> words(length);env->GetIntArrayRegion(commands,0,length,words.data());if(env->ExceptionCheck())return 0;
  for(int at=0;at<length;){int n=words[at++];if(n<2||n>12||at+n+7>length){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Truncated raster batch");return 0;}
   int op=uint32_t(words[at])>>24,expected=0;
@@ -19,8 +19,10 @@ extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_NativeRasterizer_drawBat
   if(n!=expected){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid raster packet length");return 0;}at+=n+7;
  }
  auto* ram=static_cast<jint*>(env->GetPrimitiveArrayCritical(vram,nullptr));if(!ram)return 0;i64 total=0;
- for(int at=0;at<length;){int n=words[at++];const int* p=words.data()+at;at+=n;Raster raster{ram,words.data()+at};at+=7;int op=uint32_t(p[0])>>24;
+ int pinnedPackets=0;for(int at=0;at<length;){int n=words[at++];const int* p=words.data()+at;at+=n;Raster raster{ram,words.data()+at};at+=7;int op=uint32_t(p[0])>>24;
   if(op<0x40)raster.polygon(p,op);else if(op<0x60)raster.line(p,op);else raster.rectangle(p,op);total+=raster.pixels;
+  // Larger JNI batches must not extend the old 16-draw GC critical section.
+  if(++pinnedPackets==16&&at<length){env->ReleasePrimitiveArrayCritical(vram,ram,0);ram=static_cast<jint*>(env->GetPrimitiveArrayCritical(vram,nullptr));if(!ram)return total;pinnedPackets=0;}
  }
  env->ReleasePrimitiveArrayCritical(vram,ram,0);return total;
 }

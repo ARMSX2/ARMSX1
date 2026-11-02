@@ -3,6 +3,13 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class GpuRasterTest {
+    @Test public void largerDrawQueueBatchesKeepSequentialBlendingAndReadbackOrder(){
+        for(boolean threaded:new boolean[]{false,true})try(Gpu g=new Gpu(threaded)){
+            area(g);int red=0,blue=0;
+            for(int i=0;i<64;i++){boolean r=(i&1)==0;send(g,0x62000000|(r?255:255<<16),xy(3,3),xy(1,1));red=(red>>1)+(r?15:0);blue=(blue>>1)+(r?0:15);}
+            assertEquals(red|(blue<<10),raw(g,3,3));assertTrue(g.renderStatistics(),g.renderStatistics().contains("draw_queue_batches=1 batch_primitives=64"));
+        }
+    }
     @Test public void polygonTextureCoordinatesRoundToTheNearestTexelWithoutSpriteBias(){
         try(Gpu g=new Gpu(false)){
             area(g);put(g,640,0,0,31);put(g,1,1,0x7c00);
