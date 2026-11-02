@@ -200,7 +200,7 @@ public:
         }
         barrier();dirtyDisplayRegion(x,y,w,h);contentRevision++;glCheck();
     }
-    void profile(bool enabled){timing.enabled.store(enabled);}
+    void profile(bool enabled){if(gpuTimer.enabled!=enabled){current();gpuTimer.setEnabled(enabled);}timing.enabled.store(enabled);}
     jlongArray timings(JNIEnv* env){return timing.snapshot(env);}
     void configureDisplay(float aspect,bool stretch,bool integerScale){
         double next=std::isfinite(aspect)&&aspect>=0.1f&&aspect<=10.f?aspect:4.0/3.0;
@@ -217,8 +217,11 @@ public:
     ~HardwareGpu(){destroy();}
     void destroy(){if(display==EGL_NO_DISPLAY)return;if(context!=EGL_NO_CONTEXT){if(pbuffer!=EGL_NO_SURFACE)eglMakeCurrent(display,pbuffer,pbuffer,context);gpuTimer.release();for(GLsync fence:inFlight)glDeleteSync(fence);inFlight.clear();detachWindow();sharedOutput.destroy(display);sharedOutputNext.destroy(display);GLuint buffers[]={ramBuffer,commandBuffer,counterBuffer,hdCommandBuffer,snapshotBuffer};glDeleteBuffers(5,buffers);GLuint programs[]={drawProgram,transferProgram,scanoutProgram,presentProgram,hdDrawProgram,hdTransferProgram,hdScanoutProgram,hdRasterProgram,hdPresentProgram,hdNativeResolveProgram};for(GLuint p:programs)if(p)glDeleteProgram(p);if(frameTexture)glDeleteTextures(1,&frameTexture);if(hdTexture)glDeleteTextures(1,&hdTexture);if(hdFramebuffer)glDeleteFramebuffers(1,&hdFramebuffer);if(resolveFramebuffer)glDeleteFramebuffers(1,&resolveFramebuffer);if(softwareWindow){ANativeWindow_release(softwareWindow);softwareWindow=nullptr;}if(vao)glDeleteVertexArrays(1,&vao);eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);eglDestroyContext(display,context);context=EGL_NO_CONTEXT;}if(pbuffer!=EGL_NO_SURFACE)eglDestroySurface(display,pbuffer);display=EGL_NO_DISPLAY;releaseDisplay();}
     void flush(){
-        current();if(!pendingCount)return;NativeTiming::Scope measured(timing,NativeTiming::GPU_DRAW);GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::DRAW);passes++;
+        current();if(!pendingCount)return;NativeTiming::Scope measured(timing,NativeTiming::GPU_DRAW);passes++;
         if(scale>1&&fastHd&&!serialDispatch){queueHd();if(deferredNative()){pendingCount=0;reads.clear();writes.clear();return;}}if(enhanced()&&serialDispatch)resolveNative();
+        // Deferred HD batches above only queue CPU records. Timing those empty
+        // batches inserted thousands of query boundaries into the GPU stream.
+        GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::DRAW);
         bindBuffers();streamCommands(commandBuffer,pendingCount*sizeof(Primitive),pending.data());
         Rect bounds{1023,511,0,0};for(int i=0;i<pendingCount;i++)include(bounds,pending[i].bounds());
         if(enhanced()&&!fastHd&&!serialDispatch){glUseProgram(hdDrawProgram);glUniform4i(hdDrawProgramUniforms.bounds,bounds.x0*scale,bounds.y0*scale,(bounds.x1+1)*scale-1,(bounds.y1+1)*scale-1);glUniform1i(hdDrawProgramUniforms.count,pendingCount);glUniform1i(hdDrawProgramUniforms.countPixels,0);glUniform1i(hdDrawProgramUniforms.serialMode,0);glUniform1i(hdDrawProgramUniforms.replacementTextures,texturePacks);glDispatchCompute(((bounds.x1-bounds.x0+1)*scale+7)/8,((bounds.y1-bounds.y0+1)*scale+7)/8,1);drawBarrier(true);}
