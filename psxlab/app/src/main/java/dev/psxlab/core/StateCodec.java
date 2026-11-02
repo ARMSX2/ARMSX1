@@ -10,7 +10,7 @@ final class StateCodec {
     static {
         skip(Cpu.class,"nativeCpu","bus","gte");
         skip(Bus.class,"nativeMemory","instructionWords","instructionValid","gpu","dma","mdec","spu","timers","cdrom","sio0","nativeCores","bios");
-        skip(Gpu.class,"textures","textureConfiguration","textureStatus","textureMetrics","nextNativeSnapshot","lastNativeTiming","performanceEnabled","performanceTriangles","performanceRectangles","performanceLines","performance","journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","highRefresh","presentationDecision","presentationRate","shaderAspect","blackPresented","shaderSubframes","displayVsync","baseVulkanOutput","shaderPresenterFailed","displayStretch","displayInteger","displayCrop","baseRenderer","shaderPresenterError");
+        skip(Gpu.class,"textures","textureConfiguration","textureStatus","textureMetrics","nextNativeSnapshot","lastNativeTiming","performanceEnabled","performanceTriangles","performanceRectangles","performanceLines","performance","journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","highRefresh","presentationDecision","presentationRate","shaderAspect","blackPresented","shaderSubframes","displayVsync","baseVulkanOutput","shaderPresenterFailed","displayStretch","displayInteger","displayCrop","baseRenderer","shaderPresenterError","workerTid","primitives","queueFullNanos","drawNanos","displayWaitNanos","displayConvertNanos","displayPresentNanos","displayPresentCpuNanos","displays","worstPresent");
         skip(Dma.class,"performanceEnabled","performanceWords","journal","linkedYields","linkedLastAddress","linkedLastHeader");
         skip(Spu.class,"nativeCore","sink","output");
         skip(Gte.class,"nativeCore","widescreen","projectionScale");
@@ -101,6 +101,8 @@ final class StateCodec {
         if(n.type.equals("dev.psxlab.core.Dma$OutputTransfer")&&!n.fields.containsKey("chunkWords")){
             Node chunk=new Node(1);chunk.scalar=integer(n,"words");n.fields.put("chunkWords",chunk);
         }
+        // 0.3.32 builds saved the GPU worker's host thread id by mistake; it is not machine state.
+        if(n.type.equals("dev.psxlab.core.Gpu"))n.fields.remove("workerTid");
         List<Field> fs=fields(existing.getClass());if(fs.size()!=n.fields.size())throw new IOException("State schema differs from this engine");
         // Records are immutable; their constructor already consumed every field.
         if(n.type.equals("dev.psxlab.core.Mdec$Output"))return existing;

@@ -48,6 +48,21 @@ public class SaveStateTest {
             StateCodec.apply(old,b.dma);assertEquals(Integer.MAX_VALUE,b.dma.clocksToEvent());
         }
     }
+    @Test public void reportTimingAndHostThreadIdAreNotSaveState()throws Exception{
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);
+            byte[] before=SaveState.capture(cpu,bus,gpu,"timeline");
+            gpu.workerTid=4321;gpu.primitives=99;gpu.queueFullNanos=1;gpu.drawNanos=2;gpu.displayWaitNanos=3;gpu.displayConvertNanos=4;gpu.displayPresentNanos=5;gpu.displayPresentCpuNanos=6;gpu.displays=7;
+            assertArrayEquals(before,SaveState.capture(cpu,bus,gpu,"timeline"));
+            SaveState.restore(before,cpu,bus,gpu,"timeline");assertEquals(4321,gpu.workerTid);
+        }
+    }
+    @Test public void statesThatSavedTheGpuWorkerThreadIdStillLoad()throws Exception{
+        try(Gpu gpu=new Gpu(false)){
+            StateCodec.Node saved=StateCodec.capture(gpu);saved.fields.put("workerTid",StateCodec.capture(Integer.valueOf(1234)));gpu.workerTid=77;
+            StateCodec.apply(saved,gpu);assertEquals(77,gpu.workerTid);
+        }
+    }
     @Test public void overlayMeasurementsDoNotChangeSaveStateSchemaOrGuestState()throws Exception{
         try(Gpu gpu=new Gpu(false)){
             Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);
