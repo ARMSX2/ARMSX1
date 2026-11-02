@@ -1,5 +1,6 @@
 #pragma once
 #include <GLES3/gl31.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -25,7 +26,7 @@ struct GpuStageTimer {
     void init(const std::string& extensions){
         supported=extensions.find("GL_EXT_disjoint_timer_query")!=std::string::npos;available=supported?1:0;
         if(!supported)return;
-        free.resize(128);glGenQueries(GLsizei(free.size()),free.data());
+        grow();
         GLint clear=0;glGetIntegerv(GL_GPU_DISJOINT_EXT,&clear);
     }
     void release(){
@@ -53,8 +54,12 @@ private:
     struct Pending{GLuint query;int stage;};
     std::vector<GLuint> free;std::deque<Pending> pending;std::vector<int> stack;
     GLuint active=0;int activeStage=0;
+    // A heavy scene keeps ~30 spans a frame in flight for a second or more; grow rather than skip.
+    static constexpr size_t MAX_QUERIES=8192;size_t created=0;
+    void grow(){size_t n=created==0?512:std::min(created,MAX_QUERIES-created);if(!n)return;size_t at=free.size();free.resize(at+n);glGenQueries(GLsizei(n),free.data()+at);created+=n;}
     void start(int stage){
         poll();
+        if(free.empty())grow();
         if(free.empty()){skipped++;return;}
         active=free.back();free.pop_back();activeStage=stage;glBeginQuery(GL_TIME_ELAPSED_EXT,active);
     }
