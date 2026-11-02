@@ -14,6 +14,8 @@ public final class Cpu {
     public void closeNative(){if(nativeCpu!=null){nativeCpu.exportState(this);nativeCpu.close();nativeCpu=null;}}
     public String executionDiagnostic(){return nativeCpu==null?"CPU Java interpreter":nativeCpu.diagnostic()+" · device dispatches="+bus.deviceDispatches;}
     public String executionMode(){return nativeCpu==null?"Java interpreter":"Native blocks / ARM64";}
+    /** Busiest hardware registers since the previous call: {address, reads, writes, last pc} groups. */
+    public long[] registerDeltas(){return nativeCpu==null?new long[0]:nativeCpu.registerDeltas();}
     public long[] nativeStatistics(){return nativeCpu==null?new long[15]:nativeCpu.statistics();}
     public void configureProfiling(boolean enabled){if(nativeCpu!=null)nativeCpu.configureProfiling(enabled);}
     public java.util.Map<String,Object> nativeTimings(){return nativeCpu==null?java.util.Map.of("available",false):nativeCpu.nativeTimings();}

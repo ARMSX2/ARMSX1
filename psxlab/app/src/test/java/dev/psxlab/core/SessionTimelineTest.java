@@ -43,6 +43,11 @@ public class SessionTimelineTest {
         assertEquals(1024,t.incidents().size());assertEquals(77,t.droppedIncidents());
         assertEquals("+3.0s e1099",t.incidents().get(1023));
     }
+    @Test public void rowDetailExtendsTheLastRow(){
+        SessionTimeline t=new SessionTimeline();t.start(0);t.row(5_000*MS,"a");t.rowDetail("code 8002972C 90%");
+        assertTrue(t.rows().get(0),t.rows().get(0).endsWith("| a | code 8002972C 90%"));
+        new SessionTimeline().rowDetail("ignored");
+    }
     @Test public void rowsAreDueEveryInterval(){
         SessionTimeline t=new SessionTimeline();assertFalse(t.due(10_000*MS));
         t.start(0);assertFalse(t.due(4_999*MS));assertTrue(t.due(5_000*MS));

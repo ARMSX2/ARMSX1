@@ -370,6 +370,12 @@ public final class ArmSxBackend {
         }catch(RuntimeException e){out.append(", track list unavailable: ").append(e.getMessage());}
         return out.toString();
     }
+    /** Top registers from Cpu.registerDeltas, e.g. "1F801044 Controller status r812 w0". */
+    private static String registerSummary(long[] d){
+        if(d.length==0)return "none";StringBuilder out=new StringBuilder();
+        for(int at=0;at+3<d.length&&at<16;at+=4){if(out.length()>0)out.append(", ");out.append(String.format(Locale.ROOT,"%08X %s r%d w%d",(int)d[at],HardwareRegisterReport.name((int)d[at]),d[at+1],d[at+2]));}
+        return out.toString();
+    }
     private static long threadCpu(){try{return android.os.Debug.threadCpuTimeNanos();}catch(RuntimeException e){return 0;}}
     private static long gcCount(){try{String value=android.os.Debug.getRuntimeStat("art.gc.gc-count");return value==null?0:Long.parseLong(value);}catch(RuntimeException e){return 0;}}
     /** Monotonic counters for FrameCause. Native CPU statistics: {compiled, JIT instructions, interpreted, hits, links, invalidations, device calls, ...}. */
@@ -405,7 +411,9 @@ public final class ArmSxBackend {
         long frameEmulation=0,rowBuffered=Long.MAX_VALUE,rowRefills=output.recoveries,rowDsp=output.dspCpuNanos(),rowSectors=bus.cdrom.sectorsRead,rowMdec=bus.mdec.decodedBlocks,rowCdCommands=bus.cdrom.commands,rowXa=bus.cdrom.xaSectors,rowCdda=bus.cdrom.cddaSectors,rowReadSyncs=gpu.readbackSyncs,rowReadSkips=gpu.readbackSkips,rowReadWait=gpu.readbackWaitNanos,seenRefills=rowRefills;
         int rowUnderruns=output.underruns(),seenUnderruns=rowUnderruns,seenThermal=hostThermalStatus,rowSkipped=0;
         // Late frames are explained against this session's normal frames; see FrameCause.
-        FrameCause cause=new FrameCause();long[] causeBase=causeCounters(0);long frameEmulationCpu=0,lastFrameAt=0,rowDisplays=gpu.displays;
+        FrameCause cause=new FrameCause();long[] causeBase=causeCounters(0);
+        // Where code runs and which registers it touches, per row: a stuck game shows one small loop.
+        PcSampler pcSamples=new PcSampler();int loopRows=0;cpu.registerDeltas();long frameEmulationCpu=0,lastFrameAt=0,rowDisplays=gpu.displays;
         while(!stop&&restart==null){
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
             updateGuestAudioTracing();
@@ -422,7 +430,7 @@ public final class ArmSxBackend {
             long perfStarted=ticket!=0?System.nanoTime():0;
             cpu.configureProfiling(journal.enabled());
             if(diagnosticFrame==null)diagnosticFrame=journal.frame(cpu.instructions,cpu.pc);
-            long emulationStarted=System.nanoTime(),emulationCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}frameEmulation+=System.nanoTime()-emulationStarted;frameEmulationCpu+=threadCpu()-emulationCpu;guestClocks=cpu.instructions;lastPc=cpu.pc;if(perfStarted!=0)perfCpu+=System.nanoTime()-perfStarted;
+            long emulationStarted=System.nanoTime(),emulationCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}frameEmulation+=System.nanoTime()-emulationStarted;frameEmulationCpu+=threadCpu()-emulationCpu;pcSamples.add(cpu.pc);guestClocks=cpu.instructions;lastPc=cpu.pc;if(perfStarted!=0)perfCpu+=System.nanoTime()-perfStarted;
             if(gpu.vblanks==last)continue;last=gpu.vblanks;cheats.apply(bus);if(diagnosticFrame!=null)diagnosticFrame.cpuDone(cpu.instructions,cpu.pc);
             long flushStarted=ticket!=0?System.nanoTime():0;
             long devicesStarted=System.nanoTime(),devicesCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.flush_devices",EngineLog.DEBUG)){bus.flushClocks();bus.spu.flushAudio();}frameEmulation+=System.nanoTime()-devicesStarted;frameEmulationCpu+=threadCpu()-devicesCpu;
@@ -471,6 +479,10 @@ public final class ArmSxBackend {
                     if(hostThermalStatus!=seenThermal){timeline.incident(now,"thermal status "+seenThermal+" -> "+hostThermalStatus);seenThermal=hostThermalStatus;}
                     long dsp=output.dspCpuNanos(),cdSectors=bus.cdrom.sectorsRead,fmvBlocks=bus.mdec.decodedBlocks;
                     timeline.row(now,String.format(Locale.ROOT,"%s | display shown %d, skipped %d | audio min %d ms, underruns +%d, dry +%d, dsp %d%% | cpu %.0f%% thermal %d rss %.0f MB | vram reads waited +%d (%d ms), skipped +%d | cd commands +%d %s, sectors +%d, xa +%d, cdda +%d, fmv blocks +%d",fast?"fast-forward":"normal",gpu.displays-rowDisplays,rowSkipped,rowBuffered==Long.MAX_VALUE?-1:rowBuffered*1000/44100,underruns-rowUnderruns,refills-rowRefills,(dsp-rowDsp)/(SessionTimeline.INTERVAL_NANOS/100),hostCpuPercent,hostThermalStatus,hostRssMb,gpu.readbackSyncs-rowReadSyncs,(gpu.readbackWaitNanos-rowReadWait)/1_000_000,gpu.readbackSkips-rowReadSkips,bus.cdrom.commands-rowCdCommands,bus.cdrom.recentCommands(),cdSectors-rowSectors,bus.cdrom.xaSectors-rowXa,bus.cdrom.cddaSectors-rowCdda,fmvBlocks-rowMdec));
+                    String io=registerSummary(cpu.registerDeltas());long hot=pcSamples.hotWindow();
+                    timeline.rowDetail("code "+pcSamples.top(3)+" | io "+io);
+                    if((int)hot>=85){if(++loopRows==2)timeline.incident(now,String.format(Locale.ROOT,"possible hang: game code has stayed in one small loop at %08X (%d%% of samples) for about 10 s; normal in a quiet menu, a hang if the screen is stuck; hardware used most: %s",(int)(hot>>>32),(int)hot,io));}else loopRows=0;
+                    pcSamples.clear();
                     rowBuffered=Long.MAX_VALUE;rowDisplays=gpu.displays;rowSkipped=0;rowUnderruns=underruns;rowRefills=refills;rowDsp=dsp;rowSectors=cdSectors;rowMdec=fmvBlocks;rowCdCommands=bus.cdrom.commands;rowXa=bus.cdrom.xaSectors;rowCdda=bus.cdrom.cddaSectors;rowReadSyncs=gpu.readbackSyncs;rowReadSkips=gpu.readbackSkips;rowReadWait=gpu.readbackWaitNanos;
                 }nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.mdec.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled()){guestAudioSnapshot();lastCpuTiming=cpu.nativeTimings();lastGpuTiming=gpu.nativeTimings();journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"thermal_status",hostThermalStatus,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics(),"native_cpu",lastCpuTiming,"native_gpu",lastGpuTiming,"memory",Map.of("process_rss_mb",hostRssMb,"system_available_mb",hostAvailableMb,"java_heap_used_bytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"java_heap_limit_bytes",Runtime.getRuntime().maxMemory(),"native_heap_allocated_bytes",android.os.Debug.getNativeHeapAllocatedSize())));}measured=now;}
         }
@@ -597,7 +609,7 @@ public final class ArmSxBackend {
     /** Rows every five seconds and every incident since launch; not limited by the engine log tail. */
     private org.json.JSONObject timelineReport()throws org.json.JSONException{
         org.json.JSONObject value=new org.json.JSONObject();
-        value.put("legend","late = frames over 1.5x their paced period; emu = share of wall time running the PS1 core; work = emulation plus frame submission; display shown/skipped = frames presented and frames dropped because the display was still busy; vram reads waited/skipped = VRAM-to-CPU transfers that had to wait for GPU drawing, and those served from the CPU copy because the GPU had not drawn there; cd commands = commands sent (last 12 in hex), with sectors read, XA and CD-audio sectors played; audio min = lowest queued audio; dry = queue emptied and refilled; dsp = audio stretch CPU of one core. Incidents for frames over 50 ms end with why: where the time went, what was unusual against normal frames, and the display stages; slow display frame incidents come from the GPU thread.");
+        value.put("legend","late = frames over 1.5x their paced period; emu = share of wall time running the PS1 core; work = emulation plus frame submission; display shown/skipped = frames presented and frames dropped because the display was still busy; vram reads waited/skipped = VRAM-to-CPU transfers that had to wait for GPU drawing, and those served from the CPU copy because the GPU had not drawn there; cd commands = commands sent (last 12 in hex), with sectors read, XA and CD-audio sectors played; code = where guest code was when emulation slices ended (80000080 is the interrupt vector); io = hardware registers read (r) and written (w) most in the row; audio min = lowest queued audio; dry = queue emptied and refilled; dsp = audio stretch CPU of one core. Incidents for frames over 50 ms end with why: where the time went, what was unusual against normal frames, and the display stages; slow display frame incidents come from the GPU thread.");
         value.put("incidents",new org.json.JSONArray(timeline.incidents()));value.put("dropped_incidents",timeline.droppedIncidents());
         value.put("rows",new org.json.JSONArray(timeline.rows()));value.put("dropped_rows",timeline.droppedRows());
         return value;

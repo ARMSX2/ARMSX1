@@ -18,6 +18,8 @@ final class NativeCpu implements AutoCloseable {
     private static native void setProfilingNative(long handle,boolean enabled);
     private static native long[] timingsNative(long handle);
     private static native long[] registersNative(long handle);
+    private static native long[] registerDeltasNative(long handle);
+    long[] registerDeltas(){return registerDeltasNative(handle);}
 
     private int projectionScale=65536;
     NativeCpu(Bus bus,boolean recompile,boolean ramWaitStates){this.bus=bus;this.ramWaitStates=ramWaitStates;memory=bus.enableNativeMemory();handle=create(bus,state,memory,(recompile?1:0)|(ramWaitStates?2:0));if(handle==0)throw new IllegalStateException("Native CPU initialization failed");}

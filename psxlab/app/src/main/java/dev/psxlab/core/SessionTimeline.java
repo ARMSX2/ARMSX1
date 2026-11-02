@@ -42,6 +42,8 @@ public final class SessionTimeline {
         add(rows,String.format(Locale.ROOT,"%s fps %.1f late %d worst %d ms emu %d%% work %d%% | %s",stamp(now),frames*1e9/span,late,worstGap/1_000_000,emulation*100/span,work*100/span,details),ROWS,true);
         windowStart=now;clearWindow();
     }
+    /** Append more detail to the row just written. */
+    public synchronized void rowDetail(String detail){String last=rows.pollLast();if(last!=null)rows.addLast(last+" | "+detail);}
     public synchronized void incident(long now,String text){if(started>=0)add(incidents,stamp(now)+" "+text,INCIDENTS,false);}
     private String stamp(long now){return String.format(Locale.ROOT,"+%.1fs",(now-started)/1e9);}
     private void add(ArrayDeque<String> list,String value,int limit,boolean row){if(list.size()==limit){list.removeFirst();if(row)droppedRows++;else droppedIncidents++;}list.addLast(value);}
