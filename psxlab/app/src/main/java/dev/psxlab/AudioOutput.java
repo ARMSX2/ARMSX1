@@ -44,10 +44,12 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private volatile boolean unlimitedTempo;
     private volatile long tempoEpoch;
     synchronized void setFastForwardTempo(float value){
+        boolean wasFast=unlimitedTempo||tempoFactor>1;
         boolean unlimited=value<=0,changed=unlimited!=unlimitedTempo;
         if(changed){unlimitedTempo=unlimited;tempoEpoch++;rateControl.recovered();}
         if(!unlimited)setTempoFactor(value);else if(changed)setTempoFactor(2);
         if(changed)appliedSpeed=tempoFactor;
+        if(wasFast&&!unlimitedTempo&&tempoFactor==1)trimAfterFastForward();
     }
     synchronized void setTempoFactor(float value){float next=Float.isFinite(value)?Math.max(1,Math.min(16,value)):1;if(next!=tempoFactor){rateControl.recovered();tempoEpoch++;tempoFactor=next;appliedSpeed=next;}}
     synchronized void setGain(float gain){if(!trackReleased){configuredGain=Math.max(0,Math.min(1,gain));track.setVolume(configuredGain);}}
@@ -101,6 +103,9 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
         if(inputFinished)throw new IllegalStateException("Audio input already finished");
         if(capture!=null)capture.source(pcm,count);
         sourceFrames+=count/2;
+        // Fast-forward never waits for audio: blocking here held the game below its requested speed and left
+        // a backlog that normal pacing then drained by slowing the game. Excess PCM is dropped instead.
+        if((unlimitedTempo||tempoFactor>1)&&inputSize/2+bufferedFrames()>FAST_FORWARD_QUEUE_FRAMES){droppedFrames+=count/2;return;}
         int offset=0;
         while(offset<count && running){
             while(inputSize==inputQueue.length && running){long before=System.nanoTime();try{wait();sourceBlockedNanos+=System.nanoTime()-before;}catch(InterruptedException e){Thread.currentThread().interrupt();return;}}
@@ -109,6 +114,19 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
             int n=Math.min(count-offset,Math.min(inputQueue.length-inputSize,inputQueue.length-tail));
             System.arraycopy(pcm,offset,inputQueue,tail,n);inputSize+=n;offset+=n;notifyAll();
         }
+    }
+    /** About 0.19 s of queued audio, twice the normal pacing target. */
+    static final int FAST_FORWARD_QUEUE_FRAMES=2*AudioClockPacer.TARGET_FRAMES;
+    /** Leaving fast-forward: queued fast-forward audio is stale. Keep only the normal pacing target rather than
+     * slowing the game for seconds to drain it; audio already in the track plays out. Called with the monitor held. */
+    private void trimAfterFastForward(){
+        if(trackReleased||flushedOnClose)return;
+        droppedFrames+=inputSize/2;inputSize=0;
+        long inTrack=guestFrames(Math.max(0,writtenFrames-Integer.toUnsignedLong(track.getPlaybackHeadPosition()))+inFlightFrames);
+        long keep=Math.max(0,AudioClockPacer.TARGET_FRAMES-inTrack)*outputRate/Spu.SAMPLE_RATE*2;
+        int drop=(int)Math.max(0,size-Math.min(size,keep))&~1;
+        if(drop>0){head=(head+drop)%queue.length;size-=drop;droppedFrames+=drop/2;}
+        notifyAll();
     }
     synchronized void finishInput(){
         inputFinished=true;notifyAll();
