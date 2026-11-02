@@ -6,20 +6,24 @@ layout(local_size_x=8,local_size_y=8) in;
 layout(std430,binding=0) buffer Vram {uint ram[];};
 layout(std430,binding=1) readonly buffer Commands {int q[];};
 layout(std430,binding=2) buffer Statistics {uint pixels;};
+// VRAM as it was before a feedback draw: texels come from here so the draw can run in parallel.
+layout(std430,binding=3) readonly buffer Snapshot {uint before[];};
 uniform ivec4 bounds;
 uniform int count;
 uniform int countPixels;
 uniform int serialMode;
+uniform int snapshot;
+uint texel(int i){return snapshot!=0?before[i]:ram[i];}
 int e(int at,int n){return q[at+8+n];}
 int floorDiv(int a,int b){return a/b-((a%b)<0?1:0);}
 int blend(int back,int front,int mode){if(mode==0)return(back>>1)+(front>>1);if(mode==1)return min(31,back+front);if(mode==2)return max(0,back-front);return min(31,back+(front>>2));}
 int texturePixel(int at,int u,int v,int clut){int window=e(at,2),mx=(window&31)*8,my=((window>>5)&31)*8;
  u=((u&255)&~mx)|(((window>>10)&31)*8&mx);v=((v&255)&~my)|(((window>>15)&31)*8&my);
  int page=e(at,1),x=(page&15)*64,y=((page>>4)&1)*256+v,depth=(page>>7)&3;
- if(depth>=2)return int(ram[(y&511)*1024+((x+u)&1023)]);
- int packed=int(ram[(y&511)*1024+((x+(u>>(depth==0?2:1)))&1023)]);
+ if(depth>=2)return int(texel((y&511)*1024+((x+u)&1023)));
+ int packed=int(texel((y&511)*1024+((x+(u>>(depth==0?2:1)))&1023)));
  int index=depth==0?(packed>>((u&3)*4))&15:(packed>>((u&1)*8))&255;
- return int(ram[((clut>>6)&511)*1024+(((clut&63)*16+index)&1023)]);
+ return int(texel(((clut>>6)&511)*1024+(((clut&63)*16+index)&1023)));
 }
 void drawAt(int x,int y,uint liveMask){
  while(liveMask!=0u){int n=findLSB(liveMask);liveMask&=liveMask-1u;int at=n*64;if(x<q[at+4]||y<q[at+5]||x>q[at+6]||y>q[at+7])continue;
