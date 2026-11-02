@@ -377,7 +377,7 @@ public final class ArmSxBackend {
         if(before==null||span<=0)return "gpu: starting";
         double perSecond=1e9/span/1e6;String[] names={"draw","resolve","output","transfer","upload"};StringBuilder out=new StringBuilder("gpu ms/s");long total=0;
         for(int i=0;i<5;i++){long d=now[1+i]-before[1+i];total+=d;out.append(String.format(Locale.ROOT," %s %.0f",names[i],d*perSecond));}
-        out.append(String.format(Locale.ROOT," = %.0f",total*perSecond));
+        out.append(String.format(Locale.ROOT," = %.0f, draw passes %.0f/s",total*perSecond,(now[6]-before[6])*1e9/span));
         long skipped=now[11]-before[11],lost=now[12]-before[12],waits=now[14]-before[14];
         if(skipped>0||lost>0)out.append(String.format(Locale.ROOT," (untimed spans %d, discarded %d)",skipped,lost));
         out.append(String.format(Locale.ROOT,", frame limit waited %d ms over %d frames",(now[13]-before[13])/1_000_000,waits));
