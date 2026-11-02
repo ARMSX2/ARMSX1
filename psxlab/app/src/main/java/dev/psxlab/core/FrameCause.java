@@ -6,7 +6,7 @@ import java.util.Locale;
  * The verdict names where the time went; the details name what was unusual about that frame. */
 public final class FrameCause {
     public static final int EMULATION_CPU=0,JIT=1,INTERPRETED=2,COMPILED=3,INVALIDATED=4,DEVICE_CALLS=5,PRIMITIVES=6,CD_SECTORS=7,FMV_BLOCKS=8,
-        GPU_QUEUE_FULL=9,GPU_DRAW=10,DISPLAY_WAIT=11,DISPLAY_CONVERT=12,DISPLAY_PRESENT=13,DISPLAY_PRESENT_CPU=14,DISPLAYS=15,GC=16,COUNT=17;
+        GPU_QUEUE_FULL=9,GPU_DRAW=10,DISPLAY_WAIT=11,DISPLAY_CONVERT=12,DISPLAY_PRESENT=13,DISPLAY_PRESENT_CPU=14,DISPLAYS=15,GC=16,READBACK_WAIT=17,READBACKS=18,COUNT=19;
     // Below these a spike is noise, however large its ratio to a quiet average.
     private static final long[] FLOOR=new long[COUNT];
     static{FLOOR[JIT]=200_000;FLOOR[INTERPRETED]=50_000;FLOOR[COMPILED]=20;FLOOR[INVALIDATED]=10;FLOOR[DEVICE_CALLS]=20_000;FLOOR[PRIMITIVES]=300;FLOOR[CD_SECTORS]=1;FLOOR[FMV_BLOCKS]=50;FLOOR[GPU_DRAW]=5_000_000;}
@@ -24,7 +24,8 @@ public final class FrameCause {
             if(d[GC]>0)why.append("; ").append(d[GC]).append(" Java garbage collection(s) ran");
             else why.append(" (heat throttling, a busy or small core, or another app)");
         }else if(emulation>=other){
-            if(d[GPU_QUEUE_FULL]*3>=emulation)why.append("emulation waited ").append(ms(d[GPU_QUEUE_FULL])).append(" for the GPU thread to catch up on drawing");
+            if(d[READBACK_WAIT]*3>=emulation)why.append("emulation waited ").append(ms(d[READBACK_WAIT])).append(" for the GPU to finish drawing before reading video memory back (").append(d[READBACKS]).append(" read(s))");
+            else if(d[GPU_QUEUE_FULL]*3>=emulation)why.append("emulation waited ").append(ms(d[GPU_QUEUE_FULL])).append(" for the GPU thread to catch up on drawing");
             else if(d[EMULATION_CPU]>0&&d[EMULATION_CPU]*10<emulation*6)why.append("emulation got only ").append(ms(d[EMULATION_CPU])).append(" of CPU in ").append(ms(emulation)).append(": the core ran slowly or was shared (heat, small core or another app)");
             else why.append("emulation itself took ").append(ms(emulation)).append(" of CPU work");
         }else{

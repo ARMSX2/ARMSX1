@@ -121,6 +121,14 @@ public final class Gpu implements AutoCloseable {
     private final int[] uploadBuffer=new int[512];
     private int uploadWords,uploadStart;
     private int readX,readY,readW,readH,readPixels;
+    // Every VRAM write the hardware renderer was given since vram[] was last downloaded. A VRAM-to-CPU
+    // transfer outside it reads vram[] directly instead of waiting for all queued GPU drawing.
+    private final VramDirtyRegion vramDirty=new VramDirtyRegion();
+    /** VRAM-to-CPU transfers that waited for the GPU or skipped the wait, and the time waited (VM thread). */
+    public long readbackSyncs,readbackSkips,readbackWaitNanos;
+    private String slowReadback;
+    /** The last VRAM-to-CPU wait of 20 ms or more since the previous call, described for the report timeline. */
+    public String takeSlowReadback(){String value=slowReadback;slowReadback=null;return value;}
     private boolean readSynchronized;
     private long softwareVramRevision;
     private final ScanoutCache vulkanFrames=new ScanoutCache();
@@ -225,7 +233,7 @@ public final class Gpu implements AutoCloseable {
     private void check() { if (failure != null) throw failure; }
     private void draw(int[] p){draw(p,p.length);}
     private void draw(int[] p,int length){
-        int op=p[0]>>>24;primitives++;
+        int op=p[0]>>>24;primitives++;vramDirty.addDrawingArea(environment[3],environment[4]);
         if(performanceEnabled){if(op<0x40)performanceTriangles+=(op&8)!=0?2:1;else if(op<0x60)performanceLines++;else performanceRectangles++;}
         if(op<0x40 && (op&4)!=0){int page=p[(op&16)!=0?5:4]>>>16;environment[1]=(environment[1]&~0x9ff)|(page&0x9ff);gpuStatus=(gpuStatus&~0x81ff)|(page&511)|((page&0x800)<<4);}
         if(drawBatchWords+length+8>drawBatch.length)flushDrawBatch();
@@ -273,9 +281,9 @@ public final class Gpu implements AutoCloseable {
             if(op>=0x20 && op<0x80){
                 draw(packet,expected);
                 if(op>=0x40 && op<0x60 && (op&8)!=0){polyline=true;polyShaded=(op&16)!=0;polyHalf=false;polyCommand=command;polyXy=packet[polyShaded?3:2];polyColor=polyShaded?packet[2]:command;}
-            }else if(op==2){submit(()->fill(command,xy,wh));}
+            }else if(op==2){vramDirty.addWrapped(xy&0x3f0,(xy>>>16)&511,((wh&1023)+15)&~15,(wh>>>16)&511);submit(()->fill(command,xy,wh));}
             else if(op>=0x80 && op<=0x9f){
-                int w=((extra-1)&1023)+1,h=(((extra>>>16)-1)&511)+1,mask=environment[6];
+                int w=((extra-1)&1023)+1,h=(((extra>>>16)-1)&511)+1,mask=environment[6];vramDirty.addWrapped(wh&1023,(wh>>>16)&511,w,h);
                 submit(()->{if(hardware!=null && hardwareDrawing){hardware.copy(xy,wh,extra,mask);hardwareDirty=true;}else{for(int y=0;y<h;y++)for(int x=0;x<w;x++)store(((((wh>>>16)+y)&511)*1024)+((wh+x)&1023),vram[((((xy>>>16)+y)&511)*1024)+((xy+x)&1023)],mask);softwareVramRevision++;}});
             }else if(op>=0xa0 && op<=0xbf){uploadX=xy&1023;uploadY=(xy>>>16)&511;uploadW=((wh-1)&1023)+1;uploadH=(((wh>>>16)-1)&511)+1;uploaded=0;}
             // Queue earlier draws now; the first read publishes their VRAM once.
@@ -285,7 +293,7 @@ public final class Gpu implements AutoCloseable {
     }
     private void flushUpload(){
         if(uploadWords==0)return;
-        int[] words=Arrays.copyOf(uploadBuffer,uploadWords);int start=uploadStart,x=uploadX,y=uploadY,w=uploadW,total=uploadW*uploadH,mask=environment[6];uploadWords=0;
+        int[] words=Arrays.copyOf(uploadBuffer,uploadWords);int start=uploadStart,x=uploadX,y=uploadY,w=uploadW,total=uploadW*uploadH,mask=environment[6];uploadWords=0;vramDirty.addWrapped(x,y,w,uploadH);
         submit(()->{if(hardware!=null && hardwareDrawing){hardware.upload(words,start,x,y,w,total,mask);hardwareDirty=true;}else{for(int i=0;i<words.length*2 && start+i<total;i++)store(((y+(start+i)/w)&511)*1024+((x+(start+i)%w)&1023),(words[i/2]>>>((i&1)*16))&65535,mask);softwareVramRevision++;}textureUpload(words,start,x,y,w,total,mask);});
     }
     public int read(){
@@ -293,7 +301,16 @@ public final class Gpu implements AutoCloseable {
         // A VRAM transfer can contain 262144 words. The fence publishes all
         // earlier drawing/readback once; subsequent words read that same VRAM.
         // A new GP0/GP1 write or state restore invalidates this host-only fence.
-        if(!readSynchronized){sync(true);readSynchronized=true;}
+        if(!readSynchronized){
+            if(hardware!=null&&hardwareDrawing&&!vramDirty.intersectsWrapped(readX,readY,readW,readH))readbackSkips++;
+            else{
+                long before=System.nanoTime();sync(true);long waited=System.nanoTime()-before;
+                readbackSyncs++;readbackWaitNanos+=waited;
+                if(waited>=20_000_000L)slowReadback=String.format(java.util.Locale.ROOT,"video memory read waited %.1f ms for the GPU: read %d,%d %dx%d, GPU had drawn %s",waited/1e6,readX,readY,readW,readH,vramDirty.describe());
+                vramDirty.clean();
+            }
+            readSynchronized=true;
+        }
         int value=0;for(int i=0;i<2;i++){int at=readPixels++;value|=vram[((readY+at/readW)&511)*1024+((readX+at%readW)&1023)]<<(16*i);}
         return gpuRead=value;
     }
@@ -474,7 +491,7 @@ public final class Gpu implements AutoCloseable {
     }
     public void sync(){sync(false);}
     void prepareSnapshot(){sync(true);}
-    void restoreSnapshot(){readSynchronized=false;submitDirect(()->{softwareVramRevision++;if(hardware!=null && hardwareDrawing){hardware.setVram(vram);hardwareDirty=false;}});sync();}
+    void restoreSnapshot(){readSynchronized=false;vramDirty.all();submitDirect(()->{softwareVramRevision++;if(hardware!=null && hardwareDrawing){hardware.setVram(vram);hardwareDirty=false;}});sync();}
     private void sync(boolean readback) {
         try(EngineLog.Span span=journal==null?null:journal.watch(readback?"gpu.sync.readback":"gpu.sync.commands",EngineLog.DEBUG,8_000_000L)){
         flushUpload();flushDrawBatch();

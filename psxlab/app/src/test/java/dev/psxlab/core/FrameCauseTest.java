@@ -22,6 +22,11 @@ public class FrameCauseTest {
         String why=warmed().explain(110*MS,100*MS,105*MS,0,d);
         assertTrue(why,why.contains("waited 60.0 ms for the GPU thread"));
     }
+    @Test public void videoMemoryReadbackWaitsAreNamed(){
+        long[] d=frame();d[FrameCause.EMULATION_CPU]=40*MS;d[FrameCause.READBACK_WAIT]=50*MS;d[FrameCause.READBACKS]=2;
+        String why=warmed().explain(110*MS,100*MS,105*MS,0,d);
+        assertTrue(why,why.contains("waited 50.0 ms for the GPU to finish drawing before reading video memory back (2 read(s))"));
+    }
     @Test public void starvedEmulationIsBlamedOnTheCore(){
         long[] d=frame();d[FrameCause.EMULATION_CPU]=30*MS;
         String why=warmed().explain(110*MS,100*MS,105*MS,0,d);

@@ -60,6 +60,8 @@ public final class CdRom {
     int audioBufferedFrames(){return audioSize/2;}
     public String lastMediaError="";
     private final ArrayDeque<Integer> recentCommands=new ArrayDeque<>();
+    /** The last few command numbers, oldest first, in hex. */
+    public String recentCommands(){StringBuilder out=new StringBuilder("[");for(int value:recentCommands){if(out.length()>1)out.append(' ');out.append(String.format(java.util.Locale.ROOT,"%02X",value));}return out.append(']').toString();}
     private final ArrayDeque<Integer> recentWrites=new ArrayDeque<>();
     private long irqReads,statusReads;
     private int lastReadBank;

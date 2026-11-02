@@ -334,7 +334,7 @@ public final class ArmSxBackend {
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
                                 audio=output;output.setJournal(journal);updateAudio();output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});
                                 renderer="PSX Lab / "+gpu.renderer();booted=true;
-                                timeline.incident(System.nanoTime(),"start: "+renderer+", scale "+scale+", "+output.deviceDiagnostic()+", ADPF "+(adpf?"on":"off")+", VM thread priority "+threadPriority()+", "+Runtime.getRuntime().availableProcessors()+" cores");
+                                timeline.incident(System.nanoTime(),"start: "+renderer+", scale "+scale+", "+output.deviceDiagnostic()+", ADPF "+(adpf?"on":"off")+", VM thread priority "+threadPriority()+", "+Runtime.getRuntime().availableProcessors()+" cores"+", disc "+discLayout(media));
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
                                 try{loop(output);}catch(Exception failure){lastFailureCpuContext=cpu.diagnostic();journal.event(EngineLog.FATAL,"runtime.cpu_context",Map.of("cpu",lastFailureCpuContext,"exception",failure.toString(),"guest_clocks",cpu.instructions));throw failure;}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}}
                             }finally{audio=null;bus.cdrom.setTraceSink(null);bus.spu.setTraceSink(null);guestAudioTracing=false;bus.spu.setAudioSink(null);cpu.closeNative();}
@@ -355,6 +355,18 @@ public final class ArmSxBackend {
     private static int boostThread(){try{int old=android.os.Process.getThreadPriority(android.os.Process.myTid());android.os.Process.setThreadPriority(Math.min(old,android.os.Process.THREAD_PRIORITY_DISPLAY));return old;}catch(RuntimeException e){return Integer.MIN_VALUE;}}
     private static void restoreThread(int old){if(old!=Integer.MIN_VALUE)try{android.os.Process.setThreadPriority(old);}catch(RuntimeException ignored){}}
     public void setAdpf(boolean value){adpf=value;}
+    /** Disc format and track layout, so a report shows missing CD-audio tracks (a single data track). */
+    private static String discLayout(Media value){
+        if(value==null||value.disc==null)return "none (executable)";
+        IsoDisc disc=value.disc;StringBuilder out=new StringBuilder(value.source.getClass().getSimpleName()).append(value.cue!=null?" with CUE":"");
+        try{
+            int tracks=disc.lastTrack(),audio=0;out.append(", ").append(tracks).append(" track(s), ").append(disc.sectorCount()).append(" sectors");
+            for(int track=1;track<=tracks;track++){int start=disc.trackStart(track);boolean sound=disc.audioTrack(start);if(sound)audio++;if(track<=16)out.append(track==1?": ":", ").append(track).append(sound?" audio @":" data @").append(start);}
+            if(tracks>16)out.append(", ...");
+            out.append("; ").append(audio).append(" audio track(s)");
+        }catch(RuntimeException e){out.append(", track list unavailable: ").append(e.getMessage());}
+        return out.toString();
+    }
     private static long threadCpu(){try{return android.os.Debug.threadCpuTimeNanos();}catch(RuntimeException e){return 0;}}
     private static long gcCount(){try{String value=android.os.Debug.getRuntimeStat("art.gc.gc-count");return value==null?0:Long.parseLong(value);}catch(RuntimeException e){return 0;}}
     /** Monotonic counters for FrameCause. Native CPU statistics: {compiled, JIT instructions, interpreted, hits, links, invalidations, device calls, ...}. */
@@ -363,7 +375,7 @@ public final class ArmSxBackend {
         c[FrameCause.EMULATION_CPU]=emulationCpu;c[FrameCause.COMPILED]=s[0];c[FrameCause.JIT]=s[1];c[FrameCause.INTERPRETED]=s[2];c[FrameCause.INVALIDATED]=s[5];c[FrameCause.DEVICE_CALLS]=s[6];
         c[FrameCause.PRIMITIVES]=g.primitives;c[FrameCause.CD_SECTORS]=bus.cdrom.sectorsRead;c[FrameCause.FMV_BLOCKS]=bus.mdec.decodedBlocks;
         c[FrameCause.GPU_QUEUE_FULL]=g.queueFullNanos;c[FrameCause.GPU_DRAW]=g.drawNanos;c[FrameCause.DISPLAY_WAIT]=g.displayWaitNanos;c[FrameCause.DISPLAY_CONVERT]=g.displayConvertNanos;
-        c[FrameCause.DISPLAY_PRESENT]=g.displayPresentNanos;c[FrameCause.DISPLAY_PRESENT_CPU]=g.displayPresentCpuNanos;c[FrameCause.DISPLAYS]=g.displays;c[FrameCause.GC]=gcCount();
+        c[FrameCause.DISPLAY_PRESENT]=g.displayPresentNanos;c[FrameCause.DISPLAY_PRESENT_CPU]=g.displayPresentCpuNanos;c[FrameCause.DISPLAYS]=g.displays;c[FrameCause.GC]=gcCount();c[FrameCause.READBACK_WAIT]=g.readbackWaitNanos;c[FrameCause.READBACKS]=g.readbackSyncs;
         return c;
     }
     /** Which core the VM thread last ran on and that core's clock against its maximum: shows throttling and small-core placement. */
@@ -387,7 +399,7 @@ public final class ArmSxBackend {
         // Frame work excludes pacing sleeps and blocked waits; the GPU worker joins once it has started.
         long workStarted=System.nanoTime();int[] hintThreads=null;
         // Report timeline: each frame's emulation time, plus per-row baselines for the counters below.
-        long frameEmulation=0,rowBuffered=Long.MAX_VALUE,rowRefills=output.recoveries,rowDsp=output.dspCpuNanos(),rowSectors=bus.cdrom.sectorsRead,rowMdec=bus.mdec.decodedBlocks,seenRefills=rowRefills;
+        long frameEmulation=0,rowBuffered=Long.MAX_VALUE,rowRefills=output.recoveries,rowDsp=output.dspCpuNanos(),rowSectors=bus.cdrom.sectorsRead,rowMdec=bus.mdec.decodedBlocks,rowCdCommands=bus.cdrom.commands,rowXa=bus.cdrom.xaSectors,rowCdda=bus.cdrom.cddaSectors,rowReadSyncs=gpu.readbackSyncs,rowReadSkips=gpu.readbackSkips,rowReadWait=gpu.readbackWaitNanos,seenRefills=rowRefills;
         int rowUnderruns=output.underruns(),seenUnderruns=rowUnderruns,seenThermal=hostThermalStatus,rowSkipped=0;
         // Late frames are explained against this session's normal frames; see FrameCause.
         FrameCause cause=new FrameCause();long[] causeBase=causeCounters(0);long frameEmulationCpu=0,lastFrameAt=0,rowDisplays=gpu.displays;
@@ -400,7 +412,7 @@ public final class ArmSxBackend {
             }
             if(wasBlocked){workStarted=System.nanoTime();timeline.resume(workStarted);lastFrameAt=0;performance.reset();perfCpu=perfEpoch=0;output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
             if(fast!=wasFast){timeline.incident(System.nanoTime(),"fast-forward "+(fast?"on, speed "+(fastSpeed()==0?"unlimited":fastSpeed()+"x")+(muteFast()?", muted":""):"off"));bus.spu.flushAudio();bus.spu.setAudioSink(muteFast()?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});updateAudio();output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
-            if(pendingMedia!=null&&cpu.instructions>=insertAt){bus.cdrom.insert(pendingMedia.disc);if(media!=null)media.close();media=pendingMedia;pendingMedia=null;mediaTextures();}
+            if(pendingMedia!=null&&cpu.instructions>=insertAt){bus.cdrom.insert(pendingMedia.disc);if(media!=null)media.close();media=pendingMedia;pendingMedia=null;mediaTextures();timeline.incident(System.nanoTime(),"disc changed: "+discLayout(media));}
             long ticket=performance.ticket();
             if(ticket!=perfEpoch){perfCpu=0;perfEpoch=ticket;}
             gpu.performanceEnabled=ticket!=0;bus.dma.performanceEnabled=ticket!=0;
@@ -425,6 +437,7 @@ public final class ArmSxBackend {
             else cause.add(frameDelta);
             lastFrameAt=workStarted;frameEmulation=frameEmulationCpu=0;
             long[] slowPresent=gpu.takeSlowPresent(SessionTimeline.STALL_NANOS);if(slowPresent!=null)timeline.incident(System.nanoTime(),FrameCause.slowPresent(slowPresent));
+            String slowRead=gpu.takeSlowReadback();if(slowRead!=null)timeline.incident(System.nanoTime(),slowRead);
             if(diagnosticFrame!=null)diagnosticFrame.pacing(wait,System.nanoTime()-paceStarted,buffered);
             long measuredIdle=ticket==0?0:System.nanoTime()-paceStarted,measuredCpu=perfCpu;perfCpu=0;
             int voices=0;if(ticket!=0)for(int voice=0;voice<24;voice++)if((bus.spu.read(0x1f801c0c+voice*16)&0x7fff)!=0)voices++;
@@ -454,8 +467,8 @@ public final class ArmSxBackend {
                     if(!sampled)sampleHostUsage(now);
                     if(hostThermalStatus!=seenThermal){timeline.incident(now,"thermal status "+seenThermal+" -> "+hostThermalStatus);seenThermal=hostThermalStatus;}
                     long dsp=output.dspCpuNanos(),cdSectors=bus.cdrom.sectorsRead,fmvBlocks=bus.mdec.decodedBlocks;
-                    timeline.row(now,String.format(Locale.ROOT,"%s | display shown %d, skipped %d | audio min %d ms, underruns +%d, dry +%d, dsp %d%% | cpu %.0f%% thermal %d rss %.0f MB | cd sectors +%d, fmv blocks +%d",fast?"fast-forward":"normal",gpu.displays-rowDisplays,rowSkipped,rowBuffered==Long.MAX_VALUE?-1:rowBuffered*1000/44100,underruns-rowUnderruns,refills-rowRefills,(dsp-rowDsp)/(SessionTimeline.INTERVAL_NANOS/100),hostCpuPercent,hostThermalStatus,hostRssMb,cdSectors-rowSectors,fmvBlocks-rowMdec));
-                    rowBuffered=Long.MAX_VALUE;rowDisplays=gpu.displays;rowSkipped=0;rowUnderruns=underruns;rowRefills=refills;rowDsp=dsp;rowSectors=cdSectors;rowMdec=fmvBlocks;
+                    timeline.row(now,String.format(Locale.ROOT,"%s | display shown %d, skipped %d | audio min %d ms, underruns +%d, dry +%d, dsp %d%% | cpu %.0f%% thermal %d rss %.0f MB | vram reads waited +%d (%d ms), skipped +%d | cd commands +%d %s, sectors +%d, xa +%d, cdda +%d, fmv blocks +%d",fast?"fast-forward":"normal",gpu.displays-rowDisplays,rowSkipped,rowBuffered==Long.MAX_VALUE?-1:rowBuffered*1000/44100,underruns-rowUnderruns,refills-rowRefills,(dsp-rowDsp)/(SessionTimeline.INTERVAL_NANOS/100),hostCpuPercent,hostThermalStatus,hostRssMb,gpu.readbackSyncs-rowReadSyncs,(gpu.readbackWaitNanos-rowReadWait)/1_000_000,gpu.readbackSkips-rowReadSkips,bus.cdrom.commands-rowCdCommands,bus.cdrom.recentCommands(),cdSectors-rowSectors,bus.cdrom.xaSectors-rowXa,bus.cdrom.cddaSectors-rowCdda,fmvBlocks-rowMdec));
+                    rowBuffered=Long.MAX_VALUE;rowDisplays=gpu.displays;rowSkipped=0;rowUnderruns=underruns;rowRefills=refills;rowDsp=dsp;rowSectors=cdSectors;rowMdec=fmvBlocks;rowCdCommands=bus.cdrom.commands;rowXa=bus.cdrom.xaSectors;rowCdda=bus.cdrom.cddaSectors;rowReadSyncs=gpu.readbackSyncs;rowReadSkips=gpu.readbackSkips;rowReadWait=gpu.readbackWaitNanos;
                 }nominalFps=videoRate(gpu.status());lastAudio=output.diagnostic();lastCore=cpu.executionDiagnostic()+"\n"+bus.cdrom.diagnostic()+"\n"+bus.dma.diagnostic()+"\n"+bus.mdec.diagnostic()+"\n"+bus.spu.diagnostic();renderer="PSX Lab / "+gpu.renderer();if(journal.enabled()){guestAudioSnapshot();lastCpuTiming=cpu.nativeTimings();lastGpuTiming=gpu.nativeTimings();journal.event(EngineLog.INFO,"engine.snapshot",Map.of("fps",fps,"thermal_status",hostThermalStatus,"audio",output.loggingSnapshot(),"audio_summary",lastAudio,"core",lastCore,"gpu",gpu.renderStatistics(),"native_cpu",lastCpuTiming,"native_gpu",lastGpuTiming,"memory",Map.of("process_rss_mb",hostRssMb,"system_available_mb",hostAvailableMb,"java_heap_used_bytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"java_heap_limit_bytes",Runtime.getRuntime().maxMemory(),"native_heap_allocated_bytes",android.os.Debug.getNativeHeapAllocatedSize())));}measured=now;}
         }
     }
@@ -571,7 +584,7 @@ public final class ArmSxBackend {
     /** Rows every five seconds and every incident since launch; not limited by the engine log tail. */
     private org.json.JSONObject timelineReport()throws org.json.JSONException{
         org.json.JSONObject value=new org.json.JSONObject();
-        value.put("legend","late = frames over 1.5x their paced period; emu = share of wall time running the PS1 core; work = emulation plus frame submission; display shown/skipped = frames presented and frames dropped because the display was still busy; audio min = lowest queued audio; dry = queue emptied and refilled; dsp = audio stretch CPU of one core. Incidents for frames over 50 ms end with why: where the time went, what was unusual against normal frames, and the display stages; slow display frame incidents come from the GPU thread.");
+        value.put("legend","late = frames over 1.5x their paced period; emu = share of wall time running the PS1 core; work = emulation plus frame submission; display shown/skipped = frames presented and frames dropped because the display was still busy; vram reads waited/skipped = VRAM-to-CPU transfers that had to wait for GPU drawing, and those served from the CPU copy because the GPU had not drawn there; cd commands = commands sent (last 12 in hex), with sectors read, XA and CD-audio sectors played; audio min = lowest queued audio; dry = queue emptied and refilled; dsp = audio stretch CPU of one core. Incidents for frames over 50 ms end with why: where the time went, what was unusual against normal frames, and the display stages; slow display frame incidents come from the GPU thread.");
         value.put("incidents",new org.json.JSONArray(timeline.incidents()));value.put("dropped_incidents",timeline.droppedIncidents());
         value.put("rows",new org.json.JSONArray(timeline.rows()));value.put("dropped_rows",timeline.droppedRows());
         return value;
