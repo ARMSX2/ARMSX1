@@ -66,7 +66,12 @@ bool compileArm64(CpuBlock& block){
         if(d.memory()){
             a.binary(0x8b000000,15,1,11);
             if(d.store()){
+                // The store ends the block and pending loads are committed, so W13/W14 are free here.
+                // Read the old bytes first: rewriting code with identical bytes keeps its page valid.
+                a.emit((d.op==40?0x39400000:d.op==41?0x79400000:0xb9400000)|(15<<5)|13); // LDRB/LDRH/LDR W13,[X15].
                 uint32_t op=d.op==40?0x39000000:d.op==41?0x79000000:0xb9000000;a.emit(op|(15<<5)|10);
+                int stored=10;if(d.op!=43){a.emit((d.op==40?0x53001c00:0x53003c00)|(10<<5)|14);stored=14;} // UXTB/UXTH W14,W10.
+                a.binary(0x6b000000,31,13,stored);size_t unchanged=a.jump(0x54000000); // CMP; B.EQ clean.
                 // Data sharing an executable page must not invalidate unrelated code.
                 a.emit(0x53057c00|(11<<5)|12);a.binary(0x8b000000,15,3,12);a.emit(0x39400000|(15<<5)|13);
                 a.emit(0x53021000|(11<<5)|12);a.mov(16,1);a.binary(0x1ac02000,16,16,12);a.binary(0x6a000000,31,13,16);size_t clean=a.jump(0x54000000);
@@ -74,7 +79,7 @@ bool compileArm64(CpuBlock& block){
                 a.emit(0x530c7c00|(11<<5)|12); // LSR W12,W11,#12.
                 a.emit(0x8b000000|(12<<16)|(3<<10)|(2<<5)|15);
                 a.emit(0xf9400000|(15<<5)|16);a.emit(0x91000610);a.emit(0xf9000000|(15<<5)|16);
-                a.patch(clean,a.words.size(),true);
+                a.patch(clean,a.words.size(),true);a.patch(unchanged,a.words.size(),true);
             }else{
                 uint32_t op=d.op==32?0x39c00000:d.op==33?0x79c00000:d.op==35?0xb9400000:d.op==36?0x39400000:0x79400000;
                 a.emit(op|(15<<5)|14);pending=d.t;

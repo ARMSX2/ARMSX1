@@ -47,6 +47,8 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     synchronized void setGain(float gain){if(!trackReleased){configuredGain=Math.max(0,Math.min(1,gain));track.setVolume(configuredGain);}}
     volatile long writtenFrames,droppedFrames;
     volatile long recoveries,rateChanges;
+    /** close() flushes the track, resetting its playback head; the stopped summary was taken before that. */
+    private boolean flushedOnClose;
     private volatile long maxProducerGapNanos,lastProducedNanos;
     private long productionAt,productionFrames;
     private double productionRate=1;
@@ -182,12 +184,12 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
         }catch(InterruptedException e){Thread.currentThread().interrupt();}
         catch(RuntimeException e){if(running){if(journal!=null)journal.error("audio.track.error",e);failure=e;}}
         finally{running=false;synchronized(this){
-            try{stoppedPlayed=track.getPlaybackHeadPosition();stoppedUnderruns=track.getUnderrunCount();diagnostic();}catch(IllegalStateException ignored){}
+            if(!flushedOnClose)try{stoppedPlayed=track.getPlaybackHeadPosition();stoppedUnderruns=track.getUnderrunCount();diagnostic();}catch(IllegalStateException ignored){}
             trackReleased=true;track.release();notifyAll();
         }}
     }
     synchronized void setPaused(boolean value){if(paused!=value){lastProducedNanos=0;if(capture!=null)traceEvent(-1,-1,-1,value?"PAUSE":"RESUME");}if(paused && !value)timestampAfter=System.nanoTime();paused=value;notifyAll();}
-    synchronized long bufferedFrames(){if(trackReleased)return 0;long played=Integer.toUnsignedLong(track.getPlaybackHeadPosition());return size/2+inFlightFrames+Math.max(0,writtenFrames-played);}
+    synchronized long bufferedFrames(){if(trackReleased||flushedOnClose)return 0;long played=Integer.toUnsignedLong(track.getPlaybackHeadPosition());return size/2+inFlightFrames+Math.max(0,writtenFrames-played);}
     void pace()throws InterruptedException{
         while(running){if(failure!=null)throw failure;long wait=AudioClockPacer.waitNanos(bufferedFrames());if(wait==0)return;java.util.concurrent.TimeUnit.NANOSECONDS.sleep(wait);}
     }
@@ -202,13 +204,13 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     float playbackSpeed(){return appliedSpeed;}
     String diagnostic(){
         int underruns;long buffered;
-        synchronized(this){if(trackReleased)return lastDiagnostic;underruns=track.getUnderrunCount();buffered=bufferedFrames();}
+        synchronized(this){if(trackReleased||flushedOnClose)return lastDiagnostic;underruns=track.getUnderrunCount();buffered=bufferedFrames();}
         // Formatting must not hold the PCM queue's monitor during playback.
         String snapshot=String.format(java.util.Locale.ROOT,"Audio DSP: %.0f%% stretch · %d underruns · %d refills · %d dropped\nBuffer %d ms · worst producer gap %d ms · DSP CPU %d%%",appliedSpeed*100,underruns,recoveries,droppedFrames,buffered*1000/44100,maxProducerGapNanos/1000000,dspInputFrames==0?0:dspCpuNanos*44100/(dspInputFrames*10000000))+(capture==null?"":"\n"+capture.status());
         synchronized(this){if(!trackReleased)lastDiagnostic=snapshot;return lastDiagnostic;}
     }
-    synchronized int playbackFrames(){return trackReleased?stoppedPlayed:track.getPlaybackHeadPosition();}
-    synchronized int underruns(){return trackReleased?stoppedUnderruns:track.getUnderrunCount();}
+    synchronized int playbackFrames(){return trackReleased||flushedOnClose?stoppedPlayed:track.getPlaybackHeadPosition();}
+    synchronized int underruns(){return trackReleased||flushedOnClose?stoppedUnderruns:track.getUnderrunCount();}
     /** AudioTimestamp includes the device presentation clock, unlike queue occupancy.
      * Wait for a valid timestamp at startup rather than guessing a fixed video offset.
      */
@@ -231,7 +233,13 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     java.io.File saveDiagnosis(android.content.Context context,String scene)throws java.io.IOException{if(capture==null)throw new IllegalStateException("Audio capture is not enabled");return capture.save(context,scene+"\n"+diagnostic()+"\n"+synchronizationDiagnostic()+"\n"+deviceDiagnostic());}
     float deviceSpeed(){return track.getPlaybackParams().getSpeed();}
     @Override public void close(){
-        synchronized(this){running=false;size=inputSize=0;notifyAll();}
+        // Record the stopped summary while the queue and playback head are still live. After flush()
+        // the head reads 0, so every frame ever written would be reported as buffered.
+        diagnostic();
+        synchronized(this){
+            if(!trackReleased)try{stoppedPlayed=track.getPlaybackHeadPosition();stoppedUnderruns=track.getUnderrunCount();flushedOnClose=true;}catch(IllegalStateException ignored){}
+            running=false;size=inputSize=0;notifyAll();
+        }
         // pause interrupts a blocking write; release belongs to the worker.
         try{track.pause();track.flush();}catch(IllegalStateException ignored){}
         worker.interrupt();dspWorker.interrupt();

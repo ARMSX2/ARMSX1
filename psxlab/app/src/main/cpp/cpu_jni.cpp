@@ -48,7 +48,8 @@ struct CpuCore {
     }
     void write(uint32_t address,uint32_t value,int width){
         if(width>1 && (address&uint32_t(width-1)))throw AddressFault{address,true};uint32_t a=address&0x1fffffff;
-        if(a<0x800000){if(!s->cacheIsolated){uint32_t offset=a&0x1fffff;memcpy(memory+offset,&value,size_t(width));if(memory[CodeMask+(offset>>5)]&(1<<((offset>>2)&7)))generations[offset>>12]++;}return;}
+        // Rewriting decoded code with identical bytes leaves it valid: only a real change invalidates its page.
+        if(a<0x800000){if(!s->cacheIsolated){uint32_t offset=a&0x1fffff;bool changed=memcmp(memory+offset,&value,size_t(width))!=0;memcpy(memory+offset,&value,size_t(width));if(changed&&(memory[CodeMask+(offset>>5)]&(1<<((offset>>2)&7))))generations[offset>>12]++;}return;}
         if(a>=0x1f800000&&a<0x1f800400){memcpy(memory+Scratch+a-0x1f800000,&value,size_t(width));return;}
         if(a>=0x1fc00000&&a<0x1fc80000)return;
         if(ramWaitStates&&width==1&&a==0x1f801800&&(value&3)==(memory[CdStatus]&3))return;
