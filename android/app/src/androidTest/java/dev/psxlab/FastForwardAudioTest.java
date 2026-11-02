@@ -48,7 +48,7 @@ public class FastForwardAudioTest {
         ArmSxBackend b=new ArmSxBackend(c,p->{},m->{});assertTrue(b.initialize(dir.getAbsolutePath(),fixtures.getAbsolutePath(),config.getAbsolutePath()));b.selectBios("SCPH1001.BIN");b.surface(a.gameSurface());Thread vm=new Thread(()->b.run(new java.io.File(fixtures,"game.chd").getAbsolutePath()),"PSX-Fast-Audio-Test");vm.start();
         try{
             SystemClock.sleep(10000);assertTrue(b.lastError(),b.lastError().isEmpty());assertTrue(b.frames()>200);Field field=ArmSxBackend.class.getDeclaredField("audio");field.setAccessible(true);AudioOutput output=(AudioOutput)field.get(b);assertNotNull(output);
-            long before=output.writtenFrames;b.fastForward(true);SystemClock.sleep(3000);assertEquals(2f,output.playbackSpeed(),0.01);assertTrue("PCM writes stopped while fast-forwarding",output.writtenFrames-before>44100);assertTrue(((Number)output.loggingSnapshot().get("gain")).floatValue()>0);
+            long before=output.writtenFrames;b.fastForward(true);SystemClock.sleep(3000);assertEquals(2f,((Number)output.loggingSnapshot().get("requested_tempo")).floatValue(),0.01);assertTrue(output.playbackSpeed()>=.5f&&output.playbackSpeed()<=2.11f);assertTrue("PCM writes stopped while fast-forwarding",output.writtenFrames-before>44100);assertTrue(((Number)output.loggingSnapshot().get("gain")).floatValue()>0);
             b.fastForwardSpeed(0);SystemClock.sleep(2000);int under=output.underruns();before=output.writtenFrames;SystemClock.sleep(3000);
             assertTrue("Unlimited fast-forward continues PCM playback",output.writtenFrames-before>100000);
             assertEquals("Unlimited audio keeps up with available speed",under,output.underruns());

@@ -23,5 +23,5 @@ public final class AudioRateController {
         rate=(float)Math.max(0.5,Math.min(1.05,rate+Math.max(-step,Math.min(step,desired-rate))));
         return rate;
     }
-    public void recovered(){fullness=TARGET_FRAMES;nextUpdate=0;lowSince=-1;}
+    public void recovered(){fullness=TARGET_FRAMES;nextUpdate=0;lowSince=-1;rate=1;}
 }

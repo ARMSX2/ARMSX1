@@ -40,12 +40,16 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private String lastDiagnostic="Audio starting";
     private volatile RuntimeException failure;
     private volatile float appliedSpeed=1f,tempoFactor=1f,configuredGain=1f;
+    private volatile float productionTempo=1;
     private volatile boolean unlimitedTempo;
+    private volatile long tempoEpoch;
     synchronized void setFastForwardTempo(float value){
-        if(value>0){unlimitedTempo=false;setTempoFactor(value);}
-        else if(!unlimitedTempo){setTempoFactor(2);unlimitedTempo=true;}
+        boolean unlimited=value<=0,changed=unlimited!=unlimitedTempo;
+        if(changed){unlimitedTempo=unlimited;tempoEpoch++;rateControl.recovered();}
+        if(!unlimited)setTempoFactor(value);else if(changed)setTempoFactor(2);
+        if(changed)appliedSpeed=tempoFactor;
     }
-    synchronized void setTempoFactor(float value){float next=Float.isFinite(value)?Math.max(1,Math.min(16,value)):1;tempoFactor=next;appliedSpeed=next;}
+    synchronized void setTempoFactor(float value){float next=Float.isFinite(value)?Math.max(1,Math.min(16,value)):1;if(next!=tempoFactor){rateControl.recovered();tempoEpoch++;tempoFactor=next;appliedSpeed=next;}}
     synchronized void setGain(float gain){if(!trackReleased){configuredGain=Math.max(0,Math.min(1,gain));track.setVolume(configuredGain);}}
     volatile long writtenFrames,droppedFrames;
     volatile long recoveries,rateChanges;
@@ -149,7 +153,8 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private void play(){
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
         short[] block=new short[512];
-        dev.psxlab.core.UnlimitedAudioTempo uncapped=new dev.psxlab.core.UnlimitedAudioTempo();boolean wasUnlimited=false;
+        dev.psxlab.core.UnlimitedAudioTempo uncapped=new dev.psxlab.core.UnlimitedAudioTempo();
+        dev.psxlab.core.ProductionAudioTempo finite=new dev.psxlab.core.ProductionAudioTempo();long measuredEpoch=-1;
         try{
             // Queue about 93 ms before starting, to absorb CPU/GPU scheduling jitter.
             synchronized(this){while(size<8192 && running && !(dspFinished && size>0))wait();if(!running)return;
@@ -159,12 +164,12 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
                 synchronized(this){if(paused){track.pause();while(paused && running)wait();if(!running)break;productionAt=0;productionRate=1;rateControl.recovered();track.play();}}
                 long queued=bufferedFrames();
                 long now=System.nanoTime();
-                if(unlimitedTempo){
-                    if(!wasUnlimited)uncapped.reset(now,sourceFrames,sourceBlockedNanos);
-                    float next=uncapped.update(now,sourceFrames,sourceBlockedNanos);
-                    synchronized(this){if(unlimitedTempo)tempoFactor=next;}
-                    wasUnlimited=true;
-                }else wasUnlimited=false;
+                long epoch=tempoEpoch;boolean unlimited=unlimitedTempo,adaptive=unlimited||tempoFactor>1;
+                float selected=tempoFactor,targetTempo=selected;
+                if(adaptive){
+                    if(measuredEpoch!=epoch){uncapped.reset(now,sourceFrames,sourceBlockedNanos);finite.reset(now,sourceFrames,sourceBlockedNanos,selected);measuredEpoch=epoch;}
+                    targetTempo=unlimited?uncapped.update(now,sourceFrames,sourceBlockedNanos):finite.update(now,sourceFrames,sourceBlockedNanos);
+                }else measuredEpoch=-1;
                 if(productionAt==0){productionAt=now;productionFrames=sourceFrames;}
                 else if(now-productionAt>=250000000){
                     double observed=(sourceFrames-productionFrames)*1000000000d/(44100d*(now-productionAt));
@@ -173,10 +178,13 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
                 }
                 int count;
                 synchronized(this){
-                    float requested=tempoFactor*(lockTempo?1:rateControl.update(queued,productionRate,now));
+                    // Normal play is regulated by the frame pacer. Fast-forward is not, so its fixed stretch
+                    // follows queued audio: a hitch slows the stretch instead of draining the track.
+                    float requested=targetTempo*(lockTempo&&!adaptive?1:rateControl.update(queued,adaptive?1:productionRate,now));
+                    if(epoch!=tempoEpoch)continue;productionTempo=targetTempo;
                     if(Math.abs(requested-appliedSpeed)>=0.0049f){
                         appliedSpeed=requested;rateChanges++;
-                        // Tempo changes are handled by SoundTouch; Android stays at fixed 44.1 kHz.
+                        // SoundTouch changes tempo; Android keeps its configured mixer sample rate.
                     }
                     while(size==0 && running){
                         if(paused){track.pause();while(paused && running)wait();if(!running)break;productionAt=0;productionRate=1;rateControl.recovered();track.play();}
@@ -203,7 +211,7 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
             trackReleased=true;track.release();notifyAll();
         }}
     }
-    synchronized void setPaused(boolean value){if(paused!=value){lastProducedNanos=0;if(capture!=null)traceEvent(-1,-1,-1,value?"PAUSE":"RESUME");}if(paused && !value)timestampAfter=System.nanoTime();paused=value;notifyAll();}
+    synchronized void setPaused(boolean value){if(paused!=value){tempoEpoch++;lastProducedNanos=0;if(capture!=null)traceEvent(-1,-1,-1,value?"PAUSE":"RESUME");}if(paused && !value)timestampAfter=System.nanoTime();paused=value;notifyAll();}
     synchronized long bufferedFrames(){if(trackReleased||flushedOnClose)return 0;long played=Integer.toUnsignedLong(track.getPlaybackHeadPosition());return guestFrames(size/2+inFlightFrames+Math.max(0,writtenFrames-played));}
     void pace()throws InterruptedException{
         while(running){if(failure!=null)throw failure;long wait=AudioClockPacer.waitNanos(bufferedFrames());if(wait==0)return;java.util.concurrent.TimeUnit.NANOSECONDS.sleep(wait);}
@@ -217,7 +225,7 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     }
     private java.util.Map<String,Object> loggingSnapshot(android.media.AudioDeviceInfo device){
         java.util.Map<String,Object> values=new java.util.LinkedHashMap<>();int under=underruns(), delta=Math.max(0,under-loggedUnderruns);
-        values.put("source_frames",sourceFrames);values.put("dsp_input_frames",dspInputFrames);values.put("written_frames",writtenFrames);values.put("played_frames",Integer.toUnsignedLong(playbackFrames()));values.put("input_queue_frames",inputSize/2);values.put("ready_queue_frames",size/2);values.put("in_flight_frames",inFlightFrames);values.put("buffered_frames",bufferedFrames());values.put("underruns",under);values.put("underrun_delta",delta);loggedUnderruns=under;values.put("refills",recoveries);values.put("dropped_frames",droppedFrames);values.put("stretch_ratio",appliedSpeed);values.put("tempo_factor",tempoFactor);values.put("gain",configuredGain);values.put("dsp_cpu_ns",dspCpuNanos);values.put("producer_blocked_ns",sourceBlockedNanos);values.put("worst_producer_gap_ns",maxProducerGapNanos);values.put("track_sample_rate",configuredRate);values.put("native_output_sample_rate",nativeOutputRate);values.put("track_buffer_frames",configuredBuffer);values.put("performance_mode",configuredPerformance);
+        values.put("source_frames",sourceFrames);values.put("dsp_input_frames",dspInputFrames);values.put("written_frames",writtenFrames);values.put("played_frames",Integer.toUnsignedLong(playbackFrames()));values.put("input_queue_frames",inputSize/2);values.put("ready_queue_frames",size/2);values.put("in_flight_frames",inFlightFrames);values.put("buffered_frames",bufferedFrames());values.put("underruns",under);values.put("underrun_delta",delta);loggedUnderruns=under;values.put("refills",recoveries);values.put("dropped_frames",droppedFrames);values.put("stretch_ratio",appliedSpeed);values.put("tempo_factor",tempoFactor);values.put("requested_tempo",unlimitedTempo?0f:tempoFactor);values.put("production_tempo",productionTempo);values.put("gain",configuredGain);values.put("dsp_cpu_ns",dspCpuNanos);values.put("producer_blocked_ns",sourceBlockedNanos);values.put("worst_producer_gap_ns",maxProducerGapNanos);values.put("track_sample_rate",configuredRate);values.put("native_output_sample_rate",nativeOutputRate);values.put("track_buffer_frames",configuredBuffer);values.put("performance_mode",configuredPerformance);
         if(device!=null){values.put("route_type",device.getType());values.put("route_id",device.getId());}
         if(journal!=null&&delta>0)journal.event(EngineLog.WARN,"audio.underrun_snapshot",java.util.Map.of("underruns",under));return values;
     }

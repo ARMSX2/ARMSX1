@@ -2,6 +2,7 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class AudioRateControllerTest {
+    @Test public void aRefillDoesNotRetainAnOldSlowdown(){AudioRateController c=new AudioRateController();for(int i=0;i<30;i++)c.update(0,.5,i*50_000_000L);c.recovered();assertEquals(1,c.update(4096,1,2_000_000_000L),0);}
     @Test public void healthyBufferIgnoresNoisyCpuSpeed(){AudioRateController c=new AudioRateController();for(int i=0;i<100;i++)assertEquals(1,c.update(4096,i%2==0?0.6:1.2,i*50000000L),0);}
     @Test public void rateDoesNotChangeBetweenControlIntervals(){AudioRateController c=new AudioRateController();float r=c.update(0,.5,0);for(int i=1;i<50;i++)assertEquals(r,c.update(0,.5,i*1000000L),0);}
     @Test public void depletedOutputRespondsEvenWithFullCpuSpeed(){AudioRateController c=new AudioRateController();float r=1;for(int i=0;i<20;i++)r=c.update(0,1,i*50000000L);assertTrue(r<.8);assertTrue(r>=.5);}
