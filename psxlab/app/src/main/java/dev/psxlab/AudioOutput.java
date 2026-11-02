@@ -14,6 +14,8 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     private volatile EngineLog journal;
     private int loggedUnderruns;
     private final int configuredRate,configuredBuffer,configuredPerformance;
+    /** Track rate; queue, written and played counts are in these frames, pacing sees 44.1 kHz frames. */
+    private final int outputRate;
     private final String nativeOutputRate;
     void setJournal(EngineLog value){journal=value;}
     private final boolean lockTempo;
@@ -58,21 +60,34 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
     AudioOutput(boolean lockTempo,boolean record,android.content.Context context){
         this.lockTempo=lockTempo;
         capture=record?(context==null?new AudioCapture():new AudioCapture(context)):null;
-        int minimum=AudioTrack.getMinBufferSize(Spu.SAMPLE_RATE,AudioFormat.CHANNEL_OUT_STEREO,AudioFormat.ENCODING_PCM_16BIT);
-        if(minimum<0)throw new IllegalStateException("44.1 kHz stereo audio is unavailable");
+        // Diagnostic captures are 44.1 kHz WAVs, so a capturing session keeps the guest rate.
+        outputRate=capture!=null?Spu.SAMPLE_RATE:deviceRate(context);
+        int minimum=AudioTrack.getMinBufferSize(outputRate,AudioFormat.CHANNEL_OUT_STEREO,AudioFormat.ENCODING_PCM_16BIT);
+        if(minimum<0)throw new IllegalStateException(outputRate+" Hz stereo audio is unavailable");
         track=new AudioTrack.Builder().setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
-            .setAudioFormat(new AudioFormat.Builder().setSampleRate(Spu.SAMPLE_RATE).setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
+            .setAudioFormat(new AudioFormat.Builder().setSampleRate(outputRate).setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
             // Default routing may select a deep-buffer output (about 250 ms on
             // Thor). Keep our jitter reserve, but request the interactive route.
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-            .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(Math.max(minimum*2,17640)).build();
+            .setTransferMode(AudioTrack.MODE_STREAM).setBufferSizeInBytes(Math.max(minimum*2,outputRate/10*4)).build();
         if(track.getState()!=AudioTrack.STATE_INITIALIZED){track.release();throw new IllegalStateException("Cannot initialize Android audio");}
         if(android.os.Build.VERSION.SDK_INT>=31)track.setStartThresholdInFrames(Math.min(1024,track.getBufferSizeInFrames()));
         configuredRate=track.getSampleRate();configuredBuffer=track.getBufferSizeInFrames();configuredPerformance=track.getPerformanceMode();
         android.media.AudioManager manager=context==null?null:(android.media.AudioManager)context.getSystemService(android.content.Context.AUDIO_SERVICE);
         nativeOutputRate=manager==null?"unknown":String.valueOf(manager.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE));
-        tempo=new NativeTempo();worker=new Thread(this::play,"PSX-Audio");dspWorker=new Thread(this::process,"PSX-DSP");worker.start();dspWorker.start();
+        tempo=new NativeTempo(outputRate);worker=new Thread(this::play,"PSX-Audio");dspWorker=new Thread(this::process,"PSX-DSP");worker.start();dspWorker.start();
     }
+    /** Android grants low latency only at the mixer's own rate (48 kHz on most phones). */
+    private static int deviceRate(android.content.Context context){
+        try{
+            android.media.AudioManager manager=context==null?null:(android.media.AudioManager)context.getSystemService(android.content.Context.AUDIO_SERVICE);
+            String value=manager==null?null:manager.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE);
+            int rate=value==null?0:Integer.parseInt(value.trim());
+            if(rate>=22050&&rate<=96000&&AudioTrack.getMinBufferSize(rate,AudioFormat.CHANNEL_OUT_STEREO,AudioFormat.ENCODING_PCM_16BIT)>0)return rate;
+        }catch(RuntimeException ignored){}
+        return Spu.SAMPLE_RATE;
+    }
+    private long guestFrames(long frames){return outputRate==Spu.SAMPLE_RATE?frames:frames*Spu.SAMPLE_RATE/outputRate;}
     @Override public synchronized void samples(short[] pcm,int count){
         if(failure!=null)throw failure;
         if(!running)return;
@@ -189,7 +204,7 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
         }}
     }
     synchronized void setPaused(boolean value){if(paused!=value){lastProducedNanos=0;if(capture!=null)traceEvent(-1,-1,-1,value?"PAUSE":"RESUME");}if(paused && !value)timestampAfter=System.nanoTime();paused=value;notifyAll();}
-    synchronized long bufferedFrames(){if(trackReleased||flushedOnClose)return 0;long played=Integer.toUnsignedLong(track.getPlaybackHeadPosition());return size/2+inFlightFrames+Math.max(0,writtenFrames-played);}
+    synchronized long bufferedFrames(){if(trackReleased||flushedOnClose)return 0;long played=Integer.toUnsignedLong(track.getPlaybackHeadPosition());return guestFrames(size/2+inFlightFrames+Math.max(0,writtenFrames-played));}
     void pace()throws InterruptedException{
         while(running){if(failure!=null)throw failure;long wait=AudioClockPacer.waitNanos(bufferedFrames());if(wait==0)return;java.util.concurrent.TimeUnit.NANOSECONDS.sleep(wait);}
     }
@@ -221,8 +236,8 @@ final class AudioOutput implements AutoCloseable,Spu.AudioSink {
             long age=now-timestamp.nanoTime;
             if(timestamp.nanoTime>=Math.max(lastTimestamp,timestampAfter) && age>=-20000000L && age<500000000L){
                 lastTimestamp=timestamp.nanoTime;lastClockRead=now;
-                long played=timestamp.framePosition+age*44100/1000000000L;
-                audibleSource=Math.max(audibleSource,timeline.sourceAt(Math.min(writtenFrames,played)));
+                long played=timestamp.framePosition+age*outputRate/1000000000L;
+                audibleSource=Math.max(audibleSource,timeline.sourceAt(guestFrames(Math.min(writtenFrames,played))));
             }
         }
         return lastTimestamp<0 || now-lastClockRead>=500000000L?-1:audibleSource;

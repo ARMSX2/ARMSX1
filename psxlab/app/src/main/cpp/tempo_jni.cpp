@@ -8,10 +8,12 @@ struct TempoContext {
     soundtouch::SoundTouch dsp;
     std::vector<float> buffer;
     float tempo=1;
-    TempoContext(){dsp.setSampleRate(44100);dsp.setChannels(2);dsp.setSetting(SETTING_USE_QUICKSEEK,0);dsp.setSetting(SETTING_SEQUENCE_MS,30);dsp.setSetting(SETTING_SEEKWINDOW_MS,20);dsp.setSetting(SETTING_OVERLAP_MS,10);}
+    // Quick seek keeps the overlap search affordable on small cores; it runs for every sample.
+    // The same pass converts 44.1 kHz guest audio to the device's mixer rate.
+    explicit TempoContext(int outputRate){dsp.setSampleRate(44100);dsp.setChannels(2);dsp.setSetting(SETTING_USE_QUICKSEEK,1);dsp.setSetting(SETTING_SEQUENCE_MS,30);dsp.setSetting(SETTING_SEEKWINDOW_MS,20);dsp.setSetting(SETTING_OVERLAP_MS,10);if(outputRate>0&&outputRate!=44100)dsp.setRate(44100.0/outputRate);}
 };
 static void error(JNIEnv* env,const std::exception& e){env->ThrowNew(env->FindClass("java/lang/IllegalStateException"),e.what());}
-extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_NativeTempo_create(JNIEnv* env,jclass){try{return reinterpret_cast<jlong>(new TempoContext());}catch(const std::exception& e){error(env,e);return 0;}}
+extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_NativeTempo_create(JNIEnv* env,jclass,jint outputRate){try{return reinterpret_cast<jlong>(new TempoContext(outputRate));}catch(const std::exception& e){error(env,e);return 0;}}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_NativeTempo_put(JNIEnv* env,jclass,jlong ptr,jshortArray input,jint count,jfloat tempo){
     try{auto* c=reinterpret_cast<TempoContext*>(ptr);c->buffer.resize(count);auto* pcm=env->GetShortArrayElements(input,nullptr);if(!pcm)return;for(int i=0;i<count;i++)c->buffer[i]=pcm[i]/32768.f;env->ReleaseShortArrayElements(input,pcm,JNI_ABORT);if(c->tempo!=tempo){c->tempo=tempo;c->dsp.setTempo(tempo);}c->dsp.putSamples(c->buffer.data(),count/2);}catch(const std::exception& e){error(env,e);}
 }

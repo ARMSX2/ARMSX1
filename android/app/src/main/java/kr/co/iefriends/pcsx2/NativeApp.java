@@ -32,6 +32,8 @@ public class NativeApp {
     private static volatile Surface labSurface;
     private static volatile int displayWidth, displayHeight;
     private static volatile float displayHz;
+    // The saved ADPF choice arrives before the backend exists; apply it when the backend is created.
+    private static volatile boolean adpf;
     private static final Object surfaceLock = new Object();
     private static long surfaceOwner;
     private static long nextRunToken, preparedRunToken;
@@ -143,7 +145,7 @@ public class NativeApp {
         Context context = getContext();
         if (context == null) throw new IllegalStateException("Backend context is unavailable");
         String config = new File(context.getFilesDir(), "settings.toml").getAbsolutePath();
-        if (lab == null) lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice);
+        if (lab == null) { lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice); lab.setAdpf(adpf); }
         lab.mediaResolver(source -> {
             com.armsx2.core.Ps1SafAccess.Session prepared = com.armsx2.core.Ps1SafAccess.INSTANCE.prepare(context, source, () -> !hasActiveVM());
             return new dev.psxlab.ArmSxBackend.PreparedMedia(prepared.getLaunchPath(), prepared);
@@ -213,9 +215,9 @@ public class NativeApp {
 	 *
 	 *  EXPERIMENTAL and off by default: it is a lever to A/B on a device, not a known win, and
 	 *  it can cost power for nothing on a device whose governor is already aggressive.
-	 *  Silent no-op below Android 13 (the API is dlsym'd, never linked).
-	 *  Implemented natively in frontend/perf_hint.c; persisted app-side (pref "ui.adpf"). */
-	public static void setAdpfEnabled(boolean enabled) { unsupported("setAdpfEnabled"); }
+	 *  Silent no-op below Android 12 and on devices without hint sessions.
+	 *  PSX Lab reports the CPU and GPU worker threads' frame work; persisted app-side (pref "ui.adpf"). */
+	public static void setAdpfEnabled(boolean enabled) { adpf = enabled; if (lab != null) lab.setAdpf(enabled); }
 
 	/**
 	 * Push one EmuCore setting into the base settings layer. Mirrors

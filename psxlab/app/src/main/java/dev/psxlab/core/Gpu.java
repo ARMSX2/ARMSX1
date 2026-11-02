@@ -17,6 +17,8 @@ public final class Gpu implements AutoCloseable {
     private final int internalScale,presentationMode;
     private final boolean baseVulkanOutput;
     private volatile boolean shaderPresenterFailed;
+    /** Linux thread id of the worker once it starts; zero before the first submission. */
+    public volatile int workerTid;
     private boolean displayStretch,displayInteger;
     private volatile int displayCrop;
     public void configureCrop(int mode){displayCrop=Math.max(0,Math.min(2,mode));}
@@ -149,8 +151,8 @@ public final class Gpu implements AutoCloseable {
         Arrays.fill(vram, 0);
         worker = threaded ? new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(256), r -> new Thread(()->{
-                // HD feeds a real-time display; keep driver submission ahead of background work.
-                if(scale>1)try{android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);}catch(SecurityException ignored){}
+                // Every scale feeds a real-time display; keep rasterization and submission off slow cores.
+                try{workerTid=android.os.Process.myTid();android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);}catch(RuntimeException ignored){}
                 r.run();
             }, "PSX-GPU"),
             (r, executor) -> {

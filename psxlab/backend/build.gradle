@@ -8,7 +8,7 @@ android {
     sourceSets.main {
         java.srcDirs = ['../app/src/main/java']
         java.includes = ['dev/psxlab/core/**', 'dev/psxlab/ArmSxBackend.java', 'dev/psxlab/BackendStateStore.java', 'dev/psxlab/MigrationBackup.java',
-                         'dev/psxlab/AudioOutput.java', 'dev/psxlab/AudioCapture.java', 'dev/psxlab/NativeTempo.java',
+                         'dev/psxlab/AudioOutput.java', 'dev/psxlab/AudioCapture.java', 'dev/psxlab/NativeTempo.java', 'dev/psxlab/FrameHints.java',
                          'dev/psxlab/CardStorage.java', 'dev/psxlab/FileSource.java', 'dev/psxlab/ChdSource.java']
     }
     externalNativeBuild { cmake { path '../app/src/main/cpp/CMakeLists.txt'; version '3.22.1' } }

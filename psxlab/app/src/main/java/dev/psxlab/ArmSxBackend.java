@@ -55,6 +55,7 @@ public final class ArmSxBackend {
     }
     private volatile float fps;
     private volatile float nominalFps=60;
+    private volatile boolean adpf;
     private volatile long frames,nonzero,guestClocks;
     private volatile String lastGameId="";
     private volatile int lastPc;
@@ -295,7 +296,7 @@ public final class ArmSxBackend {
     /** The host's session cancellation and this active/stop transition share this monitor. */
     public boolean run(String path,java.util.function.BooleanSupplier allowed){
         synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
-        boolean booted=false;Restore restore=null;startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=hostThermalSample=0;hostThermalStatus=-1;hostCpuPercent=hostRssMb=hostAvailableMb=-1;event("launch");
+        boolean booted=false;Restore restore=null;int priority=boostThread();startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=hostThermalSample=0;hostThermalStatus=-1;hostCpuPercent=hostRssMb=hostAvailableMb=-1;event("launch");
         try{
             options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();configureCheats();
             do{
@@ -330,13 +331,20 @@ public final class ArmSxBackend {
                 restore=restart;
             }while(!stop&&restore!=null);
         }catch(Exception e){booted=false;error(e);if(restore!=null)restore.ready().complete(false);if(restart!=null)restart.ready().complete(false);}
-        finally{performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
+        finally{restoreThread(priority);performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
         return booted;
     }
+    /** The host reuses its VM thread: raise it to the GPU worker's and DSP's level for the session only. */
+    private static int boostThread(){try{int old=android.os.Process.getThreadPriority(android.os.Process.myTid());android.os.Process.setThreadPriority(Math.min(old,android.os.Process.THREAD_PRIORITY_DISPLAY));return old;}catch(RuntimeException e){return Integer.MIN_VALUE;}}
+    private static void restoreThread(int old){if(old!=Integer.MIN_VALUE)try{android.os.Process.setThreadPriority(old);}catch(RuntimeException ignored){}}
+    public void setAdpf(boolean value){adpf=value;}
     private boolean blocked(){Surface target=surface;return paused||audioSuspended||presentationSuspended||target==null||!target.isValid();}
-    private void loop(AudioOutput output)throws Exception{
+    private void loop(AudioOutput output)throws Exception{try(FrameHints hints=new FrameHints(context)){loop(output,hints);}}
+    private void loop(AudioOutput output,FrameHints hints)throws Exception{
         FastForwardPacer fastPacer=new FastForwardPacer();
         FrameRateMeter frameRate=new FrameRateMeter();AudioAwareFramePacer pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());long last=gpu.vblanks,measured=System.nanoTime();boolean wasBlocked=false,wasFast=false;EngineLog.Frame diagnosticFrame=null;long perfCpu=0,perfEpoch=0;
+        // Frame work excludes pacing sleeps and blocked waits; the GPU worker joins once it has started.
+        long workStarted=System.nanoTime();int[] hintThreads=null;
         while(!stop&&restart==null){
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
             updateGuestAudioTracing();
@@ -344,7 +352,7 @@ public final class ArmSxBackend {
                 if(!wasBlocked&&surface!=null&&surface.isValid()&&gpu.presentationNeedsRestore()){Surface target=surface;gpu.restorePresentation(target,true,frame->{if(frame!=null)draw(target,frame);});}
                 output.setPaused(true);fastPacer.reset();wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
             }
-            if(wasBlocked){performance.reset();perfCpu=perfEpoch=0;output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
+            if(wasBlocked){workStarted=System.nanoTime();performance.reset();perfCpu=perfEpoch=0;output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
             if(fast!=wasFast){bus.spu.flushAudio();bus.spu.setAudioSink(muteFast()?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});updateAudio();output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
             if(pendingMedia!=null&&cpu.instructions>=insertAt){bus.cdrom.insert(pendingMedia.disc);if(media!=null)media.close();media=pendingMedia;pendingMedia=null;mediaTextures();}
             long ticket=performance.ticket();
@@ -360,7 +368,9 @@ public final class ArmSxBackend {
             if(flushStarted!=0)perfCpu+=System.nanoTime()-flushStarted;
             long paceStarted=diagnosticFrame==null&&ticket==0?0:System.nanoTime(),buffered=output.bufferedFrames();
             boolean accelerating=fast;if(!accelerating)fastPacer.reset();
+            if(adpf){int worker=gpu.workerTid;if(hintThreads==null||hintThreads.length==1&&worker>0)hintThreads=worker>0?new int[]{android.os.Process.myTid(),worker}:new int[]{android.os.Process.myTid()};hints.report(hintThreads,(long)(1e9/Math.max(1,nominalFps)),System.nanoTime()-workStarted);}else hints.close();
             long wait=accelerating?fastPacer.waitNanos(cpu.instructions,System.nanoTime(),fastSpeed()):pacer.waitNanos(cpu.instructions,System.nanoTime(),buffered);if(wait>0)TimeUnit.NANOSECONDS.sleep(wait);
+            workStarted=System.nanoTime();
             if(diagnosticFrame!=null)diagnosticFrame.pacing(wait,System.nanoTime()-paceStarted,buffered);
             long measuredIdle=ticket==0?0:System.nanoTime()-paceStarted,measuredCpu=perfCpu;perfCpu=0;
             int voices=0;if(ticket!=0)for(int voice=0;voice<24;voice++)if((bus.spu.read(0x1f801c0c+voice*16)&0x7fff)!=0)voices++;
@@ -385,9 +395,26 @@ public final class ArmSxBackend {
         }
     }
     private void clearSurface(){Surface target=surface;if(target==null||!target.isValid()||gpu==null)return;gpu.control(0x03000001);gpu.requestSurfaceFrame(target,false,frame->{if(frame!=null)draw(target,frame);});gpu.sync();}
+    // Software output reuses one image and lets the GPU scale it; a new full-frame Bitmap per field
+    // fed the garbage collector, and CPU filtering to a 1080p+ panel cost more than emulating the frame.
+    private final Object canvasLock=new Object();
+    private final Paint canvasPaint=new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final RectF canvasRect=new RectF();
+    private Bitmap canvasBitmap;
+    private boolean softwareCanvas;
     private void draw(Surface target,Gpu.Frame frame){
-        if(surface!=target||!target.isValid())return;Bitmap bitmap=Bitmap.createBitmap(frame.pixels(),frame.width(),frame.height(),Bitmap.Config.ARGB_8888);
-        try{Canvas canvas=target.lockCanvas(null);try{canvas.drawColor(Color.BLACK);float width=outputStretch?canvas.getWidth():Math.min(canvas.getWidth(),canvas.getHeight()*outputAspect),height=outputStretch?canvas.getHeight():width/outputAspect;if(outputInteger&&!outputStretch){int k=(int)Math.min(width/frame.width(),height/frame.height());if(k>=1){width=frame.width()*k;height=frame.height()*k;}}float x=(canvas.getWidth()-width)/2,y=(canvas.getHeight()-height)/2;canvas.drawBitmap(bitmap,null,new RectF(x,y,x+width,y+height),new Paint(Paint.FILTER_BITMAP_FLAG));}finally{target.unlockCanvasAndPost(canvas);}}catch(IllegalArgumentException|IllegalStateException ignored){}finally{bitmap.recycle();}
+        if(surface!=target||!target.isValid())return;
+        synchronized(canvasLock){
+            int w=frame.width(),h=frame.height();
+            if(canvasBitmap==null||canvasBitmap.getWidth()!=w||canvasBitmap.getHeight()!=h){if(canvasBitmap!=null)canvasBitmap.recycle();canvasBitmap=Bitmap.createBitmap(w,h,Bitmap.Config.ARGB_8888);}
+            canvasBitmap.setPixels(frame.pixels(),0,w,0,0,w,h);
+            try{Canvas canvas=lockCanvas(target);try{canvas.drawColor(Color.BLACK);float width=outputStretch?canvas.getWidth():Math.min(canvas.getWidth(),canvas.getHeight()*outputAspect),height=outputStretch?canvas.getHeight():width/outputAspect;if(outputInteger&&!outputStretch){int k=(int)Math.min(width/w,height/h);if(k>=1){width=w*k;height=h*k;}}float x=(canvas.getWidth()-width)/2,y=(canvas.getHeight()-height)/2;canvasRect.set(x,y,x+width,y+height);canvas.drawBitmap(canvasBitmap,null,canvasRect,canvasPaint);}finally{target.unlockCanvasAndPost(canvas);}}catch(IllegalArgumentException|IllegalStateException ignored){}
+        }
+    }
+    /** A device whose hardware canvas fails once keeps the CPU canvas for the rest of the process. */
+    private Canvas lockCanvas(Surface target){
+        if(!softwareCanvas)try{return target.lockHardwareCanvas();}catch(IllegalArgumentException|IllegalStateException|UnsupportedOperationException e){softwareCanvas=true;}
+        return target.lockCanvas(null);
     }
     public void surface(Surface value){surface=value;updatePresentation();if(value==null)resetButtons();event(value==null?"surface-lost":"surface-attached");wake();}
     public void pause(boolean value){paused=value;updatePresentation();if(value)resetButtons();AudioOutput out=audio;if(out!=null)out.setPaused(blocked()||muteFast());pauseCallback.accept(value);event(value?"pause":"resume");wake();}
