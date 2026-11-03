@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
+import androidx.activity.setViewTreeOnBackPressedDispatcherOwner
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -49,11 +50,12 @@ object DualScreen {
         }
     }
 
-    enum class Placement { NONE, CONTROLS_ON_SECOND, GAME_ON_SECOND, LIBRARY_ON_SECOND }
+    enum class Placement { NONE, CONTROLS_ON_SECOND, GAME_ON_SECOND, LIBRARY_ON_SECOND, SETTINGS_ON_SECOND }
 
     private const val KEY_MODE = "ui.dualScreenMode"
     private const val KEY_INFO_PANEL = "ui.dualScreenInfoPanel"
     private const val KEY_LIBRARY_ART = "ui.dualScreenLibraryArt"
+    private const val KEY_Y_SETTINGS = "ui.dualScreenYSettings"
 
     val mode = mutableStateOf(Mode.OFF)
 
@@ -62,6 +64,19 @@ object DualScreen {
 
     /** Out of a game: the library's highlighted game's box art on the second screen. */
     val libraryArt = mutableStateOf(true)
+
+    /** Y in the library opens Settings on the second screen instead of the game's menu. */
+    val ySettings = mutableStateOf(false)
+
+    /** Settings is being shown on the second screen (asked for with Y); B or Back closes it. */
+    val settingsOnSecondary = mutableStateOf(false)
+
+    /** A second display is attached and usable; kept current by the controller. */
+    val hasSecondDisplay = mutableStateOf(false)
+
+    /** True when Y should open Settings on the other screen right now. */
+    fun ySettingsAvailable(): Boolean =
+        ySettings.value && mode.value != Mode.OFF && hasSecondDisplay.value
 
     /** The main window's copy of the touch controls stands down while this is true. */
     val controlsOnSecondary = mutableStateOf(false)
@@ -76,7 +91,15 @@ object DualScreen {
             .getOrDefault(true)
         libraryArt.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_LIBRARY_ART, true) }
             .getOrDefault(true)
+        ySettings.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_Y_SETTINGS, false) }
+            .getOrDefault(false)
         com.armsx2.core.Ps1GameMedia.load()
+    }
+
+    fun setYSettings(enabled: Boolean) {
+        ySettings.value = enabled
+        if (!enabled) settingsOnSecondary.value = false
+        runCatching { MainActivityRuntime.prefs.edit().putBoolean(KEY_Y_SETTINGS, enabled).apply() }
     }
 
     fun setLibraryArt(show: Boolean) {
@@ -107,8 +130,10 @@ object DualScreen {
         touchEditMode: Boolean,
         companionShowing: Boolean,
         libraryArt: Boolean = false,
+        settingsOpen: Boolean = false,
     ): Placement = when {
         mode == Mode.OFF || !hasSecondDisplay || companionShowing -> Placement.NONE
+        !inGame && settingsOpen -> Placement.SETTINGS_ON_SECOND
         mode == Mode.GAME_MAIN && (inGame || touchEditMode) -> Placement.CONTROLS_ON_SECOND
         mode == Mode.GAME_SECOND && inGame -> Placement.GAME_ON_SECOND
         !inGame && !touchEditMode && libraryArt -> Placement.LIBRARY_ON_SECOND
@@ -158,6 +183,8 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
         this.inGame = inGame
         this.touchEditMode = touchEditMode
         this.companionShowing = companionShowing
+        // Settings on the second screen belongs to the library; a game starting closes it.
+        if (inGame) DualScreen.settingsOnSecondary.value = false
         refresh()
     }
 
@@ -197,9 +224,11 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
     private fun refresh() {
         if (!started || closed || activity.isFinishing || activity.isDestroyed) { teardown(); return }
         val display = secondDisplay()
+        DualScreen.hasSecondDisplay.value = display != null
+        if (display == null) DualScreen.settingsOnSecondary.value = false
         val wanted = DualScreen.placement(
             DualScreen.mode.value, display != null, inGame, touchEditMode, companionShowing,
-            DualScreen.libraryArt.value)
+            DualScreen.libraryArt.value, DualScreen.settingsOnSecondary.value)
         if (wanted == DualScreen.Placement.NONE || display == null) { teardown(); return }
         if (wanted == placement && display.displayId == displayId && presentation?.isShowing == true) return
         teardown()
@@ -219,7 +248,26 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
                 window?.decorView?.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or
                     View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 window?.decorView?.let { attachOwners(it) }
-                setContentView(host ?: if (wanted == DualScreen.Placement.LIBRARY_ON_SECOND)
+                setContentView(host ?: if (wanted == DualScreen.Placement.SETTINGS_ON_SECOND)
+                    composeView(context) {
+                        // The pad drives this Settings through the Activity's key routing, but the
+                        // window itself is never focused, so the selection outline (which hides in
+                        // unfocused windows) must be told it is the one being driven.
+                        val base = androidx.compose.ui.platform.LocalWindowInfo.current
+                        val driven = androidx.compose.runtime.remember(base) {
+                            object : androidx.compose.ui.platform.WindowInfo by base {
+                                override val isWindowFocused: Boolean get() = true
+                            }
+                        }
+                        CompositionLocalProvider(androidx.compose.ui.platform.LocalWindowInfo provides driven) {
+                        com.armsx2.ui.settingshub.SettingsScreen(
+                            initialCategory = com.armsx2.navigation.SettingsCategory.General,
+                            game = null,
+                            onBack = { DualScreen.settingsOnSecondary.value = false },
+                        )
+                        }
+                    }
+                else if (wanted == DualScreen.Placement.LIBRARY_ON_SECOND)
                     composeView(context) { com.armsx2.ui.DualScreenLibraryCover() }
                 else composeView(context) {
                     // Under the controls, and out of the way while the layout is being edited.
@@ -246,7 +294,7 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
         // Flip these only once the window exists: the composition reacts by dropping its own copy.
         when (wanted) {
             DualScreen.Placement.CONTROLS_ON_SECOND -> DualScreen.controlsOnSecondary.value = true
-            DualScreen.Placement.LIBRARY_ON_SECOND -> Unit
+            DualScreen.Placement.LIBRARY_ON_SECOND, DualScreen.Placement.SETTINGS_ON_SECOND -> Unit
             DualScreen.Placement.GAME_ON_SECOND -> {
                 DualScreen.gameOnSecondary.value = true
                 // A surface with no parent was freed by an earlier teardown that the composition
@@ -263,6 +311,7 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
         view.setViewTreeLifecycleOwner(activity)
         view.setViewTreeViewModelStoreOwner(activity)
         view.setViewTreeSavedStateRegistryOwner(activity)
+        view.setViewTreeOnBackPressedDispatcherOwner(activity)
     }
 
     private fun composeView(context: Context, content: @androidx.compose.runtime.Composable () -> Unit): View =
@@ -271,7 +320,13 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setContent {
                 com.armsx2.ui.theme.Armsx2Theme(forceDark = true) {
-                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                    CompositionLocalProvider(
+                    LocalLayoutDirection provides LayoutDirection.Ltr,
+                    // This window's context is a display context, not the Activity: file pickers and
+                    // back handlers in Settings must still reach the Activity's registries.
+                    androidx.activity.compose.LocalActivityResultRegistryOwner provides activity,
+                    androidx.activity.compose.LocalOnBackPressedDispatcherOwner provides activity,
+                ) {
                         Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)) {
                             content()
                         }

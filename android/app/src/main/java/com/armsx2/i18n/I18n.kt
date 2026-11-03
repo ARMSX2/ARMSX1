@@ -779,6 +779,8 @@ val EN: Map<String, String> = mapOf(
     "overlay.dualScreen.off" to "Off",
     "overlay.dualScreen.gameMain" to "Game on this screen",
     "overlay.dualScreen.gameSecond" to "Game on other screen",
+    "dualScreen.ySettings.label" to "Y opens Settings on the other screen",
+    "dualScreen.ySettings.description" to "In the library, Y opens Settings on the second screen while the library stays on this one. B closes it. Off: Y opens the highlighted game's menu.",
     "dualScreen.media.snaps.label" to "Screenshots",
     "dualScreen.media.snaps.description" to "In-game screenshots behind the box art, from the libretro thumbnail set. Matched on your game file's name.",
     "dualScreen.media.titles.label" to "Title screens",

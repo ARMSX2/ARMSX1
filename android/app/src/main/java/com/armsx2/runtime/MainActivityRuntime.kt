@@ -3537,7 +3537,8 @@ open class MainActivityRuntime : ComponentActivity() {
                 val dualEdit = com.armsx2.ui.touch.TouchControls.editMode.value
                 val dualCompanion = com.armsx2.companion.CtrCompanion.showing.value
                 androidx.compose.runtime.LaunchedEffect(
-                    dualInGame, dualEdit, dualCompanion, DualScreen.mode.value, DualScreen.libraryArt.value
+                    dualInGame, dualEdit, dualCompanion, DualScreen.mode.value, DualScreen.libraryArt.value,
+                    DualScreen.settingsOnSecondary.value,
                 ) {
                     dualScreen.update(dualInGame, dualEdit, dualCompanion)
                 }
@@ -4210,9 +4211,12 @@ open class MainActivityRuntime : ComponentActivity() {
             // model (HomeInputController). It must yield when something is layered
             // ON TOP of the library — the nav drawer, an in-game manager screen, or
             // the pause overlay — so those own the pad instead of the grid behind.
+            // Settings open on the second screen owns the pad; the library behind it stays put
+            // and the keys fall through to the SettingsControllerNav registry below.
             if (!WindowImpl.overlayVisible.value &&
                 WindowImpl.inGameScreen.value == null &&
                 !com.armsx2.navigation.UiNavigator.drawerOpen.value &&
+                !DualScreen.settingsOnSecondary.value &&
                 com.armsx2.ui.home.HomeInputController.active()
             ) {
                 // Square button (or the Menu hotkey) opens settings for the
@@ -4229,8 +4233,15 @@ open class MainActivityRuntime : ComponentActivity() {
                 // to be swallowed here and do nothing: the library search it once opened (#267) is
                 // reached from the Search row instead. Matches ARMSX2/ARMSX3.
                 if (kc == KeyEvent.KEYCODE_BUTTON_Y) {
-                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)
-                        com.armsx2.ui.home.HomeInputController.openSelectedMenu()
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        // Dual Screen tab option: Settings on the other screen, library stays on this one.
+                        if (DualScreen.ySettingsAvailable()) {
+                            com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.SUBMENU)
+                            DualScreen.settingsOnSecondary.value = true
+                        } else {
+                            com.armsx2.ui.home.HomeInputController.openSelectedMenu()
+                        }
+                    }
                     return true
                 }
                 // Shoulder buttons drive the touch-only toolbar toggles so the
@@ -5202,6 +5213,10 @@ open class MainActivityRuntime : ComponentActivity() {
     private fun handleFrontendBack() {
         com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.BACK)
         if (com.armsx2.ui.settings.ControllerTypePickerNav.back()) return
+        if (DualScreen.settingsOnSecondary.value) {
+            DualScreen.settingsOnSecondary.value = false
+            return
+        }
         val nav = com.armsx2.navigation.UiNavigator
         val achievementsMenu = nav.route.value == com.armsx2.navigation.AppRoute.Achievements ||
             WindowImpl.inGameScreen.value == com.armsx2.ui.InGameScreen.Achievements

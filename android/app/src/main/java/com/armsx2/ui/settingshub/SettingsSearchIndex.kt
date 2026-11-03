@@ -78,6 +78,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("overlay.dualScreen.label", true, SettingsCategory.DualScreen),
     SettingsSearchEntry("dualScreen.infoPanel.label", true, SettingsCategory.DualScreen),
     SettingsSearchEntry("dualScreen.libraryArt.label", true, SettingsCategory.DualScreen),
+    SettingsSearchEntry("dualScreen.ySettings.label", true, SettingsCategory.DualScreen),
     SettingsSearchEntry("dualScreen.media.snaps.label", true, SettingsCategory.DualScreen),
     SettingsSearchEntry("dualScreen.media.titles.label", true, SettingsCategory.DualScreen),
     SettingsSearchEntry("dualScreen.media.fanArt.label", true, SettingsCategory.DualScreen),

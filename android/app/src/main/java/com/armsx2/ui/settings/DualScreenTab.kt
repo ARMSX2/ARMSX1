@@ -52,6 +52,12 @@ fun DualScreenTab() {
             value = DualScreen.libraryArt.value,
             description = str("dualScreen.libraryArt.description"),
         ) { DualScreen.setLibraryArt(it) }
+        SettingsDivider()
+        ToggleRow(
+            label = str("dualScreen.ySettings.label"),
+            value = DualScreen.ySettings.value,
+            description = str("dualScreen.ySettings.description"),
+        ) { DualScreen.setYSettings(it) }
 
         // Media behind the box art while browsing. Each source can be dropped on its own.
         SettingsDivider()
