@@ -104,9 +104,14 @@ void main(){ivec2 p=ivec2(gl_GlobalInvocationID.xy);if(p.x>=display.z||p.y>=disp
 static const char* HD_RASTER_VERTEX=R"GLSL(#version 310 es
 precision highp int;precision highp float;
 layout(std430,binding=1) readonly buffer Commands {int q[];};
-flat out int primitive;
+// Per-primitive constants for the fragment shader. Reading them here, six times per primitive, replaces
+// ~30 storage-buffer loads per pixel, which mid-range Adreno GPUs pay for heavily at 3x and above.
+flat out ivec4 pInfo,pBounds,pStart,pGx,pGy,pExtra,pEnv;flat out ivec4 pEdge[3];
 uniform int scale;
-void main(){primitive=gl_InstanceID;int at=primitive*64;const ivec2 corners[6]=ivec2[6](ivec2(0,0),ivec2(1,0),ivec2(0,1),ivec2(0,1),ivec2(1,0),ivec2(1,1));ivec2 c=corners[gl_VertexID];vec2 p=vec2(c.x==0?q[at+4]*scale:(q[at+6]+1)*scale,c.y==0?q[at+5]*scale:(q[at+7]+1)*scale);if(q[at]==0){int vertex=gl_VertexID<3?gl_VertexID:0;vec2 a=vec2(q[at+43],q[at+44]),b=vec2(q[at+45],q[at+46]),d=vec2(q[at+47],q[at+48]);vec2 ab=b-a,ad=d-a,bd=d-b;float area=ab.x*ad.y-ab.y*ad.x,longest=max(dot(ab,ab),max(dot(ad,ad),dot(bd,bd)));
+void main(){int at=gl_InstanceID*64;
+ pInfo=ivec4(q[at],q[at+1],q[at+2],q[at+3]);pBounds=ivec4(q[at+4],q[at+5],q[at+6],q[at+7]);for(int i=0;i<3;i++)pEdge[i]=ivec4(q[at+16+i*4],q[at+17+i*4],q[at+18+i*4],q[at+19+i*4]);
+ pStart=ivec4(q[at+28],q[at+29],q[at+30],q[at+31]);pGx=ivec4(q[at+33],q[at+34],q[at+35],q[at+36]);pGy=ivec4(q[at+38],q[at+39],q[at+40],q[at+41]);pExtra=ivec4(q[at+32],q[at+37],q[at+42],q[at+9]);pEnv=ivec4(q[at+10],q[at+14],0,0);
+ const ivec2 corners[6]=ivec2[6](ivec2(0,0),ivec2(1,0),ivec2(0,1),ivec2(0,1),ivec2(1,0),ivec2(1,1));ivec2 c=corners[gl_VertexID];vec2 p=vec2(c.x==0?q[at+4]*scale:(q[at+6]+1)*scale,c.y==0?q[at+5]*scale:(q[at+7]+1)*scale);if(q[at]==0){int vertex=gl_VertexID<3?gl_VertexID:0;vec2 a=vec2(q[at+43],q[at+44]),b=vec2(q[at+45],q[at+46]),d=vec2(q[at+47],q[at+48]);vec2 ab=b-a,ad=d-a,bd=d-b;float area=ab.x*ad.y-ab.y*ad.x,longest=max(dot(ab,ab),max(dot(ad,ad),dot(bd,bd)));
  // Very thin triangles retain their bounding quad to avoid precision loss in mitres.
  if(area*area>=longest*longest*0.0004){vec2 v=vertex==0?a:vertex==1?b:d,previous=vertex==0?d:vertex==1?a:b,next=vertex==0?b:vertex==1?d:a;
  // Rasterize the triangle conservatively, then retain the exact integer edge tests.
@@ -141,36 +146,36 @@ static const char* HD_RASTER_FRAGMENT=R"GLSL(#version 310 es
 #extension GL_EXT_shader_framebuffer_fetch : require
 precision highp int;precision highp float;
 layout(std430,binding=0) readonly buffer Vram {uint ram[];};
-layout(std430,binding=1) readonly buffer Commands {int q[];};
 layout(location=0) inout highp uvec4 destination;
-flat in int primitive;
+// type, op, clut, dither | bounds | edges (lines: start, delta, steps) | colour/uv start and gradients | page | window, mask.
+flat in ivec4 pInfo,pBounds,pStart,pGx,pGy,pExtra,pEnv;flat in ivec4 pEdge[3];
 uniform int scale;
-int e(int at,int n){return q[at+8+n];}
 int floorDiv(int a,int b){return a/b-((a%b)<0?1:0);}
 int blend(int back,int front,int mode){if(mode==0)return(back>>1)+(front>>1);if(mode==1)return min(31,back+front);if(mode==2)return max(0,back-front);return min(31,back+(front>>2));}
-int texturePixel(int at,int u,int v,int clut){int window=e(at,2),mx=(window&31)*8,my=((window>>5)&31)*8;
+int texturePixel(int u,int v,int clut){int window=pEnv.x,mx=(window&31)*8,my=((window>>5)&31)*8;
  u=((u&255)&~mx)|(((window>>10)&31)*8&mx);v=((v&255)&~my)|(((window>>15)&31)*8&my);
- int page=e(at,1),x=(page&15)*64,y=((page>>4)&1)*256+v,depth=(page>>7)&3;
+ int page=pExtra.w,x=(page&15)*64,y=((page>>4)&1)*256+v,depth=(page>>7)&3;
  if(depth>=2)return int(ram[(y&511)*1024+((x+u)&1023)]);
  int packed=int(ram[(y&511)*1024+((x+(u>>(depth==0?2:1)))&1023)]);
  int index=depth==0?(packed>>((u&3)*4))&15:(packed>>((u&1)*8))&255;
  return int(ram[((clut>>6)&511)*1024+(((clut&63)*16+index)&1023)]);
 }
 void drawAt(int x,int y){
- {int at=primitive*64;if(x<q[at+4]*scale||y<q[at+5]*scale||x>=(q[at+6]+1)*scale||y>=(q[at+7]+1)*scale)discard;
-  int dx=x/scale-q[at+4],dy=y/scale-q[at+5],sx=x%scale,sy=y%scale,type=q[at],op=q[at+1];ivec3 color;ivec2 uv=ivec2(0);
-  if(type==0){bool inside=true;for(int edge=0;edge<3;edge++){int p=at+16+edge*4;int w=(q[p]+q[p+1]*dx+q[p+2]*dy)*scale+q[p+1]*sx+q[p+2]*sy;if(w<0||(w==0&&q[p+3]==0))inside=false;}if(!inside)discard;}
-  if(type<2){int values[5];for(int i=0;i<5;i++)values[i]=int(uint(q[at+28+i])+uint(q[at+33+i])*uint(dx)+uint(q[at+38+i])*uint(dy)+uint((q[at+33+i]/scale)*sx+(q[at+33+i]%scale)*sx/scale+(q[at+38+i]/scale)*sy+(q[at+38+i]%scale)*sy/scale))>>16;color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);}
-  else{int ax=q[at+16],ay=q[at+17],lx=q[at+18],ly=q[at+19],steps=q[at+20];int i=abs(lx)>=abs(ly)?(x/scale-ax)*(lx<0?-1:1):(y/scale-ay)*(ly<0?-1:1);if(i<0||i>steps)discard;
+ {if(x<pBounds.x*scale||y<pBounds.y*scale||x>=(pBounds.z+1)*scale||y>=(pBounds.w+1)*scale)discard;
+  int dx=x/scale-pBounds.x,dy=y/scale-pBounds.y,sx=x%scale,sy=y%scale,type=pInfo.x,op=pInfo.y;ivec3 color;ivec2 uv=ivec2(0);
+  if(type==0){bool inside=true;for(int edge=0;edge<3;edge++){ivec4 c=pEdge[edge];int w=(c.x+c.y*dx+c.z*dy)*scale+c.y*sx+c.z*sy;if(w<0||(w==0&&c.w==0))inside=false;}if(!inside)discard;}
+  if(type<2){int starts[5]=int[5](pStart.x,pStart.y,pStart.z,pStart.w,pExtra.x),gx[5]=int[5](pGx.x,pGx.y,pGx.z,pGx.w,pExtra.y),gy[5]=int[5](pGy.x,pGy.y,pGy.z,pGy.w,pExtra.z);
+   int values[5];for(int i=0;i<5;i++)values[i]=int(uint(starts[i])+uint(gx[i])*uint(dx)+uint(gy[i])*uint(dy)+uint((gx[i]/scale)*sx+(gx[i]%scale)*sx/scale+(gy[i]/scale)*sy+(gy[i]%scale)*sy/scale))>>16;color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);}
+  else{int ax=pEdge[0].x,ay=pEdge[0].y,lx=pEdge[0].z,ly=pEdge[0].w,steps=pEdge[1].x;int i=abs(lx)>=abs(ly)?(x/scale-ax)*(lx<0?-1:1):(y/scale-ay)*(ly<0?-1:1);if(i<0||i>steps)discard;
    int px=steps==0?ax:ax+floorDiv(lx*i+steps/2,steps),py=steps==0?ay:ay+floorDiv(ly*i+steps/2,steps);if(px!=x/scale||py!=y/scale)discard;
-   for(int k=0;k<3;k++)color[k]=q[at+28+k]+(steps==0?0:q[at+33+k]*i/steps);
+   for(int k=0;k<3;k++)color[k]=pStart[k]+(steps==0?0:pGx[k]*i/steps);
   }
-  int address=y*(1024*scale)+x,back=int(destination.r);if((e(at,6)&2)!=0&&(back&32768)!=0)discard;
+  int back=int(destination.r);if((pEnv.y&2)!=0&&(back&32768)!=0)discard;
   bool textured=(op&4)!=0,semi=(op&2)!=0;int mask=0;
-  if(textured){int texel=texturePixel(at,uv.x,uv.y,q[at+2]);if(texel==0)discard;mask=texel&32768;semi=semi&&mask!=0;ivec3 tex=ivec3(texel&31,(texel>>5)&31,(texel>>10)&31);color=(op&1)!=0?tex*8:(tex*color)>>4;}
-  const int dither[16]=int[16](-4,0,-3,1,2,-2,3,-1,-3,1,-4,0,3,-1,2,-2);int delta=q[at+3]!=0?dither[((y/scale)&3)*4+((x/scale)&3)]:0;color=clamp((color+delta)>>3,ivec3(0),ivec3(31));
-  if(semi){int mode=(e(at,1)>>5)&3;for(int k=0;k<3;k++)color[k]=blend((back>>(k*5))&31,color[k],mode);}
-  destination=uvec4(uint(color.r|(color.g<<5)|(color.b<<10)|mask|((e(at,6)&1)<<15)),0,0,0);
+  if(textured){int texel=texturePixel(uv.x,uv.y,pInfo.z);if(texel==0)discard;mask=texel&32768;semi=semi&&mask!=0;ivec3 tex=ivec3(texel&31,(texel>>5)&31,(texel>>10)&31);color=(op&1)!=0?tex*8:(tex*color)>>4;}
+  const int dither[16]=int[16](-4,0,-3,1,2,-2,3,-1,-3,1,-4,0,3,-1,2,-2);int delta=pInfo.w!=0?dither[((y/scale)&3)*4+((x/scale)&3)]:0;color=clamp((color+delta)>>3,ivec3(0),ivec3(31));
+  if(semi){int mode=(pExtra.w>>5)&3;for(int k=0;k<3;k++)color[k]=blend((back>>(k*5))&31,color[k],mode);}
+  destination=uvec4(uint(color.r|(color.g<<5)|(color.b<<10)|mask|((pEnv.y&1)<<15)),0,0,0);
  }
 }
 
