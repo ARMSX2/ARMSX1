@@ -199,7 +199,7 @@ public final class ArmSxBackend {
             if(!(source instanceof PbpDisc)&&!(source instanceof ChdSource)&&new String(source.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
                 disc=null;byte[] header=source.read(0,2048);int size=ExeLoader.le(header,28);
                 if(size<4||size>2*1024*1024)throw new IOException("Invalid executable size");executable=source.read(0,size+2048);
-            }else{disc=source instanceof PbpDisc?new IsoDisc((SectorSource)source):new IsoDisc(source);executable=disc.bootExecutable();}
+            }else{disc=source instanceof PbpDisc||source instanceof ChdSource chd&&chd.hasTracks()?new IsoDisc((SectorSource)source):new IsoDisc(source);executable=disc.bootExecutable();}
         }
         Media(CueDisc cue)throws IOException{this.source=null;this.cue=cue;disc=new IsoDisc((SectorSource)cue);executable=disc.bootExecutable();}
         public void close()throws IOException{if(cue!=null)cue.close();else source.close();}

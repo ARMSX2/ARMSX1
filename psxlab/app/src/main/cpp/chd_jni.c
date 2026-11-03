@@ -55,3 +55,24 @@ JNIEXPORT void JNICALL Java_dev_psxlab_ChdSource_closeNative(JNIEnv *env,jclass 
 JNIEXPORT jlong JNICALL Java_dev_psxlab_ChdSource_lengthNative(JNIEnv *env,jclass cls,jlong handle){
     (void)env;(void)cls;reader *r=(reader*)(intptr_t)handle;return (jlong)chd_get_header(r->chd)->logicalbytes;
 }
+
+/* Track table from CHT2 (or older CHTR) metadata: {audio, frames, pregap, pregap stored, postgap} per track.
+ * Empty when the CHD has no CD track metadata; the caller then keeps the flat single-track layout. */
+JNIEXPORT jintArray JNICALL Java_dev_psxlab_ChdSource_tracksNative(JNIEnv *env,jclass cls,jlong handle){
+    (void)cls;reader *r=(reader*)(intptr_t)handle;
+    jint values[99*5];int count=0;char meta[256];
+    for(uint32_t index=0;index<99;index++){
+        uint32_t length=0,tag=0;uint8_t flags=0;memset(meta,0,sizeof(meta));
+        int track=0,frames=0,pregap=0,postgap=0;char type[64]={0},subtype[64]={0},pgtype[64]={0},pgsub[64]={0};
+        if(chd_get_metadata(r->chd,CDROM_TRACK_METADATA2_TAG,index,meta,sizeof(meta)-1,&length,&tag,&flags)==CHDERR_NONE){
+            if(sscanf(meta,CDROM_TRACK_METADATA2_FORMAT,&track,type,subtype,&frames,&pregap,pgtype,pgsub,&postgap)!=8)break;
+        }else if(chd_get_metadata(r->chd,CDROM_TRACK_METADATA_TAG,index,meta,sizeof(meta)-1,&length,&tag,&flags)==CHDERR_NONE){
+            if(sscanf(meta,CDROM_TRACK_METADATA_FORMAT,&track,type,subtype,&frames)!=4)break;
+        }else break;
+        if(track!=(int)index+1||frames<=0)break;
+        jint *v=values+count*5;v[0]=strcmp(type,"AUDIO")==0;v[1]=frames;v[2]=pregap;v[3]=pgtype[0]=='V';v[4]=postgap;count++;
+    }
+    jintArray out=(*env)->NewIntArray(env,count*5);
+    if(out&&count)(*env)->SetIntArrayRegion(env,out,0,count*5,values);
+    return out;
+}
