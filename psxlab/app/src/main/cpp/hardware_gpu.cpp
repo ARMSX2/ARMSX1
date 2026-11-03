@@ -18,6 +18,7 @@
 #include "gpu_stage_timer.h"
 #include <deque>
 extern bool psxVulkanSharedSupported(jlong);
+extern bool psxVulkanSharedFrameReady(jlong);
 extern bool psxVulkanSharedAsyncSupported(jlong);
 extern bool psxVulkanPresentShared(JNIEnv*,jlong,jobject,AHardwareBuffer*,int,int,bool,int);
 extern bool psxVulkanPresentRgba(JNIEnv*,jlong,jobject,const uint32_t*,int,int,bool);
@@ -351,6 +352,12 @@ public:
     bool presentResolved(JNIEnv* env,jobject surface,const int* state,jlong vulkan){
         ANativeWindow* target=ANativeWindow_fromSurface(env,surface);if(!target)return false;int sw=ANativeWindow_getWidth(target),sh=ANativeWindow_getHeight(target);auto dimensions=enhancedDimensions(state);auto rect=psxDisplayRect(sw,sh,dimensions.first,dimensions.second,outputAspect,outputStretch,outputInteger);bool nativeMovie=(state[0]&0x200000)!=0;int w=(scale==1||nativeMovie)&&vulkan?dimensions.first/scale:rect.w,h=(scale==1||nativeMovie)&&vulkan?dimensions.second/scale:rect.h;if(w<1||h<1){ANativeWindow_release(target);throw std::runtime_error("HD target surface has no dimensions");}
         if(unchanged(env,surface,target,state,sw,sh)&&(!vulkan||!psxVulkanNeedsPresent(vulkan))){reusedFrames++;ANativeWindow_release(target);return true;}
+        // Keep guest drawing ordered, but avoid preparing another shared picture
+        // while Vulkan still owns the previous frame's command resources. Check
+        // before flipping/allocating the AHB or creating a producer sync fd.
+        if(vulkan&&psxVulkanSharedSupported(vulkan)&&!psxVulkanSharedFrameReady(vulkan)){
+            ANativeWindow_release(target);current();flush();flushHd();limitFrames();return false;
+        }
         ANativeWindow* identity=target;
         sharedFlip=!sharedFlip;activeShared=sharedFlip?&sharedOutput:&sharedOutputNext;bool shared=(!vulkan||psxVulkanSharedSupported(vulkan))&&renderShared(state,w,h,!vulkan,vulkan&&psxVulkanSharedAsyncSupported(vulkan));
         if(vulkan){auto native=enhancedDimensions(state);psxVulkanNativeDimensions(vulkan,native.first/scale,native.second/scale);ANativeWindow_release(target);bool shown;if(shared)shown=psxVulkanPresentShared(env,vulkan,surface,activeShared->buffer,w,h,state[7],sharedReadyFd);else{resolve(state,w,h);shown=psxVulkanPresentRgba(env,vulkan,surface,resolved.data(),w,h,state[7]);}if(shown){remember(env,surface,identity,state,sw,sh);presented++;if(nativeMovie)nativeMovies++;if(shared){sharedFrames++;if(sharedReadyFd>=0)asyncFrames++;}current();limitFrames();}return shown;}

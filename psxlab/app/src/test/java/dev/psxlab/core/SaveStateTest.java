@@ -64,7 +64,7 @@ public class SaveStateTest {
         try(Gpu gpu=new Gpu(false)){
             Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);
             byte[] before=SaveState.capture(cpu,bus,gpu,"timeline");
-            gpu.workerTid=4321;gpu.primitives=99;gpu.queueFullNanos=1;gpu.drawNanos=2;gpu.displayWaitNanos=3;gpu.displayConvertNanos=4;gpu.displayPresentNanos=5;gpu.displayPresentCpuNanos=6;gpu.displays=7;
+            gpu.workerTid=4321;gpu.primitives=99;gpu.queueFullNanos=1;gpu.drawNanos=2;gpu.displayWaitNanos=3;gpu.displayConvertNanos=4;gpu.displayPresentNanos=5;gpu.displayPresentCpuNanos=6;gpu.displays=7;gpu.rejectedDisplays=8;
             assertArrayEquals(before,SaveState.capture(cpu,bus,gpu,"timeline"));
             SaveState.restore(before,cpu,bus,gpu,"timeline");assertEquals(4321,gpu.workerTid);
         }
