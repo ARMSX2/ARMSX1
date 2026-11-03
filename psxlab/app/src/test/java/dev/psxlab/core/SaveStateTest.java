@@ -69,6 +69,14 @@ public class SaveStateTest {
             SaveState.restore(before,cpu,bus,gpu,"timeline");assertEquals(4321,gpu.workerTid);
         }
     }
+    @Test public void cdReportCountersAreNotSaveState()throws Exception{
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu,new PadState(),false);Cpu cpu=new Cpu(bus);
+            byte[] before=SaveState.capture(cpu,bus,gpu,"cd");
+            bus.cdrom.dataSectors=5;bus.cdrom.lostSectors=2;bus.cdrom.overwrittenReads=3;bus.cdrom.lastLostLba=40;bus.cdrom.lastOverwriteLba=41;
+            assertArrayEquals(before,SaveState.capture(cpu,bus,gpu,"cd"));
+        }
+    }
     @Test public void statesThatSavedTheGpuWorkerThreadIdStillLoad()throws Exception{
         try(Gpu gpu=new Gpu(false)){
             StateCodec.Node saved=StateCodec.capture(gpu);saved.fields.put("workerTid",StateCodec.capture(Integer.valueOf(1234)));gpu.workerTid=77;

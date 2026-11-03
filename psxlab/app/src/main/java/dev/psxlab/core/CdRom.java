@@ -29,6 +29,11 @@ public final class CdRom {
     private boolean sectorPending;
     private boolean irqAsserted;
     public long commands,commandOverwrites,sectorsRead,dmaBytes,xaSectors,xaFrames,xaDroppedFrames,cddaSectors,cddaFrames;
+    /** Report counters, not machine state: data sectors offered to the game, sectors replaced before their
+     * data-ready interrupt was raised, and data FIFOs replaced while the game had not finished reading them. */
+    public long dataSectors,lostSectors,overwrittenReads;
+    public int lastLostLba=-1,lastOverwriteLba=-1;
+    public int modeRegister(){return mode;}
     private final XaDecoder xa=new XaDecoder();
     private final short[] audio=new short[65536];
     private int audioHead,audioSize,xaFile=-1,xaChannel=-1;
@@ -200,7 +205,12 @@ public final class CdRom {
                             }else if(traceSink!=null)traceSink.accept("XA_SKIP reason="+(filtered&&!matches?"filter":"channel_range")+" lba="+(readLocation-1)+" file="+(lastSector[16]&255)+" channel="+(lastSector[17]&255));
                         }else{
                             if(realtimeAudio && traceSink!=null)traceSink.accept("XA_SKIP reason=decoder_disabled lba="+(readLocation-1)+" file="+(lastSector[16]&255)+" channel="+(lastSector[17]&255));
-                            if(!(realtimeAudio && filtered)){lastDataSector=lastSector;sectorPending=true;if(request)loadData();}
+                            if(!(realtimeAudio && filtered)){
+                                dataSectors++;
+                                if(sectorPending){lostSectors++;lastLostLba=readLocation-1;if(traceSink!=null)traceSink.accept("SECTOR_LOST lba="+(readLocation-2)+" replaced_by="+(readLocation-1)+" irq="+interrupt);}
+                                if(request&&dataPosition<data.length){overwrittenReads++;lastOverwriteLba=readLocation-1;if(traceSink!=null)traceSink.accept("FIFO_OVERWRITE lba="+(readLocation-1)+" unread="+(data.length-dataPosition));}
+                                lastDataSector=lastSector;sectorPending=true;if(request)loadData();
+                            }
                         }
                     }
                 }catch(IOException e){reading=false;lastMediaError=e.getMessage();error(0x80);}
