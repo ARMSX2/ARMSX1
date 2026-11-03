@@ -144,6 +144,12 @@ private:
         auto [u0,u1]=textureRange(p,3,mx,((window>>10)&31)*8&mx,scale>1);auto [v0,v1]=textureRange(p,4,my,((window>>15)&31)*8&my,scale>1);
         split(out,((page&15)*64+(u0>>shift))&1023,(((page>>4)&1)*256+v0)&511,(u1>>shift)-(u0>>shift)+1,v1-v0+1);
         if(depth<2){int clut=p.q[2];split(out,(clut&63)*16,(clut>>6)&511,depth==0?16:256,1);}return out;}
+    // Everything a textured primitive can sample: its whole texture page and CLUT row. A superset of
+    // textureReads(): the snapshot and partial resolve of a feedback batch must not depend on exact UV
+    // bounds, or a texel just outside them is read from rows that were never copied (they show black).
+    RectList pageReads(const Primitive& p)const{RectList out;if(!(p.q[1]&4)||!p.bounds().valid())return out;int page=p.q[9],depth=(page>>7)&3,shift=depth>=2?0:depth==1?1:2;
+        split(out,(page&15)*64,((page>>4)&1)*256,256>>shift,256);
+        if(depth<2){int clut=p.q[2];split(out,(clut&63)*16,(clut>>6)&511,depth==0?16:256,1);}return out;}
     bool feedback(const Primitive& p,const RectList& ranges)const{for(const Rect& r:ranges)if(r.intersects(p.bounds()))return true;return false;}
     void add(const Primitive& p,const RectList& newReads){if(!p.bounds().valid())return;bool hazard=false;for(const auto& r:newReads)for(const auto& w:writes)hazard|=r.intersects(w);for(const auto& w:reads)hazard|=w.intersects(p.bounds());if(hazard||pendingCount==32)flush();pending[pendingCount++]=p;reads.insert(reads.end(),newReads.begin(),newReads.end());writes.push_back(p.bounds());}
     Primitive base(int op,int clut,bool dither,const int* env,Rect bounds,int type){Primitive p;p.q[0]=type;p.q[1]=op;p.q[2]=clut;p.q[3]=dither;p.q[4]=bounds.x0;p.q[5]=bounds.y0;p.q[6]=bounds.x1;p.q[7]=bounds.y1;std::copy_n(env,7,p.q+8);return p;}
@@ -190,10 +196,10 @@ private:
         if(!area.valid())return;
         NativeTiming::Scope measured(timing,NativeTiming::GPU_RESOLVE);current();GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::RESOLVE);bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,area.x0,area.y0,area.x1,area.y1);glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((area.x1-area.x0+8)/8,(area.y1-area.y0+8)/8,1);barrier();nativeCopies++;feedbackResolvedTiles+=tiles;
     }
-    // Tiles a pending feedback batch reads (padded a row each way) or draws.
+    // Tiles a pending feedback batch can sample (whole texture pages and CLUTs, padded a row) or draws.
     std::array<uint64_t,32> feedbackTiles()const{std::array<uint64_t,32> tiles{};for(const Rect& r:reads)addTiles(tiles,{r.x0,std::max(0,r.y0-1),r.x1,std::min(511,r.y1+1)});for(const Rect& w:writes)addTiles(tiles,w);return tiles;}
     // The draw shader reads only texels (texture page and CLUT) through the snapshot; the destination comes from
-    // live VRAM. Copy whole rows spanning those reads, padded a row each way, instead of all 2 MB of VRAM.
+    // live VRAM. Copy whole rows spanning the batch's texture pages and CLUTs instead of all 2 MB of VRAM.
     void copySnapshot(){
         std::array<bool,512> wanted{};for(const Rect& r:reads)for(int y=std::max(0,r.y0-1);y<=std::min(511,r.y1+1);y++)wanted[y]=true;
         glBindBuffer(GL_COPY_READ_BUFFER,ramBuffer);glBindBuffer(GL_COPY_WRITE_BUFFER,snapshotBuffer);
@@ -307,7 +313,7 @@ public:
             for(int i=0;i<n;i++)if(p[i].bounds().valid()){
                 bool dependent=false;for(const Rect& r:ranges[i])for(const Rect& w:writes)dependent|=r.intersects(w);
                 if(pendingCount==32||dependent)flush();
-                serialDispatch=true;pending[pendingCount++]=p[i];writes.push_back(p[i].bounds());reads.insert(reads.end(),ranges[i].begin(),ranges[i].end());
+                serialDispatch=true;pending[pendingCount++]=p[i];writes.push_back(p[i].bounds());RectList page=pageReads(p[i]);reads.insert(reads.end(),page.begin(),page.end());
             }
         }else{if(serialDispatch)flush();for(int i=0;i<n;i++)add(p[i],ranges[i]);}
     }
