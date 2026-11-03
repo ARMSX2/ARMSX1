@@ -4324,6 +4324,20 @@ open class MainActivityRuntime : ComponentActivity() {
             // no adjust action, e.g. the memcard's Slot 1 / Slot 2), A confirms, B
             // dismisses the topmost surface.
             val nav = com.armsx2.ui.settings.SettingsControllerNav
+            // Dual Screen tab option: Y on the sidebar's Settings opens it on the other screen,
+            // the same as Y from the library grid.
+            if (kc == KeyEvent.KEYCODE_BUTTON_Y &&
+                com.armsx2.navigation.UiNavigator.drawerOpen.value &&
+                nav.currentSelectedId() == "drawer.Settings" &&
+                DualScreen.ySettingsAvailable()
+            ) {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    com.armsx2.MenuSfx.play(com.armsx2.MenuSfx.Event.SUBMENU)
+                    com.armsx2.navigation.UiNavigator.drawerOpen.value = false
+                    DualScreen.settingsOnSecondary.value = true
+                }
+                return true
+            }
             when (kc) {
                 KeyEvent.KEYCODE_DPAD_UP -> {
                     if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) nav.moveSpatial(0, -1)
