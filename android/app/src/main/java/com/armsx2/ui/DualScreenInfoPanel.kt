@@ -116,6 +116,7 @@ private const val COVER_ASPECT = 1f
 fun DualScreenLibraryCover() {
     val game = com.armsx2.ui.home.HomeInputController.highlightedGame() ?: return
     BoxWithConstraints(Modifier.fillMaxSize()) {
+        MediaSlideshow(game)
         // As big as the screen allows: ~80% of the height, never wider than the screen.
         val coverHeight = minOf(maxHeight * 0.80f, maxWidth * 0.9f).coerceAtLeast(120.dp)
         val titleWidth = maxWidth * 0.9f
@@ -143,3 +144,61 @@ fun DualScreenLibraryCover() {
         }
     }
 }
+
+/**
+ * Fan art and screenshots for [game], full-screen and dimmed behind the box art, cross-fading every
+ * few seconds. Waits for the selector to settle before fetching, so skimming the library with the
+ * D-pad does not download media for every cover it passes; only images that actually load are
+ * shown, so a game with no snaps simply keeps a black background.
+ */
+@Composable
+private fun MediaSlideshow(game: com.armsx2.GameInfo) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val snaps = com.armsx2.core.Ps1GameMedia.showSnaps.value
+    val titles = com.armsx2.core.Ps1GameMedia.showTitles.value
+    val fanArt = com.armsx2.core.Ps1GameMedia.showFanArt.value
+    val key = com.armsx2.core.Ps1GameMedia.steamGridDbKey.value
+    val media by produceState(emptyList<String>(), game.uri, snaps, titles, fanArt, key) {
+        value = emptyList()
+        delay(MEDIA_SETTLE_MS)
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val fileName = game.uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':').orEmpty()
+            val candidates = com.armsx2.core.Ps1GameMedia.fanArt(game.title) +
+                com.armsx2.core.Ps1GameMedia.snapUrls(fileName, snaps, titles)
+            val loader = coil.Coil.imageLoader(context)
+            candidates.filter { url ->
+                runCatching {
+                    loader.execute(coil.request.ImageRequest.Builder(context).data(url).build()) is
+                        coil.request.SuccessResult
+                }.getOrDefault(false)
+            }
+        }
+    }
+    if (media.isEmpty()) return
+    val index by produceState(0, media) {
+        value = 0
+        while (media.size > 1) {
+            delay(MEDIA_SLIDE_MS)
+            value = (value + 1) % media.size
+        }
+    }
+    androidx.compose.animation.Crossfade(
+        targetState = media.getOrNull(index),
+        animationSpec = androidx.compose.animation.core.tween(800),
+        label = "dualScreenMedia",
+    ) { url ->
+        if (url != null) {
+            coil.compose.AsyncImage(
+                model = url,
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+    // Dim it so the box art in front stays the subject.
+    Box(Modifier.fillMaxSize().background(Color(0x99000000)))
+}
+
+private const val MEDIA_SETTLE_MS = 600L
+private const val MEDIA_SLIDE_MS = 5_000L

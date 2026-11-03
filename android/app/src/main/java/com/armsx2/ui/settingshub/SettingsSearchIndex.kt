@@ -78,6 +78,9 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("overlay.dualScreen.label", true, SettingsCategory.DualScreen),
     SettingsSearchEntry("dualScreen.infoPanel.label", true, SettingsCategory.DualScreen),
     SettingsSearchEntry("dualScreen.libraryArt.label", true, SettingsCategory.DualScreen),
+    SettingsSearchEntry("dualScreen.media.snaps.label", true, SettingsCategory.DualScreen),
+    SettingsSearchEntry("dualScreen.media.titles.label", true, SettingsCategory.DualScreen),
+    SettingsSearchEntry("dualScreen.media.fanArt.label", true, SettingsCategory.DualScreen),
 
     // --- PS1 core settings ---
     // Video tab — settings.toml [video] + [runtime].display_scale

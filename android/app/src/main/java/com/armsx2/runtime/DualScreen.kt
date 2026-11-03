@@ -76,6 +76,7 @@ object DualScreen {
             .getOrDefault(true)
         libraryArt.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_LIBRARY_ART, true) }
             .getOrDefault(true)
+        com.armsx2.core.Ps1GameMedia.load()
     }
 
     fun setLibraryArt(show: Boolean) {
