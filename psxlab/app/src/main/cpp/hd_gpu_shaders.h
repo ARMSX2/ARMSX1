@@ -10,6 +10,17 @@ uniform uvec2 dirtyRows[32];
 uniform int scale;
 void main(){ivec2 p=ivec2(gl_GlobalInvocationID.xy)+bounds.xy;if(any(greaterThan(p,bounds.zw)))return;uvec2 row=dirtyRows[p.y>>4];uint mask=p.x<512?row.x:row.y;if((mask&(1u<<uint((p.x>>4)&31)))==0u)return;ram[p.y*1024+p.x]=imageLoad(hdImage,p*scale).r;}
 )GLSL";
+// Refreshes the HD texture-read copy for the dirty 16x16 tiles a draw is about to sample.
+static const char* HD_READ_COPY_SHADER=R"GLSL(#version 310 es
+precision highp int;
+layout(local_size_x=8,local_size_y=8) in;
+layout(r32ui,binding=1) readonly uniform highp uimage2D hdImage;
+layout(r32ui,binding=2) writeonly uniform highp uimage2D readImage;
+uniform ivec4 bounds;
+uniform uvec2 tiles[32];
+uniform int scale;
+void main(){ivec2 p=ivec2(gl_GlobalInvocationID.xy)+bounds.xy*scale;if(any(greaterThan(p,(bounds.zw+1)*scale-1)))return;ivec2 n=p/scale;uvec2 row=tiles[n.y>>4];uint mask=n.x<512?row.x:row.y;if((mask&(1u<<uint((n.x>>4)&31)))==0u)return;imageStore(readImage,p,imageLoad(hdImage,p));}
+)GLSL";
 static const char* HD_DRAW_SHADER=R"GLSL(#version 310 es
 precision highp int;
 layout(local_size_x=8,local_size_y=8) in;
@@ -145,34 +156,41 @@ void main(){if((status&0x800000)!=0){color=vec4(0,0,0,1);return;}vec2 p=clamp(uv
 static const char* HD_RASTER_FRAGMENT=R"GLSL(#version 310 es
 #extension GL_EXT_shader_framebuffer_fetch : require
 precision highp int;precision highp float;
-layout(std430,binding=0) readonly buffer Vram {uint ram[];};
+// Textures come from a copy of the HD image, as on DuckStation: what the game drew keeps its detail when
+// sampled, and no 1x resolve is needed first. Paletted texels and CLUT entries use each texel's top-left
+// sample, which is what the 1x resolve stored.
+uniform highp usampler2D hdRead;
 layout(location=0) inout highp uvec4 destination;
 // type, op, clut, dither | bounds | edges (lines: start, delta, steps) | colour/uv start and gradients | page | window, mask.
 flat in ivec4 pInfo,pBounds,pStart,pGx,pGy,pExtra,pEnv;flat in ivec4 pEdge[3];
 uniform int scale;
 int floorDiv(int a,int b){return a/b-((a%b)<0?1:0);}
 int blend(int back,int front,int mode){if(mode==0)return(back>>1)+(front>>1);if(mode==1)return min(31,back+front);if(mode==2)return max(0,back-front);return min(31,back+(front>>2));}
-int texturePixel(int u,int v,int clut){int window=pEnv.x,mx=(window&31)*8,my=((window>>5)&31)*8;
+int fetch(int x,int y,int sx,int sy){return int(texelFetch(hdRead,ivec2((x&1023)*scale+sx,(y&511)*scale+sy),0).r);}
+int texturePixel(int u,int v,int clut,int su,int sv){int window=pEnv.x,mx=(window&31)*8,my=((window>>5)&31)*8;
  u=((u&255)&~mx)|(((window>>10)&31)*8&mx);v=((v&255)&~my)|(((window>>15)&31)*8&my);
  int page=pExtra.w,x=(page&15)*64,y=((page>>4)&1)*256+v,depth=(page>>7)&3;
- if(depth>=2)return int(ram[(y&511)*1024+((x+u)&1023)]);
- int packed=int(ram[(y&511)*1024+((x+(u>>(depth==0?2:1)))&1023)]);
+ if(depth>=2)return fetch(x+u,y,su,sv);
+ int packed=fetch(x+(u>>(depth==0?2:1)),y,0,0);
  int index=depth==0?(packed>>((u&3)*4))&15:(packed>>((u&1)*8))&255;
- return int(ram[((clut>>6)&511)*1024+(((clut&63)*16+index)&1023)]);
+ return fetch((clut&63)*16+index,(clut>>6)&511,0,0);
 }
 void drawAt(int x,int y){
  {if(x<pBounds.x*scale||y<pBounds.y*scale||x>=(pBounds.z+1)*scale||y>=(pBounds.w+1)*scale)discard;
-  int dx=x/scale-pBounds.x,dy=y/scale-pBounds.y,sx=x%scale,sy=y%scale,type=pInfo.x,op=pInfo.y;ivec3 color;ivec2 uv=ivec2(0);
+  int dx=x/scale-pBounds.x,dy=y/scale-pBounds.y,sx=x%scale,sy=y%scale,type=pInfo.x,op=pInfo.y;ivec3 color;ivec2 uv=ivec2(0),sub=ivec2(0);
   if(type==0){bool inside=true;for(int edge=0;edge<3;edge++){ivec4 c=pEdge[edge];int w=(c.x+c.y*dx+c.z*dy)*scale+c.y*sx+c.z*sy;if(w<0||(w==0&&c.w==0))inside=false;}if(!inside)discard;}
   if(type<2){int starts[5]=int[5](pStart.x,pStart.y,pStart.z,pStart.w,pExtra.x),gx[5]=int[5](pGx.x,pGx.y,pGx.z,pGx.w,pExtra.y),gy[5]=int[5](pGy.x,pGy.y,pGy.z,pGy.w,pExtra.z);
-   int values[5];for(int i=0;i<5;i++)values[i]=int(uint(starts[i])+uint(gx[i])*uint(dx)+uint(gy[i])*uint(dy)+uint((gx[i]/scale)*sx+(gx[i]%scale)*sx/scale+(gy[i]/scale)*sy+(gy[i]%scale)*sy/scale))>>16;color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);}
+   int values[5];for(int i=0;i<5;i++)values[i]=int(uint(starts[i])+uint(gx[i])*uint(dx)+uint(gy[i])*uint(dy)+uint((gx[i]/scale)*sx+(gx[i]%scale)*sx/scale+(gy[i]/scale)*sy+(gy[i]%scale)*sy/scale));
+   // The 16-bit fraction of u/v picks the HD sample within the texel; rounding absorbs the truncation of gradient/scale.
+   sub=min(ivec2(scale-1),((ivec2(values[3],values[4])&65535)*scale+32768)>>16);
+   for(int i=0;i<5;i++)values[i]>>=16;color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);}
   else{int ax=pEdge[0].x,ay=pEdge[0].y,lx=pEdge[0].z,ly=pEdge[0].w,steps=pEdge[1].x;int i=abs(lx)>=abs(ly)?(x/scale-ax)*(lx<0?-1:1):(y/scale-ay)*(ly<0?-1:1);if(i<0||i>steps)discard;
    int px=steps==0?ax:ax+floorDiv(lx*i+steps/2,steps),py=steps==0?ay:ay+floorDiv(ly*i+steps/2,steps);if(px!=x/scale||py!=y/scale)discard;
    for(int k=0;k<3;k++)color[k]=pStart[k]+(steps==0?0:pGx[k]*i/steps);
   }
   int back=int(destination.r);if((pEnv.y&2)!=0&&(back&32768)!=0)discard;
   bool textured=(op&4)!=0,semi=(op&2)!=0;int mask=0;
-  if(textured){int texel=texturePixel(uv.x,uv.y,pInfo.z);if(texel==0)discard;mask=texel&32768;semi=semi&&mask!=0;ivec3 tex=ivec3(texel&31,(texel>>5)&31,(texel>>10)&31);color=(op&1)!=0?tex*8:(tex*color)>>4;}
+  if(textured){int texel=texturePixel(uv.x,uv.y,pInfo.z,sub.x,sub.y);if(texel==0)discard;mask=texel&32768;semi=semi&&mask!=0;ivec3 tex=ivec3(texel&31,(texel>>5)&31,(texel>>10)&31);color=(op&1)!=0?tex*8:(tex*color)>>4;}
   const int dither[16]=int[16](-4,0,-3,1,2,-2,3,-1,-3,1,-4,0,3,-1,2,-2);int delta=pInfo.w!=0?dither[((y/scale)&3)*4+((x/scale)&3)]:0;color=clamp((color+delta)>>3,ivec3(0),ivec3(31));
   if(semi){int mode=(pExtra.w>>5)&3;for(int k=0;k<3;k++)color[k]=blend((back>>(k*5))&31,color[k],mode);}
   destination=uvec4(uint(color.r|(color.g<<5)|(color.b<<10)|mask|((pEnv.y&1)<<15)),0,0,0);
