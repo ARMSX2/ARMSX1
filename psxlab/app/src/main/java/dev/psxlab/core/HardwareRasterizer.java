@@ -62,7 +62,7 @@ public final class HardwareRasterizer implements AutoCloseable {
     /** GPU model, driver and which drawing path is active. */
     String describe(){return handle==0?"":describeNative(handle);}
     /** GPU execution totals: {timer available, ns for draw/resolve/output/transfer/upload, spans for each, skipped, disjoint, frame-limit wait ns, waits}. Safe from any thread. */
-    long[] gpuTimes(){long[] out=new long[17];if(handle!=0)gpuTimesNative(handle,out);return out;}
+    long[] gpuTimes(){long[] out=new long[21];if(handle!=0)gpuTimesNative(handle,out);return out;}
 
     public static String verify(){return verifyRaster(1);}
     public static String verifySoftwareDisplayUploads(){

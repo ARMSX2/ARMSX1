@@ -380,6 +380,7 @@ public final class ArmSxBackend {
         for(int i=0;i<5;i++){long d=now[1+i]-before[1+i];total+=d;out.append(String.format(Locale.ROOT," %s %.0f",names[i],d*perSecond));}
         out.append(String.format(Locale.ROOT," = %.0f, draw spans %.0f/s",total*perSecond,(now[6]-before[6])*1e9/span));
         if(now.length>=17&&before.length>=17)out.append(String.format(Locale.ROOT,", draws/s native %.0f HD %.0f",(now[15]-before[15])*1e9/span,(now[16]-before[16])*1e9/span));
+        if(now.length>=21&&before.length>=21)out.append(String.format(Locale.ROOT,", HD batch ends/s texture %.0f transfer %.0f full %.0f other %.0f",(now[17]-before[17])*1e9/span,(now[18]-before[18])*1e9/span,(now[19]-before[19])*1e9/span,(now[20]-before[20])*1e9/span));
         long skipped=now[11]-before[11],lost=now[12]-before[12],waits=now[14]-before[14];
         if(skipped>0||lost>0)out.append(String.format(Locale.ROOT," (untimed spans %d, discarded %d)",skipped,lost));
         out.append(String.format(Locale.ROOT,", frame limit waited %d ms over %d frames",(now[13]-before[13])/1_000_000,waits));
