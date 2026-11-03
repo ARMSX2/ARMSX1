@@ -196,8 +196,11 @@ private:
         if(!area.valid())return;
         NativeTiming::Scope measured(timing,NativeTiming::GPU_RESOLVE);current();GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::RESOLVE);bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,area.x0,area.y0,area.x1,area.y1);glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((area.x1-area.x0+8)/8,(area.y1-area.y0+8)/8,1);barrier();nativeCopies++;feedbackResolvedTiles+=tiles;
     }
-    // Tiles a pending feedback batch can sample (whole texture pages and CLUTs, padded a row) or draws.
-    std::array<uint64_t,32> feedbackTiles()const{std::array<uint64_t,32> tiles{};for(const Rect& r:reads)addTiles(tiles,{r.x0,std::max(0,r.y0-1),r.x1,std::min(511,r.y1+1)});for(const Rect& w:writes)addTiles(tiles,w);return tiles;}
+    // Tiles a pending feedback batch can sample (whole texture pages and CLUTs, padded a row) or touches. The
+    // native draw and the HD refresh after it cover the batch's single bounding box, not each primitive, so
+    // resolve that whole box: tiles between two spread-out primitives are re-upscaled too, and resolving only
+    // the primitives left stale native pixels there (black specks beside CTR's skid smoke).
+    std::array<uint64_t,32> feedbackTiles()const{std::array<uint64_t,32> tiles{};for(const Rect& r:reads)addTiles(tiles,{r.x0,std::max(0,r.y0-1),r.x1,std::min(511,r.y1+1)});Rect box{1023,511,0,0};for(const Rect& w:writes)include(box,w);addTiles(tiles,box);return tiles;}
     // The draw shader reads only texels (texture page and CLUT) through the snapshot; the destination comes from
     // live VRAM. Copy whole rows spanning the batch's texture pages and CLUTs instead of all 2 MB of VRAM.
     void copySnapshot(){
