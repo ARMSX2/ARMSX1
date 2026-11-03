@@ -340,8 +340,10 @@ class EmulationSurface(context: Context) :
         return if (w in 64..8192 && h in 64..8192) Pair(w, h) else null
     }
 
+    // The attached window's display first: in dual-screen play this view can sit in a
+    // Presentation on another panel than the Activity's, and the refresh vote is for that panel.
     private fun currentDisplay(): Display? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) context.display else display
+        display ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) context.display else null
 
     private fun currentDisplayRefreshHz(): Float =
         runCatching { currentDisplay()?.refreshRate ?: 0f }.getOrDefault(0f)

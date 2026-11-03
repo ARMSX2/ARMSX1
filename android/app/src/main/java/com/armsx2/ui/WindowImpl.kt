@@ -111,7 +111,10 @@ object WindowImpl {
                     LocalDensity provides baseDensity,
                     LocalLayoutDirection provides LayoutDirection.Ltr,
                 ) {
-                    com.armsx2.ui.touch.TouchControlsOverlay()
+                    // Dual-screen play draws them on the other display instead.
+                    if (!com.armsx2.runtime.DualScreen.controlsOnSecondary.value) {
+                        com.armsx2.ui.touch.TouchControlsOverlay()
+                    }
                 }
 
                 // On-screen display — FPS / speed block plus the transient note area (paused,

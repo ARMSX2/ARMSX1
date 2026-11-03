@@ -3166,6 +3166,7 @@ open class MainActivityRuntime : ComponentActivity() {
         com.armsx2.StartupTrace.mark("discord-attach")
         com.armsx2.LibraryView.load()
         com.armsx2.ui.UiScale.load()
+        DualScreen.load()
         com.armsx2.ui.theme.ThemePreferences.load()
         com.armsx2.ui.theme.InterfacePreferences.load()
         com.armsx2.ui.theme.BootLogoPreferences.load()
@@ -3530,6 +3531,16 @@ open class MainActivityRuntime : ComponentActivity() {
                         eState.value == EmuState.RUNNING || eState.value == EmuState.PAUSED
                     surface.value?.setGameActive(gameActive)
                 }
+                // Second-screen placement follows the run state, the touch-layout editor (so it
+                // can be edited where it is drawn) and the CTR companion, which takes precedence.
+                val dualInGame = eState.value == EmuState.RUNNING || eState.value == EmuState.PAUSED
+                val dualEdit = com.armsx2.ui.touch.TouchControls.editMode.value
+                val dualCompanion = com.armsx2.companion.CtrCompanion.showing.value
+                androidx.compose.runtime.LaunchedEffect(
+                    dualInGame, dualEdit, dualCompanion, DualScreen.mode.value
+                ) {
+                    dualScreen.update(dualInGame, dualEdit, dualCompanion)
+                }
                 WindowImpl.Window {
                     if (surface.value != null) {
                         // Keep focus on the SurfaceView while gameplay is active.
@@ -3636,8 +3647,31 @@ open class MainActivityRuntime : ComponentActivity() {
                             }
                         }
                         val displayedSurface = surface.value!!
+                        if (DualScreen.gameOnSecondary.value) {
+                            // The SurfaceView lives in the second-screen Presentation. Hand it
+                            // over only once AndroidView has left the composition, and take it
+                            // back before a replacement session surface is hosted.
+                            androidx.compose.runtime.DisposableEffect(displayedSurface) {
+                                dualScreen.hostSurface(displayedSurface)
+                                onDispose { dualScreen.releaseSurface(displayedSurface) }
+                            }
+                            Box(Modifier
+                                .focusable(!frontendOwnsFocus)
+                                .focusRequester(focusRequester)
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectTapGestures(onPress = {
+                                        com.armsx2.ui.touch.TouchControls.onSurfaceTouched()
+                                    })
+                                })
+                        } else
                         androidx.compose.runtime.key(displayedSurface.ownerToken) {
-                        AndroidView(factory = { displayedSurface }, modifier = Modifier
+                        AndroidView(factory = {
+                            // Back from the second screen: AndroidView cannot adopt a view that
+                            // still has a parent.
+                            (displayedSurface.parent as? android.view.ViewGroup)?.removeView(displayedSurface)
+                            displayedSurface
+                        }, modifier = Modifier
                             // Drop the surface from the focus system while ANY
                             // Compose frontend surface (pause overlay, in-game
                             // manager/Save-Load screen, memcard dialog, library) is
@@ -6185,6 +6219,7 @@ open class MainActivityRuntime : ComponentActivity() {
      * request-parking, so calling it here can only ever be a no-op.
      */
     override fun onStop() {
+        dualScreen.stop()
         if ((eState.value == EmuState.RUNNING || eState.value == EmuState.PAUSED) &&
             !backgroundPlaybackEnabled()
         ) {
@@ -6214,6 +6249,12 @@ open class MainActivityRuntime : ComponentActivity() {
     }
 
     private val ctrCompanionDelegate = lazy { com.armsx2.companion.CtrCompanion(this) }
+    private val dualScreen by lazy { DualScreenController(this) }
+
+    override fun onStart() {
+        super.onStart()
+        dualScreen.start()
+    }
     private val ctrCompanion by ctrCompanionDelegate
 
     override fun onResume() {
@@ -6265,6 +6306,7 @@ open class MainActivityRuntime : ComponentActivity() {
 
     override fun onDestroy() {
         if (ctrCompanionDelegate.isInitialized()) ctrCompanion.close()
+        dualScreen.close()
         getSystemService(android.hardware.input.InputManager::class.java)
             ?.unregisterInputDeviceListener(inputDeviceListener)
         // On a CONFIGURATION-driven recreate (e.g. Samsung DeX moving the activity to

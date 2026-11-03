@@ -40,11 +40,17 @@ class CtrCompanion(private val activity: Activity) : DisplayManager.DisplayListe
     private val worker = Executors.newSingleThreadScheduledExecutor()
     private var task: ScheduledFuture<*>? = null
     private var presentation: Presentation? = null
+        set(value) { field = value; showing.value = value != null }
     private var panel: RacePanel? = null
     private var resumed = false
     private var closed = false
     private var displayId: Int? = null
     @Volatile private var generation = 0
+
+    companion object {
+        /** True while the race panel holds the second display; dual-screen play yields to it. */
+        val showing = androidx.compose.runtime.mutableStateOf(false)
+    }
 
     fun resume() {
         if (resumed || closed) return

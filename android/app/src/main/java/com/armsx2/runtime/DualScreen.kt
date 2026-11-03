@@ -1,0 +1,278 @@
+package com.armsx2.runtime
+
+import android.app.Presentation
+import android.content.Context
+import android.graphics.Color
+import android.hardware.display.DisplayManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Display
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.FrameLayout
+import androidx.activity.ComponentActivity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+
+/**
+ * Dual-screen play for handhelds with a second built-in panel (AYN Thor) or an attached display.
+ *
+ * The Activity, the VM and the single [EmulationSurface] never move or multiply. A [Presentation]
+ * on the other display hosts either the touch controls (game stays on the Activity's screen) or the
+ * game's SurfaceView itself (controls stay with the Activity). Off — the default — and any time no
+ * second display is attached, nothing here creates a window, so single-screen play is unchanged.
+ */
+object DualScreen {
+    enum class Mode(val key: String) {
+        OFF("off"),
+        /** Game on the screen the app is on, touch controls on the other one. */
+        GAME_MAIN("game_main"),
+        /** Game on the other screen, touch controls with the app. */
+        GAME_SECOND("game_second");
+
+        companion object {
+            fun fromKey(key: String?): Mode = entries.firstOrNull { it.key == key } ?: OFF
+        }
+    }
+
+    enum class Placement { NONE, CONTROLS_ON_SECOND, GAME_ON_SECOND }
+
+    private const val KEY_MODE = "ui.dualScreenMode"
+
+    val mode = mutableStateOf(Mode.OFF)
+
+    /** The main window's copy of the touch controls stands down while this is true. */
+    val controlsOnSecondary = mutableStateOf(false)
+
+    /** The main window must not compose the game SurfaceView while this is true. */
+    val gameOnSecondary = mutableStateOf(false)
+
+    fun load() {
+        mode.value = runCatching { Mode.fromKey(MainActivityRuntime.prefs.getString(KEY_MODE, null)) }
+            .getOrDefault(Mode.OFF)
+    }
+
+    fun setMode(next: Mode) {
+        mode.value = next
+        runCatching { MainActivityRuntime.prefs.edit().putString(KEY_MODE, next.key).apply() }
+    }
+
+    /**
+     * What the second display should carry right now. Pure so it can be unit-tested.
+     *
+     * The CTR race companion owns the second screen whenever it is up; dual-screen yields to it
+     * rather than stacking a second Presentation on the same display.
+     */
+    fun placement(
+        mode: Mode,
+        hasSecondDisplay: Boolean,
+        inGame: Boolean,
+        touchEditMode: Boolean,
+        companionShowing: Boolean,
+    ): Placement = when {
+        mode == Mode.OFF || !hasSecondDisplay || companionShowing -> Placement.NONE
+        mode == Mode.GAME_MAIN && (inGame || touchEditMode) -> Placement.CONTROLS_ON_SECOND
+        mode == Mode.GAME_SECOND && inGame -> Placement.GAME_ON_SECOND
+        else -> Placement.NONE
+    }
+}
+
+/** Owns the second-screen [Presentation]; one per Activity, main thread only. */
+class DualScreenController(private val activity: ComponentActivity) : DisplayManager.DisplayListener {
+    private val displays = activity.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+    private val main = Handler(Looper.getMainLooper())
+    private var started = false
+    private var closed = false
+
+    private var presentation: Presentation? = null
+    private var placement = DualScreen.Placement.NONE
+    private var displayId: Int? = null
+    private var surfaceHost: FrameLayout? = null
+    private var hostedSurface: EmulationSurface? = null
+
+    private var inGame = false
+    private var touchEditMode = false
+    private var companionShowing = false
+
+    fun start() {
+        if (started || closed) return
+        started = true
+        displays.registerDisplayListener(this, main)
+        refresh()
+    }
+
+    fun stop() {
+        if (!started) return
+        started = false
+        runCatching { displays.unregisterDisplayListener(this) }
+        teardown()
+    }
+
+    fun close() {
+        if (closed) return
+        stop()
+        closed = true
+    }
+
+    /** Fed from the Activity's composition whenever one of these inputs changes. */
+    fun update(inGame: Boolean, touchEditMode: Boolean, companionShowing: Boolean) {
+        this.inGame = inGame
+        this.touchEditMode = touchEditMode
+        this.companionShowing = companionShowing
+        refresh()
+    }
+
+    /**
+     * Called by the composition once it has stopped composing the SurfaceView itself (it does
+     * that while [DualScreen.gameOnSecondary] is true), so the view is free to move here.
+     */
+    fun hostSurface(surface: EmulationSurface) {
+        val host = surfaceHost
+        if (host == null || placement != DualScreen.Placement.GAME_ON_SECOND) return
+        if (surface.parent === host) { hostedSurface = surface; return }
+        hostedSurface?.let { old -> if (old.parent === host) host.removeView(old) }
+        (surface.parent as? ViewGroup)?.removeView(surface)
+        host.addView(surface, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        hostedSurface = surface
+    }
+
+    fun releaseSurface(surface: EmulationSurface) {
+        val host = surfaceHost
+        if (host != null && surface.parent === host) host.removeView(surface)
+        if (hostedSurface === surface) hostedSurface = null
+    }
+
+    private fun activityDisplayId(): Int? = runCatching {
+        activity.window?.decorView?.display?.displayId
+            ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) activity.display?.displayId
+            else @Suppress("DEPRECATION") activity.windowManager.defaultDisplay?.displayId
+    }.getOrNull()
+
+    private fun secondDisplay(): Display? = runCatching {
+        val own = activityDisplayId() ?: Display.DEFAULT_DISPLAY
+        displays.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+            .firstOrNull { it.displayId != own && it.isValid && it.state != Display.STATE_OFF }
+    }.getOrNull()
+
+    private fun refresh() {
+        if (!started || closed || activity.isFinishing || activity.isDestroyed) { teardown(); return }
+        val display = secondDisplay()
+        val wanted = DualScreen.placement(
+            DualScreen.mode.value, display != null, inGame, touchEditMode, companionShowing)
+        if (wanted == DualScreen.Placement.NONE || display == null) { teardown(); return }
+        if (wanted == placement && display.displayId == displayId && presentation?.isShowing == true) return
+        teardown()
+        show(display, wanted)
+    }
+
+    private fun show(display: Display, wanted: DualScreen.Placement) {
+        val host = if (wanted == DualScreen.Placement.GAME_ON_SECOND)
+            FrameLayout(activity).apply { setBackgroundColor(Color.BLACK) } else null
+        val next = object : Presentation(activity, display) {
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                // Keys stay with the Activity; this window only takes touches.
+                window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+                @Suppress("DEPRECATION")
+                window?.decorView?.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                window?.decorView?.let { attachOwners(it) }
+                setContentView(host ?: controlsView(context))
+            }
+        }
+        next.setOnDismissListener { if (presentation === next) onLost() }
+        try {
+            next.show()
+        } catch (_: RuntimeException) {
+            // InvalidDisplayException / BadTokenException: the display left mid-show, or the
+            // Activity is going away. Single-screen play simply continues.
+            runCatching { next.dismiss() }
+            return
+        }
+        presentation = next
+        placement = wanted
+        displayId = display.displayId
+        surfaceHost = host
+        // Flip these only once the window exists: the composition reacts by dropping its own copy.
+        when (wanted) {
+            DualScreen.Placement.CONTROLS_ON_SECOND -> DualScreen.controlsOnSecondary.value = true
+            DualScreen.Placement.GAME_ON_SECOND -> {
+                DualScreen.gameOnSecondary.value = true
+                // A surface with no parent was freed by an earlier teardown that the composition
+                // never saw (the flag went false and back to true between frames), so nothing
+                // will ask for it again. One still inside AndroidView is handed over by the
+                // composition instead.
+                MainActivityRuntime.surface.value?.let { if (it.parent == null) hostSurface(it) }
+            }
+            DualScreen.Placement.NONE -> Unit
+        }
+    }
+
+    private fun attachOwners(view: View) {
+        view.setViewTreeLifecycleOwner(activity)
+        view.setViewTreeViewModelStoreOwner(activity)
+        view.setViewTreeSavedStateRegistryOwner(activity)
+    }
+
+    private fun controlsView(context: Context): View = ComposeView(context).apply {
+        attachOwners(this)
+        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+        setContent {
+            com.armsx2.ui.theme.Armsx2Theme(forceDark = true) {
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                    Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)) {
+                        com.armsx2.ui.touch.TouchControlsOverlay()
+                    }
+                }
+            }
+        }
+    }
+
+    /** The display went away (or Android dismissed the window): hand everything back, then retry. */
+    private fun onLost() {
+        teardown()
+        main.post { refresh() }
+    }
+
+    private fun teardown() {
+        val p = presentation
+        presentation = null
+        // Free the SurfaceView BEFORE the composition is told it may compose it again: a view that
+        // still has a parent would make AndroidView throw when it re-adds it.
+        surfaceHost?.removeAllViews()
+        surfaceHost = null
+        hostedSurface = null
+        placement = DualScreen.Placement.NONE
+        displayId = null
+        if (p != null) runCatching { p.dismiss() }
+        DualScreen.controlsOnSecondary.value = false
+        DualScreen.gameOnSecondary.value = false
+    }
+
+    override fun onDisplayAdded(displayId: Int) = refresh()
+
+    override fun onDisplayRemoved(displayId: Int) {
+        if (displayId == this.displayId) teardown()
+        refresh()
+    }
+
+    override fun onDisplayChanged(displayId: Int) {
+        if (displayId == this.displayId || displayId == activityDisplayId()) refresh()
+    }
+}
