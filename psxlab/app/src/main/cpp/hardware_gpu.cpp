@@ -73,7 +73,7 @@ private:
     GLuint snapshotBuffer=0,ramBuffer=0,commandBuffer=0,counterBuffer=0,drawProgram=0,transferProgram=0,scanoutProgram=0,presentProgram=0,frameTexture=0,vao=0;
     std::array<Primitive,32> pending{};int pendingCount=0;std::vector<Rect> reads,writes;bool countEnabled=false;
     std::array<int,1024*512> cpu{};i64 fallbackPixels=0;
-    std::atomic<i64> draws{0},feedbackDraws{0},readbacks{0},passes{0},presented{0},nativeCopies{0},sharedFrames{0},asyncFrames{0};
+    std::atomic<i64> draws{0},feedbackDraws{0},readbacks{0},passes{0},presented{0},nativeCopies{0},sharedFrames{0},asyncFrames{0},feedbackBatches{0},feedbackResolvedTiles{0},snapshotBytes{0};
     bool serialDispatch=false,windowSwapConfigured=false;
     double outputAspect=4.0/3.0;bool outputStretch=false,outputInteger=false,outputVsync=false;
     std::atomic<i64> uploadBytes{0},scanouts{0},reusedFrames{0},nativeMovies{0};
@@ -176,6 +176,29 @@ private:
     void resolveNative(){
         flushHd();if(!nativeDirty.valid())return;NativeTiming::Scope measured(timing,NativeTiming::GPU_RESOLVE);current();GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::RESOLVE);bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,nativeDirty.x0,nativeDirty.y0,nativeDirty.x1,nativeDirty.y1);std::array<GLuint,64> rows;for(int row=0;row<32;row++){rows[row*2]=GLuint(nativeDirtyTiles[row]);rows[row*2+1]=GLuint(nativeDirtyTiles[row]>>32);}glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((nativeDirty.x1-nativeDirty.x0+8)/8,(nativeDirty.y1-nativeDirty.y0+8)/8,1);barrier();nativeDirty={1023,511,0,0};nativeDirtyTiles.fill(0);nativeCopies++;
     }
+    // A feedback batch needs native VRAM only where it samples texels and where it draws (it blends with,
+    // and then re-upscales, its whole bounding box). Resolving every dirty tile of a freshly drawn HD frame
+    // for each of CTR's ~20 feedback batches a frame cost several ms each on the Thor; the rest stays dirty
+    // and is resolved by whichever later batch, transfer, readback or scanout needs it.
+    void resolveNative(const std::array<uint64_t,32>& wanted){
+        flushHd();if(!nativeDirty.valid())return;
+        std::array<GLuint,64> rows{};Rect area{1023,511,0,0};bool remaining=false;i64 tiles=0;
+        for(int row=0;row<32;row++){uint64_t take=nativeDirtyTiles[row]&wanted[row];nativeDirtyTiles[row]&=~take;remaining|=nativeDirtyTiles[row]!=0;if(!take)continue;
+            rows[row*2]=GLuint(take);rows[row*2+1]=GLuint(take>>32);tiles+=__builtin_popcountll(take);include(area,{__builtin_ctzll(take)*16,row*16,(63-__builtin_clzll(take))*16+15,row*16+15});}
+        area={std::max(area.x0,nativeDirty.x0),std::max(area.y0,nativeDirty.y0),std::min(area.x1,nativeDirty.x1),std::min(area.y1,nativeDirty.y1)};
+        if(!remaining)nativeDirty={1023,511,0,0};
+        if(!area.valid())return;
+        NativeTiming::Scope measured(timing,NativeTiming::GPU_RESOLVE);current();GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::RESOLVE);bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,area.x0,area.y0,area.x1,area.y1);glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((area.x1-area.x0+8)/8,(area.y1-area.y0+8)/8,1);barrier();nativeCopies++;feedbackResolvedTiles+=tiles;
+    }
+    // Tiles a pending feedback batch reads (padded a row each way) or draws.
+    std::array<uint64_t,32> feedbackTiles()const{std::array<uint64_t,32> tiles{};for(const Rect& r:reads)addTiles(tiles,{r.x0,std::max(0,r.y0-1),r.x1,std::min(511,r.y1+1)});for(const Rect& w:writes)addTiles(tiles,w);return tiles;}
+    // The draw shader reads only texels (texture page and CLUT) through the snapshot; the destination comes from
+    // live VRAM. Copy whole rows spanning those reads, padded a row each way, instead of all 2 MB of VRAM.
+    void copySnapshot(){
+        std::array<bool,512> wanted{};for(const Rect& r:reads)for(int y=std::max(0,r.y0-1);y<=std::min(511,r.y1+1);y++)wanted[y]=true;
+        glBindBuffer(GL_COPY_READ_BUFFER,ramBuffer);glBindBuffer(GL_COPY_WRITE_BUFFER,snapshotBuffer);
+        for(int y=0;y<512;){if(!wanted[y]){y++;continue;}int end=y;while(end<512&&wanted[end])end++;GLintptr offset=GLintptr(y)*1024*sizeof(int);GLsizeiptr bytes=GLsizeiptr(end-y)*1024*sizeof(int);glCopyBufferSubData(GL_COPY_READ_BUFFER,GL_COPY_WRITE_BUFFER,offset,offset,bytes);snapshotBytes+=bytes;y=end;}
+    }
     void queueHd(){
         // Each group from add() is free of read-after-write hazards. Before it samples a tile drawn or written
         // since the last copy (including by batches still queued), draw the queue and refresh those tiles.
@@ -259,7 +282,7 @@ public:
     void destroy(){if(display==EGL_NO_DISPLAY)return;if(context!=EGL_NO_CONTEXT){if(pbuffer!=EGL_NO_SURFACE)eglMakeCurrent(display,pbuffer,pbuffer,context);gpuTimer.release();for(GLsync fence:inFlight)glDeleteSync(fence);inFlight.clear();detachWindow();sharedOutput.destroy(display);sharedOutputNext.destroy(display);GLuint buffers[]={ramBuffer,commandBuffer,counterBuffer,hdCommandBuffer,snapshotBuffer};glDeleteBuffers(5,buffers);GLuint programs[]={drawProgram,transferProgram,scanoutProgram,presentProgram,hdDrawProgram,hdTransferProgram,hdScanoutProgram,hdRasterProgram,hdPresentProgram,hdNativeResolveProgram,hdReadCopyProgram};for(GLuint p:programs)if(p)glDeleteProgram(p);if(hdReadTexture)glDeleteTextures(1,&hdReadTexture);if(frameTexture)glDeleteTextures(1,&frameTexture);if(hdTexture)glDeleteTextures(1,&hdTexture);if(hdFramebuffer)glDeleteFramebuffers(1,&hdFramebuffer);if(resolveFramebuffer)glDeleteFramebuffers(1,&resolveFramebuffer);if(softwareWindow){ANativeWindow_release(softwareWindow);softwareWindow=nullptr;}if(vao)glDeleteVertexArrays(1,&vao);eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);eglDestroyContext(display,context);context=EGL_NO_CONTEXT;}if(pbuffer!=EGL_NO_SURFACE)eglDestroySurface(display,pbuffer);display=EGL_NO_DISPLAY;releaseDisplay();}
     void flush(){
         current();if(!pendingCount)return;NativeTiming::Scope measured(timing,NativeTiming::GPU_DRAW);passes++;
-        if(scale>1&&fastHd&&!serialDispatch){queueHd();if(deferredNative()){pendingCount=0;reads.clear();writes.clear();return;}}if(enhanced()&&serialDispatch)resolveNative();
+        if(scale>1&&fastHd&&!serialDispatch){queueHd();if(deferredNative()){pendingCount=0;reads.clear();writes.clear();return;}}if(serialDispatch)feedbackBatches++;if(enhanced()&&serialDispatch)resolveNative(feedbackTiles());
         // Deferred HD batches above only queue CPU records. Timing those empty
         // batches inserted thousands of query boundaries into the GPU stream.
         GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::DRAW);
@@ -269,7 +292,7 @@ public:
         glUseProgram(drawProgram);glUniform4i(drawProgramUniforms.bounds,bounds.x0,bounds.y0,bounds.x1,bounds.y1);glUniform1i(drawProgramUniforms.count,pendingCount);glUniform1i(drawProgramUniforms.countPixels,countEnabled);// A feedback primitive reads its texture from VRAM it also draws into. Drawing it on one GPU thread kept
         // raster order but cost tens of ms each (CTR's race: ~50 a second, 3-8 s of GPU time per second on a
         // Thor). Texels now come from a copy taken just before the draw, so every pixel runs in parallel.
-        if(serialDispatch){updateBarrier();glBindBuffer(GL_COPY_READ_BUFFER,ramBuffer);glBindBuffer(GL_COPY_WRITE_BUFFER,snapshotBuffer);glCopyBufferSubData(GL_COPY_READ_BUFFER,GL_COPY_WRITE_BUFFER,0,0,sizeof(cpu));}
+        if(serialDispatch){updateBarrier();copySnapshot();}
         glUniform1i(drawProgramUniforms.serialMode,0);glUniform1i(drawProgramUniforms.snapshot,serialDispatch);nativeDrawCalls++;glDispatchCompute((bounds.x1-bounds.x0+8)/8,(bounds.y1-bounds.y0+8)/8,1);drawBarrier(false);
         // Self-feedback keeps exact native serial ordering; refresh just that region.
         if(enhanced()&&serialDispatch)transferHd(4,bounds.x0,bounds.y0,bounds.x1-bounds.x0+1,bounds.y1-bounds.y0+1,0,0,0,0);
@@ -284,7 +307,7 @@ public:
             for(int i=0;i<n;i++)if(p[i].bounds().valid()){
                 bool dependent=false;for(const Rect& r:ranges[i])for(const Rect& w:writes)dependent|=r.intersects(w);
                 if(pendingCount==32||dependent)flush();
-                serialDispatch=true;pending[pendingCount++]=p[i];writes.push_back(p[i].bounds());
+                serialDispatch=true;pending[pendingCount++]=p[i];writes.push_back(p[i].bounds());reads.insert(reads.end(),ranges[i].begin(),ranges[i].end());
             }
         }else{if(serialDispatch)flush();for(int i=0;i<n;i++)add(p[i],ranges[i]);}
     }
@@ -309,7 +332,7 @@ public:
         contentRevision++;displayChanged=true;softwareRevision=revision;std::copy_n(state,8,softwareState.begin());softwareUploadKnown=true;
     }
     void releaseSurface(JNIEnv* env){if(presentedSurface)env->DeleteWeakGlobalRef(presentedSurface);presentedSurface=nullptr;}
-    void stats(jlong* out)const{out[0]=draws.load();out[1]=feedbackDraws.load();out[2]=readbacks.load();out[3]=passes.load();out[4]=presented.load();out[5]=nativeCopies.load();out[6]=sharedFrames.load();out[7]=asyncFrames.load();out[8]=uploadBytes.load();out[9]=scanouts.load();out[10]=reusedFrames.load();out[11]=nativeMovies.load();}
+    void stats(jlong* out)const{out[0]=draws.load();out[1]=feedbackDraws.load();out[2]=readbacks.load();out[3]=passes.load();out[4]=presented.load();out[5]=nativeCopies.load();out[6]=sharedFrames.load();out[7]=asyncFrames.load();out[8]=uploadBytes.load();out[9]=scanouts.load();out[10]=reusedFrames.load();out[11]=nativeMovies.load();out[12]=feedbackBatches.load();out[13]=feedbackResolvedTiles.load();out[14]=snapshotBytes.load();}
     void verifyComputePath(){current();flush();resolveNative();fastHd=false;}
     void fill(int color,int xy,int wh){current();flush();int x=xy&0x3f0,y=(uint32_t(xy)>>16)&511,w=((wh&1023)+15)&~15,h=(uint32_t(wh)>>16)&511;if(!w||!h)return;int value=((color&255)>>3)|(((color>>8)&255)>>3<<5)|(((color>>16)&255)>>3<<10);transfer(0,x,y,w,h,value,0,0,0);}
     void upload(const int* words,int n,int start,int x,int y,int w,int total,int mask){current();flush();int count=std::min(n*2,total-start);if(count<=0)return;dirtyDisplayRegion(x,y,w,(total+w-1)/w);streamCommands(commandBuffer,n*4,words);transfer(1,x,y,w,(count+w-1)/w,0,mask,start,count);}
@@ -396,7 +419,7 @@ extern "C" JNIEXPORT jintArray JNICALL Java_dev_psxlab_core_HardwareRasterizer_c
 extern "C" JNIEXPORT jstring JNICALL Java_dev_psxlab_core_HardwareRasterizer_describeNative(JNIEnv* env,jclass,jlong h){return env->NewStringUTF(gpu(h)->description.c_str());}
 // GPU totals: {status (0 unsupported, 1 collecting, 2 disabled), ns x5, spans x5, skipped, disjoint, frame-limit wait ns, waits, native draw calls, HD draw calls, HD batch breaks x4}.
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_gpuTimesNative(JNIEnv* env,jclass,jlong h,jlongArray out){int n=env->GetArrayLength(out);if(n!=15&&n!=17&&n!=21){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"GPU time array length");return;}auto* g=gpu(h);jlong v[21];v[0]=g->gpuTimer.available.load();for(int i=0;i<5;i++){v[1+i]=g->gpuTimer.nanos[i].load();v[6+i]=g->gpuTimer.spans[i].load();}v[11]=g->gpuTimer.skipped.load();v[12]=g->gpuTimer.disjoint.load();v[13]=g->limitWaitNanos.load();v[14]=g->limitWaits.load();v[15]=g->nativeDrawCalls.load();v[16]=g->hdDrawCalls.load();for(int i=0;i<4;i++)v[17+i]=g->hdBreaks[i].load();env->SetLongArrayRegion(out,0,n,v);}
-extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_statsNative(JNIEnv* env,jclass,jlong h,jlongArray out){int n=env->GetArrayLength(out);if(n!=8&&n!=12){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid GPU statistics");return;}jlong values[12];gpu(h)->stats(values);env->SetLongArrayRegion(out,0,n,values);}
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_HardwareRasterizer_statsNative(JNIEnv* env,jclass,jlong h,jlongArray out){int n=env->GetArrayLength(out);if(n!=8&&n!=12&&n!=15){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid GPU statistics");return;}jlong values[15];gpu(h)->stats(values);env->SetLongArrayRegion(out,0,n,values);}
 
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_HardwareRasterizer_presentResolvedNative(JNIEnv* env,jclass,jlong h,jobject surface,jintArray state,jlong vk){try{if(env->GetArrayLength(state)!=8)throw std::runtime_error("Invalid HD display state");int values[8];env->GetIntArrayRegion(state,0,8,values);return !env->ExceptionCheck()&&gpu(h)->presentResolved(env,surface,values,vk);}catch(const std::exception& e){failure(env,e);return false;}}
 
