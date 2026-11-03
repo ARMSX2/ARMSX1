@@ -55,21 +55,6 @@ fun OverlayTab(gameKey: String? = null, contextGameKey: String? = gameKey) {
             onChange = { UiScale.setFontScale(it / 100f) },
         )
         SettingsDivider()
-        // Dual-screen handhelds (AYN Thor) and attached displays. Global, not per game: it is
-        // about the device, and Off keeps single-screen play exactly as it was.
-        val dualModes = com.armsx2.runtime.DualScreen.Mode.entries
-        SegmentedRow(
-            label = str("overlay.dualScreen.label"),
-            options = listOf(
-                str("overlay.dualScreen.off"),
-                str("overlay.dualScreen.gameMain"),
-                str("overlay.dualScreen.gameSecond"),
-            ),
-            selectedIndex = dualModes.indexOf(com.armsx2.runtime.DualScreen.mode.value),
-            description = str("overlay.dualScreen.description"),
-            onChange = { idx -> dualModes.getOrNull(idx)?.let { com.armsx2.runtime.DualScreen.setMode(it) } },
-        )
-        SettingsDivider()
         // Android hotkey pop-ups (Fast-Forward on/off, etc.) — a plain preference, unrelated to
         // any emulator OSD, so it is still live.
         val ffToasts = remember {

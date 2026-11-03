@@ -39,6 +39,7 @@ enum class SettingsCategory {
     Hotkeys,
     Network,
     OnScreen,
+    DualScreen,
     Skins,
     Advanced,
     Patches,

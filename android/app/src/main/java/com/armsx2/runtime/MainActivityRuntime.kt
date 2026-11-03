@@ -3537,7 +3537,7 @@ open class MainActivityRuntime : ComponentActivity() {
                 val dualEdit = com.armsx2.ui.touch.TouchControls.editMode.value
                 val dualCompanion = com.armsx2.companion.CtrCompanion.showing.value
                 androidx.compose.runtime.LaunchedEffect(
-                    dualInGame, dualEdit, dualCompanion, DualScreen.mode.value
+                    dualInGame, dualEdit, dualCompanion, DualScreen.mode.value, DualScreen.libraryArt.value
                 ) {
                     dualScreen.update(dualInGame, dualEdit, dualCompanion)
                 }

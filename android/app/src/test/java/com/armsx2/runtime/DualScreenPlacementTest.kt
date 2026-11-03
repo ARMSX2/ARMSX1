@@ -38,6 +38,19 @@ class DualScreenPlacementTest {
         Mode.entries.forEach { assertEquals(Placement.NONE, place(it, companion = true)) }
     }
 
+    @Test fun libraryArtOnlyOutOfAGame() {
+        Mode.entries.filter { it != Mode.OFF }.forEach { mode ->
+            assertEquals(Placement.LIBRARY_ON_SECOND,
+                DualScreen.placement(mode, true, inGame = false, touchEditMode = false, companionShowing = false, libraryArt = true))
+            assertEquals(Placement.NONE,
+                DualScreen.placement(mode, true, inGame = false, touchEditMode = false, companionShowing = false, libraryArt = false))
+        }
+        assertEquals(Placement.NONE,
+            DualScreen.placement(Mode.OFF, true, inGame = false, touchEditMode = false, companionShowing = false, libraryArt = true))
+        assertEquals(Placement.CONTROLS_ON_SECOND,
+            DualScreen.placement(Mode.GAME_MAIN, true, inGame = true, touchEditMode = false, companionShowing = false, libraryArt = true))
+    }
+
     @Test fun unknownStoredModeFallsBackToOff() {
         assertEquals(Mode.OFF, Mode.fromKey(null))
         assertEquals(Mode.OFF, Mode.fromKey("bogus"))

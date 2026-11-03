@@ -779,6 +779,10 @@ val EN: Map<String, String> = mapOf(
     "overlay.dualScreen.off" to "Off",
     "overlay.dualScreen.gameMain" to "Game on this screen",
     "overlay.dualScreen.gameSecond" to "Game on other screen",
+    "dualScreen.libraryArt.label" to "Box art while browsing",
+    "dualScreen.libraryArt.description" to "Out of a game, show the highlighted game's box art, large and centred, on the other screen as you move through the library.",
+    "dualScreen.infoPanel.label" to "Game info on the controls screen",
+    "dualScreen.infoPanel.description" to "Show the cover, title, play time and achievements between the touch controls while the game is on the other screen.",
     "overlay.dualScreen.description" to "With a second display (e.g. AYN Thor), show the game on one screen and the touch controls on the other. Off keeps single-screen play.",
     "overlay.uiFontSize.label" to "UI Font Size",
     "overlay.uiSize.description" to "Scales menu/library padding and control sizes. 100% = default.",
@@ -1555,6 +1559,7 @@ val EN: Map<String, String> = mapOf(
     "tab.bios" to "BIOS",
     "tab.library" to "Library",
     "tab.interface" to "Interface",
+    "tab.dualScreen" to "Dual Screen",
 
     // --- Video tab ---
     "renderer.intro" to

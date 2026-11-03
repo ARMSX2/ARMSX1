@@ -1597,7 +1597,11 @@ private fun CoverPlaceholder(title: String, serial: String?, showText: Boolean) 
 enum class HomeZone { Toolbar, Search, Collections, RecentsHeader, Recents, Grid }
 
 object HomeInputController {
-    private var owner: HomeViewModel? = null
+    // Snapshot-backed so the second screen's cover follows the library binding in and out.
+    private val ownerState = mutableStateOf<HomeViewModel?>(null)
+    private var owner: HomeViewModel?
+        get() = ownerState.value
+        set(value) { ownerState.value = value }
     private var openMenu: (() -> Unit)? = null
     private var columns = 3
     val scrollVelocity = mutableFloatStateOf(0f)
@@ -1759,6 +1763,14 @@ object HomeInputController {
 
     /** HomeScreen registers how to look up the game in a Recently Played slot. */
     fun setRecentGame(lookup: (Int) -> GameInfo?) { recentGame = lookup }
+
+    /** The game under the library's selector, or null off the grid / Recently Played row. Reads
+     *  Compose state, so a composable calling it follows the selector as it moves. */
+    fun highlightedGame(): GameInfo? = when (zone.value) {
+        HomeZone.Grid -> owner?.selectedGame()
+        HomeZone.Recents -> recentGame?.invoke(recentIndex.intValue)
+        else -> null
+    }
 
     /** HomeScreen registers the currently-shown Recently-Played games (0 when the
      *  shelf is hidden, e.g. while searching). */

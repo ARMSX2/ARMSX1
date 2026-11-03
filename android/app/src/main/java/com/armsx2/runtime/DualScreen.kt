@@ -49,11 +49,19 @@ object DualScreen {
         }
     }
 
-    enum class Placement { NONE, CONTROLS_ON_SECOND, GAME_ON_SECOND }
+    enum class Placement { NONE, CONTROLS_ON_SECOND, GAME_ON_SECOND, LIBRARY_ON_SECOND }
 
     private const val KEY_MODE = "ui.dualScreenMode"
+    private const val KEY_INFO_PANEL = "ui.dualScreenInfoPanel"
+    private const val KEY_LIBRARY_ART = "ui.dualScreenLibraryArt"
 
     val mode = mutableStateOf(Mode.OFF)
+
+    /** Game info drawn between the touch controls when they are on the second screen. */
+    val infoPanel = mutableStateOf(true)
+
+    /** Out of a game: the library's highlighted game's box art on the second screen. */
+    val libraryArt = mutableStateOf(true)
 
     /** The main window's copy of the touch controls stands down while this is true. */
     val controlsOnSecondary = mutableStateOf(false)
@@ -64,6 +72,20 @@ object DualScreen {
     fun load() {
         mode.value = runCatching { Mode.fromKey(MainActivityRuntime.prefs.getString(KEY_MODE, null)) }
             .getOrDefault(Mode.OFF)
+        infoPanel.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_INFO_PANEL, true) }
+            .getOrDefault(true)
+        libraryArt.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_LIBRARY_ART, true) }
+            .getOrDefault(true)
+    }
+
+    fun setLibraryArt(show: Boolean) {
+        libraryArt.value = show
+        runCatching { MainActivityRuntime.prefs.edit().putBoolean(KEY_LIBRARY_ART, show).apply() }
+    }
+
+    fun setInfoPanel(show: Boolean) {
+        infoPanel.value = show
+        runCatching { MainActivityRuntime.prefs.edit().putBoolean(KEY_INFO_PANEL, show).apply() }
     }
 
     fun setMode(next: Mode) {
@@ -83,10 +105,12 @@ object DualScreen {
         inGame: Boolean,
         touchEditMode: Boolean,
         companionShowing: Boolean,
+        libraryArt: Boolean = false,
     ): Placement = when {
         mode == Mode.OFF || !hasSecondDisplay || companionShowing -> Placement.NONE
         mode == Mode.GAME_MAIN && (inGame || touchEditMode) -> Placement.CONTROLS_ON_SECOND
         mode == Mode.GAME_SECOND && inGame -> Placement.GAME_ON_SECOND
+        !inGame && !touchEditMode && libraryArt -> Placement.LIBRARY_ON_SECOND
         else -> Placement.NONE
     }
 }
@@ -173,7 +197,8 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
         if (!started || closed || activity.isFinishing || activity.isDestroyed) { teardown(); return }
         val display = secondDisplay()
         val wanted = DualScreen.placement(
-            DualScreen.mode.value, display != null, inGame, touchEditMode, companionShowing)
+            DualScreen.mode.value, display != null, inGame, touchEditMode, companionShowing,
+            DualScreen.libraryArt.value)
         if (wanted == DualScreen.Placement.NONE || display == null) { teardown(); return }
         if (wanted == placement && display.displayId == displayId && presentation?.isShowing == true) return
         teardown()
@@ -193,7 +218,15 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
                 window?.decorView?.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or
                     View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                 window?.decorView?.let { attachOwners(it) }
-                setContentView(host ?: controlsView(context))
+                setContentView(host ?: if (wanted == DualScreen.Placement.LIBRARY_ON_SECOND)
+                    composeView(context) { com.armsx2.ui.DualScreenLibraryCover() }
+                else composeView(context) {
+                    // Under the controls, and out of the way while the layout is being edited.
+                    if (DualScreen.infoPanel.value && !com.armsx2.ui.touch.TouchControls.editMode.value) {
+                        com.armsx2.ui.DualScreenInfoPanel()
+                    }
+                    com.armsx2.ui.touch.TouchControlsOverlay()
+                })
             }
         }
         next.setOnDismissListener { if (presentation === next) onLost() }
@@ -212,6 +245,7 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
         // Flip these only once the window exists: the composition reacts by dropping its own copy.
         when (wanted) {
             DualScreen.Placement.CONTROLS_ON_SECOND -> DualScreen.controlsOnSecondary.value = true
+            DualScreen.Placement.LIBRARY_ON_SECOND -> Unit
             DualScreen.Placement.GAME_ON_SECOND -> {
                 DualScreen.gameOnSecondary.value = true
                 // A surface with no parent was freed by an earlier teardown that the composition
@@ -230,19 +264,20 @@ class DualScreenController(private val activity: ComponentActivity) : DisplayMan
         view.setViewTreeSavedStateRegistryOwner(activity)
     }
 
-    private fun controlsView(context: Context): View = ComposeView(context).apply {
-        attachOwners(this)
-        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-        setContent {
-            com.armsx2.ui.theme.Armsx2Theme(forceDark = true) {
-                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                    Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)) {
-                        com.armsx2.ui.touch.TouchControlsOverlay()
+    private fun composeView(context: Context, content: @androidx.compose.runtime.Composable () -> Unit): View =
+        ComposeView(context).apply {
+            attachOwners(this)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                com.armsx2.ui.theme.Armsx2Theme(forceDark = true) {
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                        Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)) {
+                            content()
+                        }
                     }
                 }
             }
         }
-    }
 
     /** The display went away (or Android dismissed the window): hand everything back, then retry. */
     private fun onLost() {

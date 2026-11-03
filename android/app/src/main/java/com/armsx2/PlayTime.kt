@@ -67,6 +67,15 @@ object PlayTime {
     fun playedSeconds(serial: String?): Long =
         serial?.takeIf { it.isNotEmpty() }?.let { MainActivityRuntime.prefs.getLong(SECS_PREFIX + it, 0L) } ?: 0L
 
+    /** Stored total plus the session still running for [serial], for a live readout. */
+    @Synchronized
+    fun totalSecondsIncludingSession(serial: String?): Long {
+        val stored = playedSeconds(serial)
+        val live = if (serial != null && serial.isNotEmpty() && serial == sessionSerial)
+            (SystemClock.elapsedRealtime() - sessionStart) / 1000L else 0L
+        return stored + live.coerceAtLeast(0L)
+    }
+
     fun lastPlayedMillis(serial: String?): Long =
         serial?.takeIf { it.isNotEmpty() }?.let { MainActivityRuntime.prefs.getLong(LAST_PREFIX + it, 0L) } ?: 0L
 

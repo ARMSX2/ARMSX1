@@ -639,6 +639,7 @@ private fun settingsSections() = listOf(
     // artwork, so people look for it next to Controls and Shortcuts. Requested by Isshin.
     SettingsSection(SettingsCategory.Skins, "◈"),
     SettingsSection(SettingsCategory.OnScreen, "⊕"),      // Interface — app chrome scaling
+    SettingsSection(SettingsCategory.DualScreen, "⧉"),    // Second display (AYN Thor) — app-wide
     SettingsSection(SettingsCategory.Advanced, "⌥"),      // [runtime] logging + [paths]
     // Cheats — [cheats] in settings.toml, applied by psx/cheats.c. The enum value is still
     // called Patches because renaming it would touch every exhaustive `when` over
@@ -684,6 +685,7 @@ private fun CategoryContent(
         SettingsCategory.Controls -> ps1 { PadTab(viewModel.settings) }
         SettingsCategory.Hotkeys -> HotkeysTab(viewModel.settings)
         SettingsCategory.OnScreen -> OverlayTab(viewModel.uiState.value.game?.settingsKey, contextGame?.settingsKey)
+        SettingsCategory.DualScreen -> com.armsx2.ui.settings.DualScreenTab()
         // Global scope edits the app-wide skin even with a game running behind the menu.
         SettingsCategory.Skins -> SkinsTab(viewModel.settings, forceGlobal = viewModel.uiState.value.game == null)
         SettingsCategory.Advanced -> ps1 { Ps1AdvancedTab() }
@@ -713,6 +715,7 @@ internal fun categoryTitle(category: SettingsCategory): String = when (category)
     SettingsCategory.Controls -> str("tab.controls")
     SettingsCategory.Hotkeys -> str("tab.hotkeys")
     SettingsCategory.OnScreen -> str("tab.interface")
+    SettingsCategory.DualScreen -> str("tab.dualScreen")
     SettingsCategory.Skins -> str("tab.skins")
     SettingsCategory.Advanced -> str("tab.fixes") // "Advanced"
     SettingsCategory.Patches -> str("cheats.title")

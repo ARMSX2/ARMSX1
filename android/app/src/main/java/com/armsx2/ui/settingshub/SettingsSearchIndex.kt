@@ -75,6 +75,9 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("overlay.toggle.fastForwardPopups", true, SettingsCategory.OnScreen),
     SettingsSearchEntry("overlay.uiSize.label", true, SettingsCategory.OnScreen),
     SettingsSearchEntry("overlay.uiFontSize.label", true, SettingsCategory.OnScreen),
+    SettingsSearchEntry("overlay.dualScreen.label", true, SettingsCategory.DualScreen),
+    SettingsSearchEntry("dualScreen.infoPanel.label", true, SettingsCategory.DualScreen),
+    SettingsSearchEntry("dualScreen.libraryArt.label", true, SettingsCategory.DualScreen),
 
     // --- PS1 core settings ---
     // Video tab — settings.toml [video] + [runtime].display_scale
