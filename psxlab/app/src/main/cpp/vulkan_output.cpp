@@ -3,7 +3,6 @@
 // Original Vulkan display backend. Rasterization remains in our software core.
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
-#include "vulkan_frame_gate.h"
 #include <android/native_window_jni.h>
 #include <android/hardware_buffer.h>
 #include <jni.h>
@@ -34,7 +33,7 @@ class Output {
     jlong previousJavaToken=0;int previousJavaWindowW=0,previousJavaWindowH=0;bool previousJavaFilter=false;
     bool shadersTouched=false,lastInputShared=false,lastInputValid=false,lastDisplayedShader=false,displayedBlack=false;int lastW=0,lastH=0,nativeW=0,nativeH=0;
     double outputAspect=4.0/3.0;bool outputStretch=false,outputInteger=false;
-    std::atomic<uint64_t> presented{0},reused{0},javaUploadBytes{0},chainBuilds{0},suboptimalPresents{0},outdatedPresents{0},busySkipped{0};
+    std::atomic<uint64_t> presented{0},reused{0},javaUploadBytes{0},chainBuilds{0},suboptimalPresents{0},outdatedPresents{0};
     // Pre-rotation. A landscape game on a portrait-native panel reports a rotated currentTransform.
     // Presenting identity content then makes the compositor rotate every frame (and returns
     // VK_SUBOPTIMAL_KHR each time). Instead the picture is drawn upright into `upright` and turned
@@ -266,7 +265,6 @@ public:
         bool shown=finishPresent(r,black?"Present black frame":"Present shader subframe");if(shown){displayedBlack=black;lastDisplayedShader=usedShader;}return shown&&(black||usedShader);
     }
     bool supportsShared()const{return sharedSupported;}
-    bool sharedFrameReady(){bool ready=psxVulkanFrameReady(device,fence);if(!ready)busySkipped++;return ready;}
     bool supportsSharedAsync()const{return sharedAsync;}
     bool presentShared(JNIEnv* env,jobject target,AHardwareBuffer* buffer,int w,int h,bool filter,int readyFd){struct OwnedFd{int value;~OwnedFd(){if(value>=0)close(value);}} ready{readyFd};for(int attempt=0;attempt<2;attempt++)if(presentSharedOnce(env,target,buffer,w,h,filter,ready.value))return true;return false;}
     bool presentSharedOnce(JNIEnv* env,jobject target,AHardwareBuffer* buffer,int w,int h,bool filter,int& readyFd){
@@ -284,7 +282,7 @@ public:
         // The next call waits this fence; ping-pong allocations let GL render concurrently.
         bool accepted=finishPresent(r,"Present shared image");if(accepted){lastDisplayedShader=usedShader;displayedBlack=false;lastInputShared=true;lastInputValid=true;lastW=w;lastH=h;}return accepted;
     }
-    void statistics(jlong* values)const{values[0]=presented.load();values[1]=reused.load();values[2]=javaUploadBytes.load();values[3]=chainBuilds.load();values[4]=suboptimalPresents.load();values[5]=outdatedPresents.load();values[6]=stagingBytes.load();values[7]=stagingAllocated.load();values[8]=stagingAllocations.load();values[9]=busySkipped.load();}
+    void statistics(jlong* values)const{values[0]=presented.load();values[1]=reused.load();values[2]=javaUploadBytes.load();values[3]=chainBuilds.load();values[4]=suboptimalPresents.load();values[5]=outdatedPresents.load();values[6]=stagingBytes.load();values[7]=stagingAllocated.load();values[8]=stagingAllocations.load();}
     void verify(JNIEnv* env){
         for(bool javaPath:{false,true})for(auto dimensions:{std::pair<int,int>{32,24},{320,240},{17,31}}){
             int w=dimensions.first,h=dimensions.second;std::vector<jint> pixels(w*h);
@@ -302,13 +300,12 @@ void failure(JNIEnv* e,const std::exception& error){e->ThrowNew(e->FindClass("ja
 extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_VulkanPresenter_create(JNIEnv* e,jclass,jint capacity){try{return reinterpret_cast<jlong>(new Output(capacity));}catch(const std::exception& x){failure(e,x);return 0;}}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_destroy(JNIEnv*,jclass,jlong h){delete reinterpret_cast<Output*>(h);}
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_VulkanPresenter_presentNative(JNIEnv* e,jclass,jlong handle,jobject surface,jintArray data,jint w,jint h,jboolean filter,jlong token){try{if(w<1||w>5120||h<1||h>2560||e->GetArrayLength(data)!=w*h)throw std::runtime_error("Invalid Vulkan frame");return reinterpret_cast<Output*>(handle)->present(e,surface,nullptr,w,h,filter,false,data,token);}catch(const std::exception& x){failure(e,x);return false;}}
-extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_statisticsNative(JNIEnv* e,jclass,jlong handle,jlongArray out){if(e->GetArrayLength(out)!=10){e->ThrowNew(e->FindClass("java/lang/IllegalArgumentException"),"Vulkan statistics length");return;}jlong values[10];reinterpret_cast<Output*>(handle)->statistics(values);e->SetLongArrayRegion(out,0,10,values);}
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_statisticsNative(JNIEnv* e,jclass,jlong handle,jlongArray out){if(e->GetArrayLength(out)!=9){e->ThrowNew(e->FindClass("java/lang/IllegalArgumentException"),"Vulkan statistics length");return;}jlong values[9];reinterpret_cast<Output*>(handle)->statistics(values);e->SetLongArrayRegion(out,0,9,values);}
 extern "C" JNIEXPORT jstring JNICALL Java_dev_psxlab_core_VulkanPresenter_verifyNative(JNIEnv* e,jclass){try{Output output;output.verify(e);std::string text="Vulkan native/Java staging upload/readback: six fixtures with source resizing match on "+output.name+".\n";return e->NewStringUTF(text.c_str());}catch(const std::exception& x){failure(e,x);return nullptr;}}
 
 bool psxVulkanPresentRgba(JNIEnv* env,jlong handle,jobject surface,const uint32_t* pixels,int w,int h,bool filter){return reinterpret_cast<Output*>(handle)->present(env,surface,reinterpret_cast<const jint*>(pixels),w,h,filter,true);}
 
 bool psxVulkanSharedSupported(jlong handle){return reinterpret_cast<Output*>(handle)->supportsShared();}
-bool psxVulkanSharedFrameReady(jlong handle){return reinterpret_cast<Output*>(handle)->sharedFrameReady();}
 bool psxVulkanPresentShared(JNIEnv* env,jlong handle,jobject surface,AHardwareBuffer* buffer,int w,int h,bool filter,int readyFd){return reinterpret_cast<Output*>(handle)->presentShared(env,surface,buffer,w,h,filter,readyFd);}
 bool psxVulkanSharedAsyncSupported(jlong handle){return reinterpret_cast<Output*>(handle)->supportsSharedAsync();}
 

@@ -148,7 +148,7 @@ public final class Gpu implements AutoCloseable {
     /** Primitives submitted by the guest; written on the VM thread. */
     public long primitives;
     /** VM thread blocked on a full GPU queue; GPU worker time drawing; presentation stages and count. */
-    public volatile long queueFullNanos,drawNanos,displayWaitNanos,displayConvertNanos,displayPresentNanos,displayPresentCpuNanos,displays,rejectedDisplays;
+    public volatile long queueFullNanos,drawNanos,displayWaitNanos,displayConvertNanos,displayPresentNanos,displayPresentCpuNanos,displays;
     private final java.util.concurrent.atomic.AtomicReference<long[]> worstPresent=new java.util.concurrent.atomic.AtomicReference<>();
     private static volatile boolean threadCpuUnavailable;
     private static long threadCpu(){if(threadCpuUnavailable)return 0;try{return android.os.Debug.threadCpuTimeNanos();}catch(RuntimeException e){threadCpuUnavailable=true;return 0;}}
@@ -158,9 +158,9 @@ public final class Gpu implements AutoCloseable {
     public String hardwareDescription(){sync();HardwareRasterizer active=hardware;return active==null?"":active.describe();}
     public long[] gpuStageTimes(){HardwareRasterizer active=hardware;return active==null?null:active.gpuTimes();}
     public long[] takeSlowPresent(long minimum){long[] value=worstPresent.getAndSet(null);return value!=null&&value[0]>=minimum?value:null;}
-    void recordPresent(long queued,long started,long convert,long ended,long cpu,boolean accepted){
+    private void recordPresent(long queued,long started,long convert,long ended,long cpu){
         long present=Math.max(0,ended-started-convert);
-        displayWaitNanos+=started-queued;displayConvertNanos+=convert;displayPresentNanos+=present;displayPresentCpuNanos+=cpu;if(accepted)displays++;else rejectedDisplays++;
+        displayWaitNanos+=started-queued;displayConvertNanos+=convert;displayPresentNanos+=present;displayPresentCpuNanos+=cpu;displays++;
         long[] value={ended-queued,started-queued,convert,present,cpu},current;
         do{current=worstPresent.get();if(current!=null&&current[0]>=value[0])return;}while(!worstPresent.compareAndSet(current,value));
     }
@@ -427,15 +427,15 @@ public final class Gpu implements AutoCloseable {
             int decision=presentationDecision(state,extras);
             ShaderChain.phase(decision==PresentationPolicy.SHADER?highRefresh.multiple:1,1,presentationRate,shaderAspect);
             if(timing!=null)timing.presentationSequence(decision==PresentationPolicy.BFI?"bfi":decision==PresentationPolicy.SHADER?"shader_subframes":"normal",decision==PresentationPolicy.BFI||decision==PresentationPolicy.SHADER?highRefresh.multiple:1);
-            boolean displayAccepted=false;
             try{
                 if(internalScale>1||(hardwareDrawing&&hardware!=null&&vulkan!=null)){
                     if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage((state[0]&0x200000)!=0?(vulkan!=null?"gpu.present.vulkan.movie24":"gpu.present.gles.movie24"):vulkan!=null?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){
-                        try{displayAccepted=vulkan!=null?hardware.presentResolved(surface,state,vulkan.nativeHandle()):hardware.present(surface,state);}
-                        catch(RuntimeException error){if(baseVulkanOutput||vulkan==null)throw error;shaderPresentationFailed(error);displayAccepted=hardware.present(surface,state);}
-                        if(timing!=null)timing.presentation(displayAccepted);
+                        boolean accepted;
+                        try{accepted=vulkan!=null?hardware.presentResolved(surface,state,vulkan.nativeHandle()):hardware.present(surface,state);}
+                        catch(RuntimeException error){if(baseVulkanOutput||vulkan==null)throw error;shaderPresentationFailed(error);accepted=hardware.present(surface,state);}
+                        if(timing!=null)timing.presentation(accepted);
                     }
-                    if(displayAccepted)presentExtra(surface,decision,timing);completed.accept(null);return;
+                    presentExtra(surface,decision,timing);completed.accept(null);return;
                 }
                 if(vulkan!=null){
                     long converting=System.nanoTime();
@@ -444,12 +444,12 @@ public final class Gpu implements AutoCloseable {
                         else{Frame previous=vulkanFrames.frame();vulkanFrames.update(softwareVramRevision,state,captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6],previous==null?null:previous.pixels()));}
                     }
                     convert=System.nanoTime()-converting;
-                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){displayAccepted=vulkan.present(surface,frame,filter,vulkanFrames.token());if(timing!=null)timing.presentation(displayAccepted);}if(displayAccepted)presentExtra(surface,decision,timing);completed.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";completed.accept(frame);displayAccepted=true;}
+                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){boolean accepted=vulkan.present(surface,frame,filter,vulkanFrames.token());if(timing!=null)timing.presentation(accepted);}presentExtra(surface,decision,timing);completed.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";completed.accept(frame);}
                 }else if(hardware!=null){if(surface!=null&&surface.isValid()){
                     if(!hardwareDrawing)try(EngineLog.Span span=timing==null?null:timing.stage("gpu.upload.gles")){hardware.setDisplayVram(vram,state,softwareVramRevision);}
-                    try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.gles")){displayAccepted=hardware.present(surface,state);if(timing!=null)timing.presentation(displayAccepted);}
-                }if(displayAccepted)presentExtra(surface,decision,timing);completed.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){completed.accept(captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]));displayAccepted=true;}
-            }finally{recordPresent(queued,started,convert,System.nanoTime(),threadCpu()-cpuStarted,displayAccepted);if(timing!=null)timing.complete();}
+                    try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.gles")){boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}
+                }presentExtra(surface,decision,timing);completed.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){completed.accept(captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]));}
+            }finally{recordPresent(queued,started,convert,System.nanoTime(),threadCpu()-cpuStarted);if(timing!=null)timing.complete();}
         });
     }
     private void readHardware(){if(hardware!=null && hardwareDrawing && hardwareDirty){hardware.readVram(vram);hardwareDirty=false;}}
