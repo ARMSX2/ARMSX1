@@ -148,11 +148,24 @@ struct CpuCore {
         block->version=generations[block->page];revalidated++;return true;
     }
     void clearCache(){NativeTiming::Scope measured(timing,NativeTiming::CPU_CLEAR,s->pc);blocks.clear();previous=nullptr;memset(memory+CodeMask,0,65536);cacheClears++;}
+    // Compiling every block of newly loaded code in one frame froze Valkyrie Profile's first battle for
+    // 140 ms (3,662 blocks). Each emulation slice (~6 a frame) may spend this long compiling; further
+    // blocks run interpreted and compile in a later slice.
+    static constexpr int64_t CompileBudgetNs=1'500'000;
+    int64_t compileSpentNs=0;
+    static int64_t monotonicNs(){timespec t{};clock_gettime(CLOCK_MONOTONIC,&t);return int64_t(t.tv_sec)*1'000'000'000+t.tv_nsec;}
+    void compile(CpuBlock* block){
+        if(compileSpentNs>=CompileBudgetNs){if(!block->compilePending)deferredCompiles++;block->compilePending=true;return;}
+        block->compilePending=false;int64_t started=monotonicNs();
+        {NativeTiming::Scope compiling(timing,NativeTiming::CPU_COMPILE,s->pc);if(compileArm64(*block))compiled++;else compileFailures++;}
+        compileSpentNs+=monotonicNs()-started;
+    }
+    uint64_t deferredCompiles=0;
     CpuBlock* findBlock(){
-        if(previous)for(CpuBlock* link:previous->links)if(valid(link)){linked++;return link;}
+        if(previous)for(CpuBlock* link:previous->links)if(valid(link)){linked++;if(link->compilePending&&!link->function)compile(link);return link;}
         auto it=blocks.find(s->pc);CpuBlock* block=it==blocks.end()?nullptr:it->second.get();
         if(block&&!valid(block)){invalidations++;if(!revalidate(block)){block->function=nullptr;block->codePage.reset();block->executable=nullptr;block->code.clear();}}
-        if(block&&!block->code.empty()){cacheHits++;}
+        if(block&&!block->code.empty()){cacheHits++;if(block->compilePending&&!block->function)compile(block);}
         else{
             NativeTiming::Scope building(timing,NativeTiming::CPU_BUILD,s->pc);
             if(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)>32*1024*1024){clearCache();block=nullptr;}
@@ -176,13 +189,13 @@ struct CpuCore {
             // exclude an instruction which exits to the interpreter for MMIO,
             // scratchpad or an address fault.
             block->ramReadClocks.assign(1,0);for(const Decoded& d:block->code)block->ramReadClocks.push_back(block->ramReadClocks.back()+((d.memory()&&!d.store()&&d.compilable())?6:0));
-            if(recompile&&(block->code.front().compilable()||(block->code.size()>=2&&block->code.front().branch()))){NativeTiming::Scope compiling(timing,NativeTiming::CPU_COMPILE,s->pc);if(compileArm64(*block))compiled++;else compileFailures++;}
+            block->compilePending=false;if(recompile&&(block->code.front().compilable()||(block->code.size()>=2&&block->code.front().branch())))compile(block);
         }
         if(previous){if(!previous->links[0]||previous->links[0]->pc==block->pc)previous->links[0]=block;else previous->links[1]=block;}
         return block;
     }
     int run(JNIEnv* e,int budget,bool stopFrame){
-        env=e;currentAt=s->pc;currentWord=0;uint64_t start=s->instructions;
+        env=e;currentAt=s->pc;currentWord=0;uint64_t start=s->instructions;compileSpentNs=0;
         try{
             status(env->CallLongMethod(bus,clockMethod,0,int(s->cacheIsolated)));
             while(s->instructions-start<uint64_t(budget)){

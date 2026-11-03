@@ -51,6 +51,7 @@ struct CpuBlock {
     std::shared_ptr<CpuCodePage> codePage;
     using Function=int(*)(CpuState*,uint8_t*,uint64_t*,uint8_t*,int,int);
     Function function=nullptr;
+    bool compilePending=false; // Built but not yet compiled: this slice's compile budget was spent.
     int instructionLimit(int clocks,int instructionClocks,bool ramWaitStates)const{
         int lo=0,hi=std::min(int(code.size()),std::max(0,clocks/instructionClocks));
         if(hi*instructionClocks+(ramWaitStates?ramReadClocks[size_t(hi)]:0)<=clocks)return hi;
