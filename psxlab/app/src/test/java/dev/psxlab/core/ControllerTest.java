@@ -13,6 +13,14 @@ public class ControllerTest {
     @Test public void pollSnapshotDoesNotTearDuringButtonUpdate(){
         try(Gpu g=new Gpu(false)){PadState p=new PadState();Bus b=new Bus(g,p);select(b);exchange(b,1);exchange(b,0x42);p.update(0xffff,0,0,0,0);assertEquals(0x5a,exchange(b,0));assertEquals(255,exchange(b,0));assertEquals(255,exchange(b,0));}
     }
+    @Test public void nativeStatusPollingSeesTheAckWithoutDispatchingEveryRead(){
+        try(Gpu g=new Gpu(false)){Bus b=new Bus(g);b.setEventScheduling(true);select(b);b.write8(BASE,1);long before=b.deviceDispatches;
+            int clocks=0;boolean received=false,acked=false;
+            while(clocks<3000 && !(received&&acked)){int status=(int)b.nativeRead(BASE+4,2,8,0);received|=(status&2)!=0;acked|=(status&128)!=0;clocks+=8;}
+            assertTrue(received);assertTrue(acked);assertEquals(255,b.read8(BASE));
+            assertTrue("Pad status polling must not dispatch all devices on every read",b.deviceDispatches-before<clocks/8/4);
+        }
+    }
     @Test public void digitalStickFallbackAndDisabledStickClicks(){
         PadState p=new PadState();p.update(6,128,128,0,255);assertEquals(0xff3f,p.get().buttonWord(false));assertEquals(0xfff9,p.get().buttonWord(true));
     }
