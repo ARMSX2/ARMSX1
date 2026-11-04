@@ -117,14 +117,14 @@ precision highp int;precision highp float;
 layout(std430,binding=1) readonly buffer Commands {int q[];};
 // Per-primitive constants for the fragment shader. Reading them here, six times per primitive, replaces
 // ~30 storage-buffer loads per pixel, which mid-range Adreno GPUs pay for heavily at 3x and above.
-flat out ivec4 pInfo,pBounds,pStart,pGx,pEnv;flat out ivec4 pEdge[3];
+flat out ivec4 pInfo,pBounds,pStart,pGx,pEnv,pUvRange;flat out ivec4 pEdge[3];
 // Colour and texture coordinates of triangles and rectangles are affine in screen position, so the GPU's
 // interpolators produce them per pixel for free instead of ~75 integer operations per pixel.
 out highp vec3 vColor;out highp vec2 vUv;
 uniform int scale;
 void main(){int at=gl_InstanceID*64;
  pInfo=ivec4(q[at],q[at+1],q[at+2],q[at+3]);pBounds=ivec4(q[at+4],q[at+5],q[at+6],q[at+7]);for(int i=0;i<3;i++)pEdge[i]=ivec4(q[at+16+i*4],q[at+17+i*4],q[at+18+i*4],q[at+19+i*4]);
- pStart=ivec4(q[at+28],q[at+29],q[at+30],q[at+31]);pGx=ivec4(q[at+33],q[at+34],q[at+35],q[at+36]);pEnv=ivec4(q[at+10],q[at+14],q[at+9],0);
+ pStart=ivec4(q[at+28],q[at+29],q[at+30],q[at+31]);pGx=ivec4(q[at+33],q[at+34],q[at+35],q[at+36]);pEnv=ivec4(q[at+10],q[at+14],q[at+9],0);pUvRange=ivec4(q[at+49],q[at+50],q[at+51],q[at+52]);
  const ivec2 corners[6]=ivec2[6](ivec2(0,0),ivec2(1,0),ivec2(0,1),ivec2(0,1),ivec2(1,0),ivec2(1,1));ivec2 c=corners[gl_VertexID];vec2 p=vec2(c.x==0?q[at+4]*scale:(q[at+6]+1)*scale,c.y==0?q[at+5]*scale:(q[at+7]+1)*scale);if(q[at]==0){int vertex=gl_VertexID<3?gl_VertexID:0;vec2 a=vec2(q[at+43],q[at+44]),b=vec2(q[at+45],q[at+46]),d=vec2(q[at+47],q[at+48]);vec2 ab=b-a,ad=d-a,bd=d-b;float area=ab.x*ad.y-ab.y*ad.x,longest=max(dot(ab,ab),max(dot(ad,ad),dot(bd,bd)));
  // Very thin triangles retain their bounding quad to avoid precision loss in mitres.
  if(area*area>=longest*longest*0.0004){vec2 v=vertex==0?a:vertex==1?b:d,previous=vertex==0?d:vertex==1?a:b,next=vertex==0?b:vertex==1?d:a;
@@ -168,7 +168,7 @@ precision highp int;precision highp float;
 uniform highp usampler2D hdRead;
 layout(location=0) inout highp uvec4 destination;
 // type, op, clut, dither | bounds | edges (lines: start, delta, steps) | line colour start and step | window, mask, page.
-flat in ivec4 pInfo,pBounds,pStart,pGx,pEnv;flat in ivec4 pEdge[3];
+flat in ivec4 pInfo,pBounds,pStart,pGx,pEnv,pUvRange;flat in ivec4 pEdge[3];
 in highp vec3 vColor;in highp vec2 vUv;
 uniform int scale;
 int floorDiv(int a,int b){return a/b-((a%b)<0?1:0);}
@@ -189,7 +189,11 @@ void drawAt(int x,int y){
   if(type==0){ivec2 l=ivec2(x,y)-pBounds.xy*scale;bool inside=true;for(int edge=0;edge<3;edge++){ivec4 c=pEdge[edge];int w=c.x*scale+c.y*l.x+c.z*l.y;if(w<0||(w==0&&c.w==0))inside=false;}if(!inside)discard;}
   if(type<2){
    // A small bias keeps exact integer values (flat colours, 1:1 sprites) from rounding down through float error.
-   const float bias=1.0/1024.0;color=ivec3(floor(vColor+bias));vec2 t=vUv+bias,whole=floor(t);uv=ivec2(whole);
+   const float bias=1.0/1024.0;color=ivec3(floor(vColor+bias));vec2 t=vUv+bias;
+   // Like DuckStation, keep texture reads inside the triangle's own UV range. Slivers too thin to cover a
+   // 1x pixel still cover HD pixels, and their ill-conditioned gradients sampled texels from outside the
+   // sprite, drawing stray lines (Hercules' menu and sprite edges). Rectangles get an unbounded range.
+   t=clamp(t,vec2(pUvRange.xz),vec2(pUvRange.yw)+0.999);vec2 whole=floor(t);uv=ivec2(whole);
    // The fraction of u/v picks the HD sample within the texel.
    sub=min(ivec2(scale-1),ivec2((t-whole)*float(scale)+0.5));}
   else{int ax=pEdge[0].x,ay=pEdge[0].y,lx=pEdge[0].z,ly=pEdge[0].w,steps=pEdge[1].x;int i=abs(lx)>=abs(ly)?(x/scale-ax)*(lx<0?-1:1):(y/scale-ay)*(ly<0?-1:1);if(i<0||i>steps)discard;
