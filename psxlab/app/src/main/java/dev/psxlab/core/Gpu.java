@@ -24,6 +24,28 @@ public final class Gpu implements AutoCloseable {
     private boolean displayStretch,displayInteger;
     private volatile int displayCrop;
     public void configureCrop(int mode){displayCrop=Math.max(0,Math.min(2,mode));}
+    /**
+     * Where the display range sits in a standard TV picture (2560 clocks across, 240 NTSC or 256 PAL lines), as
+     * fractions {x,y,w,h}; null fills the picture. Only a range well short of a full picture is windowed: real
+     * hardware shows a small one (Alundra 2's 128x32 loading screen) in a black frame, not stretched over it.
+     */
+    static float[] displayWindow(int status,int hs,int he,int vs,int ve){
+        boolean pal=(status&0x100000)!=0;int left=pal?0x274:0x260,top=pal?0x23:0x10,width=2560,height=pal?256:240;
+        if(hs>=he||vs>=ve)return null;
+        float w=Math.min(1f,(he-hs)/(float)width),h=Math.min(1f,(ve-vs)/(float)height);
+        if(w>=0.6f&&h>=0.6f)return null;
+        // A range past the picture's edge keeps its size and moves just inside it.
+        return new float[]{Math.max(0f,Math.min(1f-w,(hs-left)/(float)width)),Math.max(0f,Math.min(1f-h,(vs-top)/(float)height)),w,h};
+    }
+    private static final float[] FULL_WINDOW={0,0,1,1};
+    private float[] presentedWindow=FULL_WINDOW;private Object windowHardware,windowVulkan;
+    /** GPU worker only: tell the presenters about a changed window, or a presenter created since the last one. */
+    private void applyWindow(float[] window){
+        float[] next=window==null?FULL_WINDOW:window;
+        if(Arrays.equals(next,presentedWindow)&&windowHardware==hardware&&windowVulkan==vulkan)return;
+        presentedWindow=next;windowHardware=hardware;windowVulkan=vulkan;
+        if(hardware!=null)hardware.configureWindow(next);if(vulkan!=null)vulkan.configureWindow(next);
+    }
     private int[] displayState(boolean filter){return DisplayCrop.apply(new int[]{gpuStatus,displayX,displayY,horizontalStart,horizontalEnd,verticalStart,verticalEnd,filter?1:0},displayCrop);}
     private String baseRenderer;
     private volatile String shaderPresenterError="";
@@ -411,8 +433,9 @@ public final class Gpu implements AutoCloseable {
         });
     }
     private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
-        flushUpload();int[] state=displayState(filter);long queued=System.nanoTime();
+        flushUpload();int[] state=displayState(filter);float[] window=displayWindow(gpuStatus,horizontalStart,horizontalEnd,verticalStart,verticalEnd);long queued=System.nanoTime();
         submit(()->{
+            applyWindow(window);
             long started=System.nanoTime(),cpuStarted=threadCpu(),convert=0;
             long perfStart=performanceEnabled?System.nanoTime():0;
             java.util.function.Consumer<Frame> completed=perfStart==0?receiver:frame->{measurePresentation(perfStart,state);receiver.accept(frame);};

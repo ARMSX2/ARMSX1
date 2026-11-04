@@ -39,6 +39,8 @@ public final class HardwareRasterizer implements AutoCloseable {
     private static native void setVsyncNative(long handle,boolean enabled);
     private static native boolean presentBlackNative(long handle,Surface surface);
     void configureDisplay(float aspect,boolean stretch,boolean integerScale){configureDisplayNative(handle,aspect,stretch,integerScale);}
+    void configureWindow(float[] window){configureWindowNative(handle,window[0],window[1],window[2],window[3]);}
+    private static native void configureWindowNative(long handle,float x,float y,float width,float height);
     private static native void configureDisplayNative(long handle,float aspect,boolean stretch,boolean integerScale);
     @Override public void close(){if(handle!=0){destroy(handle);handle=0;}}
     private static native long create(int scale);

@@ -21,6 +21,8 @@ public final class VulkanPresenter implements AutoCloseable {
     boolean presentSubframe(Surface surface){return presentExtraNative(handle,surface,false);}
     private static native boolean presentExtraNative(long handle,Surface surface,boolean black);
     void configureDisplay(float aspect,boolean stretch,boolean integerScale){configureDisplayNative(handle,aspect,stretch,integerScale);}
+    void configureWindow(float[] window){configureWindowNative(handle,window[0],window[1],window[2],window[3]);}
+    private static native void configureWindowNative(long handle,float x,float y,float width,float height);
     private static native void configureDisplayNative(long handle,float aspect,boolean stretch,boolean integerScale);
     @Override public synchronized void close(){if(handle!=0){destroy(handle);handle=0;}}
     public static String verify(){if(!NativeRasterizer.AVAILABLE)throw new IllegalStateException("Native display unavailable");return verifyNative();}
