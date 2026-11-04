@@ -21,6 +21,10 @@ public class DisplayWindowTest {
         float[] w=Gpu.displayWindow(0,0x260+2000,0x260+3000,0x10+220,0x10+260);
         assertEquals(1f-1000f/2560,w[0],1e-6f);assertEquals(1f-40f/240,w[1],1e-6f);
     }
+    @Test public void aRangeStartingInTheBlankingAreaStretchesAsBefore(){
+        assertNull(Gpu.displayWindow(0,0,40,0,4));
+        assertNull(Gpu.displayWindow(PAL,0x200,0x300,0x30,0x40));
+    }
     @Test public void emptyRangesAreLeftAlone(){
         assertNull(Gpu.displayWindow(0,0xc60,0x260,0x10,0x100));
         assertNull(Gpu.displayWindow(0,0x260,0xc60,0x100,0x100));

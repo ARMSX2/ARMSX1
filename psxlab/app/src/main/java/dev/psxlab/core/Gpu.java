@@ -31,11 +31,12 @@ public final class Gpu implements AutoCloseable {
      */
     static float[] displayWindow(int status,int hs,int he,int vs,int ve){
         boolean pal=(status&0x100000)!=0;int left=pal?0x274:0x260,top=pal?0x23:0x10,width=2560,height=pal?256:240;
-        if(hs>=he||vs>=ve)return null;
+        // A range starting in the blanking area is not a picture a TV shows; keep stretching it as before.
+        if(hs>=he||vs>=ve||hs<left||vs<top)return null;
         float w=Math.min(1f,(he-hs)/(float)width),h=Math.min(1f,(ve-vs)/(float)height);
         if(w>=0.6f&&h>=0.6f)return null;
-        // A range past the picture's edge keeps its size and moves just inside it.
-        return new float[]{Math.max(0f,Math.min(1f-w,(hs-left)/(float)width)),Math.max(0f,Math.min(1f-h,(vs-top)/(float)height)),w,h};
+        // A range running past the picture's right or bottom edge keeps its size and moves just inside it.
+        return new float[]{Math.min(1f-w,(hs-left)/(float)width),Math.min(1f-h,(vs-top)/(float)height),w,h};
     }
     private static final float[] FULL_WINDOW={0,0,1,1};
     private float[] presentedWindow=FULL_WINDOW;private Object windowHardware,windowVulkan;
