@@ -80,9 +80,6 @@ public final class Bus {
         // device again for each iteration of a guest busy-wait loop.
         int a=address&0x1fffffff;
         if(width==1 && (a==0x1f801800 || a==0x1f801803)){if(pendingClocks>=clockDeadline)flushClocks();return nativeStatus(cdrom.read(a&3));}
-        // Likewise JOY_STAT: its bits change only at SIO0 events, which are in the deadline. Valkyrie Profile
-        // spins on it about 235,000 times a second while waiting for a pad ACK.
-        if(a>=0x1f801044 && a<0x1f801048 && (a&(width-1))==0){if(pendingClocks>=clockDeadline)flushClocks();return nativeStatus(sio0.read(a-0x1f801040,width));}
         int value=width==1?read8(address):width==2?read16(address):read32(address);return nativeStatus(value);}
     long nativeWrite(int address,int width,int value,int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;
         // Bank selection is a latch; it needs no device-clock synchronization.
