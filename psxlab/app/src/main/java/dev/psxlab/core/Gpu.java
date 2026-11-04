@@ -134,7 +134,7 @@ public final class Gpu implements AutoCloseable {
     private volatile VulkanPresenter vulkan;
     private boolean hardwareDirty;
     private volatile String renderer=NativeRasterizer.AVAILABLE?"Native software":"Java software";
-    public String renderer(){return renderer;}
+    public String renderer(){HardwareRasterizer active=hardware;return active instanceof VulkanHardwareRasterizer&&!active.nativeVulkan()?internalScale+"× GLES compatibility rendering / Vulkan display":renderer;}
     /** Active presentation objects, independent of the rasterizer or requested settings. */
     public String displayRenderer(){return vulkan!=null?"Vulkan":hardware!=null?"OpenGL":"Software";}
     public String renderStatistics(){HardwareRasterizer active=hardware;VulkanPresenter output=vulkan;return "GPU queue="+queuedCommands()+" draw_queue_batches="+submittedDrawBatches+" batch_primitives="+batchedPrimitives+" "+(active==null?renderer:active.statistics())+(output==null?"":" "+vulkanFrames.statistics()+" "+output.statistics())+" · "+presentationStatus()+" black="+blackPresented+" shader_subframes="+shaderSubframes;}
@@ -213,11 +213,15 @@ public final class Gpu implements AutoCloseable {
                 try { long before=System.nanoTime();executor.getQueue().put(r);long spent=System.nanoTime()-before;queueFullNanos+=spent;if(diagnosticsEnabled)diagnosticQueueWait+=spent; }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RejectedExecutionException(e); }
             }) : null;
+        if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer="Vulkan display / native software rasterizer";}catch(RuntimeException e){renderer="OpenGL display (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
         if(texturePresentation && NativeRasterizer.AVAILABLE)submitDirect(()->{
-            try{hardware=new HardwareRasterizer(scale);renderer=scale>1?scale+"× HD drawing / "+(presentationMode==2?"Vulkan":"OpenGL")+" display":hardwareDrawing?"OpenGL ES compute":"Native software + OpenGL display";}
+            if(vulkan!=null&&hardwareDrawing){
+                try{hardware=new VulkanHardwareRasterizer(scale,vulkan);renderer=scale+"× native Vulkan rendering";return;}
+                catch(RuntimeException e){android.util.Log.w("PSXGpu","Native Vulkan drawing unavailable; retaining GLES compatibility rendering",e);}
+            }
+            try{hardware=new HardwareRasterizer(scale);renderer=scale>1?scale+"× HD drawing / "+(vulkan!=null?"Vulkan compatibility":"OpenGL")+" display":hardwareDrawing?"OpenGL ES compute":"Native software + OpenGL display";}
             catch(RuntimeException e){if(scale>1)throw new IllegalStateException(scale+"x HD drawing is unavailable on this GPU ("+e.getMessage()+"). Set the internal resolution to 1x or choose another display output.",e);android.util.Log.w("PSXGpu","GLES unavailable; using the software display",e);}
         });
-        if(vulkanOutput)submitDirect(()->{try{vulkan=new VulkanPresenter(scale);renderer="Vulkan display / "+(scale>1?scale+"× OpenGL compute rasterizer":hardwareDrawing?"OpenGL compute rasterizer":"native software rasterizer");}catch(RuntimeException e){renderer=hardware!=null?"OpenGL display (Vulkan unavailable)":"Software (Vulkan unavailable)";android.util.Log.w("PSXGpu","Vulkan display unavailable",e);}});
     }
     private void reconcileShaderPresentation(){
         if(baseVulkanOutput)return;
@@ -544,7 +548,7 @@ public final class Gpu implements AutoCloseable {
     // A failure the caller already received is not thrown again on close: rethrowing that same
     // exception from try-with-resources replaced it with "Self-suppression not permitted".
     @Override public void close() {boolean reported=failureReported;try{sync();}catch(RuntimeException e){if(e!=failure||!reported)throw e;}finally{
-        Runnable cleanup=()->{if(textures!=null){textures.close();textures=null;}if(vulkan!=null){vulkan.close();vulkan=null;}if(hardware!=null){hardware.close();hardware=null;}};
+        Runnable cleanup=()->{try{if(textures!=null)try{textures.close();}finally{textures=null;}}finally{try{if(hardware!=null)try{hardware.close();}finally{hardware=null;}}finally{if(vulkan!=null)try{vulkan.close();}finally{vulkan=null;}}}};
         if(worker!=null){FutureTask<Void> close=new FutureTask<>(cleanup,null);try{worker.execute(close);close.get();}catch(InterruptedException e){Thread.currentThread().interrupt();}catch(ExecutionException e){throw new IllegalStateException(e);}finally{worker.shutdown();}}
         else cleanup.run();
     }}

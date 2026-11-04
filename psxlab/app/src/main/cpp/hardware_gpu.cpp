@@ -16,6 +16,8 @@
 #include <atomic>
 #include "shared_output.h"
 #include "gpu_stage_timer.h"
+#include "gpu_primitives.h"
+#include "gpu_command_upload.h"
 #include <deque>
 extern bool psxVulkanSharedSupported(jlong);
 extern bool psxVulkanSharedAsyncSupported(jlong);
@@ -42,17 +44,7 @@ GLuint program(const char* compute,const char* vertex=nullptr,const char* fragme
 }
 std::string scaledShader(const char* source,int scale){std::string text(source),uniform="uniform int scale;";size_t at=text.find(uniform);if(at==std::string::npos)throw std::runtime_error("HD scale declaration missing");text.replace(at,uniform.size(),"const int scale="+std::to_string(scale)+";");return text;}
 void glCheck(){GLenum error=glGetError();if(error!=GL_NO_ERROR)throw std::runtime_error("OpenGL ES error "+std::to_string(error));}
-struct Rect {int x0,y0,x1,y1;bool valid()const{return x0<=x1&&y0<=y1;}bool intersects(const Rect& b)const{return valid()&&b.valid()&&x0<=b.x1&&x1>=b.x0&&y0<=b.y1&&y1>=b.y0;}};
-// A wrapped texture rectangle and CLUT each split into at most four regions.
-// This fixed scratch storage avoids a heap allocation for each primitive.
-struct RectList {
-    std::array<Rect,8> values{};size_t count=0;
-    void push_back(const Rect& value){if(count==values.size())throw std::runtime_error("GPU texture region capacity exceeded");values[count++]=value;}
-    const Rect* begin()const{return values.data();}
-    const Rect* end()const{return values.data()+count;}
-};
-struct Primitive {int q[64]{};Rect bounds()const{return{q[4],q[5],q[6],q[7]};}};
-class HardwareGpu {
+class HardwareGpu:private GpuPrimitiveBuilder {
     NativeTiming timing;
 public:
     GpuStageTimer gpuTimer;
@@ -72,6 +64,7 @@ private:
     EGLDisplay display=EGL_NO_DISPLAY;EGLConfig config=nullptr;EGLContext context=EGL_NO_CONTEXT;EGLSurface pbuffer=EGL_NO_SURFACE,windowSurface=EGL_NO_SURFACE;ANativeWindow* window=nullptr;
     GLuint snapshotBuffer=0,ramBuffer=0,commandBuffer=0,counterBuffer=0,drawProgram=0,transferProgram=0,scanoutProgram=0,presentProgram=0,frameTexture=0,vao=0;
     std::array<Primitive,32> pending{};int pendingCount=0;std::vector<Rect> reads,writes;bool countEnabled=false;
+    GpuCommandUpload commandUploads;
     std::array<int,1024*512> cpu{};i64 fallbackPixels=0;
     std::atomic<i64> draws{0},feedbackDraws{0},readbacks{0},passes{0},presented{0},nativeCopies{0},sharedFrames{0},asyncFrames{0},feedbackBatches{0},feedbackResolvedTiles{0},snapshotBytes{0};
     bool serialDispatch=false,windowSwapConfigured=false;
@@ -127,33 +120,12 @@ private:
     }
     void streamCommands(GLuint buffer,GLsizeiptr bytes,const void* data){
         NativeTiming::Scope measured(timing,NativeTiming::GL_COMMAND_UPLOAD);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER,buffer);
-        glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,bytes,data);
+        commandUploads.upload(buffer,buffer==hdCommandBuffer?GLsizeiptr(sizeof(Primitive)*HD_BATCH):GLsizeiptr(sizeof(pending)),bytes,data);
     }
     void download(){NativeTiming::Scope measured(timing,NativeTiming::GPU_READBACK);flush();resolveNative();readbacks++;barrier();glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);void* p=glMapBufferRange(GL_SHADER_STORAGE_BUFFER,0,sizeof(cpu),GL_MAP_READ_BIT);if(!p)throw std::runtime_error("VRAM readback failed");std::memcpy(cpu.data(),p,sizeof(cpu));glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);}
     void uploadCpu(bool seedHd=true){softwareUploadKnown=false;uploadBytes+=sizeof(cpu);contentRevision++;displayChanged=true;flushHd();nativeDirty={1023,511,0,0};nativeDirtyTiles.fill(0);updateBarrier();GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::UPLOAD);glBindBuffer(GL_SHADER_STORAGE_BUFFER,ramBuffer);glBufferSubData(GL_SHADER_STORAGE_BUFFER,0,sizeof(cpu),cpu.data());barrier();if(seedHd&&hdTexture)transferHd(4,0,0,1024,512,0,0,0,0);}
-    template<class Regions> static void split(Regions& out,int x,int y,int w,int h){int firstW=std::min(w,1024-x),firstH=std::min(h,512-y);out.push_back({x,y,x+firstW-1,y+firstH-1});if(w>firstW)out.push_back({0,y,w-firstW-1,y+firstH-1});if(h>firstH){out.push_back({x,0,x+firstW-1,h-firstH-1});if(w>firstW)out.push_back({0,0,w-firstW-1,h-firstH-1});}}
-    static std::pair<int,int> textureRange(const Primitive& p,int component,int mask,int offset,bool enhanced){
-        i64 a=p.q[28+component],dx=i64(p.q[33+component])*(p.q[6]-p.q[4]+int(enhanced)),dy=i64(p.q[38+component])*(p.q[7]-p.q[5]+int(enhanced));
-        i64 lo=std::min({a,a+dx,a+dy,a+dx+dy})>>16,hi=std::max({a,a+dx,a+dy,a+dx+dy})>>16;
-        if(hi-lo>=255)return{offset,(255&~mask)|offset};
-        if(mask==0&&(lo>>8)==(hi>>8))return{int(lo)&255,int(hi)&255};
-        int low=255,high=0;for(i64 v=lo;v<=hi;v++){int mapped=((int(v)&255)&~mask)|offset;low=std::min(low,mapped);high=std::max(high,mapped);}return{low,high};
-    }
-    RectList textureReads(const Primitive& p)const{RectList out;if(!(p.q[1]&4)||!p.bounds().valid())return out;int page=p.q[9],depth=(page>>7)&3,window=p.q[10],mx=(window&31)*8,my=((window>>5)&31)*8,shift=depth>=2?0:depth==1?1:2;
-        auto [u0,u1]=textureRange(p,3,mx,((window>>10)&31)*8&mx,scale>1);auto [v0,v1]=textureRange(p,4,my,((window>>15)&31)*8&my,scale>1);
-        split(out,((page&15)*64+(u0>>shift))&1023,(((page>>4)&1)*256+v0)&511,(u1>>shift)-(u0>>shift)+1,v1-v0+1);
-        if(depth<2){int clut=p.q[2];split(out,(clut&63)*16,(clut>>6)&511,depth==0?16:256,1);}return out;}
-    bool feedback(const Primitive& p,const RectList& ranges)const{for(const Rect& r:ranges)if(r.intersects(p.bounds()))return true;return false;}
+    RectList textureReads(const Primitive& p)const{return GpuPrimitiveBuilder::textureReads(p,scale>1);}
     void add(const Primitive& p,const RectList& newReads){if(!p.bounds().valid())return;bool hazard=false;for(const auto& r:newReads)for(const auto& w:writes)hazard|=r.intersects(w);for(const auto& w:reads)hazard|=w.intersects(p.bounds());if(hazard||pendingCount==32)flush();pending[pendingCount++]=p;reads.insert(reads.end(),newReads.begin(),newReads.end());writes.push_back(p.bounds());}
-    Primitive base(int op,int clut,bool dither,const int* env,Rect bounds,int type){Primitive p;p.q[0]=type;p.q[1]=op;p.q[2]=clut;p.q[3]=dither;p.q[4]=bounds.x0;p.q[5]=bounds.y0;p.q[6]=bounds.x1;p.q[7]=bounds.y1;std::copy_n(env,7,p.q+8);return p;}
-    static Rect clip(Rect bounds,const int* env){return{std::max(bounds.x0,env[3]&1023),std::max(bounds.y0,(env[3]>>10)&511),std::min(bounds.x1,env[4]&1023),std::min(bounds.y1,(env[4]>>10)&511)};}
-    Primitive triangle(Vertex a,Vertex b,Vertex c,int op,int clut,const int* env){Rect bounds{std::min({a.x,b.x,c.x}),std::min({a.y,b.y,c.y}),std::max({a.x,b.x,c.x})-1,std::max({a.y,b.y,c.y})-1};i64 area=edge(a,b,c.x,c.y);if(!area||bounds.x1-bounds.x0+1>=1024||bounds.y1-bounds.y0+1>=512){Primitive p;p.q[6]=-1;return p;}if(area<0){std::swap(b,c);area=-area;}bounds=clip(bounds,env);bool shade=op&16,tex=op&4;Primitive p=base(op,clut,(env[1]&512)&&(shade||(tex&&!(op&1))),env,bounds,0);
-        Vertex starts[3]={b,c,a},ends[3]={c,a,b};i64 weights[3];for(int i=0;i<3;i++){int at=16+i*4;weights[i]=edge(starts[i],ends[i],bounds.x0,bounds.y0);p.q[at]=int(weights[i]);p.q[at+1]=-(ends[i].y-starts[i].y);p.q[at+2]=ends[i].x-starts[i].x;p.q[at+3]=topLeft(starts[i],ends[i]);}
-        p.q[43]=a.x;p.q[44]=a.y;p.q[45]=b.x;p.q[46]=b.y;p.q[47]=c.x;p.q[48]=c.y;int av[5]={a.r,a.g,a.b,a.u,a.v},bv[5]={b.r,b.g,b.b,b.u,b.v},cv[5]={c.r,c.g,c.b,c.u,c.v};for(int i=0;i<5;i++){bool interpolate=i<3?shade:tex;p.q[28+i]=interpolate?start(weights[0],weights[1],weights[2],av[i],bv[i],cv[i],area):i<3?av[i]*65536:0;p.q[33+i]=interpolate?gx(a,b,c,av[i],bv[i],cv[i],area):0;p.q[38+i]=interpolate?gy(a,b,c,av[i],bv[i],cv[i],area):0;}return p;
-    }
-    Primitive rectangle(const int* packet,int op,const int* env){int size=(op>>3)&3;bool tex=op&4;int uv=tex?packet[2]:0,wh=size==0?packet[tex?3:2]:0,w=size==0?wh&1023:size==1?1:size==2?8:16,h=size==0?(uint32_t(wh)>>16)&511:size==1?1:size==2?8:16;Vertex a(packet[1],packet[0],uv,env[5]);Rect bounds=clip({a.x,a.y,a.x+w-1,a.y+h-1},env);Primitive p=base(op,uint32_t(uv)>>16,false,env,bounds,1);int dx=(env[1]&4096)?-1:1,dy=(env[1]&8192)?-1:1;p.q[28]=a.r*65536;p.q[29]=a.g*65536;p.q[30]=a.b*65536;p.q[31]=(a.u+(bounds.x0-a.x)*dx)*65536;p.q[32]=(a.v+(bounds.y0-a.y)*dy)*65536;p.q[36]=dx*65536;p.q[42]=dy*65536;return p;}
-    Primitive line(const int* packet,int op,const int* env){bool shade=op&16;Vertex a(packet[1],packet[0],0,env[5]),b(packet[shade?3:2],shade?packet[2]:packet[0],0,env[5]);int dx=b.x-a.x,dy=b.y-a.y;Rect bounds=clip({std::min(a.x,b.x),std::min(a.y,b.y),std::max(a.x,b.x),std::max(a.y,b.y)},env);if(std::abs(dx)>=1024||std::abs(dy)>=512)bounds.x1=-1;Primitive p=base(op&~4,0,env[1]&512,env,bounds,2);p.q[16]=a.x;p.q[17]=a.y;p.q[18]=dx;p.q[19]=dy;p.q[20]=std::max(std::abs(dx),std::abs(dy));p.q[28]=a.r;p.q[29]=a.g;p.q[30]=a.b;p.q[33]=b.r-a.r;p.q[34]=b.g-a.g;p.q[35]=b.b-a.b;return p;}
     // A transfer resolves native VRAM only when it reads native pixels that HD drawing has made stale: a copy's
     // source, or a destination checked for the mask bit. Fills and plain uploads overwrite the area in both
     // copies, so a later resolve of those tiles reproduces the same values. Resolving on every transfer cost

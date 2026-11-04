@@ -4,7 +4,7 @@ import android.view.Surface;
 import java.util.*;
 
 /** Original GLES integer rasterizer; all calls belong to the GPU worker thread. */
-public final class HardwareRasterizer implements AutoCloseable {
+public class HardwareRasterizer implements AutoCloseable {
     private long handle;
     private boolean profiling;
     private final NativeTiming timing=new NativeTiming();
@@ -13,9 +13,11 @@ public final class HardwareRasterizer implements AutoCloseable {
     private static native void setProfilingNative(long handle,boolean enabled);
     private static native long[] timingsNative(long handle);
 
-    private final int scale;
+    protected final int scale;
     public HardwareRasterizer(){this(1);}
-    public HardwareRasterizer(int scale){if(!NativeRasterizer.AVAILABLE)throw new IllegalStateException("Native GPU unavailable");if(scale<1||scale>5)throw new IllegalArgumentException("Internal scale must be 1–5");this.scale=scale;handle=create(scale);}
+    public HardwareRasterizer(int scale){this(scale,false);}
+    protected HardwareRasterizer(int scale,boolean deferred){if(!NativeRasterizer.AVAILABLE)throw new IllegalStateException("Native GPU unavailable");if(scale<1||scale>5)throw new IllegalArgumentException("Internal scale must be 1–5");this.scale=scale;if(!deferred)handle=create(scale);}
+    boolean nativeVulkan(){return false;}
     void drawBatch(int[] words){batchNative(handle,words);}
     void readVram(int[] out){readNative(handle,out);}
     void setVram(int[] in){setNative(handle,in);}

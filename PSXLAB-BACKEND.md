@@ -73,7 +73,22 @@ PGXP, achievements, shader chains, custom drivers, multitap, rewind,
 runahead and embedded-PBP disc switching are not
 implemented by this backend. Their presence in the existing UI is not a
 compatibility claim. Native resolution and the existing shared GLES HD path are
-supported; Vulkan is a presentation backend, not a separate polygon core.
+supported. With Vulkan output and hardware drawing selected, the original engine
+now renders directly on the same Vulkan device used for presentation. Native 1x
+uses integer compute; HD uses large raster batches when ordered color attachment
+access is supported. Missing features or failed native initialization retain the
+GLES compatibility drawing path. The existing OpenGL selection continues to use
+GLES. No additional renderer setting is required. Texture replacements migrate
+native Vulkan drawing to the established GLES replacement path while preserving
+canonical VRAM. Software rasterization remains available through its existing
+selection.
+
+Native Vulkan shader binaries are generated from this engine's own GLSL rules by
+`tools/build_vulkan_gpu_shaders.py`, using the Android NDK's `glslc`. They do not
+embed another emulator's renderer. The checked-in SPIR-V keeps Python out of the
+normal Android build. Standalone GPU regression instructions are in
+`tools/gpu_backend_validation/README.txt`; those checks do not establish Android
+driver compatibility or a game-level FPS improvement.
 
 ## Validation recorded before publication
 

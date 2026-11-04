@@ -1,6 +1,6 @@
 #include "display_layout.h"
 #include "native_timing.h"
-// Original Vulkan display backend. Rasterization remains in our software core.
+// Original Vulkan display backend, shared by native Vulkan and compatibility rendering.
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
 #include <android/native_window_jni.h>
@@ -16,6 +16,7 @@
 #include <atomic>
 #include "shader_chain.h"
 #include "prerotate_shaders.h"
+#include "vulkan_gpu_android.h"
 
 namespace {
 void checked(VkResult r,const char* operation){if(r!=VK_SUCCESS)throw std::runtime_error(std::string(operation)+" (Vulkan "+std::to_string(r)+")");}
@@ -27,11 +28,12 @@ class Output {
     VkBuffer staging=VK_NULL_HANDLE;VkDeviceMemory stagingMemory=VK_NULL_HANDLE;void* mapped=nullptr;const int maxPixels;VkDeviceSize stagingCapacity=0;
     std::atomic<uint64_t> stagingBytes{0},stagingAllocated{0},stagingAllocations{0};
     VkImage source=VK_NULL_HANDLE;VkDeviceMemory sourceMemory=VK_NULL_HANDLE;int sourceW=0,sourceH=0;bool sourceReady=false,linear=true;
-    bool sharedSupported=false,sharedAsync=false;VkSemaphore producerReady=VK_NULL_HANDLE;PFN_vkImportSemaphoreFdKHR importReadyFd=nullptr;
+    bool orderedColor=false;bool sharedSupported=false,sharedAsync=false;VkSemaphore producerReady=VK_NULL_HANDLE;PFN_vkImportSemaphoreFdKHR importReadyFd=nullptr;
     PFN_vkGetAndroidHardwareBufferPropertiesANDROID getHardwareProperties=nullptr;
     struct SharedAllocation{AHardwareBuffer* buffer;VkImage image;VkDeviceMemory memory;};std::vector<SharedAllocation> sharedAllocations;AHardwareBuffer* sharedBuffer=nullptr;VkImage sharedImage=VK_NULL_HANDLE;VkDeviceMemory sharedMemory=VK_NULL_HANDLE;
     jlong previousJavaToken=0;int previousJavaWindowW=0,previousJavaWindowH=0;bool previousJavaFilter=false;
     bool shadersTouched=false,lastInputShared=false,lastInputValid=false,lastDisplayedShader=false,displayedBlack=false;int lastW=0,lastH=0,nativeW=0,nativeH=0;
+    VkImage directImage=VK_NULL_HANDLE;
     double outputAspect=4.0/3.0;bool outputStretch=false,outputInteger=false;PsxDisplayWindow outputWindow;
     std::atomic<uint64_t> presented{0},reused{0},javaUploadBytes{0},chainBuilds{0},suboptimalPresents{0},outdatedPresents{0};
     // Pre-rotation. A landscape game on a portrait-native panel reports a rotated currentTransform.
@@ -191,13 +193,47 @@ class Output {
         checked(result,operation);presented++;return true;
     }
 public:
+    PsxVulkanContext gpuContext(){return{physical,device,queue,family,armsx_shader_vk_queue_lock,armsx_shader_vk_queue_unlock,[](void* owner,VkImage image){static_cast<Output*>(owner)->forgetImage(image);},this,orderedColor};}
+    void forgetImage(VkImage image){
+        if(directImage!=image)return;idle();directImage=VK_NULL_HANDLE;lastInputValid=false;
+        // Postprocessing can retain views of the supplied source. Drop those views
+        // before its owner frees the image, then retain the same device for GLES.
+        if(shadersTouched){psx_shader_detach(device);armsx_shader_vk_device_t binding{vkGetInstanceProcAddr,instance,physical,device,queue,family};armsx_shader_vk_attach(&binding);shadersTouched=false;lastDisplayedShader=false;}
+    }
+    bool presentDirect(JNIEnv* env,jobject target,VkImage image,int w,int h,bool filter,jlong token){
+        for(int attempt=0;attempt<2;attempt++){
+            std::unique_ptr<ANativeWindow,decltype(&ANativeWindow_release)> requested(ANativeWindow_fromSurface(env,target),ANativeWindow_release);if(!requested)return false;
+            int targetW=ANativeWindow_getWidth(requested.get()),targetH=ANativeWindow_getHeight(requested.get());
+            if(image==directImage&&token>0&&token==previousJavaToken&&requested.get()==window&&chain&&targetW==previousJavaWindowW&&targetH==previousJavaWindowH&&filter==previousJavaFilter&&!needsPresent()){reused++;return true;}
+            waitFence("Native Vulkan display fence");
+            if(requested.get()!=window){detach();window=requested.release();VkAndroidSurfaceCreateInfoKHR create{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};create.window=window;checked(vkCreateAndroidSurfaceKHR(instance,&create,nullptr,&surface),"Create native Vulkan surface");VkBool32 supported=VK_FALSE;checked(vkGetPhysicalDeviceSurfaceSupportKHR(physical,family,surface,&supported),"Native Vulkan presentation support");if(!supported)throw std::runtime_error("Native Vulkan queue cannot present");}
+            if(!chain)createChain();uint32_t index=0;VkResult result=acquireImage(&index);if(result==VK_ERROR_OUT_OF_DATE_KHR){dropChain();continue;}if(result!=VK_SUBOPTIMAL_KHR)checked(result,"Acquire native Vulkan display image");
+            if(hdFinished.empty()){hdFinished.resize(images.size(),VK_NULL_HANDLE);VkSemaphoreCreateInfo semaphore{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};for(auto& item:hdFinished)checked(vkCreateSemaphore(device,&semaphore,nullptr,&item),"Native Vulkan presentation semaphore");}
+            VkSemaphore finished=hdFinished[index];beginAfterFence();
+            imageBarrier(image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_SHADER_READ_BIT);
+            imageBarrier(drawTarget(index),VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue black{};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};vkCmdClearColorImage(command,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&black,1,&range);
+            VkMemoryBarrier order{VK_STRUCTURE_TYPE_MEMORY_BARRIER};order.srcAccessMask=order.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&order,0,nullptr,0,nullptr);
+            auto rect=psxDisplayRect(int(extent.width),int(extent.height),w,h,outputAspect,outputStretch,outputInteger,outputWindow);bool usedShader=drawShader(image,w,h,drawTarget(index),rect);
+            if(!usedShader){VkImageBlit blit{};blit.srcSubresource=blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.srcOffsets[1]={w,h,1};blit.dstOffsets[0]={rect.x,rect.y,0};blit.dstOffsets[1]={rect.x+rect.w,rect.y+rect.h,1};VkFormatProperties format{};vkGetPhysicalDeviceFormatProperties(physical,VK_FORMAT_R8G8B8A8_UNORM,&format);vkCmdBlitImage(command,image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,filter&&(format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)?VK_FILTER_LINEAR:VK_FILTER_NEAREST);}
+            imageBarrier(image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_SHADER_WRITE_BIT);finishTarget(index);submit(true,finished);
+            VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&finished;present.swapchainCount=1;present.pSwapchains=&chain;present.pImageIndices=&index;
+            if(shadersTouched)armsx_shader_vk_queue_lock();result=presentImage(&present);if(shadersTouched)armsx_shader_vk_queue_unlock();if(!finishPresent(result,"Present native Vulkan image"))continue;
+            directImage=image;lastInputShared=false;lastInputValid=true;lastDisplayedShader=usedShader;displayedBlack=false;lastW=w;lastH=h;previousJavaToken=token;previousJavaWindowW=targetW;previousJavaWindowH=targetH;previousJavaFilter=filter;return true;
+        }
+        return false;
+    }
     std::string name;
     void profile(bool enabled){timing.enabled.store(enabled);}
     jlongArray timings(JNIEnv* env){return timing.snapshot(env);}
     Output(int capacity=1024*512):maxPixels(capacity){if(capacity<1||capacity>1024*512*25)throw std::runtime_error("Invalid Vulkan frame capacity");try{
         const char* extensions[]={VK_KHR_SURFACE_EXTENSION_NAME,VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="PSX Lab";uint32_t loaderVersion=VK_API_VERSION_1_0;auto enumerateVersion=reinterpret_cast<PFN_vkEnumerateInstanceVersion>(vkGetInstanceProcAddr(nullptr,"vkEnumerateInstanceVersion"));if(enumerateVersion)checked(enumerateVersion(&loaderVersion),"Vulkan loader version");app.apiVersion=loaderVersion>=VK_API_VERSION_1_1?VK_API_VERSION_1_1:VK_API_VERSION_1_0;VkInstanceCreateInfo create{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};create.pApplicationInfo=&app;create.enabledExtensionCount=2;create.ppEnabledExtensionNames=extensions;checked(vkCreateInstance(&create,nullptr,&instance),"Create Vulkan instance");uint32_t count=0;checked(vkEnumeratePhysicalDevices(instance,&count,nullptr),"Enumerate Vulkan devices");std::vector<VkPhysicalDevice> candidates(count);checked(vkEnumeratePhysicalDevices(instance,&count,candidates.data()),"Enumerate Vulkan devices");for(VkPhysicalDevice p:candidates){uint32_t n=0;vkGetPhysicalDeviceQueueFamilyProperties(p,&n,nullptr);std::vector<VkQueueFamilyProperties> families(n);vkGetPhysicalDeviceQueueFamilyProperties(p,&n,families.data());for(uint32_t i=0;i<n;i++)if(families[i].queueFlags&VK_QUEUE_GRAPHICS_BIT){physical=p;family=i;break;}if(physical)break;}if(!physical)throw std::runtime_error("No Vulkan graphics device");VkPhysicalDeviceProperties properties{};vkGetPhysicalDeviceProperties(physical,&properties);name=properties.deviceName;
         float priority=1;VkDeviceQueueCreateInfo q{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};q.queueFamilyIndex=family;q.queueCount=1;q.pQueuePriorities=&priority;const char* swapchain=VK_KHR_SWAPCHAIN_EXTENSION_NAME;VkDeviceCreateInfo d{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};d.queueCreateInfoCount=1;d.pQueueCreateInfos=&q;std::vector<const char*> deviceExtensions{swapchain};
-        if(app.apiVersion>=VK_API_VERSION_1_1&&properties.apiVersion>=VK_API_VERSION_1_1){uint32_t count=0;checked(vkEnumerateDeviceExtensionProperties(physical,nullptr,&count,nullptr),"Vulkan extension count");std::vector<VkExtensionProperties> available(count);checked(vkEnumerateDeviceExtensionProperties(physical,nullptr,&count,available.data()),"Vulkan extensions");auto has=[&](const char* name){return std::any_of(available.begin(),available.end(),[&](const auto& e){return std::strcmp(e.extensionName,name)==0;});};sharedSupported=has(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME)&&has(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);if(sharedSupported){deviceExtensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);deviceExtensions.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);sharedAsync=has(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);if(sharedAsync)deviceExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);}}
+        VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT orderedFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT};
+        if(app.apiVersion>=VK_API_VERSION_1_1&&properties.apiVersion>=VK_API_VERSION_1_1){uint32_t count=0;checked(vkEnumerateDeviceExtensionProperties(physical,nullptr,&count,nullptr),"Vulkan extension count");std::vector<VkExtensionProperties> available(count);checked(vkEnumerateDeviceExtensionProperties(physical,nullptr,&count,available.data()),"Vulkan extensions");auto has=[&](const char* name){return std::any_of(available.begin(),available.end(),[&](const auto& e){return std::strcmp(e.extensionName,name)==0;});};if(has(VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME)||has(VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME)){
+            VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};features.pNext=&orderedFeatures;vkGetPhysicalDeviceFeatures2(physical,&features);
+            orderedColor=orderedFeatures.rasterizationOrderColorAttachmentAccess;
+            if(orderedColor){deviceExtensions.push_back(has(VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME)?VK_EXT_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME:VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME);orderedFeatures.rasterizationOrderDepthAttachmentAccess=orderedFeatures.rasterizationOrderStencilAttachmentAccess=VK_FALSE;d.pNext=&orderedFeatures;}
+        }sharedSupported=has(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME)&&has(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);if(sharedSupported){deviceExtensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);deviceExtensions.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);sharedAsync=has(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);if(sharedAsync)deviceExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);}}
         d.enabledExtensionCount=deviceExtensions.size();d.ppEnabledExtensionNames=deviceExtensions.data();checked(vkCreateDevice(physical,&d,nullptr,&device),"Create Vulkan device");vkGetDeviceQueue(device,family,0,&queue);getHardwareProperties=reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(vkGetDeviceProcAddr(device,"vkGetAndroidHardwareBufferPropertiesANDROID"));sharedSupported=sharedSupported&&getHardwareProperties;importReadyFd=reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(vkGetDeviceProcAddr(device,"vkImportSemaphoreFdKHR"));sharedAsync=sharedSupported&&sharedAsync&&importReadyFd;
         if(sharedAsync){auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>(vkGetInstanceProcAddr(instance,"vkGetPhysicalDeviceExternalSemaphoreProperties"));VkPhysicalDeviceExternalSemaphoreInfo info{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO};info.handleType=VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;VkExternalSemaphoreProperties result{VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES};if(query)query(physical,&info,&result);sharedAsync=query&&(result.externalSemaphoreFeatures&VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT);}
 
@@ -233,7 +269,7 @@ public:
         if(!sameInput){if(javaPixels){uploadJava(env,javaPixels,w,h);if(env->ExceptionCheck())return false;}else upload(pixels,w,h,rgba);}if(javaPixels||!rgba){nativeW=w;nativeH=h;}beginAfterFence();if(!sameInput)copyUpload();imageBarrier(drawTarget(index),VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue black{{0,0,0,1}};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};vkCmdClearColorImage(command,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&black,1,&range);
         VkMemoryBarrier order{VK_STRUCTURE_TYPE_MEMORY_BARRIER};order.srcAccessMask=order.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&order,0,nullptr,0,nullptr);
         auto rect=psxDisplayRect(int(extent.width),int(extent.height),w,h,outputAspect,outputStretch,outputInteger,outputWindow);int dw=rect.w,dh=rect.h,x=rect.x,y=rect.y;VkImageBlit blit{};blit.srcSubresource=blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.srcOffsets[1]={w,h,1};blit.dstOffsets[0]={x,y,0};blit.dstOffsets[1]={x+dw,y+dh,1};bool usedShader=drawShader(source,w,h,drawTarget(index),rect);if(!usedShader)vkCmdBlitImage(command,source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,filter&&linear?VK_FILTER_LINEAR:VK_FILTER_NEAREST);finishTarget(index);submit(true,finished);
-        VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();if(!finishPresent(r,"Present display image"))return false;previousJavaToken=javaPixels&&chain?frameToken:0;previousJavaWindowW=targetW;previousJavaWindowH=targetH;previousJavaFilter=filter;lastDisplayedShader=usedShader;displayedBlack=false;lastInputShared=false;lastInputValid=true;lastW=w;lastH=h;return true;
+        VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();if(!finishPresent(r,"Present display image"))return false;previousJavaToken=javaPixels&&chain?frameToken:0;previousJavaWindowW=targetW;previousJavaWindowH=targetH;previousJavaFilter=filter;lastDisplayedShader=usedShader;displayedBlack=false;directImage=VK_NULL_HANDLE;lastInputShared=false;lastInputValid=true;lastW=w;lastH=h;return true;
     }
     bool needsPresent()const{return psx_shader_requested()||lastDisplayedShader||displayedBlack;}
     void nativeDimensions(int w,int h){nativeW=w;nativeH=h;}
@@ -251,14 +287,14 @@ public:
         if(!requested||requested.get()!=window)return false;if(!chain)createChain();uint32_t index=0;
         VkResult r=acquireImage(&index);if(r==VK_ERROR_OUT_OF_DATE_KHR){dropChain();return false;}if(r!=VK_SUBOPTIMAL_KHR)checked(r,"Acquire repeated image");
         if(hdFinished.empty()){hdFinished.resize(images.size(),VK_NULL_HANDLE);VkSemaphoreCreateInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};for(auto& semaphore:hdFinished)checked(vkCreateSemaphore(device,&info,nullptr,&semaphore),"Repeated presentation semaphore");}VkSemaphore finished=hdFinished[index];
-        bool usedShader=false;beginAfterFence();if(!black&&lastInputShared)sharedBarrier(true);imageBarrier(drawTarget(index),VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);
+        bool usedShader=false;beginAfterFence();if(!black&&lastInputShared)sharedBarrier(true);if(!black&&directImage)imageBarrier(directImage,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_SHADER_READ_BIT);imageBarrier(drawTarget(index),VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);
         VkClearColorValue clear{{0,0,0,1}};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};vkCmdClearColorImage(command,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&clear,1,&range);
         if(!black){VkMemoryBarrier order{VK_STRUCTURE_TYPE_MEMORY_BARRIER};order.srcAccessMask=order.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&order,0,nullptr,0,nullptr);
             auto rect=psxDisplayRect(int(extent.width),int(extent.height),lastW,lastH,outputAspect,outputStretch,outputInteger,outputWindow);
-            usedShader=drawShader(lastInputShared?sharedImage:source,lastW,lastH,drawTarget(index),rect);if(!usedShader){
-                VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.srcOffsets[1]={lastW,lastH,1};blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstOffsets[0]={rect.x,rect.y,0};blit.dstOffsets[1]={rect.x+rect.w,rect.y+rect.h,1};vkCmdBlitImage(command,lastInputShared?sharedImage:source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_NEAREST);
+            usedShader=drawShader(lastInputShared?sharedImage:directImage?directImage:source,lastW,lastH,drawTarget(index),rect);if(!usedShader){
+                VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.srcOffsets[1]={lastW,lastH,1};blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstOffsets[0]={rect.x,rect.y,0};blit.dstOffsets[1]={rect.x+rect.w,rect.y+rect.h,1};vkCmdBlitImage(command,lastInputShared?sharedImage:directImage?directImage:source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_NEAREST);
             }
-            if(lastInputShared)sharedBarrier(false);
+            if(lastInputShared)sharedBarrier(false);if(directImage)imageBarrier(directImage,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_SHADER_WRITE_BIT);
         }
         finishTarget(index);submit(true,finished);
         VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;
@@ -281,7 +317,7 @@ public:
         sharedBarrier(false);finishTarget(index);submit(true,finished,producer);
         VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();
         // The next call waits this fence; ping-pong allocations let GL render concurrently.
-        bool accepted=finishPresent(r,"Present shared image");if(accepted){lastDisplayedShader=usedShader;displayedBlack=false;lastInputShared=true;lastInputValid=true;lastW=w;lastH=h;}return accepted;
+        bool accepted=finishPresent(r,"Present shared image");if(accepted){lastDisplayedShader=usedShader;displayedBlack=false;directImage=VK_NULL_HANDLE;lastInputShared=true;lastInputValid=true;lastW=w;lastH=h;}return accepted;
     }
     void statistics(jlong* values)const{values[0]=presented.load();values[1]=reused.load();values[2]=javaUploadBytes.load();values[3]=chainBuilds.load();values[4]=suboptimalPresents.load();values[5]=outdatedPresents.load();values[6]=stagingBytes.load();values[7]=stagingAllocated.load();values[8]=stagingAllocations.load();}
     void verify(JNIEnv* env){
@@ -319,3 +355,7 @@ void psxVulkanNativeDimensions(jlong handle,int w,int h){reinterpret_cast<Output
 
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_setProfilingNative(JNIEnv*,jclass,jlong handle,jboolean enabled){reinterpret_cast<Output*>(handle)->profile(enabled);}
 extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_VulkanPresenter_timingsNative(JNIEnv* env,jclass,jlong handle){return reinterpret_cast<Output*>(handle)->timings(env);}
+
+PsxVulkanContext psxVulkanGpuContext(jlong output){return reinterpret_cast<Output*>(output)->gpuContext();}
+bool psxVulkanPresentImage(JNIEnv* env,jlong output,jobject surface,VkImage image,int width,int height,bool filter,jlong token){return reinterpret_cast<Output*>(output)->presentDirect(env,surface,image,width,height,filter,token);}
+void psxVulkanForgetImage(jlong output,VkImage image){reinterpret_cast<Output*>(output)->forgetImage(image);}
