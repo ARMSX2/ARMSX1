@@ -176,8 +176,8 @@ private:
     void resolveNative(){
         flushHd();if(!nativeDirty.valid())return;NativeTiming::Scope measured(timing,NativeTiming::GPU_RESOLVE);current();GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::RESOLVE);bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,nativeDirty.x0,nativeDirty.y0,nativeDirty.x1,nativeDirty.y1);std::array<GLuint,64> rows;for(int row=0;row<32;row++){rows[row*2]=GLuint(nativeDirtyTiles[row]);rows[row*2+1]=GLuint(nativeDirtyTiles[row]>>32);}glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((nativeDirty.x1-nativeDirty.x0+8)/8,(nativeDirty.y1-nativeDirty.y0+8)/8,1);barrier();nativeDirty={1023,511,0,0};nativeDirtyTiles.fill(0);nativeCopies++;
     }
-    // A feedback batch needs native VRAM only where it samples texels and where it draws (it blends with,
-    // and then re-upscales, its whole bounding box). Resolving every dirty tile of a freshly drawn HD frame
+    // A feedback batch needs native VRAM only where it samples texels and where its primitives draw (it blends
+    // with, and then re-upscales, those). Resolving every dirty tile of a freshly drawn HD frame
     // for each of CTR's ~20 feedback batches a frame cost several ms each on the Thor; the rest stays dirty
     // and is resolved by whichever later batch, transfer, readback or scanout needs it.
     void resolveNative(const std::array<uint64_t,32>& wanted){
@@ -190,11 +190,17 @@ private:
         if(!area.valid())return;
         NativeTiming::Scope measured(timing,NativeTiming::GPU_RESOLVE);current();GpuStageTimer::Scope gpuTime(gpuTimer,GpuStageTimer::RESOLVE);bindBuffers();glUseProgram(hdNativeResolveProgram);glUniform4i(hdNativeResolveProgramUniforms.bounds,area.x0,area.y0,area.x1,area.y1);glUniform2uiv(hdNativeResolveProgramUniforms.dirtyRows,32,rows.data());glDispatchCompute((area.x1-area.x0+8)/8,(area.y1-area.y0+8)/8,1);barrier();nativeCopies++;feedbackResolvedTiles+=tiles;
     }
-    // Tiles a pending feedback batch can sample (whole texture pages and CLUTs, padded a row) or touches. The
-    // native draw and the HD refresh after it cover the batch's single bounding box, not each primitive, so
-    // resolve that whole box: tiles between two spread-out primitives are re-upscaled too, and resolving only
-    // the primitives left stale native pixels there (black specks beside CTR's skid smoke).
-    std::array<uint64_t,32> feedbackTiles()const{std::array<uint64_t,32> tiles{};for(const Rect& r:reads)addTiles(tiles,{r.x0,std::max(0,r.y0-1),r.x1,std::min(511,r.y1+1)});Rect box{1023,511,0,0};for(const Rect& w:writes)include(box,w);addTiles(tiles,box);return tiles;}
+    // Tiles a pending feedback batch reads (padded a row each way) or draws. Only these are resolved, so the HD
+    // refresh after the draw must cover just the primitives too (refreshHdWrites): refreshing the batch's whole
+    // bounding box put stale native pixels between spread-out primitives into HD (black specks beside CTR's
+    // skid smoke), and resolving that whole box instead cost ~1.8 s of GPU time a second in a race.
+    std::array<uint64_t,32> feedbackTiles()const{std::array<uint64_t,32> tiles{};for(const Rect& r:reads)addTiles(tiles,{r.x0,std::max(0,r.y0-1),r.x1,std::min(511,r.y1+1)});for(const Rect& w:writes)addTiles(tiles,w);return tiles;}
+    // Re-upscale each rectangle a feedback batch drew, in one barrier.
+    void refreshHdWrites(){
+        if(!hdTexture||writes.empty())return;flushHd(BREAK_TRANSFER);glUseProgram(hdTransferProgram);bindBuffers();glUniform4i(hdTransferProgramUniforms.data,0,0,0,0);glUniform1i(hdTransferProgramUniforms.operation,4);
+        for(const Rect& w:writes){if(!w.valid())continue;glUniform4i(hdTransferProgramUniforms.shape,w.x0,w.y0,w.x1-w.x0+1,w.y1-w.y0+1);glDispatchCompute(((w.x1-w.x0+1)*scale+7)/8,((w.y1-w.y0+1)*scale+7)/8,1);}
+        barrier();for(const Rect& w:writes)if(w.valid())markHdReadRegion(w.x0,w.y0,w.x1-w.x0+1,w.y1-w.y0+1);
+    }
     // The draw shader reads only texels (texture page and CLUT) through the snapshot; the destination comes from
     // live VRAM. Copy whole rows spanning those reads, padded a row each way, instead of all 2 MB of VRAM.
     void copySnapshot(){
@@ -299,7 +305,7 @@ public:
         if(serialDispatch){updateBarrier();copySnapshot();}
         glUniform1i(drawProgramUniforms.serialMode,0);glUniform1i(drawProgramUniforms.snapshot,serialDispatch);nativeDrawCalls++;glDispatchCompute((bounds.x1-bounds.x0+8)/8,(bounds.y1-bounds.y0+8)/8,1);drawBarrier(false);
         // Self-feedback keeps exact native serial ordering; refresh just that region.
-        if(enhanced()&&serialDispatch)transferHd(4,bounds.x0,bounds.y0,bounds.x1-bounds.x0+1,bounds.y1-bounds.y0+1,0,0,0,0);
+        if(enhanced()&&serialDispatch)refreshHdWrites();
         pendingCount=0;reads.clear();writes.clear();serialDispatch=false;
     }
     void draw(const int* packet,const int* env){current();int op=uint32_t(packet[0])>>24;Primitive p[2];int n=1;if(op<0x40){int at=1,color=packet[0],clut=0;bool shade=op&16,tex=op&4;Vertex v[4];int vertices=(op&8)?4:3;for(int i=0;i<vertices;i++){if(i&&shade)color=packet[at++];int xy=packet[at++],uv=tex?packet[at++]:0;if(tex&&i==0)clut=uint32_t(uv)>>16;v[i]=Vertex(xy,color,uv,env[5]);}p[0]=triangle(v[0],v[1],v[2],op,clut,env);if(vertices==4){p[1]=triangle(v[1],v[2],v[3],op,clut,env);n=2;}}else if(op<0x60)p[0]=line(packet,op,env);else p[0]=rectangle(packet,op,env);
