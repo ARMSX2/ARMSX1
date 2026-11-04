@@ -44,6 +44,17 @@ public final class Timers {
         }
         return Math.max(1,next);
     }
+    /**
+     * Timer i's count after `pending` more CPU clocks that cross no timer event, for the native register cache:
+     * count | advance<<16 | residue<<20, where advance is 0 (constant), 1 (one per clock) or 8 (one per eight clocks,
+     * `residue` already counted), or -1 when it follows the dot clock and cannot be predicted from CPU clocks.
+     */
+    int nativeLatch(int i,int pending){
+        if(i==0&&(mode[0]&0x100)!=0)return -1;
+        if(i==1&&(mode[1]&0x100)!=0 || !running(i))return count[i];
+        if(i==2&&(mode[2]&0x200)!=0){int ticks=prescale[2]+pending;return ((count[2]+ticks/8)&65535)|(8<<16)|((ticks%8)<<20);}
+        return ((count[i]+pending)&65535)|(1<<16);
+    }
     int dotClocksToEvent(){return (mode[0]&0x100)!=0 && running(0)?ticksToEvent(0):Integer.MAX_VALUE;}
     public void dotClocks(int clocks){if((mode[0]&0x100)!=0)pulse(0,clocks);}
     public void hblank(boolean active){boolean rising=active && !blank[0];setBlank(0,active);if(rising && (mode[1]&0x100)!=0)pulse(1,1);}

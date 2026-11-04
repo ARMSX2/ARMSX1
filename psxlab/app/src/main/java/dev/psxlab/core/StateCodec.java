@@ -9,7 +9,7 @@ final class StateCodec {
     private static final Map<String,Set<String>> SKIP=new HashMap<>();
     static {
         skip(Cpu.class,"nativeCpu","bus","gte");
-        skip(Bus.class,"nativeMemory","instructionWords","instructionValid","gpu","dma","mdec","spu","timers","cdrom","sio0","nativeCores","bios");
+        skip(Bus.class,"nativeMemory","latchEvent","instructionWords","instructionValid","gpu","dma","mdec","spu","timers","cdrom","sio0","nativeCores","bios");
         skip(Gpu.class,"textures","presentedWindow","windowHardware","windowVulkan","textureConfiguration","textureStatus","textureMetrics","nextNativeSnapshot","lastNativeTiming","performanceEnabled","performanceTriangles","performanceRectangles","performanceLines","performance","journal","worker","raster","hardware","hardwareDrawing","internalScale","presentationMode","renderer","failure","diagnosticsEnabled","diagnosticQueueWait","diagnosticDraw","diagnosticScanout","vulkan","readSynchronized","softwareVramRevision","vulkanFrames","highRefresh","presentationDecision","presentationRate","shaderAspect","blackPresented","shaderSubframes","displayVsync","baseVulkanOutput","shaderPresenterFailed","displayStretch","displayInteger","displayCrop","baseRenderer","shaderPresenterError","workerTid","primitives","queueFullNanos","drawNanos","displayWaitNanos","displayConvertNanos","displayPresentNanos","displayPresentCpuNanos","displays","worstPresent","vramDirty","readbackSyncs","readbackSkips","readbackWaitNanos","slowReadback","failureReported","submittedDrawBatches","batchedPrimitives");
         skip(Dma.class,"performanceEnabled","performanceWords","journal","linkedYields","linkedLastAddress","linkedLastHeader");
         skip(Spu.class,"nativeCore","sink","output");

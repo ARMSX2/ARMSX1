@@ -1,7 +1,7 @@
 package dev.psxlab.core;
 
 public final class Bus {
-    static final int BIOS_OFFSET=0x200000,SCRATCH_OFFSET=0x280000,GEN_OFFSET=0x280400,CODE_MASK_OFFSET=0x281400,CD_STATUS_OFFSET=0x291400,MEMORY_BYTES=0x291410;
+    static final int BIOS_OFFSET=0x200000,SCRATCH_OFFSET=0x280000,GEN_OFFSET=0x280400,CODE_MASK_OFFSET=0x281400,CD_STATUS_OFFSET=0x291400,LATCH_OFFSET=0x291410,MEMORY_BYTES=0x291430;
     private java.nio.ByteBuffer nativeMemory;
     private boolean eventScheduling;
     private boolean deadlineDirty;
@@ -67,11 +67,22 @@ public final class Bus {
     private void updateDeadline(){
         deadlineDirty=false;
         if(!eventScheduling){clockDeadline=32;return;}
-        int next=Math.min(spu.clocksToEvent(),Math.min(gpu.clocksToEvent(timers),timers.clocksToEvent()));
-        next=Math.min(next,Math.min(cdrom.clocksToEvent(),Math.min(sio0.clocksToEvent(),dma.clocksToEvent())));
-        clockDeadline=Math.max(32,((next+31)/32)*32);
+        int devices=Math.min(Math.min(gpu.clocksToEvent(timers),timers.clocksToEvent()),Math.min(sio0.clocksToEvent(),dma.clocksToEvent()));
+        int next=Math.min(devices,Math.min(spu.clocksToEvent(),cdrom.clocksToEvent()));
+        latchEvent=devices;clockDeadline=Math.max(32,((next+31)/32)*32);
     }
-    private long nativeStatus(int value){if(deadlineDirty)updateDeadline();if(nativeMemory!=null){nativeMemory.put(CD_STATUS_OFFSET,(byte)cdrom.statusRegister());nativeMemory.put(CD_STATUS_OFFSET+3,(byte)cdrom.interruptRegister());}return Integer.toUnsignedLong(value)|((long)Math.max(1,clockDeadline-pendingClocks)<<32)|(gpu.vblanks!=nativeFrame?1L<<61:0)|(interruptPending()?1L<<62:0)|(cacheIsolated?1L<<63:0);}
+    private int latchEvent;
+    /**
+     * Registers games poll in tight loops (JOY_STAT, GPUSTAT, timer counts), cached for the native core so a poll does
+     * not cross into Java and dispatch every device. Their values change only at GPU, timer, SIO0 or DMA events, so the
+     * cache is exact for the clocks until the next of those; a timer count carries how it advances in the meantime.
+     */
+    private void writeLatch(){
+        nativeMemory.putInt(LATCH_OFFSET,eventScheduling?Math.max(0,latchEvent-pendingClocks):0);
+        nativeMemory.putInt(LATCH_OFFSET+4,sio0.read(4,4));nativeMemory.putInt(LATCH_OFFSET+8,gpu.status());
+        for(int i=0;i<3;i++)nativeMemory.putInt(LATCH_OFFSET+12+i*4,timers.nativeLatch(i,pendingClocks));
+    }
+    private long nativeStatus(int value){if(deadlineDirty)updateDeadline();if(nativeMemory!=null){nativeMemory.put(CD_STATUS_OFFSET,(byte)cdrom.statusRegister());nativeMemory.put(CD_STATUS_OFFSET+3,(byte)cdrom.interruptRegister());writeLatch();}return Integer.toUnsignedLong(value)|((long)Math.max(1,clockDeadline-pendingClocks)<<32)|(gpu.vblanks!=nativeFrame?1L<<61:0)|(interruptPending()?1L<<62:0)|(cacheIsolated?1L<<63:0);}
     long nativeClock(int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;if(pendingClocks>=clockDeadline)flushClocks();return nativeStatus(0);}
     long nativeFinish(int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;return nativeStatus(0);}
     long nativeRead(int address,int width,int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;
