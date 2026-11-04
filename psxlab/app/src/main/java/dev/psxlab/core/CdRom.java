@@ -73,6 +73,8 @@ public final class CdRom {
     private java.util.function.Consumer<String> traceSink;
     /** Optional bounded capture is owned by the diagnostic caller, never enabled by normal play. */
     public void setTraceSink(java.util.function.Consumer<String> sink){traceSink=sink;}
+    /** Header, subheader and first data word of a raw sector: what a guest reading 16 bytes in whole-sector mode sees. */
+    private static String sectorHeader(byte[] s){return s==null||s.length<28?"none":String.format(Locale.ROOT,"msf=%02X:%02X:%02X mode=%d file=%d channel=%d submode=%02X coding=%02X data=%02X%02X%02X%02X",s[12]&255,s[13]&255,s[14]&255,s[15]&255,s[16]&255,s[17]&255,s[18]&255,s[19]&255,s[24]&255,s[25]&255,s[26]&255,s[27]&255);}
     /** Current routing state, not evidence that a particular voice or song was audible. */
     public Map<String,Object> loggingSnapshot(){
         Map<String,Object> state=new LinkedHashMap<>();
@@ -195,6 +197,7 @@ public final class CdRom {
                     else{
                         int submode=lastSector[18]&255;
                         boolean realtimeAudio=(lastSector[15]&255)==2 && (submode&0x44)==0x44;
+                        if(traceSink!=null && (lastSector[15]&255)==2 && (submode&0x81)!=0)traceSink.accept("SUBMODE_END lba="+(readLocation-1)+((submode&128)!=0?" eof":"")+((submode&1)!=0?" eor":"")+" xa_mode="+((mode&64)!=0)+" "+sectorHeader(lastSector));
                         boolean filtered=(mode&8)!=0,matches=(lastSector[16]&255)==file && (lastSector[17]&255)==channel;
                         if(realtimeAudio && (mode&64)!=0){
                             if((!filtered || matches) && (lastSector[17]&255)<32){
@@ -208,7 +211,8 @@ public final class CdRom {
                             if(!(realtimeAudio && filtered)){
                                 dataSectors++;
                                 if(sectorPending){lostSectors++;lastLostLba=readLocation-1;if(traceSink!=null)traceSink.accept("SECTOR_LOST lba="+(readLocation-2)+" replaced_by="+(readLocation-1)+" irq="+interrupt);}
-                                if(request&&dataPosition<data.length){overwrittenReads++;lastOverwriteLba=readLocation-1;if(traceSink!=null)traceSink.accept("FIFO_OVERWRITE lba="+(readLocation-1)+" unread="+(data.length-dataPosition));}
+                                if(request&&dataPosition<data.length){overwrittenReads++;lastOverwriteLba=readLocation-1;if(traceSink!=null)traceSink.accept("FIFO_OVERWRITE lba="+(readLocation-1)+" unread="+(data.length-dataPosition)+" unread_sector "+sectorHeader(lastDataSector));}
+                                if((mode&64)!=0 && traceSink!=null)traceSink.accept("DATA_SECTOR lba="+(readLocation-1)+" request="+request+" "+sectorHeader(lastSector));
                                 lastDataSector=lastSector;sectorPending=true;if(request)loadData();
                             }
                         }
