@@ -166,7 +166,7 @@ fun GameLibraryDrawer() {
                                 border = null) {
                                 Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    GameCoverArt(game, Modifier.size(66.dp))
+                                    GameCoverArt(game, Modifier.size(66.dp), size = 256)
                                     Column(Modifier.weight(1f)) {
                                         Text(game.title, maxLines = 2, overflow = TextOverflow.Ellipsis,
                                             fontWeight = FontWeight.SemiBold)

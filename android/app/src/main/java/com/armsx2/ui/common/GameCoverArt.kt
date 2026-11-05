@@ -1,6 +1,7 @@
 package com.armsx2.ui.common
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -24,8 +26,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
-import coil.request.ImageRequest
-import coil.size.Precision
+import coil.imageLoader
 import com.armsx2.CustomCovers
 import com.armsx2.GameInfo
 import com.armsx2.CoverCatalogue
@@ -34,7 +35,7 @@ import java.io.IOException
 import java.io.FileNotFoundException
 
 @Composable
-fun GameCoverArt(game: GameInfo, modifier: Modifier = Modifier) {
+fun GameCoverArt(game: GameInfo, modifier: Modifier = Modifier, size: Int = 500) {
     val context = LocalContext.current
     val customCover = remember(game.uri, CustomCovers.version.value) {
         CustomCovers.fileFor(context, game)
@@ -45,6 +46,7 @@ fun GameCoverArt(game: GameInfo, modifier: Modifier = Modifier) {
         modifier = modifier.clip(RoundedCornerShape(14.dp)),
         contentScale = ContentScale.Crop,
         crossfade = true,
+        size = size,
     ) { GameCoverPlaceholder(game.title, game.serial) }
 }
 
@@ -56,12 +58,14 @@ fun FallbackCoverImage(
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Fit,
     crossfade: Boolean = false,
+    size: Int = 500,
     placeholder: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
     val generation = CoverCatalogue.version.intValue
     val customVersion = CustomCovers.version.value
-    val state = remember(models, generation, customVersion) { mutableStateOf(CoverLoadAttempt()) }
+    val orderedModels = remember(models, generation, customVersion) { CoverArtCache.ordered(context, models) }
+    val state = remember(orderedModels, generation, customVersion) { mutableStateOf(CoverLoadAttempt()) }
     val attempted = state.value
     LaunchedEffect(attempted, models, generation, customVersion) {
         if (attempted.waiting) {
@@ -69,26 +73,38 @@ fun FallbackCoverImage(
             if (state.value == attempted) state.value = attempted.resume()
         }
     }
-    val model = models.getOrNull(attempted.index)
-    val request = remember(context, model, crossfade, generation, attempted.retry, customVersion) {
-        ImageRequest.Builder(context).data(model).size(500, 500)
-            .precision(Precision.INEXACT).allowHardware(true).crossfade(crossfade).build()
+    val model = orderedModels.getOrNull(attempted.index)
+    val cached = remember(model, generation, customVersion, size) {
+        model?.let { context.imageLoader.memoryCache?.get(CoverArtCache.memoryKey(it, size))?.bitmap }
+    }
+    if (cached != null) {
+        Image(cached.asImageBitmap(), contentDescription, modifier, contentScale = contentScale)
+        return
+    }
+    val preview = remember(model, generation, customVersion, size) {
+        if (size > 256) model?.let { context.imageLoader.memoryCache?.get(CoverArtCache.memoryKey(it))?.bitmap }
+        else null
+    }
+    val request = remember(context, model, crossfade, generation, attempted.retry, customVersion, size) {
+        CoverArtCache.request(context, model, crossfade, size)
     }
     key(generation, attempted.retry, customVersion) { SubcomposeAsyncImage(
         model = request,
         contentDescription = contentDescription,
         modifier = modifier,
         contentScale = contentScale,
+        onSuccess = { if (model != null) CoverArtCache.succeeded(context, models, model) },
         onError = { error ->
             if (state.value == attempted) {
                 val cause = error.result.throwable
+                CoverArtCache.failed(model, cause)
                 val transient = when (cause) {
                     is coil.network.HttpException -> cause.response.code in setOf(408, 429, 500, 502, 503, 504)
                     is IOException -> cause !is FileNotFoundException
                     else -> false
                 }
-                state.value = attempted.failed(models.size, transient)
-                if (models.isNotEmpty() && attempted.index == models.lastIndex) {
+                state.value = attempted.failed(orderedModels.size, transient)
+                if (orderedModels.isNotEmpty() && attempted.index == orderedModels.lastIndex) {
                     val source = (model as? String)?.takeIf {
                         it.startsWith("https://raw.githubusercontent.com/xlenore/psx-covers/")
                     } ?: "local/custom"
@@ -96,7 +112,11 @@ fun FallbackCoverImage(
                 }
             }
         },
-        loading = { placeholder() },
+        loading = {
+            if (preview != null) Image(preview.asImageBitmap(), contentDescription,
+                Modifier.fillMaxSize(), contentScale = contentScale)
+            else placeholder()
+        },
         error = { placeholder() },
     ) }
 }

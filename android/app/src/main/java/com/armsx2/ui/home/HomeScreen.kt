@@ -1,6 +1,19 @@
 package com.armsx2.ui.home
 
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import com.armsx2.ui.common.CoverArtCache
 import com.armsx2.ui.common.selectionOutline
 import com.armsx2.ui.common.SelectionBlue
 
@@ -433,6 +446,43 @@ fun HomeScreen(
             val leadingItems = HomeScrollPolicy.leadingItems(toolbarBottom,
                 state.initialized && showSearch, state.initialized && showCollections,
                 shownRecents.isNotEmpty(), allGamesHeaderShown)
+            val coverStyle = CoverArtStyle.use3d.value
+            val coverGeneration = com.armsx2.CoverCatalogue.version.intValue
+            val customVersion = CustomCovers.version.value
+            val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+            // Warm every game, including games outside the current collection/search.
+            // One background request leaves capacity for visible and nearby rows.
+            LaunchedEffect(state.allGames, coverStyle, coverGeneration, customVersion, customCoverMap, lifecycleState) {
+                if (lifecycleState != Lifecycle.State.RESUMED) return@LaunchedEffect
+                var ready = 0
+                for (game in state.allGames) {
+                    val sources = withContext(Dispatchers.Default) {
+                        listOfNotNull(CustomCovers.matchIn(customCoverMap, game)) + game.coverUrls
+                    }
+                    if (CoverArtCache.prefetch(context, sources)) ready++
+                }
+                android.util.Log.i("ARMSX-Covers", "Library artwork preload completed: $ready/${state.allGames.size} covers ready")
+            }
+            LaunchedEffect(gridState, state.visibleGames, shownRecents, state.layout, estimatedColumns,
+                leadingItems, coverStyle, coverGeneration, customVersion, customCoverMap, lifecycleState) {
+                if (lifecycleState != Lifecycle.State.RESUMED) return@LaunchedEffect
+                val permits = Semaphore(2)
+                val gamesPerItem = if (state.layout == LibraryLayout.Shelf) estimatedColumns else 1
+                snapshotFlow {
+                    gridState.firstVisibleItemIndex to (gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0)
+                }.collectLatest { (first, last) ->
+                    val range = HomeScrollPolicy.prefetchRange(first, last, leadingItems,
+                        gamesPerItem, estimatedColumns, state.visibleGames.size)
+                    val nearby = shownRecents + range.map { state.visibleGames[it] }
+                    // Resolve UI preferences/custom art before Coil switches to its IO dispatcher.
+                    val models = nearby.distinctBy { it.uri }.map { game ->
+                        listOfNotNull(CustomCovers.matchIn(customCoverMap, game)) + game.coverUrls
+                    }
+                    coroutineScope {
+                        models.map { sources -> async { permits.withPermit { CoverArtCache.prefetch(context, sources) } } }.awaitAll()
+                    }
+                }
+            }
             LaunchedEffect(state.selectedIndex, state.visibleGames.size, state.layout, HomeInputController.zone.value,
                 state.initialized, showSearch, showCollections, shownRecents.size, toolbarBottom, estimatedColumns,
                 HomeInputController.userNavigated) {
@@ -1521,6 +1571,7 @@ private fun GameCover(
             contentDescription = game.displayTitle(EnglishTitles.enabled.value),
             modifier = Modifier.fillMaxSize(),
             contentScale = contentScale,
+            size = 256,
         ) {
             CoverPlaceholder(game.displayTitle(EnglishTitles.enabled.value), game.serial, showText = placeholderText)
         }

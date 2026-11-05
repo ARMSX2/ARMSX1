@@ -1,9 +1,16 @@
 package com.armsx2.ui.home
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeScrollPolicyTest {
+    @Test fun prefetchCoversBothSidesOfTheVisibleShelf() {
+        assertEquals(36..71, HomeScrollPolicy.prefetchRange(11, 12, 3, 6, 6, 100))
+        assertEquals(0..17, HomeScrollPolicy.prefetchRange(0, 0, 3, 6, 6, 100))
+        assertEquals(84..99, HomeScrollPolicy.prefetchRange(19, 20, 3, 6, 6, 100))
+        assertTrue(HomeScrollPolicy.prefetchRange(0, 0, 3, 6, 6, 0).isEmpty())
+    }
     @Test fun hiddenCollectionsDoNotShiftTheFirstOrLastGame() {
         val leading = HomeScrollPolicy.leadingItems(false, true, false, true, true)
         assertEquals(4, leading)

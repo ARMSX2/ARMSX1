@@ -10,7 +10,10 @@ object CoverCatalogue {
     @Volatile private var loaded = false
 
     /** Refreshing the library/downloaded art must also reset tiles whose URL list is unchanged. */
-    fun refreshImages() { version.intValue++ }
+    fun refreshImages() {
+        com.armsx2.ui.common.CoverArtCache.refresh()
+        version.intValue++
+    }
 
     @Synchronized fun load(context: Context) {
         if (loaded) return

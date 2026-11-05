@@ -20,9 +20,8 @@ import java.io.File
  *     under memory pressure. Cover art is small, never changes, and worth
  *     keeping across cache-clear events — `filesDir/cover_cache` is the
  *     persistent equivalent.
- *  2. The default size is 2% of free space (max 250 MB). 100 MB is plenty
- *     for thousands of covers (typical PS1/PS2 cover JPEG ~30-80 KB) while
- *     not eating the user's storage.
+ *  2. A 256 MiB disk budget keeps whole-library preloads across restarts.
+ *     The decoded thumbnail cache is bounded separately by the app's memory budget.
  *
  * Cover requests in the UI use Coil's `SubcomposeAsyncImage`, which picks up
  * this default `ImageLoader` automatically — no changes needed at call sites.
@@ -151,15 +150,15 @@ class Pasx2Application : Application(), ImageLoaderFactory {
 			.diskCache {
 				DiskCache.Builder()
 					.directory(coverCacheDir)
-					// 100 MiB. Covers are tiny; this fits an enormous library.
-					.maxSizeBytes(100L * 1024L * 1024L)
+					// Keep the complete library's downloaded artwork across restarts.
+					.maxSizeBytes(256L * 1024L * 1024L)
 					.build()
 			}
 			.memoryCache {
 				MemoryCache.Builder(this)
-					// 25% of the app's memory budget (Coil default), but
-					// explicit so it's clear what we're doing.
-					.maxSizePercent(0.25)
+					// Library thumbnails use 256px rather than full-size decodes, so
+					// this retains hundreds of covers without loading on each row.
+					.maxSizePercent(0.40)
 					.build()
 			}
 			// Cache policy: keep both layers enabled. Read order is
