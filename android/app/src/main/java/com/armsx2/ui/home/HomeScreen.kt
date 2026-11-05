@@ -48,7 +48,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
@@ -56,7 +55,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -134,35 +132,6 @@ import com.armsx2.ui.common.StatusChip
 import kotlin.math.abs
 
 private val LocalCustomCoverMap = staticCompositionLocalOf<Map<String, java.io.File>> { emptyMap() }
-
-/** Reveal only the hidden part; no long animation to restart during held input. */
-private suspend fun LazyListState.revealControllerItem(index: Int) {
-    withFrameNanos { }
-    val info = layoutInfo
-    if(index !in 0 until info.totalItemsCount)return
-    val item = info.visibleItemsInfo.firstOrNull { it.index == index }
-    if(item == null) scrollToItem(index)
-    else {
-        val delta = HomeScrollPolicy.revealDelta(item.offset,item.size,
-            info.viewportStartOffset + info.beforeContentPadding,
-            info.viewportEndOffset - info.afterContentPadding)
-        if(delta != 0)scrollBy(delta.toFloat())
-    }
-}
-
-private suspend fun LazyGridState.revealControllerItem(index: Int) {
-    withFrameNanos { }
-    val info = layoutInfo
-    if(index !in 0 until info.totalItemsCount)return
-    val item = info.visibleItemsInfo.firstOrNull { it.index == index }
-    if(item == null) scrollToItem(index)
-    else {
-        val delta = HomeScrollPolicy.revealDelta(item.offset.y,item.size.height,
-            info.viewportStartOffset + info.beforeContentPadding,
-            info.viewportEndOffset - info.afterContentPadding)
-        if(delta != 0)scrollBy(delta.toFloat())
-    }
-}
 
 private data class HomeFolderEntry(val key: String, val label: String,
     val game: GameInfo? = null, val expanded: Boolean? = null, val glyph: String = "▤",
@@ -299,8 +268,9 @@ fun HomeScreen(
         }
     }
     LaunchedEffect(directories, nativeReady) { viewModel.load(directories, nativeReady) }
-    DisposableEffect(viewModel, onOpenMenu) {
-        HomeInputController.bind(viewModel, onOpenMenu)
+    val currentOpenMenu by rememberUpdatedState(onOpenMenu)
+    DisposableEffect(viewModel) {
+        HomeInputController.bind(viewModel) { currentOpenMenu() }
         HomeInputController.setGameMenu { menuGame = it }
         onDispose { HomeInputController.unbind(viewModel) }
     }
@@ -460,8 +430,12 @@ fun HomeScreen(
             val allGamesHeaderShown = shownRecents.isNotEmpty() &&
                 state.initialized && state.visibleGames.isNotEmpty()
             val toolbarBottom = ToolbarPositionPreferences.atBottom.value
+            val leadingItems = HomeScrollPolicy.leadingItems(toolbarBottom,
+                state.initialized && showSearch, state.initialized && showCollections,
+                shownRecents.isNotEmpty(), allGamesHeaderShown)
             LaunchedEffect(state.selectedIndex, state.visibleGames.size, state.layout, HomeInputController.zone.value,
-                state.initialized, showSearch, shownRecents.size, toolbarBottom, estimatedColumns) {
+                state.initialized, showSearch, showCollections, shownRecents.size, toolbarBottom, estimatedColumns,
+                HomeInputController.userNavigated) {
                 if (HomeInputController.zone.value != HomeZone.Grid) return@LaunchedEffect
                 // Don't follow (and thus don't scroll away from the top) until the user
                 // has actually navigated — otherwise a cold open snaps the grid to the
@@ -469,22 +443,20 @@ fun HomeScreen(
                 if (!HomeInputController.userNavigated) return@LaunchedEffect
                 val sel = state.selectedIndex
                 if (sel < 0 || state.visibleGames.isEmpty()) return@LaunchedEffect
-                val leading = (if (toolbarBottom) 0 else 1) + // toolbar
-                    (if (state.initialized && showSearch) 1 else 0) + // search field
-                    (if (state.initialized) 1 else 0) + // collections row
-                    (if (shownRecents.isNotEmpty()) 1 else 0) + // recents section
-                    (if (allGamesHeaderShown) 1 else 0) // All Games header
                 val cols = estimatedColumns.coerceAtLeast(1)
-                val target = HomeScrollPolicy.targetIndex(sel, leading, if(state.layout == LibraryLayout.Shelf) cols else 1)
+                val target = HomeScrollPolicy.targetIndex(sel, leadingItems, if(state.layout == LibraryLayout.Shelf) cols else 1)
                 gridState.revealControllerItem(target)
             }
             // Reveal the actual chrome row, not always item zero (recents/collections
             // can sit below the viewport). The pinned bottom toolbar needs no scroll.
-            LaunchedEffect(HomeInputController.zone.value,state.initialized,showSearch,shownRecents.size,toolbarBottom) {
+            LaunchedEffect(HomeInputController.zone.value, HomeInputController.collectionIndex.intValue,
+                HomeInputController.recentIndex.intValue, HomeInputController.toolbarIndex.intValue,
+                HomeInputController.userNavigated, state.initialized, showSearch, showCollections,
+                shownRecents.size, toolbarBottom) {
                 val zone = HomeInputController.zone.value
                 val toolbarRows=if(toolbarBottom)0 else 1
                 val searchRows=if(state.initialized && showSearch)1 else 0
-                val collectionRows=if(state.initialized)1 else 0
+                val collectionRows=if(state.initialized && showCollections)1 else 0
                 val target=when(zone) {
                     HomeZone.Toolbar -> if(toolbarBottom)null else 0
                     HomeZone.Search -> toolbarRows
@@ -1643,7 +1615,8 @@ object HomeInputController {
      *  / search / recently-played) instead of the follow snapping the grid to the
      *  initially-selected cover and hiding the whole header. Reset in bind() so each
      *  time the library (re)opens it starts at the top again. */
-    var userNavigated = false
+    var userNavigated by mutableStateOf(false)
+        private set
 
     fun bind(viewModel: HomeViewModel, onOpenMenu: () -> Unit) {
         finishTileMove()
@@ -2017,7 +1990,12 @@ private fun GameShelf(
 ) {
     if (com.armsx2.ui.theme.InterfacePreferences.psOne) {
         if (scroll) {
-            LazyRow(modifier, horizontalArrangement = Arrangement.spacedBy(12.dp),
+            val rowState = rememberLazyListState()
+            LaunchedEffect(selectedIndex, games.size) {
+                val local = selectedIndex - startIndex
+                if (local in games.indices) rowState.revealControllerItem(local)
+            }
+            LazyRow(modifier, state = rowState, horizontalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp)) {
                 itemsIndexed(games, key = { _, game -> game.uri.toString() }) { i, game ->
                     PsOneGameTile(game.displayTitle(EnglishTitles.enabled.value), startIndex + i == selectedIndex,

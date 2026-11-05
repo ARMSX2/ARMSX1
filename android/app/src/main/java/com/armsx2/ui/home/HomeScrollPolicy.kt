@@ -2,6 +2,10 @@ package com.armsx2.ui.home
 
 /** Immediate controller-follow math, independent of animation and Compose. */
 internal object HomeScrollPolicy {
+    fun leadingItems(toolbarBottom: Boolean, search: Boolean, collections: Boolean,
+        recents: Boolean, allGamesHeader: Boolean): Int =
+        listOf(!toolbarBottom, search, collections, recents, allGamesHeader).count { it }
+
     fun revealDelta(start: Int, size: Int, viewportStart: Int, viewportEnd: Int): Int {
         if (size <= 0 || viewportEnd <= viewportStart) return 0
         val end = start.toLong() + size

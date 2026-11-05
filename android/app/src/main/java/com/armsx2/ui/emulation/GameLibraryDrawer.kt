@@ -34,6 +34,7 @@ import com.armsx2.runtime.MainActivityRuntime
 import com.armsx2.ui.WindowImpl
 import com.armsx2.ui.common.GameCoverArt
 import com.armsx2.ui.home.LibraryKeyboard
+import com.armsx2.ui.home.revealControllerItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -95,8 +96,8 @@ fun GameLibraryDrawer() {
         loaded = true
     }
     LaunchedEffect(entries.size, collectionId) { selected = selected.coerceAtMost(entries.size + 1) }
-    LaunchedEffect(selected) {
-        if (selected > 1) listState.animateScrollToItem(selected - 2)
+    LaunchedEffect(selected, entries.size) {
+        if (selected > 1) listState.revealControllerItem(selected - 2)
     }
     val token = remember { Any() }
     SideEffect {

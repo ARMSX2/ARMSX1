@@ -226,10 +226,10 @@ fun CollectionsOverlay(games: List<GameInfo>, initialGame: GameInfo? = null,
         val releaseLayer = SettingsControllerNav.claimLayer("library.collections")
         onDispose { CollectionsInputController.unbind(token); LibraryKeyboard.close(); releaseLayer() }
     }
-    LaunchedEffect(selected, page, rows.size) {
+    LaunchedEffect(selected, page, rows.size, folderGrid, gridColumns) {
         selected = selected.coerceIn(0, (rows.size - 1).coerceAtLeast(0))
         if (rows.isNotEmpty()) {
-            if (folderGrid) gridState.animateScrollToItem(selected) else listState.animateScrollToItem(selected)
+            if (folderGrid) gridState.revealControllerItem(selected) else listState.revealControllerItem(selected)
         }
     }
     BackHandler { if (LibraryKeyboard.visible.value) LibraryKeyboard.close() else back() }
