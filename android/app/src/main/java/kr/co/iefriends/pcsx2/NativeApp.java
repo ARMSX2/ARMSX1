@@ -344,7 +344,7 @@ public class NativeApp {
 	public static int getSwanMemoryByte(int address) { unsupported("getSwanMemoryByte"); return 0; }
 	/** Read-only, emulation-thread-consistent RAM copy for developer memory research.
 	 *  Returns empty with no running core; never exposes memory or provides a write API. */
-	public static byte[] getSwanMemorySnapshot() { unsupported("getSwanMemorySnapshot"); return new byte[0]; }
+	public static byte[] getSwanMemorySnapshot() { return lab == null ? new byte[0] : lab.memorySnapshot(); }
 	/** Paused diagnostic VM only; requires an explicit test configuration. */
 	public static String runSwanCpuOptimizationTests() { unsupported("runSwanCpuOptimizationTests"); return ""; }
 	public static byte[] getSwanCompanionSnapshot() { unsupported("getSwanCompanionSnapshot"); return new byte[0]; }

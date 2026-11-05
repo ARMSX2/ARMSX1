@@ -541,6 +541,8 @@ public final class ArmSxBackend {
         if(!active)return failed;CompletableFuture<T> result=new CompletableFuture<>();commands.add(()->{if(result.isCancelled())return;try{result.complete(!stop&&bus!=null?action.call():failed);}catch(Exception e){error(e);result.complete(failed);}});wake();
         try{return result.get(15,TimeUnit.SECONDS);}catch(Exception e){result.cancel(false);error(e);return failed;}
     }
+    /** Read-only copy of the 2 MiB main RAM, taken on the emulation thread; empty with no game running. */
+    public byte[] memorySnapshot(){return call(()->bus.snapshotRam(),new byte[0]);}
     public boolean save(int slot){return call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before saving");File file=BackendStateStore.file(root,stateId.isEmpty()?gamePath:stateId,slot);String disc=discPath.equals(bootPath)?"":discSources.getOrDefault(discPath,discPath);if(disc.contains("/cache/saf-launch/"))throw new IOException("Cannot save a temporary disc without its original source");BackendStateStore.write(file,gamePath,disc,stateId,SaveState.capture(cpu,bus,gpu,gamePath));screenshotNow(file+".png");if(slot==-1){atomic(new File(root,"autosave-game.txt"),gamePath.getBytes(StandardCharsets.UTF_8));atomic(new File(root,"autosave-key.txt"),(stateId+"\n"+gamePath).getBytes(StandardCharsets.UTF_8));}event("save-slot="+slot);return true;},false);}
     public boolean load(int slot,boolean acknowledgeCards){
         if(!acknowledgeCards){notice.accept("Loading restores machine state using the current memory cards. Back up your cards first.");return false;}
