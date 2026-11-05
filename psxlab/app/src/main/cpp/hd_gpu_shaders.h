@@ -53,7 +53,9 @@ void drawAt(int x,int y,uint liveMask){
  while(liveMask!=0u){int n=findLSB(liveMask);liveMask&=liveMask-1u;int at=n*64;if(x<q[at+4]*scale||y<q[at+5]*scale||x>=(q[at+6]+1)*scale||y>=(q[at+7]+1)*scale)continue;
   int dx=x/scale-q[at+4],dy=y/scale-q[at+5],sx=x%scale,sy=y%scale,type=q[at],op=q[at+1];ivec3 color;ivec2 uv=ivec2(0),fraction=ivec2(0);
   if(type==0){bool inside=true;for(int edge=0;edge<3;edge++){int p=at+16+edge*4;int w=(q[p]+q[p+1]*dx+q[p+2]*dy)*scale+q[p+1]*sx+q[p+2]*sy;if(w<0||(w==0&&q[p+3]==0))inside=false;}if(!inside)continue;}
-  if(type<2){int values[5];for(int i=0;i<5;i++){int fixedValue=int(uint(q[at+28+i])+uint(q[at+33+i])*uint(dx)+uint(q[at+38+i])*uint(dy)+uint((q[at+33+i]/scale)*sx+(q[at+33+i]%scale)*sx/scale+(q[at+38+i]/scale)*sy+(q[at+38+i]%scale)*sy/scale));values[i]=fixedValue>>16;if(i>=3)fraction[i-3]=fixedValue&65535;}color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);}
+  if(type<2){int values[5];for(int i=0;i<5;i++){int fixedValue=int(uint(q[at+28+i])+uint(q[at+33+i])*uint(dx)+uint(q[at+38+i])*uint(dy)+uint((q[at+33+i]/scale)*sx+(q[at+33+i]%scale)*sx/scale+(q[at+38+i]/scale)*sy+(q[at+38+i]%scale)*sy/scale));values[i]=fixedValue>>16;if(i>=3)fraction[i-3]=fixedValue&65535;}color=ivec3(values[0],values[1],values[2]);uv=ivec2(values[3],values[4]);
+   // Keep reads inside the triangle's UV range, as HD_RASTER_FRAGMENT does (rectangles get an unbounded range).
+   ivec2 low=ivec2(q[at+49],q[at+51]),high=ivec2(q[at+50],q[at+52]);for(int k=0;k<2;k++){if(uv[k]<low[k]){uv[k]=low[k];fraction[k]=0;}else if(uv[k]>high[k]){uv[k]=high[k];fraction[k]=65535;}}}
   else{int ax=q[at+16],ay=q[at+17],lx=q[at+18],ly=q[at+19],steps=q[at+20];int i=abs(lx)>=abs(ly)?(x/scale-ax)*(lx<0?-1:1):(y/scale-ay)*(ly<0?-1:1);if(i<0||i>steps)continue;
    int px=steps==0?ax:ax+floorDiv(lx*i+steps/2,steps),py=steps==0?ay:ay+floorDiv(ly*i+steps/2,steps);if(px!=x/scale||py!=y/scale)continue;
    for(int k=0;k<3;k++)color[k]=q[at+28+k]+(steps==0?0:q[at+33+k]*i/steps);
