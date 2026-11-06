@@ -5,6 +5,50 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class CdRomTest {
+    @Test public void explicitNextRequestCanDiscardUnreadSectorPadding(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);readFirst(b,7,0);b.write8(BASE+3,0x80);
+            for(int i=0;i<2044;i++)b.read8(BASE+2);
+            ack(b);b.cdrom.tick(SECTOR);b.cdrom.tick(1);
+            assertEquals(4,b.cdrom.availableBytes());
+            b.write8(BASE+3,0x80);
+            assertEquals(2048,b.cdrom.availableBytes());assertEquals(8,b.read8(BASE+2));
+        }
+    }
+
+    @Test public void acceptedRawMovieSectorSurvivesLaterVideoSectors()throws Exception{
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);readFirst(b,7,0xe8);b.write8(BASE+3,0x80);
+            byte[] expected=Arrays.copyOfRange(disc().readSector(7),12,2352);
+            for(int i=0;i<20;i++)assertEquals(expected[i]&255,b.read8(BASE+2));
+            ack(b);b.cdrom.tick(SECTOR);b.cdrom.tick(SECTOR);
+            for(int i=20;i<expected.length;i++)assertEquals("Movie sector byte "+i,expected[i]&255,b.read8(BASE+2));
+        }
+    }
+
+    @Test public void eachSectorRequiresAnExplicitDataRequest(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);readFirst(b,7,0);b.write8(BASE+3,0x80);
+            for(int i=0;i<2048;i++)b.read8(BASE+2);
+            ack(b);b.cdrom.tick(SECTOR);b.cdrom.tick(1);
+            assertEquals("An incoming sector must not silently refill an exhausted host FIFO",0,b.cdrom.availableBytes());
+            b.write8(BASE+3,0x80);
+            assertEquals(2048,b.cdrom.availableBytes());assertEquals(8,b.read8(BASE+2));
+        }
+    }
+
+    @Test public void acceptedSectorStaysLockedWhileLaterSectorsArrive(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);readFirst(b,7,0);b.write8(BASE+3,0x80);
+            for(int i=0;i<32;i++)assertEquals((7+i)&255,b.read8(BASE+2));
+            ack(b);b.cdrom.tick(SECTOR);b.cdrom.tick(1);
+            assertEquals("Incoming sectors must not rewind or replace the accepted data FIFO",2048-32,b.cdrom.availableBytes());
+            for(int i=32;i<2048;i++)assertEquals((7+i)&255,b.read8(BASE+2));
+            b.write8(BASE+3,0);b.write8(BASE+3,0x80);
+            assertEquals("A fresh request accepts the following sector",8,b.read8(BASE+2));
+        }
+    }
+
     @Test public void setlocAcknowledgesZeroAndPregapWithoutReadingTheImage(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);b.cdrom.insert(disc());

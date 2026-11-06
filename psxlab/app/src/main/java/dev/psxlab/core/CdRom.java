@@ -19,6 +19,7 @@ public final class CdRom {
     private int pendingCommand=-1,commandTicks,location,readLocation,sectorTicks;
     private int[] commandParameters;
     private boolean motor,reading,playing,request,muted;
+    private long dataSectorSerial,acceptedDataSerial;
     private int driveTicks,seekTicks,seekTarget;
     private boolean readAfterSeek,explicitSeek,seekReady;
     private int playStep=1;
@@ -84,6 +85,16 @@ public final class CdRom {
         state.put("buffered_frames",audioBufferedFrames());state.put("xa_sectors",xaSectors);state.put("xa_frames",xaFrames);state.put("dropped_frames",xaDroppedFrames);state.put("cdda_sectors",cddaSectors);
         state.put("last_media_error",lastMediaError);return state;
     }
+    /** Raw drive header versus the accepted host FIFO, for split movie-header DMA failures. */
+    public Map<String,Object> dataSnapshot(){
+        return Map.of("mode",mode,"request",request,"fifo_position",dataPosition,"fifo_remaining",availableBytes(),
+            "drive_sector_serial",dataSectorSerial,"accepted_sector_serial",acceptedDataSerial,
+            "latest_raw_header_words",headerWords(lastDataSector,12),"accepted_fifo_header_words",headerWords(data,0));
+    }
+    private static int[] headerWords(byte[] bytes,int offset){
+        if(bytes==null||bytes.length<offset)return new int[0];int[] out=new int[Math.min(16,(bytes.length-offset)/4)];
+        for(int i=0;i<out.length;i++){int at=offset+i*4;out[i]=(bytes[at]&255)|((bytes[at+1]&255)<<8)|((bytes[at+2]&255)<<16)|(bytes[at+3]<<24);}return out;
+    }
     private static final class Event {
         int ticks;final int irq;final int[] bytes;
         Event(int ticks,int irq,int[] bytes){this.ticks=ticks;this.irq=irq;this.bytes=bytes;}
@@ -137,7 +148,8 @@ public final class CdRom {
             else{
                 if((value&0x20)!=0)throw new UnsupportedOperationException("CD-ROM sound-map writes are not implemented");
                 boolean previous=request;request=(value&0x80)!=0;
-                if(request && !previous && lastDataSector!=null)loadData();else if(!request){data=new byte[0];dataPosition=0;}
+                if(request && (!previous || dataPosition>=data.length || acceptedDataSerial!=dataSectorSerial) && lastDataSector!=null)loadData();
+                else if(!request){data=new byte[0];dataPosition=0;}
             }
         }else if(bank==1){
             if(port==2){enable=value&31;irqLine();}
@@ -160,6 +172,7 @@ public final class CdRom {
     }
     private final int[] audioRegisters=new int[6];
     private void loadData(){
+        acceptedDataSerial=dataSectorSerial;
         int offset=(mode&32)!=0?12:(lastDataSector[15]&255)==1?16:24;
         int bytes=(mode&32)!=0?2340:2048;
         data=Arrays.copyOfRange(lastDataSector,offset,offset+bytes);dataPosition=0;bus.dma.resumeCdrom();
@@ -211,9 +224,11 @@ public final class CdRom {
                             if(!(realtimeAudio && filtered)){
                                 dataSectors++;
                                 if(sectorPending){lostSectors++;lastLostLba=readLocation-1;if(traceSink!=null)traceSink.accept("SECTOR_LOST lba="+(readLocation-2)+" replaced_by="+(readLocation-1)+" irq="+interrupt);}
-                                if(request&&dataPosition<data.length){overwrittenReads++;lastOverwriteLba=readLocation-1;if(traceSink!=null)traceSink.accept("FIFO_OVERWRITE lba="+(readLocation-1)+" unread="+(data.length-dataPosition)+" unread_sector "+sectorHeader(lastDataSector));}
                                 if((mode&64)!=0 && traceSink!=null)traceSink.accept("DATA_SECTOR lba="+(readLocation-1)+" request="+request+" "+sectorHeader(lastSector));
-                                lastDataSector=lastSector;sectorPending=true;if(request)loadData();
+                                // BFRD accepts a sector into a separate, locked host FIFO.
+                                // Incoming sectors may replace the drive buffer, never bytes
+                                // already accepted by an interrupt handler or an active DMA.
+                                lastDataSector=lastSector;dataSectorSerial++;sectorPending=true;
                             }
                         }
                     }

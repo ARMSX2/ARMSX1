@@ -32,6 +32,16 @@ public class SaveStateTest {
             assertEquals("cards",SaveState.identity(state));
         }
     }
+    @Test public void cdStatesFromBeforeTheLockedHostFifoStillLoad()throws Exception{
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g,new PadState(),false);
+            StateCodec.Node legacy=StateCodec.capture(b.cdrom);
+            legacy.fields.remove("dataSectorSerial");legacy.fields.remove("acceptedDataSerial");
+            StateCodec.apply(legacy,b.cdrom);
+            assertEquals(0L,b.cdrom.dataSnapshot().get("drive_sector_serial"));
+            assertEquals(0L,b.cdrom.dataSnapshot().get("accepted_sector_serial"));
+        }
+    }
     @Test public void oldCdStatesRestoreTheExistingInterruptLevelWithoutANewEdge()throws Exception{
         for(boolean pending:new boolean[]{false,true})try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g,new PadState(),false);b.write16(0x1f801074,4);
