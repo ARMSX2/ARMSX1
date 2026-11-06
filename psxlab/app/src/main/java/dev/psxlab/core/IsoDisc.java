@@ -88,6 +88,10 @@ public final class IsoDisc implements SectorSource {
     @Override public int trackIndex(int lba){return mapped==null?1:mapped.trackIndex(lba);}
     @Override public int trackRelative(int lba){return mapped==null?Math.max(0,lba):mapped.trackRelative(lba);}
     @Override public boolean audioTrack(int lba){return mapped!=null&&mapped.audioTrack(lba);}
+    private Map<Integer,byte[]> subchannel=Map.of();
+    public void subchannel(Map<Integer,byte[]> entries){subchannel=Map.copyOf(entries);}
+    public int subchannelEntries(){return subchannel.size();}
+    @Override public byte[] subchannelQ(int lba){byte[] q=subchannel.get(lba);return q!=null?q:mapped==null?null:mapped.subchannelQ(lba);}
     @Override public char region(){
         String name=bootPath==null?"":bootPath.toUpperCase(Locale.ROOT);
         if(name.matches(".*S[CL]US_.*"))return 'A';

@@ -338,6 +338,8 @@ public class NativeApp {
 	public static void configureSwanSession(String identity, String originalPath) { if (lab != null) lab.configureSession(originalPath); }
     public static void configureSwanSession(String identity,String originalPath,String[] aliases){configureSwanSession(identity,originalPath);if(lab!=null&&aliases!=null)for(String alias:aliases)lab.sessionAlias(alias);}
     public static void registerDiscSource(String runtime, String source) { if (lab != null) lab.discSource(runtime, source); }
+    /** SBI bytes for a disc PSX Lab opens straight from SAF, where no sidecar file sits beside it. */
+    public static void registerDiscSubchannel(String runtime, byte[] sbi) { if (lab != null) lab.discSubchannel(runtime, sbi); }
 	public static String getSwanStatePath(int slot) { try { return lab == null ? "" : lab.stateFile(slot).getAbsolutePath(); } catch (IllegalArgumentException e) { return ""; } }
 	public static String getSwanCardPath(int slot) { return lab == null ? "" : lab.cardPath(slot - 1); }
 	public static int getSwanGuestFrame() { return lab == null ? 0 : (int)lab.frames(); }

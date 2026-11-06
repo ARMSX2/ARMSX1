@@ -80,6 +80,8 @@ public final class ArmSxBackend {
     public synchronized void configureSession(String source){if(!active){configuredGame=BackendStateStore.normalize(source);discSources.clear();sessionAliases.clear();sessionAliases.add(configuredGame);}}
     public synchronized void sessionAlias(String source){if(!active&&source!=null&&!source.isBlank())sessionAliases.add(BackendStateStore.normalize(source));}
     public void discSource(String runtime,String source){discSources.put(runtime,source);}
+    private final Map<String,byte[]> discSubchannels=new ConcurrentHashMap<>();
+    public void discSubchannel(String runtime,byte[] sbi){discSubchannels.put(runtime,sbi.clone());}
     private File root,biosFolder,config;
     private byte[] bios;
     private Cpu cpu;
@@ -292,6 +294,24 @@ public final class ArmSxBackend {
         }
     }
     private Media openMedia(String path)throws IOException{
+        Media media=openMediaImage(path);
+        try{attachSubchannel(media,path);}catch(IOException e){journal.error("cd.sbi",e);notice.accept("Ignoring SBI file: "+e.getMessage());}
+        return media;
+    }
+    // LibCrypt PAL discs need the SBI that the game library stages beside the image (same name, .sbi).
+    private void attachSubchannel(Media media,String path)throws IOException{
+        if(media.disc==null)return;byte[] registered=discSubchannels.get(path);
+        if(registered!=null){Map<Integer,byte[]> entries=SubchannelPatch.parse(registered);media.disc.subchannel(entries);journal.event(EngineLog.INFO,"cd.sbi.loaded",Map.of("file","registered","entries",entries.size()));return;}
+        Uri uri=Uri.parse(path);if(uri.getScheme()!=null&&!uri.getScheme().equals("file"))return;
+        File image=new File(uri.getScheme()==null?path:uri.getPath()),parent=image.getParentFile();if(parent==null)return;
+        String name=image.getName(),stem=name.lastIndexOf('.')>0?name.substring(0,name.lastIndexOf('.')):name;
+        File[] matches=parent.listFiles((dir,candidate)->candidate.equalsIgnoreCase(stem+".sbi"));
+        if(matches==null||matches.length!=1)return;
+        if(matches[0].length()>1024*1024)throw new IOException("SBI file is too large");
+        Map<Integer,byte[]> entries=SubchannelPatch.parse(Files.readAllBytes(matches[0].toPath()));
+        media.disc.subchannel(entries);journal.event(EngineLog.INFO,"cd.sbi.loaded",Map.of("file",matches[0].getName(),"entries",entries.size()));
+    }
+    private Media openMediaImage(String path)throws IOException{
         Uri uri=Uri.parse(path);String filePath=uri.getScheme()==null?path:uri.getPath();
         if(CueDisc.isCueName(filePath)){
             if(uri.getScheme()!=null&&!uri.getScheme().equals("file"))throw new IOException("Launch the CUE through the game library so its BIN files can be prepared together");

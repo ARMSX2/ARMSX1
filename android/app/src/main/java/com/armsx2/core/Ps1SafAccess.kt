@@ -133,8 +133,13 @@ object Ps1SafAccess {
         if (!pathOrUri.startsWith("content://")) return Session(pathOrUri)
 
         val uri = Uri.parse(pathOrUri)
+        val directName = displayName(context, uri)
         if (com.armsx2.BuildConfig.PSXLAB_BACKEND &&
-            Ps1SafText.extension(displayName(context, uri)) in setOf("chd", "bin", "iso", "img", "exe")) {
+            Ps1SafText.extension(directName) in setOf("chd", "bin", "iso", "img", "exe")) {
+            // Nothing is copied, so hand PSX Lab the image's SBI (LibCrypt PAL discs) directly.
+            runCatching { directSbi(context, uri, directName) }
+                .onFailure { println("@@ARMSX_SBI_SKIPPED@@ ${it.message}") }
+                .getOrNull()?.let { kr.co.iefriends.pcsx2.NativeApp.registerDiscSubchannel(pathOrUri, it) }
             return Session(pathOrUri)
         }
         val root = File(
@@ -210,6 +215,27 @@ object Ps1SafAccess {
                 it.writeText(Ps1SafText.rewriteCue(text, localNames))
                 if (includeSbi) materializeSbi(resolver, cueUri, displayName, it, cancelled, siblings)
             }
+    }
+
+    private fun directSbi(context: Context, uri: Uri, name: String): ByteArray? {
+        val resolver = context.contentResolver
+        // A single-document grant may not allow listing its parent; the game still runs.
+        val siblings = runCatching { siblingDocuments(resolver, uri) }.getOrNull() ?: return null
+        val sidecar = Ps1Sbi.sidecars(name, name, siblings.keys).firstOrNull() ?: return null
+        val bytes = resolver.openInputStream(siblings.getValue(sidecar.source))?.use { input ->
+            val output = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(4096)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (output.size() + count > 1024 * 1024) throw IOException("SBI file is unexpectedly large")
+                output.write(buffer, 0, count)
+            }
+            output.toByteArray()
+        } ?: return null
+        Ps1Sbi.validate(bytes)
+        println("@@ARMSX_SBI_STAGED@@ files=1 direct=${sidecar.source}")
+        return bytes
     }
 
     private fun materializeSbi(
