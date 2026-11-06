@@ -29,11 +29,12 @@ struct CpuCore {
     void wait(int clocks){elapsed+=clocks;s->instructions+=clocks;if(elapsed>=deadline)status(clockCall(clockMethod));}
     int biosWait(int width)const{return (biosReadWaits>>(width==4?16:width==2?8:0))&255;}
     int fetchWait(uint32_t pc)const{return ramWaitStates && pc>=0xbfc00000 && pc<0xbfc80000?biosWait(4):0;}
-    // Bus.writeLatch: JOY_STAT, GPUSTAT and timer counts, exact for latch[0] clocks after the last Java boundary.
+    // Bus.writeLatch: JOY_STAT, GPUSTAT, timer counts and GPU DMA CHCR, exact for latch[0] clocks after the last Java boundary.
     bool latched(uint32_t a,int width,uint32_t& value)const{
-        int32_t latch[6];memcpy(latch,memory+Latch,sizeof latch);if(elapsed>=latch[0])return false;
+        int32_t latch[7];memcpy(latch,memory+Latch,sizeof latch);if(elapsed>=latch[0])return false;
         if(a>=0x1f801044&&a<0x1f801048){value=(uint32_t(latch[1])>>((a-0x1f801044)*8))&(width==4?~0u:width==2?0xffffu:0xffu);return true;}
         if(a==0x1f801814&&width==4){value=uint32_t(latch[2]);return true;}
+        if(a==0x1f8010a8&&width==4){value=uint32_t(latch[6]);return true;}
         if((a==0x1f801100||a==0x1f801110||a==0x1f801120)&&width>=2){
             int32_t t=latch[3+((a>>4)&3)];if(t<0)return false;int advance=(t>>16)&15,count=t&65535;
             value=uint32_t(advance==1?count+elapsed:advance==8?count+(((t>>20)&7)+elapsed)/8:count)&65535u;return true;

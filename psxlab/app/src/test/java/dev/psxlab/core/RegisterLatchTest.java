@@ -30,16 +30,23 @@ public class RegisterLatchTest {
             b.write16(0x1f801114,0x100);b.write16(0x1f801124,0x200);
             ControllerTest.select(b);b.write8(0x1f801040,1);
             java.util.Random random=new java.util.Random(7);int windows=0;
+            // A cyclic GPU list keeps DMA2 busy, retrying at DMA events, until the cycle is broken.
+            b.write32(0x1f8010f0,0x07654b21);b.write32(0x100,0x100);b.write32(0x1f8010a0,0x100);b.write32(0x1f8010a8,0x01000401);
+            int busyWindows=0,idleWindows=0;
             for(int step=0;step<3000;step++){
                 if(step%300==0)b.write8(0x1f801040,0x42);
+                if(step==1500)b.write32(0x100,0x00800000);
+                if(step==2500){b.write32(0x100,0x100);b.write32(0x1f8010a0,0x100);b.write32(0x1f8010a8,0x01000401);}
+                if((b.dma.read(0x1f8010a8)&0x1000000)!=0)busyWindows++;else if(step>1500&&step<2500)idleWindows++;
                 b.nativeClock(1+random.nextInt(64),0);int window=m.getInt(Bus.LATCH_OFFSET);if(window<=1)continue;
                 int[] latch=new int[6];for(int i=0;i<6;i++)latch[i]=m.getInt(Bus.LATCH_OFFSET+i*4);
                 int e=random.nextBoolean()?window-1:random.nextInt(window);
                 b.nativeFinish(e,0);b.flushClocks();windows++;
                 assertEquals(b.sio0.read(4,4),latch[1]);assertEquals(b.gpu.status(),latch[2]);
+                assertEquals("GPU DMA CHCR at +"+e+" of "+window,b.dma.read(0x1f8010a8),m.getInt(Bus.LATCH_OFFSET+24));
                 for(int i=0;i<3;i++)if(latch[3+i]>=0)assertEquals("timer "+i+" at +"+e+" of "+window,b.timers.read(0x1f801100+i*16),predict(latch[3+i],e));
             }
-            assertTrue(windows>1000);
+            assertTrue(windows>1000);assertTrue("DMA2 was never busy",busyWindows>100);assertTrue("DMA2 never completed",idleWindows>100);
         }
     }
 }

@@ -81,6 +81,8 @@ public final class Bus {
         nativeMemory.putInt(LATCH_OFFSET,eventScheduling?Math.max(0,latchEvent-pendingClocks):0);
         nativeMemory.putInt(LATCH_OFFSET+4,sio0.read(4,4));nativeMemory.putInt(LATCH_OFFSET+8,gpu.status());
         for(int i=0;i<3;i++)nativeMemory.putInt(LATCH_OFFSET+12+i*4,timers.nativeLatch(i,pendingClocks));
+        // GPU DMA CHCR: games spin on its busy bit while a display list runs; it changes only at DMA/GPU events or writes.
+        nativeMemory.putInt(LATCH_OFFSET+24,dma.read(0x1f8010a8));
     }
     private long nativeStatus(int value){if(deadlineDirty)updateDeadline();if(nativeMemory!=null){nativeMemory.put(CD_STATUS_OFFSET,(byte)cdrom.statusRegister());nativeMemory.put(CD_STATUS_OFFSET+3,(byte)cdrom.interruptRegister());writeLatch();}return Integer.toUnsignedLong(value)|((long)Math.max(1,clockDeadline-pendingClocks)<<32)|(gpu.vblanks!=nativeFrame?1L<<61:0)|(interruptPending()?1L<<62:0)|(cacheIsolated?1L<<63:0);}
     long nativeClock(int elapsed,int isolated){cacheIsolated=isolated!=0;pendingClocks+=elapsed;if(pendingClocks>=clockDeadline)flushClocks();return nativeStatus(0);}
