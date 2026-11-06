@@ -4,8 +4,9 @@ import java.util.*;
 
 /**
  * Redump SBI subchannel corrections. LibCrypt-protected PAL discs (CTR, Spyro 3, Ape Escape, ...)
- * read the Q subchannel of a few sectors with GetlocP; on a real disc those sectors carry
- * deliberately altered Q data, and a disc image that lacks it is treated as a copy and sabotaged.
+ * read the Q subchannel of a few sectors with GetlocP. On a real disc those sectors carry altered Q
+ * data with a bad CRC, so the drive keeps reporting the previous valid position; a disc image whose
+ * drive reports the sector's own position is treated as a copy and sabotaged.
  */
 public final class SubchannelPatch {
     private SubchannelPatch(){}

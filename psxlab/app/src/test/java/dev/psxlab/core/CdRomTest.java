@@ -49,6 +49,27 @@ public class CdRomTest {
         }
     }
 
+    @Test public void getlocPKeepsTheLastValidPositionOverLibCryptSectors(){
+        SectorSource base=disc();
+        SectorSource protectedDisc=new SectorSource(){
+            public int sectorCount(){return base.sectorCount();}
+            public char region(){return base.region();}
+            public byte[] readSector(int lba)throws IOException{return base.readSector(lba);}
+            @Override public byte[] subchannelQ(int lba){return lba==8||lba==9?new byte[10]:null;}
+        };
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.cdrom.insert(protectedDisc);command(b,0x0e,0);ack(b);
+            command(b,2,0,2,7);ack(b);command(b,6);assertEquals(3,irq(b));ack(b);
+            int[] expected={7,7,7,10};
+            for(int lba=7;lba<=10;lba++){
+                firstSector(b);ack(b);command(b,0x11);int[] q=response(b);ack(b);
+                assertEquals(8,q.length);
+                int frames=expected[lba-7]+150;
+                assertArrayEquals("GetlocP after reading LBA "+lba,new int[]{CdRom.bcd(frames/4500),CdRom.bcd(frames/75%60),CdRom.bcd(frames%75)},Arrays.copyOfRange(q,5,8));
+            }
+        }
+    }
+
     @Test public void setlocAcknowledgesZeroAndPregapWithoutReadingTheImage(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);b.cdrom.insert(disc());

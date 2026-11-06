@@ -11,7 +11,7 @@ public interface SectorSource {
     default int trackIndex(int lba){return 1;}
     default int trackRelative(int lba){return Math.max(0,lba);}
     default boolean audioTrack(int lba){return false;}
-    /** Recorded Q subchannel for a sector whose Q differs from its position (see SubchannelPatch), else null. */
+    /** Recorded Q subchannel of a LibCrypt sector, whose Q fails its CRC on the real disc (see SubchannelPatch), else null. */
     default byte[] subchannelQ(int lba){return null;}
     /** Emulated disc-region identifier inferred from the executable serial, not lead-in authentication. */
     default char region(){return ' ';}

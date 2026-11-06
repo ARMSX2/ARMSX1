@@ -346,11 +346,11 @@ public final class CdRom {
             case 0x0f -> {if(count(p,0))event(0,3,status(),mode,0,file,channel);}
             case 0x10 -> {if(count(p,0)){if(lastSector==null)error(0x80);else{int[] header=new int[8];for(int i=0;i<8;i++)header[i]=lastSector[12+i]&255;event(0,3,header);}}}
             case 0x11 -> {
-                if(!count(p,0) || !media())break;int at=Math.max(0,readLocation-1),absolute=at+150;
-                // LibCrypt sectors report the altered Q a real disc carries, from the image's SBI.
-                byte[] q=disc.subchannelQ(at);
-                if(q!=null){event(0,3,q[1]&255,q[2]&255,q[3]&255,q[4]&255,q[5]&255,q[7]&255,q[8]&255,q[9]&255);break;}
-                int relative=disc.trackRelative(at);
+                if(!count(p,0) || !media())break;int at=Math.max(0,readLocation-1);
+                // LibCrypt sectors (listed in the image's SBI) carry Q data with a bad CRC. The drive ignores
+                // such Q and keeps reporting the last sector whose Q was valid; LibCrypt checks for that.
+                while(at>0 && disc.subchannelQ(at)!=null)at--;
+                int absolute=at+150,relative=disc.trackRelative(at);
                 event(0,3,bcd(disc.trackNumber(at)),bcd(disc.trackIndex(at)),bcd(relative/4500),bcd(relative/75%60),bcd(relative%75),bcd(absolute/4500),bcd(absolute/75%60),bcd(absolute%75));
             }
             case 0x12 -> {if(count(p,1) && media()){if(p[0]!=1)error(0x10);else{event(0,3,status());event(COMPLETE_TICKS,2,status());}}}
