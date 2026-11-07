@@ -350,10 +350,13 @@ public final class ArmSxBackend {
                             if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,restore.identity());
                             else if(media!=null&&(media.disc==null||media.disc.region()==' '&&Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))){cpu=BiosBoot.initialize(bios,bus,()->stop);bus.cdrom.prepareBootHandoff();ExeLoader.loadInto(media.executable,bus,cpu);}
                             else if(media!=null&&Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false")))cpu=BiosBoot.discBoot(bios,bus,()->stop);
-                            cpu.gte.setWidescreen(widescreenEnabled(),projectionAspect);cpu.enableNative(true,true,true);
+                            cpu.gte.setWidescreen(widescreenEnabled(),projectionAspect);
+                            String cpuMode=options.getOrDefault("cpu.execution_mode","cached");
+                            if(!cpuMode.equals("interpreter"))cpu.enableNative(!cpuMode.equals("cached_interpreter"),true,true);
                             try(AudioOutput output=new AudioOutput(true,Boolean.parseBoolean(options.getOrDefault("diagnostics.audio_capture","false")),context)){
                                 audio=output;output.setJournal(journal);updateAudio();output.setPaused(blocked());bus.spu.setAudioSink((pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});
                                 renderer="PSX Lab / "+gpu.renderer();booted=true;
+                                timeline.incident(System.nanoTime(),"CPU execution mode: "+cpu.executionMode());
                                 timeline.incident(System.nanoTime(),"start: "+renderer+", scale "+scale+", "+output.deviceDiagnostic()+", GPU "+(gpu.hardwareDescription().isEmpty()?"none (software renderer)":gpu.hardwareDescription())+", ADPF "+(adpf?"on":"off")+", VM thread priority "+threadPriority()+", "+Runtime.getRuntime().availableProcessors()+" cores"+", disc "+discLayout(media));
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
                                 try{loop(output);}catch(Exception failure){lastFailureCpuContext=cpu.diagnostic();journal.event(EngineLog.FATAL,"runtime.cpu_context",Map.of("cpu",lastFailureCpuContext,"exception",failure.toString(),"guest_clocks",cpu.instructions));throw failure;}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}}

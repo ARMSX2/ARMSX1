@@ -3,17 +3,21 @@ package dev.psxlab.core;
 /** Functional MIPS-I integer interpreter with COP2/GTE. Cycle/cache accuracy remains separate work. */
 public final class Cpu {
     private NativeCpu nativeCpu;
+    private boolean recompile;
     public boolean enableNative(boolean recompile,boolean events){
         return enableNative(recompile,events,false);
     }
     public boolean enableNative(boolean recompile,boolean events,boolean ramWaitStates){
         if(!NativeCore.AVAILABLE || !gte.nativeExecution())return false;
         if(nativeCpu!=null)return true;
-        bus.setEventScheduling(events);nativeCpu=new NativeCpu(bus,recompile,ramWaitStates);nativeCpu.importState(this);return true;
+        bus.setEventScheduling(events);nativeCpu=new NativeCpu(bus,recompile,ramWaitStates);nativeCpu.importState(this);this.recompile=recompile;return true;
     }
     public void closeNative(){if(nativeCpu!=null){nativeCpu.exportState(this);nativeCpu.close();nativeCpu=null;}}
     public String executionDiagnostic(){return nativeCpu==null?"CPU Java interpreter":nativeCpu.diagnostic()+" · device dispatches="+bus.deviceDispatches;}
-    public String executionMode(){return nativeCpu==null?"Java interpreter":"Native blocks / ARM64";}
+    public String executionMode(){
+        if(nativeCpu==null)return "Java interpreter";
+        return recompile?"ARM64 recompiler":"Native cached interpreter";
+    }
     /** Busiest hardware registers since the previous call: {address, reads, writes, last pc} groups. */
     public long[] registerDeltas(){return nativeCpu==null?new long[0]:nativeCpu.registerDeltas();}
     public long[] nativeStatistics(){return nativeCpu==null?new long[15]:nativeCpu.statistics();}
