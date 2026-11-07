@@ -8,12 +8,24 @@ namespace {
 struct Assembler {
     std::vector<uint32_t> words;
     void emit(uint32_t w){words.push_back(w);}
-    void mov(int d,uint32_t v){emit(0x52800000|((v&65535)<<5)|d);if(v>>16)emit(0x72a00000|((v>>16)<<5)|d);}
+    void mov(int d,uint32_t v){
+        if((v>>16)==65535)emit(0x12800000|((~v&65535)<<5)|d); // MOVN
+        else if((v&65535)==0 && v>>16)emit(0x52a00000|((v>>16)<<5)|d); // MOVZ, LSL #16
+        else{emit(0x52800000|((v&65535)<<5)|d);if(v>>16)emit(0x72a00000|((v>>16)<<5)|d);}
+    }
     void pointer(int d,uintptr_t value){emit(0xd2800000|((value&65535)<<5)|d);for(int part=1;part<4;part++)if((value>>(part*16))&65535)emit(0xf2800000|(part<<21)|(((value>>(part*16))&65535)<<5)|d);}
     void load(int d,int offset){emit(0xb9400000|((offset/4)<<10)|d);}
+    void loadGpr(int host,int guest){
+        if(guest==0)mov(host,0);
+        else load(host,guest*4);
+    }
     void store(int r,int offset){emit(0xb9000000|((offset/4)<<10)|r);}
     void binary(uint32_t op,int d,int a,int b){emit(op|(b<<16)|(a<<5)|d);}
-    void immediate(int d,int a,int v){if(v>=0 && v<4096)emit(0x11000000|(v<<10)|(a<<5)|d);else{mov(12,uint32_t(v));binary(0x0b000000,d,a,12);}}
+    void immediate(int d,int a,int v){
+        if(v>=0 && v<4096)emit(0x11000000|(v<<10)|(a<<5)|d);
+        else if(v<0 && v>-4096)emit(0x51000000|((-v)<<10)|(a<<5)|d);
+        else{mov(12,uint32_t(v));binary(0x0b000000,d,a,12);}
+    }
     void compare(int d,int a,int b,int condition){binary(0x6b000000,31,a,b);emit(0x1a9f07e0|((condition^1)<<12)|d);}
     size_t jump(uint32_t op){size_t p=words.size();emit(op);return p;}
     void patch(size_t p,size_t target,bool conditional){int64_t delta=int64_t(target)-int64_t(p);words[p]|=conditional?(uint32_t(delta)&0x7ffff)<<5:uint32_t(delta)&0x3ffffff;}
@@ -39,7 +51,25 @@ bool compileArm64(CpuBlock& block){
     int pending=-1,count=0;bool controlFinished=false;
     auto guard=[&](uint32_t op){exits.push_back({a.jump(op),count,pending});};
     auto instruction=[&](const Decoded& d){
-        a.load(9,d.s*4);a.load(10,d.t*4);
+        if(d.word==0){
+            // A MIPS NOP still commits the preceding instruction's delayed load.
+            a.commit(pending);
+            pending=0;
+            return;
+        }
+        const bool geometry=d.gte();
+        const bool gteWrite=geometry&&(d.s==4||d.s==6);
+        if(geometry){
+            if(gteWrite)a.loadGpr(10,d.t);
+        }else if(d.op==0){
+            // Immediate shifts use rt, MFHI/MFLO have no GPR source, and
+            // MTHI/MTLO use rs. Other supported SPECIAL instructions use both.
+            if(d.fun>=4&&d.fun!=16&&d.fun!=18)a.loadGpr(9,d.s);
+            if(d.fun<16||d.fun>=24)a.loadGpr(10,d.t);
+        }else{
+            if(d.op!=15)a.loadGpr(9,d.s);
+            if(d.store())a.loadGpr(10,d.t);
+        }
         if(d.memory()){
             a.immediate(11,9,d.imm);a.emit(0x53007000|(11<<5)|11);
             a.mov(12,0x800000);a.binary(0x6b000000,31,11,12);guard(0x54000002);
@@ -47,12 +77,13 @@ bool compileArm64(CpuBlock& block){
             if(width>1){a.emit(0x53000000|((width==4?1:0)<<10)|(11<<5)|12);guard(0x35000000|12);}
             a.emit(0x53005000|(11<<5)|11);
         }
-        if(d.gte()){a.load(11,offsetof(CpuState,cop0)+12*4);a.mov(12,0x40000000);a.binary(0x6a000000,31,11,12);guard(0x54000000);}
+        if(geometry){a.load(11,offsetof(CpuState,cop0)+12*4);a.mov(12,0x40000000);a.binary(0x6a000000,31,11,12);guard(0x54000000);}
         a.commit(pending);pending=0;
-        if(d.gte()){
+        if(geometry){
             // Save caller-owned arguments and LR around the shared, JNI-free geometry helper.
             a.emit(0xa9bc07e0);a.emit(0xa9010fe2);a.emit(0xa90217e4);a.emit(0xf9001bfe);
-            a.mov(1,d.word);a.binary(0x2a000000,2,31,5);a.binary(0x2a000000,3,31,10);
+            a.mov(1,d.word);a.binary(0x2a000000,2,31,5);
+            if(gteWrite)a.binary(0x2a000000,3,31,10);
             a.pointer(16,reinterpret_cast<uintptr_t>(&executeCompiledGte));a.emit(0xd63f0200);
             a.emit(0xf9401bfe);a.emit(0xa94217e4);a.emit(0xa9410fe2);a.emit(0xa8c407e0);
             if(d.s==0||d.s==2){a.load(14,offsetof(CpuState,loadValue));pending=d.t;}
@@ -124,7 +155,9 @@ bool compileArm64(CpuBlock& block){
         a.emit(0x71000000|(needed<<10)|(4<<5)|4);guard(0x54000003);
         if(!d.branch()){instruction(d);count++;continue;}
         if(index+1>=block.code.size()||!block.code[index+1].compilable()||block.code[index+1].memory()||block.code[index+1].gte())return false;
-        a.load(9,d.s*4);a.load(10,d.t*4);a.commit(pending);pending=0;
+        if(d.op!=2&&d.op!=3)a.loadGpr(9,d.s);
+        if(d.op==4||d.op==5)a.loadGpr(10,d.t);
+        a.commit(pending);pending=0;
         if(d.op==0){a.binary(0x2a000000,16,31,9);a.mov(17,1);}
         else if(d.op==2||d.op==3){a.mov(16,((d.at+4)&0xf0000000)|((d.word&0x3ffffff)<<2));a.mov(17,1);}
         else{a.mov(16,d.at+4+uint32_t(d.imm*4));if(d.op==4||d.op==5)a.compare(17,9,10,d.op==4?0:1);else a.compare(17,9,31,d.op==6?13:d.op==7?12:(d.t&1)?10:11);}
@@ -138,7 +171,19 @@ bool compileArm64(CpuBlock& block){
         a.mov(0,count);a.emit(0xd65f03c0);controlFinished=true;break;
     }
     if(!controlFinished)a.finish(count,pending);
-    for(const Exit& e:exits){a.patch(e.branch,a.words.size(),true);a.finish(e.count,e.pending);}
+    // Guards for the same instruction leave the same guest PC and load delay.
+    // Share their exit code while keeping the fall-through path inline.
+    size_t exitTarget=0;
+    int exitCount=-1,exitPending=-2;
+    for(const Exit& e:exits){
+        if(e.count!=exitCount||e.pending!=exitPending){
+            exitTarget=a.words.size();
+            exitCount=e.count;
+            exitPending=e.pending;
+            a.finish(e.count,e.pending);
+        }
+        a.patch(e.branch,exitTarget,true);
+    }
     size_t page=size_t(sysconf(_SC_PAGESIZE)),bytes=(a.words.size()*4+15)&~size_t(15);
     // Only this core thread executes its generated code. Compilation happens
     // after generated functions return, so a page can safely switch W -> X.
