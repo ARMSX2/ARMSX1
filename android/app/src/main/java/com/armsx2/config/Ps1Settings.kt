@@ -106,12 +106,12 @@ data class Ps1Settings(
     val wideUpscale: String = "480p",            // 480p | 720p | 1080p | 1440p | 2160p
     // Rasteriser, NOT presentation — orthogonal to gpuBackend above. `software` is the original
     // native-resolution rasteriser; `hardware` is the scale-aware one that can render above
-    // native. It is opt-in: the CPU fallback is materially slower on SDL-only Android surfaces,
-    // even at 1x, and must never make a fresh BIOS boot miss its timing target.
+    // native. Prefer GPU acceleration on new installs, like DuckStation; users can still
+    // explicitly select software and the GPU implementation retains its compatibility fallback.
     //
     // MUST match config.c's cfg->renderer default; a Kotlin default that disagrees with the
     // core's is how a setting ends up looking enabled while the core runs the other path.
-    val hwRasterizer: Boolean = false,
+    val hwRasterizer: Boolean = true,
     // Internal render resolution multiplier for the hardware rasteriser, 1..8. Ignored entirely
     // while hwRasterizer is false. Deliberately NOT clamped against another range on the way in:
     // an over-eager coerceIn is exactly how a new value gets silently eaten here.

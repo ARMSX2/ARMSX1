@@ -105,7 +105,7 @@ static const char g_default_settings[] =
 #ifdef USE_HARDWARE
     "    gpu_backend = \"vulkan\"   # software | sdl-accelerated | opengl | angle | vulkan\n"
     "    gl_driver = \"system\"     # GLES implementation for the opengl backend: system | angle\n"
-    "    renderer = \"software\"    # rasterizer: software | hardware | hardware-cpu | hardware-gl\n"
+    "    renderer = \"hardware\"    # rasterizer: software | hardware | hardware-cpu | hardware-gl\n"
     "    internal_scale = 1        # 1..8; internal resolution, hardware rasterizer only\n"
     "    gpu_profile = \"auto\"     # auto | adreno | mali | powervr | xclipse\n"
     "    force_fbfetch = \"auto\"   # auto | on | off; overrule the GPU profile's fbfetch default\n"
@@ -497,10 +497,10 @@ void psxe_cfg_load_defaults(psxe_config_t* cfg) {
        token, never by picking the OpenGL backend. */
     cfg->gpu_backend = 3;
     cfg->gl_driver = 0;
-    /* 0 = the native, accuracy-authoritative rasterizer. The scale-aware hardware rasterizer
-       is opt-in: its CPU fallback is materially slower on SDL-only Android surfaces, and a
-       default that silently selects it turns a BIOS boot into a frame-rate regression. */
-    cfg->renderer = 0;
+    /* Prefer hardware rasterization at native resolution. The GPU implementation tries
+       native Vulkan, then GLES compatibility, and retains software fallback. Users can
+       still explicitly choose the accuracy-authoritative software rasterizer. */
+    cfg->renderer = 1;
     cfg->internal_scale = 1;
 #endif
     /* Hardware truth, and FREE for games that do not use the features: mask check/set

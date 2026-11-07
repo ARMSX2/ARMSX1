@@ -16,6 +16,8 @@ public class RendererSelectionTest {
     @Test public void standaloneLegacyRendererRemainsSupported(){
         assertEquals(2,RendererSelection.from(Map.of("video.renderer","vulkan")).presentation());
         assertEquals(new RendererSelection(1,true),RendererSelection.from(Map.of("video.renderer","hardware")));
-        assertEquals(new RendererSelection(0,false),RendererSelection.from(Map.of()));
+        assertEquals(new RendererSelection(0,true),RendererSelection.from(Map.of()));
+        assertEquals(new RendererSelection(2,true),RendererSelection.from(Map.of("video.gpu_backend","vulkan")));
+        assertEquals(new RendererSelection(2,false),RendererSelection.from(Map.of("video.gpu_backend","vulkan","video.renderer","software")));
     }
 }
