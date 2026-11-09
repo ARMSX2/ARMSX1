@@ -26,6 +26,27 @@ public class GpuEfficiencyTest {
             pixels=gpu.snapshot();assertEquals(0xff080000,pixels[1024+11]);
         }
     }
+    @Test public void mirroredHdQuadDoesNotSampleTheAdjacentAtlasRowOrColumn(){
+        final int left=108,top=32,right=148,bottom=88;
+        int[] vram=new int[1024*512];
+        for(int v=0;v<=56;v++)for(int u=127;u<=167;u++)
+            vram[v*1024+512+u]=v==0||u==127?0x001f:v==56||u==167?0x7c00:0x03e0;
+        int[] quad={9,0x2d808080,left|(top<<16),167|(56<<8),right|(top<<16),127|(56<<8),
+            left|(bottom<<16),167,right|(bottom<<16),127,0,0x108,0,0,255|(239<<10),0,0};
+        int[] display={0,0,0,0,2560,0,240,0};
+        for(int scale:new int[]{1,3,5})try(HardwareRasterizer gpu=new HardwareRasterizer(scale)){
+            gpu.setVram(vram);
+            gpu.drawBatch(quad);
+            Gpu.Frame frame=gpu.capture(display);
+            assertEquals("leading texture corner at "+scale+"x",0xff0000ff,frame.pixels()[top*scale*frame.width()+left*scale]);
+            for(int sub=1;sub<=scale;sub++){
+                assertEquals("trailing texture column at "+scale+"x",0xff00ff00,
+                    frame.pixels()[(top+12)*scale*frame.width()+right*scale-sub]);
+                assertEquals("trailing texture row at "+scale+"x",0xff00ff00,
+                    frame.pixels()[(bottom*scale-sub)*frame.width()+(left+12)*scale]);
+            }
+        }
+    }
     @Test public void softwareClearsPreserveWrappedPixels(){
         for(int trial=0;trial<4;trial++)try(Gpu gpu=new Gpu(false)){
             long start=System.nanoTime();
