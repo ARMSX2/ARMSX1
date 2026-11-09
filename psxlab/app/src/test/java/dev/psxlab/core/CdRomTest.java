@@ -111,12 +111,25 @@ public class CdRomTest {
     @Test public void openingTrayStopsDmaAndReadAndSignalsShellOpenUntilReplacement(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);readFirst(b,7,0);b.write8(BASE+3,0x80);assertEquals(2048,b.cdrom.availableBytes());
-            long before=b.cdrom.sectorsRead;b.cdrom.eject();assertEquals(0,b.cdrom.availableBytes());b.cdrom.tick(1);
-            assertEquals(5,irq(b));assertArrayEquals(new int[]{0x10,8},response(b));ack(b);
-            b.cdrom.tick(33868800);assertEquals(before,b.cdrom.sectorsRead);
+            long before=b.cdrom.sectorsRead;int delay=b.cdrom.ejectForSwap();
+            assertEquals(2*CdDriveTiming.HZ+CdDriveTiming.stop(true,false),delay);
+            assertEquals(0,b.cdrom.availableBytes());b.cdrom.tick(1);
+            assertEquals(5,irq(b));assertArrayEquals(new int[]{1,8},response(b));ack(b);
+            b.cdrom.tick(delay);assertEquals(before,b.cdrom.sectorsRead);
             command(b,1);assertArrayEquals(new int[]{0x10},response(b));ack(b);
             command(b,6);assertEquals(5,irq(b));ack(b);response(b);
-            b.cdrom.insert(disc());command(b,1);assertArrayEquals(new int[]{2},response(b));
+            SectorSource replacement=new SectorSource(){
+                public byte[] readSector(int lba)throws IOException{return disc().readSector(lba+17);}
+                public int sectorCount(){return disc().sectorCount()-17;}
+            };
+            b.cdrom.insertReplacement(replacement);
+            command(b,1);assertArrayEquals(new int[]{0x10},response(b));ack(b);
+            command(b,1);assertArrayEquals(new int[]{0},response(b));ack(b);
+            command(b,6);assertEquals(3,irq(b));ack(b);response(b);
+            b.cdrom.tick(CdDriveTiming.HZ/2);assertEquals(before,b.cdrom.sectorsRead);
+            firstSector(b);
+            b.write8(BASE+3,0x80);
+            assertEquals(17,b.read8(BASE+2));
         }
     }
     @Test public void rawScexTestAtDataPositionReturnsNoStringsWithoutChangingDiscId(){

@@ -13,9 +13,9 @@ are supported. Nonbinary audio files and invalid/missing tracks produce an error
 The ISO boot reader still expects the PlayStation data filesystem in track 1.
 
 `PbpDisc` reads unencrypted PS1 PSISOIMG data, raw or deflated 16-sector blocks,
-and embedded multi-disc tables. Launch currently selects the first embedded disc;
-the reader's indexed constructor supports other discs, but there is no new menu for
-switching embedded PBP discs. PSP applications and encrypted PSN containers are
+and embedded multi-disc tables. Launch selects the first embedded disc. The Swap
+Disc menu lists the other discs, and save states remember the selected disc.
+PSP applications and encrypted PSN containers are
 rejected explicitly. PBP verification uses generated compressed, raw, multi-disc
 and corrupt fixtures; no supplied commercial PBP was available for a full-game test.
 

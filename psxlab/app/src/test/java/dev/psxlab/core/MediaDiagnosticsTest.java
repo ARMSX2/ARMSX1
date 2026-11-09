@@ -28,8 +28,11 @@ public class MediaDiagnosticsTest {
         public void close(){closes++;}
     }
     private static AutoCloseable mount(Class<?> type,Object source)throws Exception{
-        Constructor<?> constructor=MEDIA.getDeclaredConstructor(type);constructor.setAccessible(true);
-        return (AutoCloseable)constructor.newInstance(source);
+        return mount(type,source,true);
+    }
+    private static AutoCloseable mount(Class<?> type,Object source,boolean boot)throws Exception{
+        Constructor<?> constructor=MEDIA.getDeclaredConstructor(type,boolean.class);constructor.setAccessible(true);
+        return (AutoCloseable)constructor.newInstance(source,boot);
     }
     private static String layout(Object media)throws Exception{return (String)LAYOUT.invoke(null,media);}
     @Test public void cueDataTrackDoesNotDereferenceTheAbsentByteSource()throws Exception{
@@ -59,6 +62,14 @@ public class MediaDiagnosticsTest {
     }
     @Test public void standaloneExecutableDoesNotNeedDiscMetadata()throws Exception{
         try(AutoCloseable media=mount(ByteSource.class,new MemorySource(BootTest.executable()))){assertEquals("none (executable)",layout(media));}
+    }
+    @Test public void dataOnlyDiscCanBeInsertedWithoutABootExecutable()throws Exception{
+        byte[] iso=BootTest.iso();
+        Arrays.fill(iso,20*2048,21*2048,(byte)0);
+        assertThrows(InvocationTargetException.class,()->mount(ByteSource.class,new MemorySource(iso)));
+        try(AutoCloseable media=mount(ByteSource.class,new MemorySource(iso),false)){
+            assertTrue(layout(media).contains("1 track(s), 32 sectors"));
+        }
     }
     @Test public void biosOnlyLaunchDoesNotNeedMountedMedia()throws Exception{assertEquals("none (executable)",layout(null));}
 }

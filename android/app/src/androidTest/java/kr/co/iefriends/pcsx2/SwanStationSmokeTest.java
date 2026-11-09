@@ -170,6 +170,8 @@ public class SwanStationSmokeTest {
                     NativeApp.pause();NativeApp.onNativeSurfaceDestroyed(surfaceOwner);SystemClock.sleep(100);
                     colored.set(0);NativeApp.onNativeSurfaceChanged(reader.getSurface(),960,720,surfaceOwner);NativeApp.resume();
                     until("Surface recreation did not resume video",8000,()->colored.get()>3);
+                    assertEquals("A standalone disc must let the menu open the normal picker","",NativeApp.getSwanEmbeddedDiscs(sessionToken));
+                    assertEquals("A stale run must not query the mounted disc","!",NativeApp.getSwanEmbeddedDiscs(cancelledToken));
                     assertFalse("Missing disc accepted",NativeApp.changeDisc(new File(root,"missing.chd").getAbsolutePath()));
                     assertTrue("Disc reinsertion failed",NativeApp.changeDisc(game.getAbsolutePath()));
                     if(launch<2||launch>=4){File textures=new File(root,"texture-smoke-"+launch+"-"+System.nanoTime());NativeApp.setPs1TextureOptions(true,false,textures.getAbsolutePath());

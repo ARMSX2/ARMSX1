@@ -53,7 +53,7 @@ public class PbpDiscTest {
     @Test public void multiDiscOffsetsAreRelativeToThePsarAndSelectTheRequestedDisc()throws Exception{
         byte[] first=body(raw(42,false),true,false),second=body(raw(43,false),false,false);int secondAt=(0x1000+first.length+0xfff)&~0xfff;
         byte[] title=new byte[secondAt+second.length];System.arraycopy("PSTITLEIMG000000".getBytes("US-ASCII"),0,title,0,16);word(title,0x200,0x1000);word(title,0x204,secondAt);System.arraycopy(first,0,title,0x1000,first.length);System.arraycopy(second,0,title,secondAt,second.length);
-        byte[] pbp=container(title);for(int i=0;i<2;i++)try(PbpDisc disc=new PbpDisc(memory(pbp),i)){assertEquals(2,disc.discCount());byte[] exe=new IsoDisc((SectorSource)disc).bootExecutable();assertEquals(42+i,exe[2048]&255);}assertThrows(IOException.class,()->new PbpDisc(memory(pbp),2));
+        byte[] pbp=container(title);for(int i=0;i<2;i++)try(PbpDisc disc=new PbpDisc(memory(pbp),i)){assertEquals(2,disc.discCount());assertEquals(i,disc.discIndex());byte[] exe=new IsoDisc((SectorSource)disc).bootExecutable();assertEquals(42+i,exe[2048]&255);}assertThrows(IOException.class,()->new PbpDisc(memory(pbp),2));
     }
     @Test public void encryptedPspAndInvalidOffsetsGiveSpecificErrors()throws Exception{
         byte[] encrypted=fixture(true,false);System.arraycopy(new byte[]{0,'P','G','D'},0,encrypted,0x100+0x400,4);assertTrue(assertThrows(IOException.class,()->new PbpDisc(memory(encrypted))).getMessage().contains("Encrypted"));

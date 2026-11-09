@@ -6,10 +6,10 @@ import java.nio.file.*;
 
 /** Disk metadata and machine state are committed together; engine validation happens before load. */
 public final class BackendStateStore {
-    private static final int MAGIC = 0x50534c41, VERSION = 3;
+    private static final int MAGIC = 0x50534c41, VERSION_IDENTITY = 3, VERSION_DISC_INDEX = 4;
     private static final int MAXIMUM_PAYLOAD = 24 * 1024 * 1024;
     private static final java.util.regex.Pattern SLOT=java.util.regex.Pattern.compile("^[0-9a-f]{64}-(autosave|[0-9])\\.psxlabstate$",java.util.regex.Pattern.CASE_INSENSITIVE);
-    record Stored(String game,String disc,String identity,byte[] payload) {}
+    record Stored(String game,String disc,String identity,int discIndex,byte[] payload) {}
     public record Metadata(String game,String disc,int slot,String identity) {}
     public interface IdentityResolver { String identify(String source)throws Exception; }
     /** Disc ID plus boot-content fingerprint: independent of name, URI and container format. */
@@ -41,7 +41,13 @@ public final class BackendStateStore {
         Integer slot=slot(file.getName());if(slot==null)throw new IOException("Not an own-engine slot");
         try(DataInputStream in=new DataInputStream(new FileInputStream(file))){
             if(in.readInt()!=MAGIC)throw new IOException("Not an own-engine state");int version=in.readInt();
-            if(version==2||version==VERSION){String game=in.readUTF(),disc=in.readUTF(),identity=version==VERSION?in.readUTF():rememberedIdentity(file,game);int size=in.readInt();if(game.isEmpty()||version==VERSION&&!validIdentity(identity)||size<1||size>MAXIMUM_PAYLOAD||size!=in.available())throw new IOException("Invalid backend state length");return new Metadata(game,disc,slot,identity);}
+            if(version>=2&&version<=VERSION_DISC_INDEX){
+                String game=in.readUTF(),disc=in.readUTF(),identity=version>=VERSION_IDENTITY?in.readUTF():rememberedIdentity(file,game);
+                readDiscIndex(in,version);
+                int size=in.readInt();
+                if(game.isEmpty()||version>=VERSION_IDENTITY&&!validIdentity(identity)||size<1||size>MAXIMUM_PAYLOAD||size!=in.available())throw new IOException("Invalid backend state length");
+                return new Metadata(game,disc,slot,identity);
+            }
             if(version!=1)throw new IOException("Unsupported backend state version");
         }
         Stored stored=read(file);return new Metadata(stored.game(),stored.disc(),slot,stored.identity());
@@ -79,7 +85,7 @@ public final class BackendStateStore {
         }catch(IOException ignored){}
         int adopted=0;for(var entry:newest.entrySet()){
             File target=file(root,identity,entry.getKey());if(target.exists())continue;
-            File original=entry.getValue();Stored state=read(original);write(target,state.game(),state.disc(),identity,state.payload());
+            File original=entry.getValue();Stored state=read(original);write(target,state.game(),state.disc(),identity,state.discIndex(),state.payload());
             File preview=new File(original+".png");if(preview.isFile())atomic(new File(target+".png"),Files.readAllBytes(preview.toPath()));
             target.setLastModified(original.lastModified());adopted++;
         }
@@ -108,19 +114,30 @@ public final class BackendStateStore {
         write(file,game,disc,"",payload);
     }
     static void write(File file,String game,String disc,String identity,byte[] payload)throws IOException{
+        write(file,game,disc,identity,0,payload);
+    }
+    static void write(File file,String game,String disc,String identity,int discIndex,byte[] payload)throws IOException{
         if (payload.length < 1 || payload.length > MAXIMUM_PAYLOAD) throw new IOException("Invalid backend state length");
         if(!identity.isEmpty()&&!validIdentity(identity))throw new IOException("Invalid game identity");
+        if(discIndex<0||discIndex>4||discIndex!=0&&identity.isEmpty())throw new IOException("Invalid embedded disc index");
         try (ByteArrayOutputStream bytes = new ByteArrayOutputStream(); DataOutputStream out = new DataOutputStream(bytes)) {
             out.writeInt(MAGIC);
-            out.writeInt(identity.isEmpty()?2:VERSION);
+            out.writeInt(discIndex!=0?VERSION_DISC_INDEX:identity.isEmpty()?2:VERSION_IDENTITY);
             out.writeUTF(game);
             out.writeUTF(disc);
             if(!identity.isEmpty())out.writeUTF(identity);
+            if(discIndex!=0)out.writeByte(discIndex);
             out.writeInt(payload.length);
             out.write(payload);
             out.flush();
             atomic(file, bytes.toByteArray());
         }
+    }
+    private static int readDiscIndex(DataInputStream in,int version)throws IOException{
+        if(version<VERSION_DISC_INDEX)return 0;
+        int index=in.readUnsignedByte();
+        if(index>4)throw new IOException("Invalid embedded disc index");
+        return index;
     }
 
     static Stored read(File file) throws IOException {
@@ -128,17 +145,18 @@ public final class BackendStateStore {
         try (DataInputStream in = new DataInputStream(new FileInputStream(file))) {
             if (in.readInt() != MAGIC)
                 throw new IOException("This is not a PSX Lab backend state. Use SwanStation for SwanStation states.");
-            int version=in.readInt();if(version!=1&&version!=2&&version!=VERSION)throw new IOException("Unsupported backend state version");
+            int version=in.readInt();if(version<1||version>VERSION_DISC_INDEX)throw new IOException("Unsupported backend state version");
             String game=version>=2?in.readUTF():null;
             String disc = in.readUTF();
-            String identity=version==VERSION?in.readUTF():"";if(version==VERSION&&!validIdentity(identity))throw new IOException("Invalid game identity");
+            String identity=version>=VERSION_IDENTITY?in.readUTF():"";if(version>=VERSION_IDENTITY&&!validIdentity(identity))throw new IOException("Invalid game identity");
+            int discIndex=readDiscIndex(in,version);
             int length = in.readInt();
             if (length < 1 || length > MAXIMUM_PAYLOAD) throw new IOException("Invalid backend state length");
             byte[] state = new byte[length];
             in.readFully(state);
             if (in.read() != -1) throw new IOException("Unexpected backend state data");
             if(game==null){try{game=dev.psxlab.core.SaveState.identity(state);}catch(IOException e){game=disc;}}
-            return new Stored(game,disc,version==VERSION?identity:rememberedIdentity(file,game),state);
+            return new Stored(game,disc,version>=VERSION_IDENTITY?identity:rememberedIdentity(file,game),discIndex,state);
         }
     }
 

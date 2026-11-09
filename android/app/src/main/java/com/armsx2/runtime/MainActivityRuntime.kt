@@ -1982,12 +1982,12 @@ open class MainActivityRuntime : ComponentActivity() {
                     val mounted = metadata.getOrNull()
                     embeddedDiscs.value = mounted?.discs.orEmpty()
                     embeddedCurrentIndex.value = mounted?.currentIndex ?: -1
-                    showDiscChoicesOrBrowser(activity)
+                    showDiscChoicesOrBrowser()
                 }
             }
         }
 
-        private fun showDiscChoicesOrBrowser(activity: MainActivityRuntime) {
+        private fun showDiscChoicesOrBrowser() {
             // A multi-disc game knows its own discs — sending the player to a file browser to
             // find disc 2 of the game they are already playing is the wrong question to ask.
             if (playlistDiscs().size > 1) {
@@ -1998,6 +1998,12 @@ open class MainActivityRuntime : ComponentActivity() {
                 return
             }
 
+            browseSwapDisc()
+        }
+
+        fun browseSwapDisc() {
+            if (discSwapInProgress.value || vmStopInProgress || !NativeApp.hasActiveVM()) return
+            val activity = instance ?: return
             discPickerOpen.value = false
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
@@ -2725,6 +2731,9 @@ open class MainActivityRuntime : ComponentActivity() {
                     // new disc, and emits the on-screen "Disc changed to …" OSD.
                     // Runs off-thread since it parks the CPU thread and blocks.
                     println("@@ANDROID_SWAP_DISC@@ uri=${uri.take(240)}")
+                    intent?.data?.let { selected ->
+                        runCatching { contentResolver.takePersistableUriPermission(selected, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                    }
                     swapDiscPath(uri)
                 }
             } catch (_: Exception) { }

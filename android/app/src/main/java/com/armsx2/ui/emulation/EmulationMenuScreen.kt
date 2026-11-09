@@ -198,7 +198,7 @@ fun EmulationMenuScreen(viewModel: EmulationMenuViewModel = viewModel()) {
                     }
                 }
             },
-            confirmButton = {},
+            confirmButton = { TextButton(onClick = MainActivityRuntime::browseSwapDisc, enabled = !busy) { Text("Browse files…") } },
             dismissButton = { TextButton(onClick = dismiss, enabled = !busy) { Text(str("action.cancel")) } },
         )
     }

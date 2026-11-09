@@ -87,6 +87,8 @@ final class StateCodec {
         if(!existing.getClass().getName().equals(n.type))throw new IOException("State object type mismatch");
         // Version-1 states made before drive mechanics had no operation in flight.
         if(existing instanceof CdRom){
+            if(!n.fields.containsKey("spinUpTicks")){Node ticks=new Node(1);ticks.scalar=0;n.fields.put("spinUpTicks",ticks);}
+            if(!n.fields.containsKey("shellOpen")){Node opened=new Node(3);opened.scalar=false;n.fields.put("shellOpen",opened);}
             // States from before the locked host FIFO: the FIFO already held the drive's latest sector.
             for(String key:new String[]{"dataSectorSerial","acceptedDataSerial"})if(!n.fields.containsKey(key)){Node serial=new Node(2);serial.scalar=0L;n.fields.put(key,serial);}
             if(!n.fields.containsKey("irqAsserted")){Node asserted=new Node(3);asserted.scalar=(integer(n,"interrupt")&integer(n,"enable")&31)!=0;n.fields.put("irqAsserted",asserted);}

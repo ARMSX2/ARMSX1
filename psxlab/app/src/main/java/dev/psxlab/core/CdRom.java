@@ -21,6 +21,8 @@ public final class CdRom {
     private boolean motor,reading,playing,request,muted;
     private long dataSectorSerial,acceptedDataSerial;
     private int driveTicks,seekTicks,seekTarget;
+    private int spinUpTicks;
+    private boolean shellOpen;
     private boolean readAfterSeek,explicitSeek,seekReady;
     private int playStep=1;
     private int scexTotal,scexMatches;
@@ -100,20 +102,33 @@ public final class CdRom {
         Event(int ticks,int irq,int[] bytes){this.ticks=ticks;this.irq=irq;this.bytes=bytes;}
     }
     CdRom(Bus bus){this.bus=bus;}
-    public void insert(SectorSource disc){this.disc=Objects.requireNonNull(disc);stopRead();driveTicks=0;motor=true;lastSector=lastDataSector=null;resetAudio();location=readLocation=0;data=new byte[0];dataPosition=0;initializeScex();}
+    public void insert(SectorSource disc){this.disc=Objects.requireNonNull(disc);stopRead();driveTicks=spinUpTicks=0;motor=true;shellOpen=false;lastSector=lastDataSector=null;resetAudio();location=readLocation=0;locationPending=false;data=new byte[0];dataPosition=0;initializeScex();}
+    public void insertReplacement(SectorSource disc){
+        boolean opened=shellOpen;
+        insert(disc);
+        shellOpen=opened;
+        motor=false;
+        driveTicks=spinUpTicks=CdDriveTiming.HZ;
+    }
+    public int ejectForSwap(){
+        if(disc==null)return 0;
+        int delay=2*CdDriveTiming.HZ+CdDriveTiming.stop(motor,(mode&128)!=0);
+        eject();
+        return delay;
+    }
     /** Host tray-open event. The host retains the old source until replacement is installed. */
     public void eject(){
-        stopRead();disc=null;motor=false;driveTicks=seekTicks=0;readAfterSeek=explicitSeek=seekReady=false;
+        stopRead();disc=null;motor=false;shellOpen=true;locationPending=false;driveTicks=spinUpTicks=0;
         pendingCommand=-1;commandTicks=0;parameterCount=0;events.clear();response.clear();interrupt=0;irqLine();
         lastSector=lastDataSector=null;data=new byte[0];dataPosition=0;resetAudio();initializeScex();
-        event(0,5,0x10,8);
+        event(0,5,0x01,8);
     }
     private void initializeScex(){scexTotal=scexMatches=disc!=null && disc.region()!=' '?1:0;}
     /** The fast-load path replaces the BIOS GUI, including its CD host IRQ setup. */
     public void prepareBootHandoff(){if(disc!=null){write(0,1);write(2,31);write(3,0x5f);write(0,0);write(3,0);}}
     public static int bcd(int n){return (n/10<<4)|(n%10);}
     private int binary(int n){if((n&15)>9 || (n>>>4)>9)return -1;return (n>>>4)*10+(n&15);}
-    private int status(){return (disc==null?0x10:0)|(motor?2:0)|(seekTicks>0?0x40:0)|(reading?0x20:0)|(playing?0x80:0);}
+    private int status(){return (disc==null||shellOpen?0x10:0)|(motor?2:0)|(seekTicks>0?0x40:0)|(reading?0x20:0)|(playing?0x80:0);}
     private void irqLine(){boolean active=(interrupt&enable&31)!=0;if(active && !irqAsserted)bus.raiseInterrupt(2);irqAsserted=active;}
     private void event(int ticks,int irq,int... bytes){if(events.size()>=16)throw new IllegalStateException("CD-ROM response queue overflow");events.add(new Event(ticks,irq,bytes));}
     private void error(int code){event(0,5,status()|1,code);}
@@ -186,6 +201,7 @@ public final class CdRom {
     }
     public void tick(int cycles){
         boolean wasSeeking=seekTicks>0,wasReading=reading;driveTicks=Math.max(0,driveTicks-cycles);
+        if(spinUpTicks>0){spinUpTicks=Math.max(0,spinUpTicks-cycles);if(spinUpTicks==0)motor=true;}
         irqLine();
         if(pendingCommand>=0){commandTicks=Math.max(0,commandTicks-cycles);if(commandTicks==0 && interrupt==0){int command=pendingCommand;pendingCommand=-1;process(command,commandParameters);}}
         if(!events.isEmpty()){
@@ -249,6 +265,7 @@ public final class CdRom {
         if(reading || playing)n=Math.min(n,Math.max(1,sectorTicks));
         if(seekTicks>0)n=Math.min(n,seekTicks);
         if(driveTicks>0)n=Math.min(n,driveTicks);
+        if(spinUpTicks>0)n=Math.min(n,spinUpTicks);
         if(sectorPending && pendingCommand<0 && interrupt==0 && events.isEmpty())return 1;
         return n;
     }
@@ -290,14 +307,14 @@ public final class CdRom {
     private boolean count(int[] p,int n){if(p.length!=n){error(0x20);return false;}return true;}
     private void stopRead(){reading=playing=readAfterSeek=explicitSeek=seekReady=false;seekTicks=0;sectorPending=false;}
     private void seek(int target,boolean read){
-        if(!motor)driveTicks=Math.max(driveTicks,CdDriveTiming.HZ);motor=true;
+        if(!motor){driveTicks=Math.max(driveTicks,spinUpTicks==0?CdDriveTiming.HZ:spinUpTicks);motor=spinUpTicks==0;}
         seekTarget=target;seekTicks=driveTicks+CdDriveTiming.seek(readLocation,target,(mode&128)!=0);readAfterSeek=read;explicitSeek=!read;
         if(traceSink!=null)traceSink.accept("SEEK_BEGIN from="+readLocation+" to="+target+" ticks="+seekTicks+" after="+(read?"read":"interrupt"));
     }
     private void process(int command,int[] p){
         if(traceSink!=null)traceSink.accept(String.format(Locale.ROOT,"CMD %02X %s at LBA %d",command,Arrays.toString(p),readLocation));
         switch(command){
-            case 1 -> {if(count(p,0))event(0,3,status());}
+            case 1 -> {if(count(p,0)){event(0,3,status());if(disc!=null)shellOpen=false;}}
             case 2 -> {
                 if(!count(p,3))break;
                 int m=binary(p[0]),s=binary(p[1]),f=binary(p[2]);
@@ -314,7 +331,7 @@ public final class CdRom {
                 stopRead();resetAudio();
                 if(track!=0){readLocation=disc.trackStart(track);locationPending=false;}
                 else if(locationPending){readLocation=location;locationPending=false;}
-                motor=playing=true;playStep=1;sectorTicks=SINGLE_SECTOR_TICKS/((mode&128)!=0?2:1);event(0,3,status());
+                motor=spinUpTicks==0;playing=true;playStep=1;sectorTicks=spinUpTicks+CdDriveTiming.sector((mode&128)!=0);event(0,3,status());
             }
             case 4,5 -> {
                 if(!count(p,0))break;
@@ -334,9 +351,9 @@ public final class CdRom {
             }
             case 7,8,9,0x0a -> {
                 if(!count(p,0))break;
-                int old=status(),completion=command==9?CdDriveTiming.pause(reading||playing,(mode&128)!=0,readLocation,sectorTicks):command==0x0a?Math.max(CdDriveTiming.INIT,(mode&128)!=0?CdDriveTiming.HZ*7/10:0):command==8?(motor?((mode&128)!=0?25000000:13000000):7000):400000;
+                int old=status(),completion=command==9?CdDriveTiming.pause(reading||playing,(mode&128)!=0,readLocation,sectorTicks):command==0x0a?Math.max(CdDriveTiming.INIT,(mode&128)!=0?CdDriveTiming.HZ*7/10:0):command==8?CdDriveTiming.stop(motor,(mode&128)!=0):Math.max(400000,spinUpTicks);
                 stopRead();resetAudio();events.removeIf(e->e.irq==2);driveTicks=Math.max(driveTicks,completion);
-                if(command==8)motor=false;else if(command==7 || command==0x0a)motor=disc!=null;
+                if(command==8){motor=false;spinUpTicks=0;}else if(command==7 || command==0x0a)motor=disc!=null&&spinUpTicks==0;
                 if(command==0x0a){mode=file=channel=0;xaMuted=false;System.arraycopy(new int[]{128,0,128,0},0,pendingVolume,0,4);System.arraycopy(pendingVolume,0,volume,0,4);location=readLocation=0;locationPending=false;data=new byte[0];dataPosition=0;request=false;muted=false;}
                 event(0,3,old);event(completion,2,status());
             }

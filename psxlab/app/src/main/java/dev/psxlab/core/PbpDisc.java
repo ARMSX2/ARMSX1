@@ -9,6 +9,7 @@ import java.util.zip.*;
 public final class PbpDisc implements ByteSource,SectorSource {
     private static final int SECTOR=2352,BLOCK_SECTORS=16,BLOCK_BYTES=SECTOR*BLOCK_SECTORS,MAX_BLOCKS=32256;
     private final ByteSource file;
+    private final int discIndex;
     private final Inflater inflater=new Inflater(true);
     private final byte[] cache=new byte[BLOCK_BYTES];
     private long[] offsets;private int[] sizes,starts,pregaps;private boolean[] audio;
@@ -17,7 +18,7 @@ public final class PbpDisc implements ByteSource,SectorSource {
     public PbpDisc(ByteSource file)throws IOException{this(file,0);}
     /** Disc index is zero-based; ordinary launches select the first embedded disc. */
     public PbpDisc(ByteSource file,int discIndex)throws IOException{
-        this.file=file;try{open(discIndex);raw=CueDisc.rawBytes(this);}catch(IOException|RuntimeException e){try{close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
+        this.file=file;this.discIndex=discIndex;try{open(discIndex);raw=CueDisc.rawBytes(this);}catch(IOException|RuntimeException e){try{close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
     }
     public static boolean hasMagic(byte[] bytes){return bytes.length>=4&&bytes[0]==0&&bytes[1]=='P'&&bytes[2]=='B'&&bytes[3]=='P';}
     private static long u32(byte[] b,int at){return Integer.toUnsignedLong((b[at]&255)|((b[at+1]&255)<<8)|((b[at+2]&255)<<16)|(b[at+3]<<24));}
@@ -76,6 +77,7 @@ public final class PbpDisc implements ByteSource,SectorSource {
         cachedBlock=index;
     }
     public int discCount(){return discCount;}
+    public int discIndex(){return discIndex;}
     @Override public int sectorCount(){return sectors;}
     @Override public int lastTrack(){return starts.length;}
     @Override public int trackStart(int track){if(track==0)return sectors;if(track<1||track>starts.length)throw new IllegalArgumentException("No such PBP track");return starts[track-1];}

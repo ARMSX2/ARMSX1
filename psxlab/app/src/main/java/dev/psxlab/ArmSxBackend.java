@@ -167,7 +167,7 @@ public final class ArmSxBackend {
         updateTextures();
     }
     private void prepareStateIdentity()throws IOException{
-        if(!stateId.isEmpty()||media==null)return;
+        if(!stateId.isEmpty()||media==null||media.executable==null)return;
         stateId=BackendStateStore.identity(media.disc==null?"":media.disc.bootPath,media.executable);
         lastGameId=MigrationBackup.digest(stateId.getBytes(StandardCharsets.UTF_8));
         int adopted=0;try{adopted=BackendStateStore.adoptLegacy(root,stateId,gamePath,bootPath,Set.copyOf(sessionAliases),source->{
@@ -191,19 +191,28 @@ public final class ArmSxBackend {
         float volume=fast?decimal(options.get("audio.fast_forward_volume"),100):normal;
         output.setGain(muted||muteFast()?0:volume/100f);
     }
-    private record Restore(byte[] state,String disc,String identity,CompletableFuture<Boolean> ready) {}
+    private record Restore(byte[] state,String disc,int discIndex,String identity,CompletableFuture<Boolean> ready) {}
     private static final class Media implements AutoCloseable {
         final ByteSource source; final CueDisc cue; final IsoDisc disc; final byte[] executable;
-        Media(ByteSource source)throws IOException{
+        Media(ByteSource source,boolean boot)throws IOException{
             this.source=source;cue=null;
             // A decoded disc's system area may itself begin with executable data.
             // Explicit PBP/CHD container identity takes precedence over that prefix.
             if(!(source instanceof PbpDisc)&&!(source instanceof ChdSource)&&new String(source.read(0,8),StandardCharsets.US_ASCII).equals("PS-X EXE")){
-                disc=null;byte[] header=source.read(0,2048);int size=ExeLoader.le(header,28);
+                disc=null;
+                if(!boot){executable=null;return;}
+                byte[] header=source.read(0,2048);int size=ExeLoader.le(header,28);
                 if(size<4||size>2*1024*1024)throw new IOException("Invalid executable size");executable=source.read(0,size+2048);
-            }else{disc=source instanceof PbpDisc||source instanceof ChdSource chd&&chd.hasTracks()?new IsoDisc((SectorSource)source):new IsoDisc(source);executable=disc.bootExecutable();}
+            }else{disc=source instanceof PbpDisc||source instanceof ChdSource chd&&chd.hasTracks()?new IsoDisc((SectorSource)source):new IsoDisc(source);executable=readExecutable(disc,boot);}
         }
-        Media(CueDisc cue)throws IOException{this.source=null;this.cue=cue;disc=new IsoDisc((SectorSource)cue);executable=disc.bootExecutable();}
+        Media(CueDisc cue,boolean boot)throws IOException{this.source=null;this.cue=cue;disc=new IsoDisc((SectorSource)cue);executable=readExecutable(disc,boot);}
+        private static byte[] readExecutable(IsoDisc disc,boolean boot)throws IOException{
+            if(boot)return disc.bootExecutable();
+            // Later discs can be readable data images without an executable to boot.
+            try{disc.readBootPath();}catch(IOException ignored){}
+            return null;
+        }
+        int discIndex(){return source instanceof PbpDisc pbp?pbp.discIndex():0;}
         public void close()throws IOException{if(cue!=null)cue.close();else source.close();}
     }
     public ArmSxBackend(Context context,Consumer<Boolean> pauseCallback,Consumer<String> notice){
@@ -282,19 +291,21 @@ public final class ArmSxBackend {
         Uri uri=Uri.parse(path);ParcelFileDescriptor fd=uri.getScheme()!=null&&uri.getScheme().equals("content")?context.getContentResolver().openFileDescriptor(uri,"r"):ParcelFileDescriptor.open(new File(uri.getScheme()!=null&&uri.getScheme().equals("file")?uri.getPath():path),ParcelFileDescriptor.MODE_READ_ONLY);
         if(fd==null)throw new IOException("Cannot open game image");return fd;
     }
-    private ByteSource source(String path)throws IOException{
+    private ByteSource source(String path,int discIndex)throws IOException{
         try(ParcelFileDescriptor fd=descriptor(path)){
             // Recognize CHD by its header, including content URIs with no extension.
             try(FileSource probe=new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal)){
                 byte[] magic=probe.read(0,8);
+                if(PbpDisc.hasMagic(magic))return new PbpDisc(new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal),discIndex);
+                if(discIndex!=0)throw new IOException("Disc image has no embedded discs");
                 if(new String(magic,StandardCharsets.US_ASCII).equals("MComprHD"))return new ChdSource(fd,journal);
-                if(PbpDisc.hasMagic(magic))return new PbpDisc(new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal));
             }
             return new FileSource(new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(fd.getFileDescriptor())),journal);
         }
     }
-    private Media openMedia(String path)throws IOException{
-        Media media=openMediaImage(path);
+    private Media openMedia(String path)throws IOException{return openMedia(path,0,true);}
+    private Media openMedia(String path,int discIndex,boolean boot)throws IOException{
+        Media media=openMediaImage(path,discIndex,boot);
         try{attachSubchannel(media,path);}catch(IOException e){journal.error("cd.sbi",e);notice.accept("Ignoring SBI file: "+e.getMessage());}
         return media;
     }
@@ -305,15 +316,22 @@ public final class ArmSxBackend {
         Uri uri=Uri.parse(path);if(uri.getScheme()!=null&&!uri.getScheme().equals("file"))return;
         File image=new File(uri.getScheme()==null?path:uri.getPath()),parent=image.getParentFile();if(parent==null)return;
         String name=image.getName(),stem=name.lastIndexOf('.')>0?name.substring(0,name.lastIndexOf('.')):name;
-        File[] matches=parent.listFiles((dir,candidate)->candidate.equalsIgnoreCase(stem+".sbi"));
+        File[] matches=null;
+        if(media.source instanceof PbpDisc pbp){
+            String indexed=stem+"_"+(pbp.discIndex()+1)+".sbi";
+            matches=parent.listFiles((dir,candidate)->candidate.equalsIgnoreCase(indexed));
+        }
+        if((matches==null||matches.length==0)&&media.discIndex()==0)
+            matches=parent.listFiles((dir,candidate)->candidate.equalsIgnoreCase(stem+".sbi"));
         if(matches==null||matches.length!=1)return;
         if(matches[0].length()>1024*1024)throw new IOException("SBI file is too large");
         Map<Integer,byte[]> entries=SubchannelPatch.parse(Files.readAllBytes(matches[0].toPath()));
         media.disc.subchannel(entries);journal.event(EngineLog.INFO,"cd.sbi.loaded",Map.of("file",matches[0].getName(),"entries",entries.size()));
     }
-    private Media openMediaImage(String path)throws IOException{
+    private Media openMediaImage(String path,int discIndex,boolean boot)throws IOException{
         Uri uri=Uri.parse(path);String filePath=uri.getScheme()==null?path:uri.getPath();
         if(CueDisc.isCueName(filePath)){
+            if(discIndex!=0)throw new IOException("Disc image has no embedded discs");
             if(uri.getScheme()!=null&&!uri.getScheme().equals("file"))throw new IOException("Launch the CUE through the game library so its BIN files can be prepared together");
             File cueFile=new File(filePath).getCanonicalFile(),parent=cueFile.getParentFile();
             if(cueFile.length()>1024*1024)throw new IOException("CUE text exceeds 1 MiB");
@@ -322,10 +340,16 @@ public final class ArmSxBackend {
                 if(!track.toPath().startsWith(parent.toPath()))throw new IOException("CUE track is outside its folder");
                 return new FileSource(new FileInputStream(track),journal);
             });
-            try{Media result=new Media(cue);journal.event(EngineLog.INFO,"cd.cue.mounted",Map.of("tracks",cue.lastTrack(),"sectors",cue.sectorCount()));return result;}
+            try{Media result=new Media(cue,boot);journal.event(EngineLog.INFO,"cd.cue.mounted",Map.of("tracks",cue.lastTrack(),"sectors",cue.sectorCount()));return result;}
             catch(Exception e){try{cue.close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
         }
-        ByteSource source=source(path);try{Media result=new Media(source);if(source instanceof PbpDisc pbp)journal.event(EngineLog.INFO,"cd.pbp.mounted",Map.of("tracks",pbp.lastTrack(),"sectors",pbp.sectorCount(),"discs",pbp.discCount()));journal.event(EngineLog.INFO,"media.boot",Map.of("kind",result.disc==null?"psx_exe":"disc_image","boot_path",result.disc==null?"":result.disc.bootPath,"header",ExeLoader.headerSummary(result.executable)));return result;}catch(Exception e){source.close();throw e;}
+        ByteSource source=source(path,discIndex);
+        try{
+            Media result=new Media(source,boot);
+            if(source instanceof PbpDisc pbp)journal.event(EngineLog.INFO,"cd.pbp.mounted",Map.of("tracks",pbp.lastTrack(),"sectors",pbp.sectorCount(),"discs",pbp.discCount(),"disc_index",pbp.discIndex()));
+            if(boot)journal.event(EngineLog.INFO,"media.boot",Map.of("kind",result.disc==null?"psx_exe":"disc_image","boot_path",result.disc==null?"":result.disc.bootPath,"header",ExeLoader.headerSummary(result.executable)));
+            return result;
+        }catch(Exception e){try{source.close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
     }
     /** Blocking, as ArmSX1's existing runVMThread contract requires. */
     public boolean run(String path){return run(path, () -> true);}
@@ -344,7 +368,9 @@ public final class ArmSxBackend {
                 try(Gpu graphics=mode==0&&scale==1&&!selected.hardware()?new Gpu(true,false):new Gpu(true,mode,scale,selected.hardware())){
                     gpu=graphics;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();configurePads();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
-                        String mounted=restore==null?discPath:restore.disc();media=mounted.isEmpty()?null:openMedia(mounted);prepareStateIdentity();mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
+                        String mounted=restore==null?discPath:restore.disc();
+                        media=mounted.isEmpty()?null:openMedia(mounted,restore==null?0:restore.discIndex(),restore==null||restore.state()==null);
+                        prepareStateIdentity();mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
                         try{
                             cpu=new Cpu(bus);cpu.reset();guestAudioTracing=false;updateGuestAudioTracing();
                             if(restore!=null&&restore.state()!=null)SaveState.restore(restore.state(),cpu,bus,gpu,restore.identity());
@@ -463,7 +489,13 @@ public final class ArmSxBackend {
             }
             if(wasBlocked){workStarted=System.nanoTime();timeline.resume(workStarted);lastFrameAt=0;performance.reset();perfCpu=perfEpoch=0;output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());measured=System.nanoTime();frameRate.reset();wasBlocked=false;}
             if(fast!=wasFast){timeline.incident(System.nanoTime(),"fast-forward "+(fast?"on, speed "+(fastSpeed()==0?"unlimited":fastSpeed()+"x")+(muteFast()?", muted":""):"off"));bus.spu.flushAudio();bus.spu.setAudioSink(muteFast()?null:(pcm,count)->{int audible=0;for(int i=0;i<count;i++)if(pcm[i]!=0)audible++;nonzero+=audible;output.samples(pcm,count);});updateAudio();output.setPaused(muteFast());pacer=new AudioAwareFramePacer(cpu.instructions,System.nanoTime());wasFast=fast;frameRate.reset();}
-            if(pendingMedia!=null&&cpu.instructions>=insertAt){bus.cdrom.insert(pendingMedia.disc);if(media!=null)media.close();media=pendingMedia;pendingMedia=null;mediaTextures();timeline.incident(System.nanoTime(),"disc changed: "+discLayout(media));}
+            if(pendingMedia!=null&&cpu.instructions>=insertAt){
+                Media previous=media;media=pendingMedia;pendingMedia=null;
+                bus.cdrom.insertReplacement(media.disc);
+                if(previous!=null)try{previous.close();}catch(IOException e){journal.error("cd.close_previous",e);}
+                mediaTextures();
+                timeline.incident(System.nanoTime(),"disc changed: "+discLayout(media));
+            }
             long ticket=performance.ticket();
             if(ticket!=perfEpoch){perfCpu=0;perfEpoch=ticket;}
             gpu.performanceEnabled=ticket!=0;bus.dma.performanceEnabled=ticket!=0;
@@ -566,7 +598,7 @@ public final class ArmSxBackend {
     }
     /** Read-only copy of the 2 MiB main RAM, taken on the emulation thread; empty with no game running. */
     public byte[] memorySnapshot(){return call(()->bus.snapshotRam(),new byte[0]);}
-    public boolean save(int slot){return call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before saving");File file=BackendStateStore.file(root,stateId.isEmpty()?gamePath:stateId,slot);String disc=discPath.equals(bootPath)?"":discSources.getOrDefault(discPath,discPath);if(disc.contains("/cache/saf-launch/"))throw new IOException("Cannot save a temporary disc without its original source");BackendStateStore.write(file,gamePath,disc,stateId,SaveState.capture(cpu,bus,gpu,gamePath));screenshotNow(file+".png");if(slot==-1){atomic(new File(root,"autosave-game.txt"),gamePath.getBytes(StandardCharsets.UTF_8));atomic(new File(root,"autosave-key.txt"),(stateId+"\n"+gamePath).getBytes(StandardCharsets.UTF_8));}event("save-slot="+slot);return true;},false);}
+    public boolean save(int slot){return call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before saving");File file=BackendStateStore.file(root,stateId.isEmpty()?gamePath:stateId,slot);String disc=discPath.equals(bootPath)?"":discSources.getOrDefault(discPath,discPath);if(disc.contains("/cache/saf-launch/"))throw new IOException("Cannot save a temporary disc without its original source");BackendStateStore.write(file,gamePath,disc,stateId,media==null?0:media.discIndex(),SaveState.capture(cpu,bus,gpu,gamePath));screenshotNow(file+".png");if(slot==-1){atomic(new File(root,"autosave-game.txt"),gamePath.getBytes(StandardCharsets.UTF_8));atomic(new File(root,"autosave-key.txt"),(stateId+"\n"+gamePath).getBytes(StandardCharsets.UTF_8));}event("save-slot="+slot);return true;},false);}
     public boolean load(int slot,boolean acknowledgeCards){
         if(!acknowledgeCards){notice.accept("Loading restores machine state using the current memory cards. Back up your cards first.");return false;}
         CompletableFuture<Boolean> ready=new CompletableFuture<>();
@@ -580,12 +612,12 @@ public final class ArmSxBackend {
             if(disc.isEmpty()||BackendStateStore.sameGame(disc,gamePath,bootPath))disc=bootPath;
             else if(mediaResolver!=null)prepared=mediaResolver.prepare(disc);
             String mounted=prepared==null?disc:prepared.path();PreparedMedia retained=prepared;
-            boolean accepted=call(()->{SaveState.validate(stored.payload(),stored.game(),bios);try(Media checked=openMedia(mounted)){}if(retained!=null){restoredMedia.add(retained);discSources.put(mounted,stored.disc());}restart=new Restore(stored.payload(),mounted,stored.game(),ready);event("load-slot="+slot);return true;},false);
+            boolean accepted=call(()->{SaveState.validate(stored.payload(),stored.game(),bios);try(Media checked=openMedia(mounted,stored.discIndex(),false)){}if(retained!=null){restoredMedia.add(retained);discSources.put(mounted,stored.disc());}restart=new Restore(stored.payload(),mounted,stored.discIndex(),stored.game(),ready);event("load-slot="+slot);return true;},false);
             if(!accepted){if(prepared!=null)prepared.close();return false;}
         }catch(Exception e){if(prepared!=null)try{prepared.close();}catch(Exception closing){e.addSuppressed(closing);}error(e);return false;}
         try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
     }
-    public void reset(){call(()->{restart=new Restore(null,discPath,gamePath,new CompletableFuture<>());return true;},false);}
+    public void reset(){call(()->{Media selected=selectedMedia();restart=new Restore(null,discPath,selected==null?0:selected.discIndex(),gamePath,new CompletableFuture<>());return true;},false);}
     /** Apply internal resolution and rasterizer changes to the running game. Both are fixed when a session's Gpu is
      *  created, so an in-game change used to wait for a restart. This snapshots the machine and goes round the same
      *  restart path a state load uses, with the settings read again; the state format skips those Gpu fields, so the
@@ -595,7 +627,7 @@ public final class ArmSxBackend {
         boolean accepted=call(()->{if(pendingMedia!=null)throw new IOException("Wait for the disc tray to close before changing the resolution");
             byte[] state=SaveState.capture(cpu,bus,gpu,gamePath);Map<String,String> next=readConfig();String api=options.get("video.gpu_backend");
             if(api==null)next.remove("video.gpu_backend");else next.put("video.gpu_backend",api);options=next;
-            restart=new Restore(state,discPath,gamePath,ready);event("reload-video");return true;},false);
+            restart=new Restore(state,discPath,media==null?0:media.discIndex(),gamePath,ready);event("reload-video");return true;},false);
         if(!accepted)return false;try{return ready.get(15,TimeUnit.SECONDS);}catch(Exception e){error(e);return false;}
     }
     private String stateIdentity(int slot){if(!gamePath.isEmpty()||slot!=-1||root==null)return gamePath;File index=new File(root,"autosave-game.txt");try{return index.length()<=65536?new String(Files.readAllBytes(index.toPath()),StandardCharsets.UTF_8):"";}catch(IOException e){return "";}}
@@ -613,7 +645,38 @@ public final class ArmSxBackend {
     // Only framebuffer capture needs a guest boundary. PNG encoding and fsync
     // belong to the requesting host thread, so diagnosis does not starve audio.
     private void writeScreenshot(String path,Gpu.Frame frame)throws IOException{Bitmap image=Bitmap.createBitmap(frame.pixels(),frame.width(),frame.height(),Bitmap.Config.ARGB_8888);try(ByteArrayOutputStream bytes=new ByteArrayOutputStream()){if(!image.compress(Bitmap.CompressFormat.PNG,100,bytes))throw new IOException("Screenshot failed");atomic(new File(path),bytes.toByteArray());}finally{image.recycle();}}
-    public boolean changeDisc(String path){return call(()->{Media next=openMedia(path);if(next.disc==null){next.close();throw new IOException("Disc replacement requires a CD image");}if(pendingMedia!=null)pendingMedia.close();bus.cdrom.eject();pendingMedia=next;insertAt=cpu.instructions+33868800L;discPath=path;event("disc-change");return true;},false);}
+    private Media selectedMedia(){return pendingMedia!=null?pendingMedia:media;}
+    public String embeddedDiscs(long session,java.util.function.BooleanSupplier currentSession){
+        return call(()->{
+            if(!currentSession.getAsBoolean())return "!";
+            Media selected=selectedMedia();
+            if(selected==null||!(selected.source instanceof PbpDisc pbp)||pbp.discCount()<2)return "";
+            StringBuilder list=new StringBuilder().append(session).append('\t').append(pbp.discIndex());
+            for(int i=1;i<=pbp.discCount();i++)list.append("\nDisc ").append(i);
+            return list.toString();
+        },"!");
+    }
+    public boolean changeEmbeddedDisc(int index,java.util.function.BooleanSupplier currentSession){
+        return call(()->{
+            Media selected=selectedMedia();
+            if(!currentSession.getAsBoolean()||selected==null||!(selected.source instanceof PbpDisc pbp)
+                    ||pbp.discCount()<2||index<0||index>=pbp.discCount())return false;
+            return queueDiscSwap(discPath,index);
+        },false);
+    }
+    public boolean changeDisc(String path){return call(()->queueDiscSwap(path,0),false);}
+    private boolean queueDiscSwap(String path,int index)throws IOException{
+        Media next=openMedia(path,index,false);
+        if(next.disc==null){next.close();throw new IOException("Disc replacement requires a CD image");}
+        if(pendingMedia==null){
+            bus.flushClocks();
+            insertAt=cpu.instructions+bus.cdrom.ejectForSwap();
+        }else try{pendingMedia.close();}catch(IOException e){journal.error("cd.close_pending",e);}
+        pendingMedia=next;
+        discPath=path;
+        event("disc-change");
+        return true;
+    }
     /** Frontend code for the DualShock Analog button (NativeApp.setPadButton). */
     static final int ANALOG_BUTTON=200;
     public void button(int player,int key,int range,boolean down){if(player<0||player>=pads.length)return;if(key==ANALOG_BUTTON){if(down){pads[player].toggleAnalog();event("analog-button player="+player);}return;}if((key>=110&&key<=113)||(key>=120&&key<=123)){int stick=key>=120?1:0,offset=key%10;PadState.State s=pads[player].get();int x=stick==0?s.leftX():s.rightX(),y=stick==0?s.leftY():s.rightY();int v=down?Math.min(127,Math.max(0,range)*127/32767):0;if(offset==0||offset==2)y=128+(offset==0?-v:v);else x=128+(offset==3?-v:v);analog(player,stick,x,y);return;}int bit=buttonBit(key);if(bit<0)return;PadState p=pads[player];synchronized(p){PadState.State s=p.get();int mask=1<<bit;p.update(down?s.pressed()|mask:s.pressed()&~mask,s.rightX(),s.rightY(),s.leftX(),s.leftY());}}

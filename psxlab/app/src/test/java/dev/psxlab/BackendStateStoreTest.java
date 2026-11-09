@@ -26,6 +26,19 @@ public class BackendStateStoreTest {
             BackendStateStore.Stored saved=BackendStateStore.read(canonical);assertEquals(library,saved.game());assertEquals("disc-two.chd",saved.disc());assertEquals(id(1),saved.identity());assertArrayEquals(new byte[]{1,2,3},saved.payload());
         }
     }
+    @Test public void saveStateRecordsTheSelectedPbpDiscAndReadsLegacyStates()throws Exception{
+        File root=Files.createTempDirectory("embedded-disc-state").toFile();
+        String source="/games/collection.pbp";
+        File legacy=BackendStateStore.file(root,id(1),0),current=BackendStateStore.file(root,id(1),1);
+        BackendStateStore.write(legacy,source,"",id(1),new byte[]{1});
+        BackendStateStore.write(current,source,"",id(1),2,new byte[]{2});
+        assertEquals(0,BackendStateStore.read(legacy).discIndex());
+        BackendStateStore.Stored state=BackendStateStore.read(current);
+        assertEquals(2,state.discIndex());assertEquals(id(1),state.identity());assertArrayEquals(new byte[]{2},state.payload());
+        assertEquals(id(1),BackendStateStore.metadata(current).identity());
+        assertThrows(IOException.class,()->BackendStateStore.write(current,source,"",id(1),5,new byte[]{3}));
+        assertEquals(2,BackendStateStore.read(current).discIndex());
+    }
     @Test public void migrationKeepsNewestSlotAndArchivesEveryOriginalAndPreview()throws Exception{
         File root=Files.createTempDirectory("legacy-aliases").toFile();String library="content://library/Crash.chd",frontend="/games/Renamed.pbp";
         File older=BackendStateStore.file(root,library,2),newer=BackendStateStore.file(root,frontend,2);

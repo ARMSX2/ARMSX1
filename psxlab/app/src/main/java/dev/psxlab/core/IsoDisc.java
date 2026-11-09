@@ -63,7 +63,7 @@ public final class IsoDisc implements SectorSource {
         }
         return current;
     }
-    public byte[] bootExecutable()throws IOException{
+    public void readBootPath()throws IOException{
         bootPath="PSX.EXE";
         try{
             String cnf=new String(contents(find("SYSTEM.CNF"),65536),StandardCharsets.US_ASCII);
@@ -71,6 +71,9 @@ public final class IsoDisc implements SectorSource {
             if(!match.find())throw new IOException("SYSTEM.CNF has no BOOT executable");
             bootPath=match.group(1).trim().split("\\s+",2)[0];
         }catch(FileNotFoundException ignored){}
+    }
+    public byte[] bootExecutable()throws IOException{
+        readBootPath();
         Record exe=find(bootPath);if(exe.directory)throw new IOException("Boot entry is a directory");
         int maximum=2*1024*1024+2048;byte[] bytes=contents(exe,maximum);
         // BIOS CD reads operate in complete sectors. Some mastered executables

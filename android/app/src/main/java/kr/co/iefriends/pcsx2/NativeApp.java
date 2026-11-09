@@ -1433,10 +1433,22 @@ public class NativeApp {
 	/** Swap the running game's disc. Accepted asynchronously: the swap is applied on the
 	 *  emulation thread at the next instruction boundary, so true means "queued", not "done". */
 	public static boolean changeDisc(String path) { if (lab == null) { return false; } return lab.changeDisc(path);  }
-	/** Mounted PBP subimages for this run token. Blocking: call off the UI thread. */
-	public static String getSwanEmbeddedDiscs(long session) { return "[]"; }
+	/** Mounted PBP subimages for this run token, or an empty string for the normal disc picker.
+	 * Blocks on the emulation thread. */
+	public static String getSwanEmbeddedDiscs(long session) {
+		dev.psxlab.ArmSxBackend backend = lab;
+		return backend == null ? "!" : backend.embeddedDiscs(session, () -> discSessionActive(backend, session));
+	}
+	private static boolean discSessionActive(dev.psxlab.ArmSxBackend backend, long session) {
+		synchronized (backend) {
+			return session != 0 && session == preparedRunToken && backend.active();
+		}
+	}
 	/** Select an embedded PBP disc without replacing or re-copying its container. */
-	public static boolean changeSwanEmbeddedDisc(int index, long session) { unsupported("changeSwanEmbeddedDisc"); return false; }
+	public static boolean changeSwanEmbeddedDisc(int index, long session) {
+		dev.psxlab.ArmSxBackend backend = lab;
+		return backend != null && backend.changeEmbeddedDisc(index, () -> discSessionActive(backend, session));
+	}
 
 	// Matches PSX_STATE_SLOT_AUTOSAVE in psx/state.h. Uses a per-game
 	// .autosave.pss file through the same emulation-thread queue as numbered

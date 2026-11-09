@@ -6,6 +6,7 @@ final class CdDriveTiming {
     private static final int[] MINUTES={0,4,7,11,16,23,27,32,39,44,52,60,67,74,80};
     static int revolution(int lba){int minute=Math.min(80,Math.max(0,lba)/4500);for(int i=0;i<MINUTES.length;i++)if(minute<=MINUTES[i])return 8+i;return 23;}
     static int sector(boolean doubled){return HZ/(doubled?150:75);}
+    static int stop(boolean motor,boolean doubled){return motor?(doubled?25000000:13000000):7000;}
     static int pause(boolean active,boolean doubled,int lba,int remaining){
         if(!active)return 7400;
         int period=sector(doubled),elapsed=Math.max(0,period-Math.min(period,remaining));
