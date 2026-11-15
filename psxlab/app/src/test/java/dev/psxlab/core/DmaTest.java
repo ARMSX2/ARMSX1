@@ -67,6 +67,20 @@ public class DmaTest {
             assertEquals(Integer.MAX_VALUE,b.dma.clocksToEvent());assertTrue(b.dma.diagnostic().contains("linked-yields=0"));
         }
     }
+    @Test public void cyclicListRetryIsPacedByTheWordsItResent(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.dma.performanceEnabled=true;
+            // 2000 one-word nodes whose last link returns to the first: 4000 words per pass.
+            for(int i=0;i<2000;i++){int at=0x100+8*i;b.write32(at,0x01000000|(i==1999?0x100:at+8));b.write32(at+4,0xe6000000);}
+            startList(b,0x100);
+            assertEquals(2000,b.dma.performanceWords[2]);assertTrue(b.dma.diagnostic().contains("linked-yields=1"));
+            assertTrue("a long loop must not be resent every 1024 clocks",b.dma.clocksToEvent()>=4000);
+        }
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.write32(0x100,0x200);b.write32(0x200,0x100);startList(b,0x100);
+            assertEquals(1024,b.dma.clocksToEvent());
+        }
+    }
     @Test public void disablePausesAndStopCancelsDeferredList(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);b.write32(0x100,0x100);startList(b,0x100);b.dma.tick(100);

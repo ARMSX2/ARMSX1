@@ -13,7 +13,7 @@ public final class Dma {
     private SpuRequest spuRequest;
     // Keep cyclic transfers live so the CPU can repair or cancel the list.
     // Ordinary lists retain their existing atomic transfer behaviour.
-    private static final int LINKED_RETRY_CLOCKS=1024;
+    private static final int LINKED_RETRY_CLOCKS=1024,LINKED_MAX_RETRY_CLOCKS=1<<20;
     private int linkedDelay;
     private long linkedYields;
     private int linkedLastAddress,linkedLastHeader;
@@ -78,18 +78,20 @@ public final class Dma {
         int address=channels[ch][0]&0x1ffffc,step=(control&2)!=0?-4:4;
         if(mode==2){
             if(ch!=2 || (control&1)==0)throw new UnsupportedOperationException("Invalid GPU linked-list DMA direction");
-            java.util.HashSet<Integer> visited=new java.util.HashSet<>();
+            java.util.HashSet<Integer> visited=new java.util.HashSet<>();long sent=0;
             while(true){
                 if(!visited.add(address)){
                     // Re-read RAM after yielding. A cycle is neither a host
-                    // exception nor a successful DMA completion.
-                    linkedDelay=LINKED_RETRY_CLOCKS;linkedYields++;
+                    // exception nor a successful DMA completion. The bus moves at most
+                    // one word per clock, so a long loop is not resent faster than that;
+                    // a fixed retry redrew whole frames hundreds of times per field.
+                    linkedDelay=(int)Math.max(LINKED_RETRY_CLOCKS,Math.min(sent,LINKED_MAX_RETRY_CLOCKS));linkedYields++;
                     if(journal!=null && journal.enabled() && (linkedYields<=4 || (linkedYields&(linkedYields-1))==0))
                         journal.event(EngineLog.WARN,"dma.gpu.linked.yield",java.util.Map.of("yields",linkedYields,"last_address",linkedLastAddress,"last_header",Integer.toUnsignedLong(linkedLastHeader),"next_address",channels[2][0],"control",channels[2][2],"resume_clocks",linkedDelay));
                     return;
                 }
                 int header=bus.read32(address),words=header>>>24;
-                linkedLastAddress=address;linkedLastHeader=header;
+                linkedLastAddress=address;linkedLastHeader=header;sent+=words+1;
                 if(performanceEnabled)performanceWords[2]+=words;
                 for(int i=0;i<words;i++){address=(address+4)&0x1ffffc;bus.gpu.write(bus.read32(address));}
                 // Test the end bit before masking the RAM mirror/address bits.
