@@ -21,7 +21,14 @@ object Ps1CheatIdentity {
             when (uri.scheme) {
                 null, "file" -> probe(uri.path ?: source)
                 "content" -> Ps1SafAccess.prepare(context, source, cancelled).use { session ->
-                    if (cancelled()) null else probe(session.launchPath)
+                    when {
+                        cancelled() -> null
+                        // Launched in place (CHD, PBP, raw images): read the serial through the
+                        // granted document instead of treating the URI as a file path.
+                        session.launchPath.startsWith("content://") ->
+                            Ps1SafAccess.probeDocument(context, source).serial
+                        else -> probe(session.launchPath)
+                    }
                 }
                 else -> null
             }

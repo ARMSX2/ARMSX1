@@ -24,6 +24,24 @@ internal object Ps1Sbi {
         }
     }
 
+    /**
+     * The SBI sibling for each disc of an image the core reads in place, keyed by disc index.
+     * Same choice as the core's own folder lookup: a PBP's `_N` file is disc N-1 and wins over
+     * the plain stem, which only ever applies to disc 0.
+     */
+    fun directSidecars(imageName: String, siblings: Collection<String>): Map<Int, String> {
+        val localStem = imageName.substringBeforeLast('.')
+        val result = LinkedHashMap<Int, String>()
+        val (plain, indexed) = sidecars(imageName, imageName, siblings)
+            .partition { it.destination == "$localStem.sbi" }
+        for (sidecar in indexed) {
+            val disc = sidecar.destination.removeSuffix(".sbi").removePrefix("${localStem}_").toIntOrNull() ?: continue
+            result[disc - 1] = sidecar.source
+        }
+        plain.firstOrNull()?.let { result.putIfAbsent(0, it.source) }
+        return result
+    }
+
     /** Validate the format this core actually supports; existence alone isn't a loaded SBI. */
     fun validate(bytes: ByteArray) {
         fun invalid(): Nothing = throw IOException("Invalid or incomplete SBI file; use the SBI matching this disc and region")

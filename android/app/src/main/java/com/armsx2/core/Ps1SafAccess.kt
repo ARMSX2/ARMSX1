@@ -128,19 +128,29 @@ object Ps1SafAccess {
     }
 
     private val RAW_IMAGE_EXTENSIONS = setOf("bin", "iso", "img")
+    private val DIRECT_EXTENSIONS = setOf("chd", "pbp", "bin", "iso", "img", "exe")
 
     private fun prepareSession(context: Context, pathOrUri: String, discoverDiscs: Boolean, cancelled: () -> Boolean): Session {
         if (!pathOrUri.startsWith("content://")) return Session(pathOrUri)
 
         val uri = Uri.parse(pathOrUri)
         val directName = displayName(context, uri)
-        if (com.armsx2.BuildConfig.PSXLAB_BACKEND &&
-            Ps1SafText.extension(directName) in setOf("chd", "bin", "iso", "img", "exe")) {
+        val directExtension = Ps1SafText.extension(directName)
+        // PSX Lab opens these single-file images through the granted descriptor with positional
+        // reads, so launch them in place. Staging a 300-700 MB PBP into the cache on every launch
+        // was the whole load delay on slower storage.
+        if (com.armsx2.BuildConfig.PSXLAB_BACKEND && directExtension in DIRECT_EXTENSIONS) {
             // Nothing is copied, so hand PSX Lab the image's SBI (LibCrypt PAL discs) directly.
             runCatching { directSbi(context, uri, directName) }
                 .onFailure { println("@@ARMSX_SBI_SKIPPED@@ ${it.message}") }
-                .getOrNull()?.let { kr.co.iefriends.pcsx2.NativeApp.registerDiscSubchannel(pathOrUri, it) }
-            return Session(pathOrUri)
+                .getOrNull()?.forEach { (disc, sbi) ->
+                    kr.co.iefriends.pcsx2.NativeApp.registerDiscSubchannel(pathOrUri, disc, sbi)
+                }
+            // A game split into one PBP per disc still offers its sibling discs, as when staged.
+            val discs = if (discoverDiscs && directExtension == "pbp") {
+                runCatching { discsForImage(context.contentResolver, uri, directName) }.getOrDefault(emptyList())
+            } else emptyList()
+            return Session(pathOrUri, discs = discs)
         }
         val root = File(
             context.cacheDir,
@@ -217,12 +227,23 @@ object Ps1SafAccess {
             }
     }
 
-    private fun directSbi(context: Context, uri: Uri, name: String): ByteArray? {
+    /** Validated SBI bytes per disc index for an image launched in place. */
+    private fun directSbi(context: Context, uri: Uri, name: String): Map<Int, ByteArray> {
         val resolver = context.contentResolver
         // A single-document grant may not allow listing its parent; the game still runs.
-        val siblings = runCatching { siblingDocuments(resolver, uri) }.getOrNull() ?: return null
-        val sidecar = Ps1Sbi.sidecars(name, name, siblings.keys).firstOrNull() ?: return null
-        val bytes = resolver.openInputStream(siblings.getValue(sidecar.source))?.use { input ->
+        val siblings = runCatching { siblingDocuments(resolver, uri) }.getOrNull() ?: return emptyMap()
+        val result = LinkedHashMap<Int, ByteArray>()
+        for ((disc, source) in Ps1Sbi.directSidecars(name, siblings.keys)) {
+            readSbi(resolver, siblings.getValue(source))?.let {
+                result[disc] = it
+                println("@@ARMSX_SBI_STAGED@@ files=1 direct=$source disc=$disc")
+            }
+        }
+        return result
+    }
+
+    private fun readSbi(resolver: ContentResolver, document: Uri): ByteArray? {
+        val bytes = resolver.openInputStream(document)?.use { input ->
             val output = java.io.ByteArrayOutputStream()
             val buffer = ByteArray(4096)
             while (true) {
@@ -234,7 +255,6 @@ object Ps1SafAccess {
             output.toByteArray()
         } ?: return null
         Ps1Sbi.validate(bytes)
-        println("@@ARMSX_SBI_STAGED@@ files=1 direct=${sidecar.source}")
         return bytes
     }
 

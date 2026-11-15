@@ -340,6 +340,8 @@ public class NativeApp {
     public static void registerDiscSource(String runtime, String source) { if (lab != null) lab.discSource(runtime, source); }
     /** SBI bytes for a disc PSX Lab opens straight from SAF, where no sidecar file sits beside it. */
     public static void registerDiscSubchannel(String runtime, byte[] sbi) { if (lab != null) lab.discSubchannel(runtime, sbi); }
+    /** Per embedded disc of a PBP read in place (disc 0 is the same as the overload above). */
+    public static void registerDiscSubchannel(String runtime, int discIndex, byte[] sbi) { if (lab != null) lab.discSubchannel(runtime, discIndex, sbi); }
 	public static String getSwanStatePath(int slot) { try { return lab == null ? "" : lab.stateFile(slot).getAbsolutePath(); } catch (IllegalArgumentException e) { return ""; } }
 	public static String getSwanCardPath(int slot) { return lab == null ? "" : lab.cardPath(slot - 1); }
 	public static int getSwanGuestFrame() { return lab == null ? 0 : (int)lab.frames(); }

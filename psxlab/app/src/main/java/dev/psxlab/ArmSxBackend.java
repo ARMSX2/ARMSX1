@@ -81,7 +81,10 @@ public final class ArmSxBackend {
     public synchronized void sessionAlias(String source){if(!active&&source!=null&&!source.isBlank())sessionAliases.add(BackendStateStore.normalize(source));}
     public void discSource(String runtime,String source){discSources.put(runtime,source);}
     private final Map<String,byte[]> discSubchannels=new ConcurrentHashMap<>();
-    public void discSubchannel(String runtime,byte[] sbi){discSubchannels.put(runtime,sbi.clone());}
+    public void discSubchannel(String runtime,byte[] sbi){discSubchannel(runtime,0,sbi);}
+    /** A PBP read in place carries one SBI per embedded disc; disc 0 keeps the plain key. */
+    public void discSubchannel(String runtime,int discIndex,byte[] sbi){discSubchannels.put(subchannelKey(runtime,discIndex),sbi.clone());}
+    private static String subchannelKey(String path,int discIndex){return discIndex==0?path:path+"\n"+discIndex;}
     private File root,biosFolder,config;
     private byte[] bios;
     private Cpu cpu;
@@ -311,7 +314,7 @@ public final class ArmSxBackend {
     }
     // LibCrypt PAL discs need the SBI that the game library stages beside the image (same name, .sbi).
     private void attachSubchannel(Media media,String path)throws IOException{
-        if(media.disc==null)return;byte[] registered=discSubchannels.get(path);
+        if(media.disc==null)return;byte[] registered=discSubchannels.get(subchannelKey(path,media.discIndex()));
         if(registered!=null){Map<Integer,byte[]> entries=SubchannelPatch.parse(registered);media.disc.subchannel(entries);journal.event(EngineLog.INFO,"cd.sbi.loaded",Map.of("file","registered","entries",entries.size()));return;}
         Uri uri=Uri.parse(path);if(uri.getScheme()!=null&&!uri.getScheme().equals("file"))return;
         File image=new File(uri.getScheme()==null?path:uri.getPath()),parent=image.getParentFile();if(parent==null)return;
