@@ -146,7 +146,12 @@ public final class Dma {
                 transferWord(ch,address,control,i==words-1);
                 address=(address+step)&0x1ffffc;
             }
-            if(mode==1)channels[ch][0]=address;
+            if(mode==1){
+                // Request mode decrements BA to zero. Publish completion state
+                // before raising IRQ3 so image/movie callbacks do not mistake
+                // a finished transfer for outstanding work. Burst BCR is retained.
+                channels[ch][0]=address;channels[ch][1]&=65535;
+            }
         }
         complete(ch);
     }
@@ -167,14 +172,14 @@ public final class Dma {
     private void transferWord(int ch,int address,int control,boolean last){
         if(performanceEnabled)performanceWords[ch]++;
         if(ch==0)bus.mdec.write(bus.read32(address));
-        else if(ch==1){int destination=(address+bus.mdec.dmaAddressOffset())&0x1ffffc;bus.write32(destination,bus.mdec.read());}
-        else if(ch==6)bus.write32(address,last?0xffffff:(address-4)&0x1fffff);
-        else if(ch==3)bus.write32(address,bus.cdrom.readDmaWord());
+        else if(ch==1){int destination=(address+bus.mdec.dmaAddressOffset())&0x1ffffc;bus.dmaWrite32(destination,bus.mdec.read());}
+        else if(ch==6)bus.dmaWrite32(address,last?0xffffff:(address-4)&0x1fffff);
+        else if(ch==3)bus.dmaWrite32(address,bus.cdrom.readDmaWord());
         else if(ch==4){
             if((control&1)!=0){int word=bus.read32(address);bus.spu.writeTransfer(word&65535);bus.spu.writeTransfer(word>>>16);}
-            else bus.write32(address,bus.spu.readTransfer()|(bus.spu.readTransfer()<<16));
+            else bus.dmaWrite32(address,bus.spu.readTransfer()|(bus.spu.readTransfer()<<16));
         }
-        else if((control&1)!=0)bus.gpu.write(bus.read32(address));else bus.write32(address,bus.gpu.read());
+        else if((control&1)!=0)bus.gpu.write(bus.read32(address));else bus.dmaWrite32(address,bus.gpu.read());
     }
     /** Advance DMA/CPU windows without skipping devices or completing the DMA early. */
     public void tick(int cycles){

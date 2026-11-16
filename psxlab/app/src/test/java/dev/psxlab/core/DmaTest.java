@@ -2,6 +2,40 @@ package dev.psxlab.core;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public class DmaTest {
+    @Test public void completedGpuImageDmaClearsRemainingBlocksBeforeItsInterrupt(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.write32(0x1f8010f0,0x07654b21);b.write32(0x1f8010f4,0x00840000);b.write16(0x1f801074,8);
+            g.write(0xa0000000);g.write(0);g.write(0x00010004);
+            b.write32(0x100,0x03e0001f);b.write32(0x104,0x7fff7c00);
+            b.write32(0x1f8010a0,0x100);b.write32(0x1f8010a4,0x00020001);b.write32(0x1f8010a8,0x01000201);
+            assertTrue(b.interruptPending());assertEquals(0,b.read32(0x1f8010a8)&0x1000000);
+            assertEquals("Completed request DMA must expose zero blocks to its callback",1,b.read32(0x1f8010a4));
+            assertEquals(0x108,b.read32(0x1f8010a0));
+            g.write(0xc0000000);g.write(0);g.write(0x00010004);
+            assertEquals(0x03e0001f,g.read());assertEquals(0x7fff7c00,g.read());
+        }
+    }
+    @Test public void completedMdecTableDmaClearsRemainingBlocksBeforeItsInterrupt(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.write32(0x1f8010f0,0x07654329);b.write32(0x1f8010f4,0x00810000);b.write16(0x1f801074,8);
+            b.write32(0x1f801824,0x40000000);b.write32(0x1f801820,0x40000000);
+            for(int i=0;i<16;i++)b.write32(0x100+i*4,0x01010101);
+            b.write32(0x1f801080,0x100);b.write32(0x1f801084,0x00020008);b.write32(0x1f801088,0x01000201);
+            assertEquals(1,b.mdec.quantUploads);assertTrue(b.interruptPending());
+            assertEquals("Movie setup callbacks must see their input DMA completed",8,b.read32(0x1f801084));
+            assertEquals(0x140,b.read32(0x1f801080));
+        }
+    }
+    @Test public void completedGpuReadbackClearsOnlyTheRequestBlockCounter(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);g.write(0xa0000000);g.write(0);g.write(0x00010002);g.write(0x7c00001f);
+            g.write(0xc0000000);g.write(0);g.write(0x00010002);
+            b.write32(0x1f8010f0,0x07654b21);b.write32(0x1f8010a0,0x100);b.write32(0x1f8010a4,0x00010001);b.write32(0x1f8010a8,0x01000200);
+            assertEquals(0x7c00001f,b.read32(0x100));assertEquals(1,b.read32(0x1f8010a4));
+            b.write32(0x1f8010f0,0x0f654321);b.write32(0x1f8010e0,0x200);b.write32(0x1f8010e4,2);b.write32(0x1f8010e8,0x11000002);
+            assertEquals("Burst DMA preserves BCR",2,b.read32(0x1f8010e4));
+        }
+    }
     @Test public void otcBuildsReverseOrderingTableAndRaisesIrq(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);b.write32(0x1f8010f0,0x0f654321);b.write32(0x1f8010f4,0x00c00000);b.write16(0x1f801074,8);

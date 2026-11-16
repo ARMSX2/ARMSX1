@@ -24,6 +24,8 @@ public final class Bus {
         if(nativeMemory==null){for(int i=0;i<bytes;i++)ram[offset+i]=(byte)(value>>>(i*8));}
         else{if(bytes==4)nativeMemory.putInt(offset,value);else if(bytes==2)nativeMemory.putShort(offset,(short)value);else nativeMemory.put(offset,(byte)value);if((nativeMemory.get(CODE_MASK_OFFSET+(offset>>>5))&(1<<((offset>>>2)&7)))!=0){int at=GEN_OFFSET+(offset>>>12)*8;nativeMemory.putLong(at,nativeMemory.getLong(at)+1);}}
     }
+    /** DMA writes physical RAM, independently of the CPU's isolated data cache. */
+    void dmaWrite32(int address,int value){storeRam(address&0x1ffffc,value,4);}
     // Physical RAM patches bypass guest cache isolation, retain code-cache invalidation,
     // and skip unchanged values. Unaligned 16-bit cheat writes cross words safely.
     void patchRam(int address,int value,int width){
