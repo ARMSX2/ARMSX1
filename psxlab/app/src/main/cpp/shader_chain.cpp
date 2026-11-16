@@ -308,8 +308,13 @@ struct ChainState {
     bool                    failed = false; /* `desired` failed to build; do not retry it */
     size_t                  frame_count = 0;
 
-    OwnedImage input;   /* only allocated when the frame has to be downsampled */
+    // The chain samples only our copy. Caller-owned scanout images can then be
+    // resized or retired without invalidating librashader's retained image views.
+    OwnedImage input;
     OwnedImage output;  /* always: the chain's COLOR_ATTACHMENT render target */
+    struct RetiredImage {OwnedImage image;size_t after;};
+    std::vector<RetiredImage> retired_images;
+    size_t shader_calls = 0;
     int        logged_input_w = 0;
     int        logged_input_h = 0;
 };
@@ -418,6 +423,16 @@ bool EnsureImage(OwnedImage* img, int width, int height, VkImageUsageFlags usage
     return true;
 }
 
+bool EnsureChainImage(OwnedImage* img,int width,int height,VkImageUsageFlags usage){
+    if(img->image!=VK_NULL_HANDLE&&(img->width!=width||img->height!=height)){
+        // librashader retains source and output views in a three-call residual
+        // ring. Recycle those views before releasing the old backing image.
+        g_state.retired_images.push_back({*img,g_state.shader_calls+3});
+        *img=OwnedImage{};
+    }
+    return EnsureImage(img,width,height,usage);
+}
+
 void Barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout old_layout, VkImageLayout new_layout,
              VkAccessFlags src_access, VkAccessFlags dst_access, VkPipelineStageFlags src_stage,
              VkPipelineStageFlags dst_stage) {
@@ -449,16 +464,17 @@ void BlitFull(VkCommandBuffer cmd, VkImage src, int src_w, int src_h, VkImage ds
 
 void DestroyChain() {
     psx_active_shader=false;
-    if (!g_state.chain) {
-        return;
-    }
-    const LibraApi* api = EnsureLibra();
-    if (g_state.fns.DeviceWaitIdle && g_state.dev.device) {
+    const LibraApi* api = g_state.chain?EnsureLibra():nullptr;
+    if ((g_state.chain||!g_state.retired_images.empty())&&g_state.fns.DeviceWaitIdle && g_state.dev.device) {
         g_state.fns.DeviceWaitIdle(g_state.dev.device);
     }
-    if (api) {
+    if (api && g_state.chain) {
         api->chain_free(&g_state.chain);
     }
+    // chain_free releases the residual views before their backing images.
+    for(auto& retired:g_state.retired_images)DestroyImage(&retired.image);
+    g_state.retired_images.clear();
+    g_state.shader_calls = 0;
     g_state.chain = nullptr;
     g_state.active.clear();
     g_state.frame_count = 0;
@@ -1065,23 +1081,22 @@ bool armsx_shader_vk_render(const armsx_shader_vk_frame_t* frame) {
         }
     }
 
-    VkImage input_image = frame->source;
-    if (downsample) {
-        if (!EnsureImage(&g_state.input, input_w, input_h,
-                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) {
-            return false;
-        }
-        input_image = g_state.input.image;
+    bool input_changed=g_state.input.width!=input_w||g_state.input.height!=input_h;
+    if (!EnsureChainImage(&g_state.input, input_w, input_h,
+                     VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                     VK_IMAGE_USAGE_SAMPLED_BIT)) {
+        return false;
     }
+    VkImage input_image = g_state.input.image;
 
-    if (!EnsureImage(&g_state.output, frame->dst_w, frame->dst_h,
+    if (!EnsureChainImage(&g_state.output, frame->dst_w, frame->dst_h,
                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         return false;
     }
 
     VkCommandBuffer cmd = frame->cmd;
 
-    if (downsample) {
+    {
         Barrier(cmd, g_state.input.image,
                 g_state.input.initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
                                           : VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1091,21 +1106,15 @@ bool armsx_shader_vk_render(const armsx_shader_vk_frame_t* frame) {
                 g_state.input.initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
                                           : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT);
-        /* LINEAR: at an exact 2:1 this is a 2x2 box filter, i.e. supersampling. */
+        // Keep native pixels exact; use the established box downsample for HD.
         BlitFull(cmd, frame->source, frame->source_width, frame->source_height,
-                 g_state.input.image, 0, 0, input_w, input_h, VK_FILTER_LINEAR);
+                 g_state.input.image, 0, 0, input_w, input_h,
+                 downsample?VK_FILTER_LINEAR:VK_FILTER_NEAREST);
         Barrier(cmd, g_state.input.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         g_state.input.initialized = true;
-    } else {
-        /* Sample frame_image in place. The caller handed it over in TRANSFER_SRC_OPTIMAL
-           and expects it back that way, so this is a there-and-back pair. */
-        Barrier(cmd, frame->source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
-                VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     }
 
     /* ---- output: the chain's render target -------------------------------------- */
@@ -1118,7 +1127,7 @@ bool armsx_shader_vk_render(const armsx_shader_vk_frame_t* frame) {
 
     libra_image_vk_t source{};
     source.handle = input_image;
-    source.format = downsample?VK_FORMAT_R8G8B8A8_UNORM:frame->source_format;
+    source.format = VK_FORMAT_R8G8B8A8_UNORM;
     source.width = (uint32_t)input_w;
     source.height = (uint32_t)input_h;
 
@@ -1137,6 +1146,7 @@ bool armsx_shader_vk_render(const armsx_shader_vk_frame_t* frame) {
     viewport.height = (uint32_t)frame->dst_h;
 
     PsxFrameOptions options;options.total_subframes=psx_total_subframes;options.current_subframe=psx_current_subframe;
+    options.clear_history=input_changed||g_state.shader_calls==0;
     options.aspect_ratio=psx_shader_aspect;options.frames_per_second=psx_shader_fps;
     options.frametime_delta=uint32_t(std::lround(1000.f/(std::max(1.f,psx_shader_fps)*std::max(1u,psx_total_subframes))));
     libra_error_t error = api->chain_frame(&g_state.chain, cmd, g_state.frame_count, source, target,
@@ -1150,14 +1160,13 @@ bool armsx_shader_vk_render(const armsx_shader_vk_frame_t* frame) {
            Reconcile(), which runs before any recording, do the teardown. */
         g_state.failed = true;psx_active_shader=false;
         g_state.desired.clear();
-        /* Restore the layouts the caller expects, then let it blit over the top. */
-        if (!downsample) {
-            Barrier(cmd, frame->source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
-                    VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT);
-        }
+        // The caller's source stayed in TRANSFER_SRC_OPTIMAL throughout.
         return false;
+    }
+    ++g_state.shader_calls;
+    for(auto it=g_state.retired_images.begin();it!=g_state.retired_images.end();){
+        if(g_state.shader_calls>it->after){DestroyImage(&it->image);it=g_state.retired_images.erase(it);}
+        else ++it;
     }
     if(psx_current_subframe>=psx_total_subframes)++g_state.frame_count;
 
@@ -1171,13 +1180,6 @@ bool armsx_shader_vk_render(const armsx_shader_vk_frame_t* frame) {
 
     BlitFull(cmd, g_state.output.image, frame->dst_w, frame->dst_h, frame->target, frame->dst_x,
              frame->dst_y, frame->dst_w, frame->dst_h, VK_FILTER_NEAREST);
-
-    if (!downsample) {
-        Barrier(cmd, frame->source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
-                VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT);
-    }
 
     return true;
 #else

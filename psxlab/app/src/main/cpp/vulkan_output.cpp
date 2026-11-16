@@ -196,9 +196,9 @@ public:
     PsxVulkanContext gpuContext(){return{physical,device,queue,family,armsx_shader_vk_queue_lock,armsx_shader_vk_queue_unlock,[](void* owner,VkImage image){static_cast<Output*>(owner)->forgetImage(image);},this,orderedColor};}
     void forgetImage(VkImage image){
         if(directImage!=image)return;idle();directImage=VK_NULL_HANDLE;lastInputValid=false;
-        // Postprocessing can retain views of the supplied source. Drop those views
-        // before its owner frees the image, then retain the same device for GLES.
-        if(shadersTouched){psx_shader_detach(device);armsx_shader_vk_device_t binding{vkGetInstanceProcAddr,instance,physical,device,queue,family};armsx_shader_vk_attach(&binding);shadersTouched=false;lastDisplayedShader=false;}
+        // Postprocessing owns its sampled input copy. Retiring a movie/menu
+        // scanout must not tear down and recompile the active shader chain.
+        previousJavaToken=0;
     }
     bool presentDirect(JNIEnv* env,jobject target,VkImage image,int w,int h,bool filter,jlong token){
         for(int attempt=0;attempt<2;attempt++){
