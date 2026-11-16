@@ -50,7 +50,9 @@ data class Ps1Settings(
     val frameLimit: Boolean = true,
     val speedPercent: Int = 100,                 // 10..1000
     val fpsLimit: Int = 0,                       // absolute fps cap, 0 = off
-    val fastForwardSpeed: Float = 2f,            // 1.0..16.0, or 0 = uncapped
+    // 4x: slower phones cannot reach it and simply run flat out, while faster ones stay
+    // capped instead of heating up the way Unlimited would. Saved choices are kept.
+    val fastForwardSpeed: Float = 4f,            // 1.0..16.0, or 0 = uncapped
     // Frame skip. In the same table and pushed by the same call, but NOT a pacing value: the
     // four above decide how fast the machine runs, this decides how many of the frames it
     // produces are put on screen. Emulation, audio and guest timing are identical either way.

@@ -875,7 +875,7 @@ private fun SessionPane(state: EmulationMenuUiState, viewModel: EmulationMenuVie
             Spacer(Modifier.height(6.dp))
             val ffSpeeds = com.armsx2.config.Ps1Settings.FAST_FORWARD_SPEEDS
             val ffSpeedIndex = ffSpeeds.indexOf(com.armsx2.core.Ps1Pacing.fastForwardSpeed(pacingContext))
-                .takeIf { it >= 0 } ?: ffSpeeds.indexOf(2f)
+                .takeIf { it >= 0 } ?: ffSpeeds.indexOf(Ps1Stock.fastForwardSpeed)
             MenuOrderItem("MenuCycleRow.perf.fastForwardSpeed.label") {
                 MenuCycleRow(
                     title = str("perf.fastForwardSpeed.label"),

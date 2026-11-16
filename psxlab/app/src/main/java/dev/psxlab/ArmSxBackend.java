@@ -184,9 +184,11 @@ public final class ArmSxBackend {
     public void shadersChanged(){if(active&&blocked()){commands.add(()->{if(gpu!=null)gpu.prepareShaders();});wake();}}
     public void audioVolume(int volume){volumeOverride=volume;updateAudio();}
     public void audioMuted(boolean muted){mutedOverride=muted;updateAudio();}
-    public void fastForwardSpeed(float speed){fastSpeedOverride=Float.isFinite(speed)?speed:2;updateAudio();}
+    public void fastForwardSpeed(float speed){fastSpeedOverride=Float.isFinite(speed)?speed:DEFAULT_FAST_SPEED;updateAudio();}
+    /** Matches the frontend default; settings.toml normally always carries the user's value. */
+    private static final float DEFAULT_FAST_SPEED=4;
     private boolean muteFast(){return fast&&Boolean.parseBoolean(options.getOrDefault("audio.mute_fast_forward","false"));}
-    private float fastSpeed(){float configured=fastSpeedOverride>=0?fastSpeedOverride:decimal(options.get("runtime.fast_forward_speed"),2);return configured<=0?0:Math.max(1,Math.min(16,configured));}
+    private float fastSpeed(){float configured=fastSpeedOverride>=0?fastSpeedOverride:decimal(options.get("runtime.fast_forward_speed"),DEFAULT_FAST_SPEED);return configured<=0?0:Math.max(1,Math.min(16,configured));}
     private void updateAudio(){
         AudioOutput output=audio;if(output==null)return;output.setFastForwardTempo(fast&&!muteFast()?fastSpeed():1);
         boolean muted=mutedOverride!=null?mutedOverride:Boolean.parseBoolean(options.getOrDefault("audio.muted","false"));

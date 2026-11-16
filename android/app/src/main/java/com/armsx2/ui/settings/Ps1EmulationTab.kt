@@ -109,7 +109,7 @@ fun Ps1EmulationTab() {
             label = str("perf.fastForwardSpeed.label"),
             options = Ps1Settings.FAST_FORWARD_SPEEDS.map { Ps1Settings.fastForwardSpeedLabel(it) },
             selectedIndex = Ps1Settings.FAST_FORWARD_SPEEDS.indexOf(s.fastForwardSpeed)
-                .takeIf { it >= 0 } ?: Ps1Settings.FAST_FORWARD_SPEEDS.indexOf(2f),
+                .takeIf { it >= 0 } ?: Ps1Settings.FAST_FORWARD_SPEEDS.indexOf(Ps1Settings().fastForwardSpeed),
             description = str("perf.fastForwardSpeed.description"),
             onChange = { idx ->
                 editor.update { it.copy(fastForwardSpeed = Ps1Settings.FAST_FORWARD_SPEEDS[idx]) }
