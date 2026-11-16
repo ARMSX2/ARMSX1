@@ -24,7 +24,7 @@ target_link_libraries(psxgpu PRIVATE EGL GLESv3 android vulkan log dl)
 target_compile_features(psxgpu PRIVATE cxx_std_17)
 target_compile_options(psxgpu PRIVATE -O3 -fwrapv -Wall -Wextra)
 
-add_library(psxcore SHARED gte_jni.cpp spu_jni.cpp cpu_jni.cpp cpu_arm64.cpp)
+add_library(psxcore SHARED gte_jni.cpp spu_jni.cpp cpu_jni.cpp cpu_arm64.cpp mdec_jni.cpp)
 target_compile_features(psxcore PRIVATE cxx_std_17)
 target_compile_options(psxcore PRIVATE -O3 -fwrapv -Wall -Wextra)
 

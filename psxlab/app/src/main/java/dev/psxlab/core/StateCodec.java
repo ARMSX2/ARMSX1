@@ -16,6 +16,7 @@ final class StateCodec {
         skip(Gte.class,"nativeCore","widescreen","projectionScale");
         skip(NativeGte.class,"projectionScale");
         skip(ReferenceGte.class,"projectionScale");
+        skip(Mdec.class,"nativeIdct","dcOnlyBlocks","nativeIdctBlocks");
         skip(CdRom.class,"disc","xaSink","recentCommands","recentWrites","lastMediaError","cddaSectors","cddaFrames","dataSectors","lostSectors","overwrittenReads","lastLostLba","lastOverwriteLba");
         skip(SerialPad.class,"state");
         skip(MemoryCard.class,"data","changed");

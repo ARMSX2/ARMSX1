@@ -15,6 +15,7 @@ public final class Mdec {
         58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63};
     private record Output(int[] words,int block,int depth){}
     private final Bus bus;
+    private final boolean nativeIdct;
     private final int[] luma=new int[64],chroma=new int[64],scale=new int[64];
     private final int[] coefficients=new int[64],temporary=new int[64];
     private final int[][] blocks=new int[6][64];
@@ -22,8 +23,9 @@ public final class Mdec {
     private int command,kind,remaining,parameterIndex,format,control,block,coefficient=-1,qScale;
     private int outputIndex,outputWords,idleCount,lastRead;
     public long decodedBlocks,resets,quantUploads,scaleUploads;
+    public long dcOnlyBlocks,nativeIdctBlocks;
 
-    Mdec(Bus bus){this.bus=bus;reset();}
+    Mdec(Bus bus){this.bus=bus;nativeIdct=bus.nativeCores&&NativeMdec.AVAILABLE;reset();}
     private void reset(){
         command=kind=remaining=parameterIndex=format=control=block=outputIndex=outputWords=idleCount=0;
         coefficient=-1;lastRead=0;output.clear();resets++;
@@ -85,6 +87,8 @@ public final class Mdec {
         coefficients[qScale==0?coefficient:ZIGZAG[coefficient]]=clamp(v,-1024,1023);
     }
     private void transform(int[] destination){
+        if(transformDc(coefficients,scale,temporary,destination)){dcOnlyBlocks++;return;}
+        if(nativeIdct){NativeMdec.transform(coefficients,scale,destination);nativeIdctBlocks++;return;}
         int[] source=coefficients,target=temporary;
         for(int pass=0;pass<2;pass++){
             for(int y=0;y<8;y++)for(int x=0;x<8;x++){
@@ -93,6 +97,17 @@ public final class Mdec {
             }
             source=target;target=destination;
         }
+    }
+    /** Exactly the same two rounded passes for a block with no AC coefficients. */
+    static boolean transformDc(int[] source,int[] scale,int[] temporary,int[] destination){
+        for(int i=1;i<64;i++)if(source[i]!=0)return false;
+        int dc=source[0],factor=scale[0]>>3;boolean constant=true;
+        for(int i=1;i<8;i++)constant&=(scale[i]>>3)==factor;
+        if(dc==0){Arrays.fill(destination,0);return true;}
+        if(constant){int first=(int)(((long)dc*factor+4095)>>13);int value=(int)(((long)first*factor+4095)>>13);Arrays.fill(destination,value);return true;}
+        for(int y=0;y<8;y++)temporary[y]=(int)(((long)dc*(scale[y]>>3)+4095)>>13);
+        for(int y=0;y<8;y++)for(int x=0;x<8;x++)destination[y*8+x]=(int)(((long)temporary[y]*(scale[x]>>3)+4095)>>13);
+        return true;
     }
     private int sample(int value){
         value=(value<<23)>>23;return component(value);
@@ -139,5 +154,5 @@ public final class Mdec {
         return (raster-linear)*4;
     }
     private static int clamp(int value,int low,int high){return Math.max(low,Math.min(high,value));}
-    public String diagnostic(){return "MDEC blocks="+decodedBlocks+" resets="+resets+" tables="+quantUploads+"/"+scaleUploads+" pending="+remaining+" output="+outputWords+String.format(java.util.Locale.ROOT," status=%08X",status());}
+    public String diagnostic(){return "MDEC blocks="+decodedBlocks+" dc-fast="+dcOnlyBlocks+" native-idct="+nativeIdctBlocks+" resets="+resets+" tables="+quantUploads+"/"+scaleUploads+" pending="+remaining+" output="+outputWords+String.format(java.util.Locale.ROOT," status=%08X",status());}
 }
