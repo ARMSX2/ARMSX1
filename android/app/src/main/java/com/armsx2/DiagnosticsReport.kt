@@ -12,6 +12,8 @@ import android.system.OsConstants
 import android.view.InputDevice
 import com.armsx2.config.Ps1SettingsStore
 import com.armsx2.runtime.MainActivityRuntime
+import dev.psxlab.core.GpuReplay
+import dev.psxlab.core.GpuReplayReport
 import kr.co.iefriends.pcsx2.NativeApp
 import java.io.BufferedWriter
 import java.io.File
@@ -174,6 +176,7 @@ object DiagnosticsReport {
         w.appendLine()
         section(w, "saved settings.toml (requested configuration)", File(context.filesDir, "settings.toml"))
         val engineLogs = File(context.filesDir, "logs/psxlab")
+        GpuReplayReport.append(w, File(engineLogs, GpuReplay.FILE_NAME))
         section(w, "PSX Lab session checkpoint (historical, timestamped)", File(engineLogs,"last-session.json"))
         section(w, "PSX Lab structured engine log (current tail)", File(engineLogs,"engine-current.jsonl"))
         section(w, "PSX Lab structured engine log (previous tail)", File(engineLogs,"engine-previous.jsonl"))

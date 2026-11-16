@@ -62,6 +62,8 @@ public final class ArmSxBackend {
     private volatile int lastPc;
     private volatile String lastAudio="Not started";
     private volatile String lastCore="Not started";
+    private volatile Map<String,Object> lastGraphicsCapture=Map.of("status","not captured; pause at the problem with logging enabled");
+    private long capturedGraphicsClocks=-1;
     private volatile String lastFailureCpuContext="";
     private volatile Map<String,Object> lastCpuTiming=Map.of(),lastGpuTiming=Map.of();
     private String biosPin;
@@ -250,7 +252,26 @@ public final class ArmSxBackend {
                 "pc",Integer.toHexString(current==null?0:current.pc),"cd",bus.cdrom.loggingSnapshot(),"spu",bus.spu.loggingSnapshot()));
     }
     public void displayMetadata(int width,int height,float hz){if(width>0){surfaceWidth=width;surfaceHeight=height;}if(hz>0)displayRefreshHz=hz;updateProjection();updatePresentation();journal.event(EngineLog.INFO,"presentation.display",Map.of("width",surfaceWidth,"height",surfaceHeight,"refresh_hz",displayRefreshHz));}
-    public boolean flushDiagnosticLog(long timeout){return journal.flush(timeout);}
+    public boolean flushDiagnosticLog(long timeout){
+        long deadline=System.nanoTime()+Math.max(1,timeout)*1_000_000L;
+        if(active&&blocked()&&!stop){CompletableFuture<Void> captured=new CompletableFuture<>();commands.add(()->{try{saveGraphicsCapture("report");}finally{captured.complete(null);}});wake();try{captured.get(Math.max(1,timeout/2),TimeUnit.MILLISECONDS);}catch(Exception ignored){}}
+        return journal.flush(Math.max(1,(deadline-System.nanoTime())/1_000_000L));
+    }
+    /** VM-thread only, while paused or after the emulation loop has ended. */
+    private void saveGraphicsCapture(String reason){
+        if(!journal.enabled()||gpu==null||bus==null||cpu==null)return;
+        File file=new File(journal.directory(),GpuReplay.FILE_NAME);
+        if(capturedGraphicsClocks==cpu.instructions&&file.isFile())return;
+        try{
+            GpuReplay.Capture capture=gpu.captureGraphics();if(capture==null)return;
+            Map<String,Object> metadata=new LinkedHashMap<>();metadata.put("session",journal.summary().get("session"));metadata.put("game_id",lastGameId);metadata.put("renderer",gpu.renderer());metadata.put("gpu",gpu.renderStatistics());metadata.put("reason",reason);metadata.put("guest_clocks",cpu.instructions);metadata.put("pc",Integer.toHexString(cpu.pc));metadata.put("registers",cpu.r.clone());metadata.put("cop0",cpu.cop0.clone());metadata.put("dma",bus.dma.loggingSnapshot());metadata.put("cd_data",bus.cdrom.dataSnapshot());metadata.put("mdec",bus.mdec.diagnostic());
+            // Guest RAM lets a stuck-game report be disassembled offline: what the CPU loop
+            // waits on, ring buffers, callback state. Game memory only; paused VM thread.
+            GpuReplay.write(file,EngineLog.json(metadata),capture,bus.snapshotRam(),bus.snapshotScratchpad());capturedGraphicsClocks=cpu.instructions;
+            lastGraphicsCapture=Map.of("status","captured","file",GpuReplay.FILE_NAME,"bytes",file.length(),"game_id",lastGameId,"session",journal.summary().get("session"),"first_frame",capture.firstFrame(),"last_frame",capture.lastFrame(),"operations",capture.operations().size(),"reason",reason);
+            journal.event(EngineLog.INFO,"gpu.replay.saved",lastGraphicsCapture);
+        }catch(IOException|RuntimeException error){lastGraphicsCapture=Map.of("status","capture failed","error",error.toString());journal.error("gpu.replay.capture",error);}
+    }
     public String diagnosticDirectory(){return journal.directory().getAbsolutePath();}
     private void configureLogging(Map<String,String> settings){
         boolean enabled=Boolean.parseBoolean(settings.getOrDefault("runtime.logging_enabled",Boolean.toString(!Boolean.parseBoolean(settings.getOrDefault("runtime.quiet","true")))));
@@ -363,7 +384,7 @@ public final class ArmSxBackend {
         synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;stateId="";lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
         boolean booted=false;Restore restore=null;int priority=boostThread();startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=hostThermalSample=0;hostThermalStatus=-1;hostCpuPercent=hostRssMb=hostAvailableMb=-1;timeline.start(System.nanoTime());event("launch");
         try{
-            options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));bios=readBios();configureCheats();
+            options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));capturedGraphicsClocks=-1;lastGraphicsCapture=Map.of("status","recording when logging is enabled; pause at the problem to capture");try{Files.deleteIfExists(new File(journal.directory(),GpuReplay.FILE_NAME).toPath());}catch(IOException error){journal.error("gpu.replay.reset",error);}bios=readBios();configureCheats();
             do{
                 restart=null;performance.reset();
                 int scale=Math.max(1,Math.min(5,Integer.parseInt(options.getOrDefault("video.internal_scale","1"))));
@@ -371,7 +392,7 @@ public final class ArmSxBackend {
                 // Keep one graphics API attached to a retained Android Surface. Software
                 // still rasterizes on the CPU; its finished pixels use the texture presenter.
                 try(Gpu graphics=mode==0&&scale==1&&!selected.hardware()?new Gpu(true,false):new Gpu(true,mode,scale,selected.hardware())){
-                    gpu=graphics;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();configurePads();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
+                    gpu=graphics;capturedGraphicsClocks=-1;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();configurePads();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
                     try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
                         String mounted=restore==null?discPath:restore.disc();
                         media=mounted.isEmpty()?null:openMedia(mounted,restore==null?0:restore.discIndex(),restore==null||restore.state()==null);
@@ -390,7 +411,7 @@ public final class ArmSxBackend {
                                 timeline.incident(System.nanoTime(),"CPU execution mode: "+cpu.executionMode());
                                 timeline.incident(System.nanoTime(),"start: "+renderer+", scale "+scale+", "+output.deviceDiagnostic()+", GPU "+(gpu.hardwareDescription().isEmpty()?"none (software renderer)":gpu.hardwareDescription())+", ADPF "+(adpf?"on":"off")+", VM thread priority "+threadPriority()+", "+Runtime.getRuntime().availableProcessors()+" cores"+", disc "+discLayout(media));
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
-                                try{loop(output);}catch(Exception failure){lastFailureCpuContext=cpu.diagnostic();journal.event(EngineLog.FATAL,"runtime.cpu_context",Map.of("cpu",lastFailureCpuContext,"exception",failure.toString(),"guest_clocks",cpu.instructions));throw failure;}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}}
+                                try{loop(output);}catch(Exception failure){lastFailureCpuContext=cpu.diagnostic();journal.event(EngineLog.FATAL,"runtime.cpu_context",Map.of("cpu",lastFailureCpuContext,"exception",failure.toString(),"guest_clocks",cpu.instructions));throw failure;}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}saveGraphicsCapture("stop");}
                             }finally{audio=null;bus.cdrom.setTraceSink(null);bus.spu.setTraceSink(null);guestAudioTracing=false;bus.spu.setAudioSink(null);cpu.closeNative();}
                         }finally{if(media!=null){media.close();media=null;}if(pendingMedia!=null){pendingMedia.close();pendingMedia=null;}}
                     }finally{clearSurface();}
@@ -489,6 +510,7 @@ public final class ArmSxBackend {
             Runnable job;while((job=commands.poll())!=null)job.run();if(stop||restart!=null)break;
             updateGuestAudioTracing();
             if(blocked()){
+                if(!wasBlocked)saveGraphicsCapture("pause");
                 if(!wasBlocked&&surface!=null&&surface.isValid()&&gpu.presentationNeedsRestore()){Surface target=surface;gpu.restorePresentation(target,true,frame->{if(frame!=null)draw(target,frame);});}
                 output.setPaused(true);fastPacer.reset();wasBlocked=true;fps=0;diagnosticFrame=null;journal.leaveFrame();synchronized(gate){gate.wait(10);}continue;
             }
@@ -718,7 +740,7 @@ public final class ArmSxBackend {
     private synchronized void event(String value){timeline.incident(System.nanoTime(),value);if(events.size()==128)events.removeFirst();events.addLast(android.os.SystemClock.elapsedRealtime()+" "+value);android.util.Log.i("PSXLabBackend",value);journal.event(EngineLog.INFO,"runtime.event",Map.of("message",value));}
     /** No BIOS/RAM/game data or authentication settings are included in a report. */
     public synchronized String diagnosticReport(){
-        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",lastGameId);json.put("renderer",renderer);json.put("displayRenderer",displayRenderer());org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.gpu_backend","video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("failureCpuContext",lastFailureCpuContext);json.put("nativeTimings",new org.json.JSONObject(Map.of("cpu",lastCpuTiming,"gpu",lastGpuTiming)));json.put("memory",new org.json.JSONObject(Map.of("processRssMb",hostRssMb,"systemAvailableMb",hostAvailableMb,"javaHeapUsedBytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"nativeHeapAllocatedBytes",android.os.Debug.getNativeHeapAllocatedSize(),"thermalStatus",hostThermalStatus)));json.put("timeline",timelineReport());json.put("events",new org.json.JSONArray(events));json.put("logging",new org.json.JSONObject(journal.summary()));json.put("cheats",new org.json.JSONObject(cheats.diagnostic()));json.put("textures",new org.json.JSONObject(Map.of("status",textureStatus(),"metrics",new org.json.JSONArray(textureMetrics()))));json.put("highRefresh",framePresentationStatus());json.put("shader",ShaderChain.requested()?(gpu!=null?gpu.shaderStatus():ShaderChain.status()):"Off");json.put("display",new org.json.JSONObject(Map.of("width",surfaceWidth,"height",surfaceHeight,"refreshHz",displayRefreshHz,"aspect",outputAspect,"stretch",outputStretch,"integerScaling",outputInteger,"timingDomain","host/API; physical present timestamps unavailable")));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
+        org.json.JSONObject json=new org.json.JSONObject();try{json.put("schema",1);json.put("backend","PSX Lab ArmSX1 adapter 1");json.put("gameId",lastGameId);json.put("renderer",renderer);json.put("displayRenderer",displayRenderer());org.json.JSONObject settings=new org.json.JSONObject();for(String key:List.of("video.gpu_backend","video.renderer","video.internal_scale","cpu.fast_boot","cpu.execution_mode","console.region"))if(options.containsKey(key))settings.put(key,options.get(key));json.put("options",settings);json.put("biosSha256",bios==null?"":MigrationBackup.digest(bios));json.put("active",active);json.put("paused",blocked());json.put("frames",frames);json.put("guestClocks",guestClocks);json.put("pc",String.format(Locale.ROOT,"%08X",lastPc));json.put("fps",fps);json.put("nominalFps",nominalFps);json.put("audioNonzero",nonzero);json.put("audio",audioDiagnostic());json.put("core",lastCore);json.put("lastError",lastError);json.put("failureCpuContext",lastFailureCpuContext);json.put("graphicsCapture",new org.json.JSONObject(lastGraphicsCapture));json.put("nativeTimings",new org.json.JSONObject(Map.of("cpu",lastCpuTiming,"gpu",lastGpuTiming)));json.put("memory",new org.json.JSONObject(Map.of("processRssMb",hostRssMb,"systemAvailableMb",hostAvailableMb,"javaHeapUsedBytes",Runtime.getRuntime().totalMemory()-Runtime.getRuntime().freeMemory(),"nativeHeapAllocatedBytes",android.os.Debug.getNativeHeapAllocatedSize(),"thermalStatus",hostThermalStatus)));json.put("timeline",timelineReport());json.put("events",new org.json.JSONArray(events));json.put("logging",new org.json.JSONObject(journal.summary()));json.put("cheats",new org.json.JSONObject(cheats.diagnostic()));json.put("textures",new org.json.JSONObject(Map.of("status",textureStatus(),"metrics",new org.json.JSONArray(textureMetrics()))));json.put("highRefresh",framePresentationStatus());json.put("shader",ShaderChain.requested()?(gpu!=null?gpu.shaderStatus():ShaderChain.status()):"Off");json.put("display",new org.json.JSONObject(Map.of("width",surfaceWidth,"height",surfaceHeight,"refreshHz",displayRefreshHz,"aspect",outputAspect,"stretch",outputStretch,"integerScaling",outputInteger,"timingDomain","host/API; physical present timestamps unavailable")));return json.toString(2);}catch(org.json.JSONException e){throw new IllegalStateException(e);}
     }
     /** Rows every five seconds and every incident since launch; not limited by the engine log tail. */
     private org.json.JSONObject timelineReport()throws org.json.JSONException{

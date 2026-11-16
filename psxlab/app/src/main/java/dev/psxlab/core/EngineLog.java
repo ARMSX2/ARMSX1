@@ -112,6 +112,7 @@ public final class EngineLog implements AutoCloseable {
         String text=value.toString();out.append('"');for(int i=0;i<Math.min(text.length(),8192);i++){char c=text.charAt(i);switch(c){case '"'->out.append("\\\"");case '\\'->out.append("\\\\");case '\n'->out.append("\\n");case '\r'->out.append("\\r");case '\t'->out.append("\\t");default->{if(c<32)out.append(String.format(Locale.ROOT,"\\u%04x",(int)c));else out.append(c);}}}out.append('"');
     }
     public static String source(String path){
+        if(path.startsWith("gpu.replay."))return "psxlab/app/src/main/java/dev/psxlab/core/Gpu.java#captureGraphics/replayBoundary";
         if(path.equals("audio.guest.snapshot"))return "psxlab/app/src/main/java/dev/psxlab/ArmSxBackend.java#guestAudioSnapshot";
         if(path.startsWith("audio.guest.spu"))return "psxlab/app/src/main/java/dev/psxlab/core/Spu.java#write/loggingSnapshot";
         if(path.startsWith("audio.guest.cd"))return "psxlab/app/src/main/java/dev/psxlab/core/CdRom.java#process/tick/audioFrame";

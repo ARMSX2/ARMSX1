@@ -19,6 +19,16 @@ public final class Dma {
     private int linkedLastAddress,linkedLastHeader;
     private EngineLog journal;
     public void setJournal(EngineLog value){journal=value;}
+    private final java.util.ArrayDeque<int[]> traceTransfers=new java.util.ArrayDeque<>();
+    private int traceSequence;
+    private void traceTransfer(int ch,int phase){
+        if(journal==null||!journal.accepts(EngineLog.INFO)||ch==2||ch==6)return;
+        int address=channels[ch][0]&0x1ffffc;
+        traceTransfers.addLast(new int[]{++traceSequence,phase,ch,channels[ch][0],channels[ch][1],channels[ch][2],priority,interrupt,bus.cacheIsolated?1:0,
+            bus.read32(address),bus.read32((address+4)&0x1ffffc),bus.read32((address+8)&0x1ffffc),bus.read32((address+12)&0x1ffffc)});
+        if(traceTransfers.size()>32)traceTransfers.removeFirst();
+    }
+    public java.util.Map<String,Object> loggingSnapshot(){return java.util.Map.of("columns","sequence, phase (0=start request,1=complete), channel, MADR, BCR, CHCR, DPCR, DICR, CPU cache isolated, four RAM words at MADR","transfers",new java.util.ArrayList<>(traceTransfers));}
     private int priority=0x07654321,interrupt;
     public long choppedTransfers,choppedWindows;
     public boolean performanceEnabled;
@@ -72,6 +82,7 @@ public final class Dma {
         if(chopped[ch]!=null || ch==1 && mdecOutput!=null || ch==2 && linkedDelay>0 || ch==4 && spuRequest!=null)return;
         int control=channels[ch][2],mode=(control>>>9)&3;
         if((priority&(8<<(ch*4)))==0 || (control&0x1000000)==0 || mode==0 && (control&0x10000000)==0)return;
+        traceTransfer(ch,0);
         if(ch==5)throw new UnsupportedOperationException("DMA channel "+ch+" is not implemented");
         boolean chopping=(control&0x100)!=0;
         if(chopping && mode!=0)throw new UnsupportedOperationException("DMA chopping is only supported in burst mode");
@@ -243,6 +254,7 @@ public final class Dma {
         channels[ch][2]&=~0x11000000;
         if((interrupt&0x800000)!=0 && (interrupt&(1<<(16+ch)))!=0)interrupt|=1<<(24+ch);
         updateInterrupt();
+        traceTransfer(ch,1);
     }
     int clocksToEvent(){int n=mdecOutput!=null&&(priority&0x80)!=0&&bus.mdec.outputRequest()?Math.max(1,mdecOutput.delay):Integer.MAX_VALUE;if(spuRequest!=null&&(priority&0x80000)!=0)n=Math.min(n,Math.max(1,spuRequest.delay));if(linkedDelay>0&&(priority&0x800)!=0)n=Math.min(n,linkedDelay);for(int ch=0;ch<7;ch++)if(chopped[ch]!=null&&(priority&(8<<(ch*4)))!=0)n=Math.min(n,Math.max(1,chopped[ch].delay));return n;}
     public String diagnostic(){return "DMA chopped="+choppedTransfers+" windows="+choppedWindows+String.format(java.util.Locale.ROOT," active=%02X CD-MADR=%06X BCR=%08X CHCR=%08X; GPU-MADR=%06X CHCR=%08X linked-yields=%d resume=%d last=%06X header=%08X",choppedMask,channels[3][0],channels[3][1],channels[3][2],channels[2][0],channels[2][2],linkedYields,linkedDelay,linkedLastAddress,linkedLastHeader)+"; MDEC FIFO="+bus.mdec.availableWords()+" remaining="+(mdecOutput==null?0:mdecOutput.words)+" chunk="+(mdecOutput==null?0:mdecOutput.chunkWords)+" delay="+(mdecOutput==null?0:mdecOutput.delay);}

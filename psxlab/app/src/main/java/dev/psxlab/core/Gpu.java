@@ -131,6 +131,38 @@ public final class Gpu implements AutoCloseable {
     private volatile java.util.Map<String,Object> lastNativeTiming=java.util.Map.of();
     public java.util.Map<String,Object> nativeTimings(){return lastNativeTiming;}
     public void setJournal(EngineLog value){journal=value;}
+    // Diagnostic-only, owned by the GPU worker. Never included in guest save states.
+    private GpuReplayRecorder replayRecorder;
+    private int[] replayDisplay=new int[8];
+    private long replayFrame;
+    private void recordReplay(int kind,int[] words){
+        if(replayRecorder==null)return;
+        if(replayRecorder.full(words.length))try(EngineLog.Span span=journal==null?null:journal.begin("gpu.replay.checkpoint",EngineLog.INFO)){
+            readHardware();replayRecorder.checkpoint(vram,replayDisplay.clone(),new int[7],replayFrame,System.nanoTime());
+        }
+        replayRecorder.add(kind,words);
+    }
+    private void replayBoundary(int[] state){
+        if(journal==null||!journal.enabled()){replayRecorder=null;return;}
+        replayFrame++;replayDisplay=state.clone();long now=System.nanoTime();
+        if(replayRecorder==null)try(EngineLog.Span span=journal.begin("gpu.replay.checkpoint",EngineLog.INFO)){readHardware();replayRecorder=new GpuReplayRecorder(vram,replayFrame,now);}
+        else{
+            recordReplay(GpuReplay.FRAME,state.clone());
+            if(replayRecorder.due(now))try(EngineLog.Span span=journal.begin("gpu.replay.checkpoint",EngineLog.INFO)){
+                readHardware();replayRecorder.checkpoint(vram,state.clone(),new int[7],replayFrame,System.nanoTime());
+            }
+        }
+    }
+    /** Pause/stop only: fence earlier draws and copy the bounded rolling window. No disc is needed to replay it. */
+    public GpuReplay.Capture captureGraphics(){
+        if(journal==null||!journal.enabled())return null;
+        flushUpload();int[] state=displayState(false),env=environment.clone();
+        FutureTask<GpuReplay.Capture> task=new FutureTask<>(()->{
+            readHardware();long now=System.nanoTime();if(replayRecorder==null)replayRecorder=new GpuReplayRecorder(vram,replayFrame,now);
+            return replayRecorder.capture(vram,state,env,replayFrame,now);
+        });
+        submit(task::run);try{return task.get();}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IllegalStateException(e);}catch(ExecutionException e){throw new IllegalStateException(e.getCause());}
+    }
     private volatile VulkanPresenter vulkan;
     private boolean hardwareDirty;
     private volatile String renderer=NativeRasterizer.AVAILABLE?"Native software":"Java software";
@@ -279,7 +311,7 @@ public final class Gpu implements AutoCloseable {
         if(drawBatchCount==0)return;
         submittedDrawBatches++;batchedPrimitives+=drawBatchCount;
         int[] commands=Arrays.copyOf(drawBatch,drawBatchWords);int count=drawBatchCount;drawBatchWords=drawBatchCount=0;
-        submitDirect(()->{long before=System.nanoTime();try(EngineLog.Span span=journal==null?null:journal.begin(hardwareDrawing?"gpu.raster.gles":"gpu.raster.software",EngineLog.TRACE)){if(hardware!=null && hardwareDrawing){hardware.drawBatch(commands);hardwareDirty=true;raster.primitives+=count;}else{raster.drawBatch(commands,count);softwareVramRevision++;}}long spent=System.nanoTime()-before;drawNanos+=spent;if(diagnosticsEnabled)diagnosticDraw+=spent;});
+        submitDirect(()->{recordReplay(GpuReplay.BATCH,commands);long before=System.nanoTime();try(EngineLog.Span span=journal==null?null:journal.begin(hardwareDrawing?"gpu.raster.gles":"gpu.raster.software",EngineLog.TRACE)){if(hardware!=null && hardwareDrawing){hardware.drawBatch(commands);hardwareDirty=true;raster.primitives+=count;}else{raster.drawBatch(commands,count);softwareVramRevision++;}}long spent=System.nanoTime()-before;drawNanos+=spent;if(diagnosticsEnabled)diagnosticDraw+=spent;});
     }
     private static int packetSize(int op){
         if(op>=0x20 && op<0x40){int n=(op&8)!=0?4:3;return (op&16)!=0?n*(2+((op>>>2)&1)):1+n*(1+((op>>>2)&1));}
@@ -318,7 +350,7 @@ public final class Gpu implements AutoCloseable {
             }else if(op==2){vramDirty.addWrapped(xy&0x3f0,(xy>>>16)&511,((wh&1023)+15)&~15,(wh>>>16)&511);submit(()->fill(command,xy,wh));}
             else if(op>=0x80 && op<=0x9f){
                 int w=((extra-1)&1023)+1,h=(((extra>>>16)-1)&511)+1,mask=environment[6];vramDirty.addWrapped(wh&1023,(wh>>>16)&511,w,h);
-                submit(()->{if(hardware!=null && hardwareDrawing){hardware.copy(xy,wh,extra,mask);hardwareDirty=true;}else{for(int y=0;y<h;y++)for(int x=0;x<w;x++)store(((((wh>>>16)+y)&511)*1024)+((wh+x)&1023),vram[((((xy>>>16)+y)&511)*1024)+((xy+x)&1023)],mask);softwareVramRevision++;}});
+                submit(()->{if(replayRecorder!=null)recordReplay(GpuReplay.COPY,new int[]{xy,wh,extra,mask});if(hardware!=null && hardwareDrawing){hardware.copy(xy,wh,extra,mask);hardwareDirty=true;}else{for(int y=0;y<h;y++)for(int x=0;x<w;x++)store(((((wh>>>16)+y)&511)*1024)+((wh+x)&1023),vram[((((xy>>>16)+y)&511)*1024)+((xy+x)&1023)],mask);softwareVramRevision++;}});
             }else if(op>=0xa0 && op<=0xbf){uploadX=xy&1023;uploadY=(xy>>>16)&511;uploadW=((wh-1)&1023)+1;uploadH=(((wh>>>16)-1)&511)+1;uploaded=0;}
             // Queue earlier draws now; the first read publishes their VRAM once.
             // Parsing the transfer header does not itself consume rendered data.
@@ -328,7 +360,7 @@ public final class Gpu implements AutoCloseable {
     private void flushUpload(){
         if(uploadWords==0)return;
         int[] words=Arrays.copyOf(uploadBuffer,uploadWords);int start=uploadStart,x=uploadX,y=uploadY,w=uploadW,total=uploadW*uploadH,mask=environment[6];uploadWords=0;vramDirty.addWrapped(x,y,w,uploadH);
-        submit(()->{if(hardware!=null && hardwareDrawing){hardware.upload(words,start,x,y,w,total,mask);hardwareDirty=true;}else{for(int i=0;i<words.length*2 && start+i<total;i++)store(((y+(start+i)/w)&511)*1024+((x+(start+i)%w)&1023),(words[i/2]>>>((i&1)*16))&65535,mask);softwareVramRevision++;}textureUpload(words,start,x,y,w,total,mask);});
+        submit(()->{if(replayRecorder!=null){int[] recorded=new int[words.length+6];recorded[0]=start;recorded[1]=x;recorded[2]=y;recorded[3]=w;recorded[4]=total;recorded[5]=mask;System.arraycopy(words,0,recorded,6,words.length);recordReplay(GpuReplay.UPLOAD,recorded);}if(hardware!=null && hardwareDrawing){hardware.upload(words,start,x,y,w,total,mask);hardwareDirty=true;}else{for(int i=0;i<words.length*2 && start+i<total;i++)store(((y+(start+i)/w)&511)*1024+((x+(start+i)%w)&1023),(words[i/2]>>>((i&1)*16))&65535,mask);softwareVramRevision++;}textureUpload(words,start,x,y,w,total,mask);});
     }
     public int read(){
         check();if(readPixels>=readW*readH)return gpuRead;
@@ -430,8 +462,9 @@ public final class Gpu implements AutoCloseable {
         completeFrameWithoutPresentation(receiver,timing,"fast_forward_skip");
     }
     public void completeFrameWithoutPresentation(java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,String reason){
-        flushUpload();int[] state=timing==null?null:displayState(false);
+        flushUpload();int[] state=displayState(false);
         submit(()->{
+            replayBoundary(state);
             if(performanceEnabled){Performance previous=performance;performance=new Performance(0,previous.width(),previous.height(),previous.scale());}
             if(timing!=null){timing.gpuBegin(renderer,state);timing.presentationSequence(reason,0);}
             try{receiver.accept(null);}finally{if(timing!=null)timing.complete();}
@@ -440,6 +473,7 @@ public final class Gpu implements AutoCloseable {
     private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
         flushUpload();int[] state=displayState(filter);float[] window=displayWindow(gpuStatus,horizontalStart,horizontalEnd,verticalStart,verticalEnd);long queued=System.nanoTime();
         submit(()->{
+            replayBoundary(state);
             applyWindow(window);
             long started=System.nanoTime(),cpuStarted=threadCpu(),convert=0;
             long perfStart=performanceEnabled?System.nanoTime():0;
@@ -510,6 +544,7 @@ public final class Gpu implements AutoCloseable {
     }
     private static int argb(int p){int r=p&31,g=(p>>>5)&31,b=(p>>>10)&31;return 0xff000000|((r<<3|r>>>2)<<16)|((g<<3|g>>>2)<<8)|(b<<3|b>>>2);}
     private void fill(int c, int xy, int wh) {
+        if(replayRecorder!=null)recordReplay(GpuReplay.FILL,new int[]{c,xy,wh});
         if(hardware!=null && hardwareDrawing){hardware.fill(c,xy,wh);hardwareDirty=true;return;}
         int x = xy & 0x3f0, y = (xy >>> 16) & 511;
         int w = ((wh & 1023) + 15) & ~15, h = (wh >>> 16) & 511;
@@ -526,7 +561,7 @@ public final class Gpu implements AutoCloseable {
     }
     public void sync(){sync(false);}
     void prepareSnapshot(){sync(true);}
-    void restoreSnapshot(){readSynchronized=false;vramDirty.all();submitDirect(()->{softwareVramRevision++;if(hardware!=null && hardwareDrawing){hardware.setVram(vram);hardwareDirty=false;}});sync();}
+    void restoreSnapshot(){readSynchronized=false;vramDirty.all();submitDirect(()->{replayRecorder=null;softwareVramRevision++;if(hardware!=null && hardwareDrawing){hardware.setVram(vram);hardwareDirty=false;}});sync();}
     private void sync(boolean readback) {
         try(EngineLog.Span span=journal==null?null:journal.watch(readback?"gpu.sync.readback":"gpu.sync.commands",EngineLog.DEBUG,8_000_000L)){
         flushUpload();flushDrawBatch();
