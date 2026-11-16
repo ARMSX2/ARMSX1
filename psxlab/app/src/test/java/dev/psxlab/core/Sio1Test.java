@@ -22,10 +22,12 @@ public final class Sio1Test {
         assertEquals(0,sio.read(10,2));
     }
     @Test public void busRoutesSio1WithoutAffectingSio0() {
-        Bus bus=new Bus(new Gpu());
-        bus.write16(0x1f80105a,3);
-        assertEquals(3,bus.read16(0x1f80105a));
-        bus.write16(0x1f80105e,0x3456);
-        assertEquals(0x3456,bus.read16(0x1f80105e));
+        try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu);
+            bus.write16(0x1f80105a,3);
+            assertEquals(3,bus.read16(0x1f80105a));
+            bus.write16(0x1f80105e,0x3456);
+            assertEquals(0x3456,bus.read16(0x1f80105e));
+        }
     }
 }
