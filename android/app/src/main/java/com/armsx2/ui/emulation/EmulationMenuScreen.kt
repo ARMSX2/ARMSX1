@@ -1609,6 +1609,18 @@ private fun PerformancePane(state: EmulationMenuUiState, viewModel: EmulationMen
                     viewModel.updateSettings { it.copy(osdShowMessages = value) }
                 }
             }
+            // Which core events become notes; only meaningful while notes are shown at all.
+            if (settings.osdShowMessages) {
+                Spacer(Modifier.height(6.dp))
+                MenuSwitchRow(str("overlay.toggle.notifyMemoryCard"), com.armsx2.ui.OsdNotices.memoryCard.value,
+                    notDefault = !com.armsx2.ui.OsdNotices.memoryCard.value) { com.armsx2.ui.OsdNotices.setMemoryCard(it) }
+                Spacer(Modifier.height(6.dp))
+                MenuSwitchRow(str("overlay.toggle.notifyCheats"), com.armsx2.ui.OsdNotices.cheats.value,
+                    notDefault = !com.armsx2.ui.OsdNotices.cheats.value) { com.armsx2.ui.OsdNotices.setCheats(it) }
+                Spacer(Modifier.height(6.dp))
+                MenuSwitchRow(str("overlay.toggle.notifySettings"), com.armsx2.ui.OsdNotices.settings.value,
+                    notDefault = !com.armsx2.ui.OsdNotices.settings.value) { com.armsx2.ui.OsdNotices.setSettings(it) }
+            }
             MenuOrderItem("MenuSwitchRow.overlay.toggle.controlInputs") {
                 MenuSwitchRow(str("overlay.toggle.controlInputs"), settings.osdShowInputs, notDefault = settings.osdShowInputs != HostStock.osdShowInputs) { value ->
                     viewModel.updateSettings { it.copy(osdShowInputs = value) }

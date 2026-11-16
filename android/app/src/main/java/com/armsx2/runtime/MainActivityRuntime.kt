@@ -3176,6 +3176,7 @@ open class MainActivityRuntime : ComponentActivity() {
         com.armsx2.LibraryView.load()
         com.armsx2.ui.UiScale.load()
         DualScreen.load()
+        com.armsx2.ui.OsdNotices.load()
         com.armsx2.ui.theme.ThemePreferences.load()
         com.armsx2.ui.theme.InterfacePreferences.load()
         com.armsx2.ui.theme.BootLogoPreferences.load()

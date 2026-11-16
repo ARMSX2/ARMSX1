@@ -12,6 +12,12 @@ public class CheatsTest {
             assertEquals(0,cheats.arm(false,new String[]{"Health"}));bus.write16(0x100,1);cheats.apply(bus);assertEquals(1,bus.read16(0x100));
         }
     }
+    @Test public void armedNamesListTheSelectedCheatsInCatalogueOrder()throws Exception{
+        Cheats cheats=new Cheats();cheats.loadText("[Infinite HP]\n80000100 0063\n[Max Gil]\n80000104 FFFF\n[Walk Through Walls]\n80000108 0001\n");
+        cheats.arm(true,new String[]{"walk through walls","Infinite HP","Missing"});
+        assertEquals(java.util.List.of("Infinite HP","Walk Through Walls"),cheats.armedNames());
+        cheats.arm(false,new String[]{"Infinite HP"});assertTrue(cheats.armedNames().isEmpty());
+    }
     @Test public void groupsDoNotShareConditionalOrSlideStateAndUnknownTypesAreVisible()throws Exception{
         Cheats cheats=new Cheats();cheats.loadText("[First]\nD0000100 0001\n[Second]\n30000110 0044\n[Slide]\n50000302 0001\n[Last]\n80000120 0005\nC0000000 0001\n@desc Test description\n");
         cheats.arm(true,new String[]{"First","Second","Slide","Last","Missing"});assertEquals(1,cheats.diagnostic().get("missing_names"));

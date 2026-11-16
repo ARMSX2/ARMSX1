@@ -145,7 +145,7 @@ public class NativeApp {
         Context context = getContext();
         if (context == null) throw new IllegalStateException("Backend context is unavailable");
         String config = new File(context.getFilesDir(), "settings.toml").getAbsolutePath();
-        if (lab == null) { lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice); lab.setAdpf(adpf); }
+        if (lab == null) { lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice); lab.setAdpf(adpf); lab.osdListener(com.armsx2.ui.OsdNotices.INSTANCE::post); }
         lab.mediaResolver(source -> {
             com.armsx2.core.Ps1SafAccess.Session prepared = com.armsx2.core.Ps1SafAccess.INSTANCE.prepare(context, source, () -> !hasActiveVM());
             return new dev.psxlab.ArmSxBackend.PreparedMedia(prepared.getLaunchPath(), prepared);

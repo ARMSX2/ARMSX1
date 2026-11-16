@@ -159,7 +159,8 @@ object GameOsd {
     /** Live presentation/rasterizer path, including real fallback and shader changes. */
     val renderer = mutableStateOf("")
 
-    data class Note(val id: Long, val text: String, val expiresAt: Long, val position: Int = 2)
+    /** [key]: notes sharing one replace each other (a card's "saving…" becomes "saved"). */
+    data class Note(val id: Long, val text: String, val expiresAt: Long, val position: Int = 2, val key: String? = null)
     data class AchievementIndicator(val id: String, val text: String, val position: Int)
     val achievementIndicators = mutableStateListOf<AchievementIndicator>()
 
@@ -191,13 +192,18 @@ object GameOsd {
         addNote(text, durationMs, 2)
     }
 
-    private fun addNote(text: String, durationMs: Long, position: Int) {
+    /** A note that replaces any earlier note with the same [key]. Safe to call from any thread. */
+    fun notice(key: String, text: String, durationMs: Long = DEFAULT_NOTE_MS) {
+        addNote(text, durationMs, 2, key)
+    }
+
+    private fun addNote(text: String, durationMs: Long, position: Int, key: String? = null) {
         if (text.isBlank()) return
         val activity = MainActivityRuntime.instance
         val push = Runnable {
             // One line per message: a rapid FF on/off/on replaces rather than stacks.
-            notes.removeAll { it.text == text }
-            notes.add(Note(nextNoteId++, text, System.currentTimeMillis() + durationMs, position))
+            notes.removeAll { it.text == text || (key != null && it.key == key) }
+            notes.add(Note(nextNoteId++, text, System.currentTimeMillis() + durationMs, position, key))
             while (notes.size > MAX_NOTES) notes.removeAt(0)
         }
         if (activity != null) activity.runOnUiThread(push) else push.run()

@@ -22,6 +22,26 @@ public final class ArmSxBackend {
     private volatile float displayRefreshHz;private volatile int surfaceWidth,surfaceHeight;
     private final Consumer<Boolean> pauseCallback;
     private final Consumer<String> notice;
+    /** In-game OSD events. Kinds: memory_card.saving|saved|failed (detail "slot" or "slot\u001fmessage"),
+     *  cheats (armed names joined by \u001f, empty when none) and settings (a one-line summary). */
+    private volatile java.util.function.BiConsumer<String,String> osd=(kind,detail)->{};
+    /** True from "ready" until the session ends, so cheat changes are announced only during play. */
+    private volatile boolean sessionReady;
+    public void osdListener(java.util.function.BiConsumer<String,String> listener){osd=listener==null?(kind,detail)->{}:listener;}
+    private void osd(String kind,String detail){try{osd.accept(kind,detail);}catch(RuntimeException error){journal.error("osd.notice",error);}}
+    private void cardEvent(int slot,int state,String detail){
+        String kind=state==CardStorage.SAVING?"memory_card.saving":state==CardStorage.SAVED?"memory_card.saved":"memory_card.failed";
+        osd(kind,state==CardStorage.FAILED?(slot+1)+"\u001f"+detail:String.valueOf(slot+1));
+        if(state==CardStorage.FAILED)journal.event(EngineLog.WARN,"memory_card.save_failed",Map.of("slot",slot+1,"error",detail));
+    }
+    private void announceCheats(){osd("cheats",String.join("\u001f",cheats.armedNames()));}
+    /** What the player usually checks first: renderer and scale, CPU mode, fast boot, widescreen. */
+    private void announceSettings(){
+        StringBuilder text=new StringBuilder(gpu.renderer()).append(" · ").append(cpu.executionMode());
+        text.append(" · Fast boot ").append(Boolean.parseBoolean(options.getOrDefault("cpu.fast_boot","false"))?"on":"off");
+        text.append(" · Widescreen ").append(widescreenEnabled()?"on":"off");
+        osd("settings",text.toString());
+    }
     private final Object gate=new Object();
     private final ConcurrentLinkedQueue<Runnable> commands=new ConcurrentLinkedQueue<>();
     private final PadState[] pads={new PadState(),new PadState()};
@@ -136,7 +156,7 @@ public final class ArmSxBackend {
     private final Cheats cheats=new Cheats();
     public int cheatsLoad(String path){try{return cheats.load(path);}catch(IOException|RuntimeException error){journal.error("cheats.load",error);notice.accept("Cannot load cheats: "+error.getMessage());return -1;}}
     public String cheatsList(){return cheats.describe();}
-    public int cheatsApply(boolean enabled,String[] names){int count=cheats.arm(enabled,names);journal.event(EngineLog.INFO,"cheats.selection",cheats.diagnostic());return count;}
+    public int cheatsApply(boolean enabled,String[] names){int count=cheats.arm(enabled,names);journal.event(EngineLog.INFO,"cheats.selection",cheats.diagnostic());if(sessionReady)announceCheats();return count;}
     public int cheatsArmedCount(){return cheats.armedCount();}
     private void configureCheats(){
         boolean enabled=Boolean.parseBoolean(options.getOrDefault("cheats.enabled","false"));
@@ -381,7 +401,7 @@ public final class ArmSxBackend {
     public boolean run(String path){return run(path, () -> true);}
     /** The host's session cancellation and this active/stop transition share this monitor. */
     public boolean run(String path,java.util.function.BooleanSupplier allowed){
-        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;stateId="";lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
+        synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;sessionReady=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;stateId="";lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
         boolean booted=false;Restore restore=null;int priority=boostThread();startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=hostThermalSample=0;hostThermalStatus=-1;hostCpuPercent=hostRssMb=hostAvailableMb=-1;timeline.start(System.nanoTime());event("launch");
         try{
             options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));capturedGraphicsClocks=-1;lastGraphicsCapture=Map.of("status","recording when logging is enabled; pause at the problem to capture");try{Files.deleteIfExists(new File(journal.directory(),GpuReplay.FILE_NAME).toPath());}catch(IOException error){journal.error("gpu.replay.reset",error);}bios=readBios();configureCheats();
@@ -393,7 +413,7 @@ public final class ArmSxBackend {
                 // still rasterizes on the CPU; its finished pixels use the texture presenter.
                 try(Gpu graphics=mode==0&&scale==1&&!selected.hardware()?new Gpu(true,false):new Gpu(true,mode,scale,selected.hardware())){
                     gpu=graphics;capturedGraphicsClocks=-1;displayGpu=graphics;gpu.setJournal(journal);ShaderChain.backend(mode);updateDisplay();updatePresentation();clearSurface();gpu.prepareShaders();configurePads();bus=new Bus(gpu,pads[0]);bus.dma.setJournal(journal);bus.sio0.setPad(1,pads[1]);bus.loadBios(bios);
-                    try(CardStorage cards=new CardStorage(new File(root,"cards"),bus)){
+                    try(CardStorage cards=new CardStorage(new File(root,"cards"),bus,this::cardEvent,CardStorage.DEFAULT_QUIET_MILLIS)){
                         String mounted=restore==null?discPath:restore.disc();
                         media=mounted.isEmpty()?null:openMedia(mounted,restore==null?0:restore.discIndex(),restore==null||restore.state()==null);
                         prepareStateIdentity();mediaTextures();if(media!=null&&media.disc!=null)bus.cdrom.insert(media.disc);
@@ -411,6 +431,8 @@ public final class ArmSxBackend {
                                 timeline.incident(System.nanoTime(),"CPU execution mode: "+cpu.executionMode());
                                 timeline.incident(System.nanoTime(),"start: "+renderer+", scale "+scale+", "+output.deviceDiagnostic()+", GPU "+(gpu.hardwareDescription().isEmpty()?"none (software renderer)":gpu.hardwareDescription())+", ADPF "+(adpf?"on":"off")+", VM thread priority "+threadPriority()+", "+Runtime.getRuntime().availableProcessors()+" cores"+", disc "+discLayout(media));
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
+                                // A save-state load restarts this machine; announce settings once per launch, cheats every start.
+                                if(!sessionReady)announceSettings();sessionReady=true;if(cheats.armedCount()>0)announceCheats();
                                 try{loop(output);}catch(Exception failure){lastFailureCpuContext=cpu.diagnostic();journal.event(EngineLog.FATAL,"runtime.cpu_context",Map.of("cpu",lastFailureCpuContext,"exception",failure.toString(),"guest_clocks",cpu.instructions));throw failure;}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}saveGraphicsCapture("stop");}
                             }finally{audio=null;bus.cdrom.setTraceSink(null);bus.spu.setTraceSink(null);guestAudioTracing=false;bus.spu.setAudioSink(null);cpu.closeNative();}
                         }finally{if(media!=null){media.close();media=null;}if(pendingMedia!=null){pendingMedia.close();pendingMedia=null;}}
@@ -423,7 +445,7 @@ public final class ArmSxBackend {
                 restore=restart;
             }while(!stop&&restore!=null);
         }catch(Exception e){booted=false;error(e);if(restore!=null)restore.ready().complete(false);if(restart!=null)restart.ready().complete(false);}
-        finally{restoreThread(priority);performance.reset();resetButtons();fps=0;renderer="Stopped";synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
+        finally{restoreThread(priority);performance.reset();resetButtons();fps=0;renderer="Stopped";sessionReady=false;synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
         return booted;
     }
     /** The host reuses its VM thread: raise it to the GPU worker's and DSP's level for the session only. */

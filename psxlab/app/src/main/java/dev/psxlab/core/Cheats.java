@@ -55,6 +55,8 @@ public final class Cheats {
         missing=selected.size()-found.size();armed=Collections.unmodifiableList(next);return next.size();
     }
     public int armedCount(){return armed.size();}
+    /** Display names of the armed cheats, in catalogue order. */
+    public List<String> armedNames(){List<String> names=new ArrayList<>();for(Entry entry:armed)names.add(entry.name);return names;}
     public Map<String,Object> diagnostic(){return Map.of("file",source,"catalogue_entries",catalogue.size(),"armed_entries",armed.size(),"missing_names",missing,"source","psxlab/app/src/main/java/dev/psxlab/core/Cheats.java#apply");}
     public String describe(){
         StringBuilder out=new StringBuilder();for(Entry entry:catalogue){if(out.length()!=0)out.append('\u001e');out.append(entry.name).append('\u001f').append(entry.codes.size()).append('\u001f').append(entry.unsupported?'1':'0').append('\u001f').append(entry.description);}return out.toString();
