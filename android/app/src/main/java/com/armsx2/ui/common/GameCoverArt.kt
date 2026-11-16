@@ -35,7 +35,12 @@ import java.io.IOException
 import java.io.FileNotFoundException
 
 @Composable
-fun GameCoverArt(game: GameInfo, modifier: Modifier = Modifier, size: Int = 500) {
+fun GameCoverArt(
+    game: GameInfo,
+    modifier: Modifier = Modifier,
+    size: Int = 500,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(14.dp),
+) {
     val context = LocalContext.current
     val customCover = remember(game.uri, CustomCovers.version.value) {
         CustomCovers.fileFor(context, game)
@@ -43,7 +48,7 @@ fun GameCoverArt(game: GameInfo, modifier: Modifier = Modifier, size: Int = 500)
     FallbackCoverImage(
         models = listOfNotNull(customCover) + game.coverUrls,
         contentDescription = game.title,
-        modifier = modifier.clip(RoundedCornerShape(14.dp)),
+        modifier = modifier.clip(shape),
         contentScale = ContentScale.Crop,
         crossfade = true,
         size = size,

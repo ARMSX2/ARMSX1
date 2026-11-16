@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -115,6 +116,10 @@ private const val COVER_ASPECT = 1f
 @Composable
 fun DualScreenLibraryCover() {
     val game = com.armsx2.ui.home.HomeInputController.highlightedGame() ?: return
+    if (com.armsx2.runtime.DualScreen.libraryArtFill.value) {
+        FullScreenLibraryCover(game)
+        return
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         MediaSlideshow(game)
         // As big as the screen allows: ~80% of the height, never wider than the screen.
@@ -144,6 +149,54 @@ fun DualScreenLibraryCover() {
         }
     }
 }
+
+/**
+ * The highlighted game's box art edge to edge on the second screen, cropped to its shape, with the
+ * title on a dark strip along the bottom. The media slideshow would sit hidden behind it, so it is
+ * not fetched in this mode.
+ */
+@Composable
+private fun FullScreenLibraryCover(game: com.armsx2.GameInfo) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+        // Decode at the screen's own resolution (capped) so the art stays sharp at this size.
+        val pixels = with(androidx.compose.ui.platform.LocalDensity.current) {
+            maxOf(maxWidth, maxHeight).roundToPx()
+        }.coerceIn(500, MAX_FULL_SCREEN_COVER_PX)
+        // Keyed on the game so a new cover loads fresh instead of cross-fading the old one.
+        androidx.compose.runtime.key(game.uri) {
+            com.armsx2.ui.common.GameCoverArt(
+                game,
+                Modifier.fillMaxSize(),
+                size = pixels,
+                shape = androidx.compose.ui.graphics.RectangleShape,
+            )
+        }
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        listOf(Color.Transparent, Color(0xD9000000)),
+                    ),
+                )
+                .padding(start = 16.dp, end = 16.dp, top = 36.dp, bottom = 14.dp),
+        ) {
+            Text(
+                game.displayTitle(EnglishTitles.enabled.value),
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+private const val MAX_FULL_SCREEN_COVER_PX = 1600
 
 /**
  * Fan art and screenshots for [game], full-screen and dimmed behind the box art, cross-fading every

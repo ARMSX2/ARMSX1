@@ -52,6 +52,14 @@ fun DualScreenTab() {
             value = DualScreen.libraryArt.value,
             description = str("dualScreen.libraryArt.description"),
         ) { DualScreen.setLibraryArt(it) }
+        if (DualScreen.libraryArt.value) {
+            SettingsDivider()
+            ToggleRow(
+                label = str("dualScreen.libraryArtFill.label"),
+                value = DualScreen.libraryArtFill.value,
+                description = str("dualScreen.libraryArtFill.description"),
+            ) { DualScreen.setLibraryArtFill(it) }
+        }
         SettingsDivider()
         ToggleRow(
             label = str("dualScreen.ySettings.label"),

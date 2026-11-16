@@ -55,6 +55,7 @@ object DualScreen {
     private const val KEY_MODE = "ui.dualScreenMode"
     private const val KEY_INFO_PANEL = "ui.dualScreenInfoPanel"
     private const val KEY_LIBRARY_ART = "ui.dualScreenLibraryArt"
+    private const val KEY_LIBRARY_ART_FILL = "ui.dualScreenLibraryArtFill"
     private const val KEY_Y_SETTINGS = "ui.dualScreenYSettings"
 
     val mode = mutableStateOf(Mode.OFF)
@@ -64,6 +65,9 @@ object DualScreen {
 
     /** Out of a game: the library's highlighted game's box art on the second screen. */
     val libraryArt = mutableStateOf(true)
+
+    /** That box art fills the whole second screen (cropped to it) instead of sitting centred over the media slideshow. */
+    val libraryArtFill = mutableStateOf(true)
 
     /** Y in the library opens Settings on the second screen instead of the game's menu. */
     val ySettings = mutableStateOf(false)
@@ -91,6 +95,8 @@ object DualScreen {
             .getOrDefault(true)
         libraryArt.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_LIBRARY_ART, true) }
             .getOrDefault(true)
+        libraryArtFill.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_LIBRARY_ART_FILL, true) }
+            .getOrDefault(true)
         ySettings.value = runCatching { MainActivityRuntime.prefs.getBoolean(KEY_Y_SETTINGS, false) }
             .getOrDefault(false)
         com.armsx2.core.Ps1GameMedia.load()
@@ -105,6 +111,11 @@ object DualScreen {
     fun setLibraryArt(show: Boolean) {
         libraryArt.value = show
         runCatching { MainActivityRuntime.prefs.edit().putBoolean(KEY_LIBRARY_ART, show).apply() }
+    }
+
+    fun setLibraryArtFill(fill: Boolean) {
+        libraryArtFill.value = fill
+        runCatching { MainActivityRuntime.prefs.edit().putBoolean(KEY_LIBRARY_ART_FILL, fill).apply() }
     }
 
     fun setInfoPanel(show: Boolean) {
