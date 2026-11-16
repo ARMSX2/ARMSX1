@@ -8,6 +8,26 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class CpuCacheEfficiencyTest {
+    @Test public void cachePressureEvictsInSmallBatchesInsteadOfPurgingTheWholeCache(){
+        for(boolean recompile:new boolean[]{false,true})try(Gpu gpu=new Gpu(false)){
+            Bus bus=new Bus(gpu);Cpu cpu=new Cpu(bus);int base=0x80010000,count=65700;
+            for(int i=0;i<count;i++)bus.write32(base+i*4,0xac020000); // sw v0,0(zero): one block per instruction
+            cpu.r[2]=0x12345678;cpu.jump(base);
+            assertTrue(cpu.enableNative(recompile,false,true));
+            try{
+                cpu.configureProfiling(true);assertEquals(count,cpu.run(count));
+                assertEquals(0x12345678,bus.read32(0));
+                long[] stats=cpu.nativeStatistics();
+                assertEquals("Cache pressure must not discard all 65,536 blocks in a frame",0,stats[14]);
+                assertTrue("The bounded cache must evict old blocks",stats.length>15&&stats[15]>0);
+                // Revisit retired addresses and surviving successors: neither can retain a dangling link.
+                for(int i:new int[]{0,1,127,128,count-2,count-1}){
+                    cpu.r[2]=i+1;cpu.jump(base+i*4);assertEquals(1,cpu.run(1));assertEquals(i+1,bus.read32(0));
+                }
+                android.util.Log.i("CpuCacheEfficiencyTest","capacity pressure JIT="+recompile+" "+cpu.nativeTimings());
+            }finally{cpu.closeNative();}
+        }
+    }
     private static void invoke(Cpu cpu,int address){cpu.jump(address);cpu.run(64);}
     @Test public void unchangedBlocksSurviveChangesElsewhereOnTheSamePage(){
         for(boolean recompile:new boolean[]{false,true})for(boolean events:new boolean[]{false,true})try(Gpu gpu=new Gpu(false)){

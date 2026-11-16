@@ -4,6 +4,7 @@
 #include "hardware_register_counters.h"
 #include "native_timing.h"
 #include "cpu_gte.h"
+#include "cpu_cache_eviction.h"
 #include <stdexcept>
 #include <limits>
 
@@ -16,8 +17,9 @@ struct CpuCore {
     CpuState* s;uint8_t* memory;uint64_t* generations;
     int elapsed=0,deadline=32,biosReadWaits=0,cdReadWaits=0;bool irq=false,recompile,frameBoundary=false,ramWaitStates;int projectionScale=65536;
     std::unordered_map<uint32_t,std::unique_ptr<CpuBlock>> blocks;
+    std::deque<uint32_t> blockOrder;
     CpuBlock* previous=nullptr;NativeTiming timing;HardwareRegisterCounters registers;
-    uint64_t cacheClears=0;uint32_t changedPc=0,changedAddress=0,oldInstruction=0,newInstruction=0;
+    uint64_t cacheClears=0,cacheTrims=0;uint32_t changedPc=0,changedAddress=0,oldInstruction=0,newInstruction=0;
     uint64_t cacheHits=0,compiled=0,jitInstructions=0,interpreted=0,invalidations=0,linked=0,bridges=0,compileFailures=0,revalidated=0;
     uint32_t currentAt=0,currentWord=0;
     CpuCore(JNIEnv* e,jobject b,CpuState* state,uint8_t* mem,int options):bus(e->NewGlobalRef(b)),s(state),memory(mem),generations(reinterpret_cast<uint64_t*>(mem+Generations)),recompile((options&1)!=0),ramWaitStates((options&2)!=0){
@@ -160,7 +162,13 @@ struct CpuCore {
         }
         block->version=generations[block->page];revalidated++;return true;
     }
-    void clearCache(){NativeTiming::Scope measured(timing,NativeTiming::CPU_CLEAR,s->pc);blocks.clear();previous=nullptr;memset(memory+CodeMask,0,65536);cacheClears++;}
+    void trimCache(CpuBlock* protectedBlock=nullptr){
+        NativeTiming::Scope measured(timing,NativeTiming::CPU_CLEAR,s->pc);
+        previous=nullptr;
+        if(evictCpuBlocks(blocks,blockOrder,128,protectedBlock))cacheTrims++;
+        // Keep the conservative code-word mask: retained blocks still require
+        // write tracking, and stale bits only cause extra generation checks.
+    }
     // Compiling every block of newly loaded code in one frame froze Valkyrie Profile's first battle for
     // 140 ms (3,662 blocks). Each emulation slice (~6 a frame) may spend this long compiling; further
     // blocks run interpreted and compile in a later slice.
@@ -181,9 +189,9 @@ struct CpuCore {
         if(block&&!block->code.empty()){cacheHits++;if(block->compilePending&&!block->function)compile(block);}
         else{
             NativeTiming::Scope building(timing,NativeTiming::CPU_BUILD,s->pc);
-            if(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)>32*1024*1024){clearCache();block=nullptr;}
+            if(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)>32*1024*1024)trimCache(block);
             uint32_t p=s->pc&0x1fffffff;if((s->pc&3)||!(p<0x800000 || (p>=0x1fc00000&&p<0x1fc80000)))return nullptr;
-            if(!block){if(blocks.size()>=65536){clearCache();}auto owner=std::make_unique<CpuBlock>(s->pc);block=owner.get();blocks.emplace(s->pc,std::move(owner));}
+            if(!block){if(blocks.size()>=65536)trimCache();auto owner=std::make_unique<CpuBlock>(s->pc);block=owner.get();blocks.emplace(s->pc,std::move(owner));blockOrder.push_back(s->pc);}
             block->page=p<0x800000?int((p&0x1fffff)>>12):-1;block->version=block->page<0?0:generations[block->page];
             for(int i=0;i<CpuBlock::MaximumInstructions;i++){
                 uint32_t at=s->pc+uint32_t(i*4),physical=at&0x1fffffff;if((physical>>12)!=(p>>12))break;
@@ -247,7 +255,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_NativeCpu_create(JNIEnv*
 }
 extern "C" JNIEXPORT jint JNICALL Java_dev_psxlab_core_NativeCpu_runNative(JNIEnv* env,jclass,jlong handle,jint budget,jboolean stopFrame){return reinterpret_cast<CpuCore*>(handle)->run(env,budget,stopFrame);}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_destroy(JNIEnv* env,jclass,jlong handle){auto* core=reinterpret_cast<CpuCore*>(handle);if(core){env->DeleteGlobalRef(core->bus);delete core;}}
-extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_statisticsNative(JNIEnv* env,jclass,jlong handle){auto* c=reinterpret_cast<CpuCore*>(handle);jlong values[]={jlong(c->compiled),jlong(c->jitInstructions),jlong(c->interpreted),jlong(c->cacheHits),jlong(c->linked),jlong(c->invalidations),jlong(c->bridges),jlong(c->compileFailures),jlong(c->revalidated),jlong(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)),jlong(c->changedPc),jlong(c->changedAddress),jlong(c->oldInstruction),jlong(c->newInstruction),jlong(c->cacheClears)};jlongArray result=env->NewLongArray(15);env->SetLongArrayRegion(result,0,15,values);return result;}
+extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_statisticsNative(JNIEnv* env,jclass,jlong handle){auto* c=reinterpret_cast<CpuCore*>(handle);jlong values[]={jlong(c->compiled),jlong(c->jitInstructions),jlong(c->interpreted),jlong(c->cacheHits),jlong(c->linked),jlong(c->invalidations),jlong(c->bridges),jlong(c->compileFailures),jlong(c->revalidated),jlong(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)),jlong(c->changedPc),jlong(c->changedAddress),jlong(c->oldInstruction),jlong(c->newInstruction),jlong(c->cacheClears),jlong(c->cacheTrims)};jlongArray result=env->NewLongArray(16);env->SetLongArrayRegion(result,0,16,values);return result;}
 
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProjectionNative(JNIEnv*,jclass,jlong handle,jint scale){reinterpret_cast<CpuCore*>(handle)->projectionScale=scale;}
 

@@ -119,7 +119,7 @@ public final class EngineLog implements AutoCloseable {
         if(path.startsWith("texture."))return "psxlab/app/src/main/java/dev/psxlab/core/TexturePacks.java#upload/decode/dump";
         if(path.equals("cpu.compile"))return "psxlab/app/src/main/cpp/cpu_arm64.cpp#compileArm64";
         if(path.equals("cpu.cache.check"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::revalidate";
-        if(path.equals("cpu.cache.clear"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::clearCache";
+        if(path.equals("cpu.cache.trim"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::trimCache";
         if(path.equals("cpu.block.build"))return "psxlab/app/src/main/cpp/cpu_jni.cpp#CpuCore::findBlock";
         if(path.equals("gpu.raster.dispatch"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::flush";
         if(path.equals("gpu.vram.transfer"))return "psxlab/app/src/main/cpp/hardware_gpu.cpp#HardwareGpu::transfer";
