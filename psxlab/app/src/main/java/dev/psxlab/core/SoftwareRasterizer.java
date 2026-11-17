@@ -76,6 +76,8 @@ final class SoftwareRasterizer {
         int uv=textured?p[2]:0,wh=size==0?p[textured?3:2]:0;
         int w=size==0?wh&1023:size==1?1:size==2?8:16,h=size==0?(wh>>>16)&511:size==1?1:size==2?8:16;
         Vertex a=new Vertex(p[1],p[0],uv,e[5]);
+        // Rectangle origins wrap to signed 11 bits after adding the drawing offset.
+        a.x=signed11(a.x);a.y=signed11(a.y);
         int minX=Math.max(a.x,e[3]&1023),maxX=Math.min(a.x+w-1,e[4]&1023),minY=Math.max(a.y,(e[3]>>>10)&511),maxY=Math.min(a.y+h-1,(e[4]>>>10)&511);
         int dx=(e[1]&4096)!=0?-1:1,dy=(e[1]&8192)!=0?-1:1;
         for(int y=minY;y<=maxY;y++)for(int x=minX;x<=maxX;x++)pixel(x,y,a.r,a.g,a.b,a.u+(x-a.x)*dx,a.v+(y-a.y)*dy,op,uv>>>16,e,false);

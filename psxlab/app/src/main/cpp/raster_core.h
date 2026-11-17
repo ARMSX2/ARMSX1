@@ -70,6 +70,8 @@ struct Raster {
  triangle(v[0],v[1],v[2],op,clut);if(n==4)triangle(v[1],v[2],v[3],op,clut);}
  void rectangle(const int* p,int op){int size=(op>>3)&3;bool tex=op&4;int uv=tex?p[2]:0,wh=size==0?p[tex?3:2]:0;
  int w=size==0?wh&1023:size==1?1:size==2?8:16,h=size==0?(wh>>16)&511:size==1?1:size==2?8:16;Vertex a(p[1],p[0],uv,e[5]);
+ // Rectangle origins wrap after offset addition, before draw-area clipping.
+ a.x=s11(a.x);a.y=s11(a.y);
  int minX=std::max(a.x,e[3]&1023),maxX=std::min(a.x+w-1,e[4]&1023),minY=std::max(a.y,(e[3]>>10)&511),maxY=std::min(a.y+h-1,(e[4]>>10)&511),dx=(e[1]&4096)?-1:1,dy=(e[1]&8192)?-1:1;
 #ifdef __aarch64__
  if(!(op&6)){

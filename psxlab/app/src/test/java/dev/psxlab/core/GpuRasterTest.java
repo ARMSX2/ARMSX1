@@ -3,6 +3,21 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class GpuRasterTest {
+    @Test public void rectangleOriginWrapsAfterDrawingOffsetBeforeClipping(){
+        // Linda3 uses Y=0x500 with offset -912 for lower-framebuffer tiles.
+        // The signed 11-bit result is 368, rather than an off-screen -1680.
+        int[][] cases={{-256,1280,376,-912,120,368},{1280,-256,-912,376,368,120}};
+        for(int[] c:cases)for(int op:new int[]{0x60,0x68,0x70,0x78}){
+            int size=op==0x60?16:op==0x68?1:op==0x70?8:16;
+            int[] ram=new int[524288];SoftwareRasterizer raster=new SoftwareRasterizer(ram,false);
+            int[] packet=op==0x60?new int[]{(op<<24)|255,xy(c[0],c[1]),xy(16,16)}:new int[]{(op<<24)|255,xy(c[0],c[1])};
+            int[] env={0,0,0,0,1023|(511<<10),(c[2]&2047)|((c[3]&2047)<<11),0};
+            raster.draw(packet,env);
+            assertEquals("wrapped rectangle origin",31,ram[c[5]*1024+c[4]]);
+            assertEquals("last included pixel",31,ram[(c[5]+size-1)*1024+c[4]+size-1]);
+            assertEquals("outside rectangle",0,ram[c[5]*1024+c[4]+size]);
+        }
+    }
     @Test public void largerDrawQueueBatchesKeepSequentialBlendingAndReadbackOrder(){
         for(boolean threaded:new boolean[]{false,true})try(Gpu g=new Gpu(threaded)){
             area(g);int red=0,blue=0;
