@@ -5,6 +5,33 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 public class CdRomTest {
+    /** Popolocrois II and Poporogue keep ReadS's INT3 stat (libcd's CdSync result) and wait for its
+     *  seek bit to clear; a stat taken after the seek started left them waiting forever. */
+    @Test public void readSeekAndPlayAcknowledgeTheStatusFromBeforeTheyStart(){
+        try(Gpu g=new Gpu(false)){
+            Bus b=new Bus(g);b.cdrom.insert(disc());
+            command(b,1);int idle=response(b)[0];ack(b);
+            int frames=50+150;
+            for(int read:new int[]{6,0x1b}){
+                command(b,9);while(irq(b)!=0){ack(b);b.cdrom.tick(b.cdrom.clocksToEvent());}
+                command(b,2,CdRom.bcd(frames/4500),CdRom.bcd(frames/75%60),CdRom.bcd(frames%75));ack(b);
+                command(b,1);int before=response(b)[0];ack(b);
+                command(b,read);assertEquals(3,irq(b));int accepted=response(b)[0];ack(b);
+                assertEquals("read acknowledges the pre-command status",before,accepted);
+                assertEquals(0,accepted&0x40);
+                command(b,1);assertEquals("the seek has still begun",0x40,response(b)[0]&0x40);ack(b);
+            }
+            command(b,9);while(irq(b)!=0){ack(b);b.cdrom.tick(b.cdrom.clocksToEvent());}
+            command(b,2,CdRom.bcd(frames/4500),CdRom.bcd(frames/75%60),CdRom.bcd(frames%75));ack(b);
+            command(b,0x15);assertEquals(3,irq(b));int seek=response(b)[0];ack(b);
+            assertEquals("SeekL acknowledges without its own seek bit",0,seek&0x40);
+            command(b,1);assertEquals(0x40,response(b)[0]&0x40);ack(b);
+            command(b,9);while(irq(b)!=0){ack(b);b.cdrom.tick(b.cdrom.clocksToEvent());}
+            command(b,3);assertEquals(3,irq(b));int play=response(b)[0];ack(b);
+            assertEquals("Play acknowledges without its own play bit",0,play&0x80);
+            assertEquals(idle&0x10,play&0x10);
+        }
+    }
     @Test public void explicitNextRequestCanDiscardUnreadSectorPadding(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);readFirst(b,7,0);b.write8(BASE+3,0x80);

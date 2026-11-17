@@ -90,7 +90,7 @@ public class CueDiscTest {
             command(b,0x13);assertArrayEquals(new int[]{2,1,3},response(b));ack(b);
             command(b,0x14,2);assertArrayEquals(new int[]{2,0,4},response(b));ack(b);
             command(b,0x14,0);assertArrayEquals(new int[]{2,0,4},response(b));ack(b);
-            command(b,3,2);assertArrayEquals(new int[]{0x82},response(b));ack(b);b.cdrom.tick(SECTOR);assertEquals(588,b.cdrom.audioBufferedFrames());assertEquals(0xedcc1234,b.cdrom.audioFrame());assertEquals(0,b.cdrom.availableBytes());assertEquals(0,b.cdrom.dmaBytes);
+            command(b,3,2);assertArrayEquals("Play acknowledges before playing",new int[]{0x02},response(b));ack(b);b.cdrom.tick(SECTOR);assertEquals(588,b.cdrom.audioBufferedFrames());assertEquals(0xedcc1234,b.cdrom.audioFrame());assertEquals(0,b.cdrom.availableBytes());assertEquals(0,b.cdrom.dmaBytes);
             command(b,0x11);int[] at=response(b);assertEquals(2,at[0]);assertEquals(1,at[1]);assertEquals(0,at[4]);assertEquals(1,b.cdrom.cddaSectors);
         }
     }

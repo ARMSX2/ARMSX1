@@ -15,9 +15,9 @@ public class CdDriveTimingTest {
     }
     @Test public void explicitSeekCompletesBeforeReadWithoutSeekingTwice(){
         try(Gpu g=new Gpu(false)){
-            Bus b=new Bus(g);b.cdrom.insert(disc());command(b,2,0,2,4);ack(b);command(b,0x15);assertEquals(3,irq(b));assertEquals(0x42,response(b)[0]);ack(b);
+            Bus b=new Bus(g);b.cdrom.insert(disc());command(b,2,0,2,4);ack(b);command(b,0x15);assertEquals(3,irq(b));assertEquals("SeekL acknowledges before its seek starts",0x02,response(b)[0]);ack(b);
             b.cdrom.tick(10000);assertEquals(0,irq(b));assertEquals(0,b.cdrom.sectorsRead);awaitIrq(b,2);assertEquals(2,response(b)[0]);ack(b);
-            command(b,6);assertEquals(0x22,response(b)[0]);ack(b);b.cdrom.tick(SECTOR-1);assertEquals(0,b.cdrom.sectorsRead);b.cdrom.tick(1);assertEquals(1,b.cdrom.sectorsRead);
+            command(b,6);assertEquals("ReadN acknowledges before reading starts",0x02,response(b)[0]);ack(b);b.cdrom.tick(SECTOR-1);assertEquals(0,b.cdrom.sectorsRead);b.cdrom.tick(1);assertEquals(1,b.cdrom.sectorsRead);
         }
     }
     @Test public void speedChangeDelaysFirstDataButPreservesSubsequentSectorCadence(){

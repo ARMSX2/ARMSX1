@@ -8,7 +8,8 @@ public class CdDataPlayTest {
     @Test public void playAtSetlocAdvancesSilentlyWithoutDataInterrupts(){
         try(Gpu g=new Gpu(false)){
             Bus b=new Bus(g);b.cdrom.insert(disc());command(b,2,0,2,7);ack(b);
-            command(b,3);assertArrayEquals(new int[]{0x82},response(b));ack(b);
+            // The acknowledge carries the status from before Play started (DuckStation order); play follows.
+            command(b,3);assertArrayEquals(new int[]{0x02},response(b));ack(b);
             b.cdrom.tick(SECTOR);assertEquals(0,irq(b));assertEquals(0,b.cdrom.audioBufferedFrames());
             assertEquals(0,b.cdrom.audioFrame());assertEquals(0,b.cdrom.availableBytes());assertEquals(0,b.cdrom.dmaBytes);
             command(b,0x11);assertArrayEquals(new int[]{1,1,0,0,7,0,2,7},response(b));ack(b);

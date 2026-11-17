@@ -328,10 +328,11 @@ public final class CdRom {
                 if(!media())break;
                 int track=p.length==0?0:binary(p[0]);if(track<0||track>disc.lastTrack()){error(0x10);break;}
                 if(disc.sectorCount()<=0){error(0x80);break;}
+                int accepted=status(); // as for reads and seeks: the play state follows the acknowledge
                 stopRead();resetAudio();
                 if(track!=0){readLocation=disc.trackStart(track);locationPending=false;}
                 else if(locationPending){readLocation=location;locationPending=false;}
-                motor=spinUpTicks==0;playing=true;playStep=1;sectorTicks=spinUpTicks+CdDriveTiming.sector((mode&128)!=0);event(0,3,status());
+                motor=spinUpTicks==0;playing=true;playStep=1;sectorTicks=spinUpTicks+CdDriveTiming.sector((mode&128)!=0);event(0,3,accepted);
             }
             case 4,5 -> {
                 if(!count(p,0))break;
@@ -341,13 +342,17 @@ public final class CdRom {
             }
             case 6,0x1b -> {
                 if(!count(p,0) || !media())break;
-                if(reading && !locationPending){event(0,3,status());break;}
+                // The acknowledge carries the drive status from when the command was accepted;
+                // the seek/read it starts shows up in later responses. libcd keeps this INT3 stat
+                // as the command's CdSync result, and games wait on it for the seek bit to clear.
+                int accepted=status();
+                if(reading && !locationPending){event(0,3,accepted);break;}
                 int target=locationPending?location:readLocation;boolean positioned=seekReady && target==readLocation;
                 stopRead();resetAudio();locationPending=false;
                 if(positioned && driveTicks==0){reading=true;sectorTicks=CdDriveTiming.sector((mode&128)!=0);}
                 else if(positioned){seekTarget=target;seekTicks=driveTicks;readAfterSeek=true;}
                 else seek(target,true);
-                event(0,3,status());
+                event(0,3,accepted);
             }
             case 7,8,9,0x0a -> {
                 if(!count(p,0))break;
@@ -378,8 +383,8 @@ public final class CdRom {
                 int frames=disc.trackStart(track)+150;event(0,3,status(),bcd(frames/4500),bcd(frames/75%60));
             }
             case 0x15,0x16 -> {
-                if(!count(p,0) || !media())break;stopRead();resetAudio();locationPending=false;events.removeIf(e->e.irq==2);
-                seek(location,false);event(0,3,status());
+                if(!count(p,0) || !media())break;int accepted=status();stopRead();resetAudio();locationPending=false;events.removeIf(e->e.irq==2);
+                seek(location,false);event(0,3,accepted); // seek bit appears after the acknowledge
             }
             case 0x19 -> {
                 if(p.length!=1){error(0x20);break;}
