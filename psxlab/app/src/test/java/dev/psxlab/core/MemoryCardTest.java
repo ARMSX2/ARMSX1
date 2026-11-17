@@ -6,5 +6,18 @@ public class MemoryCardTest {
     private int write(MemoryCard c,int sector,byte[] bytes,boolean corrupt){begin(c,0x57,sector);int xor=sector>>>8^(sector&255);for(byte b:bytes){c.exchange(b);xor^=b&255;}c.exchange(xor^(corrupt?1:0));assertEquals(0x5c,c.exchange(0).value());assertEquals(0x5d,c.exchange(0).value());SerialPad.Reply end=c.exchange(0);assertFalse(end.acknowledge());return end.value();}
     @Test public void formatContainsValidHeaderFreeDirectoryAndChecksums(){byte[] d=MemoryCard.formatted();assertEquals(131072,d.length);assertEquals('M',d[0]);assertEquals('C',d[1]);for(int s=0;s<36;s++){int xor=0;for(int i=0;i<128;i++)xor^=d[s*128+i]&255;assertEquals(0,xor);}for(int s=1;s<16;s++)assertEquals(0xa0,d[s*128]&255);}
     @Test public void sectorWriteReadEchoChecksumAndAcknowledgement(){int[] saves={0};MemoryCard c=new MemoryCard(MemoryCard.formatted(),()->saves[0]++);byte[] data=new byte[128];new java.util.Random(12).nextBytes(data);assertEquals(0x47,write(c,123,data,false));assertEquals(1,saves[0]);begin(c,0x52,123);assertEquals(0x5c,c.exchange(0).value());assertEquals(0x5d,c.exchange(0).value());assertEquals(0,c.exchange(0).value());assertEquals(123,c.exchange(0).value());int xor=123;for(byte b:data){assertEquals(b&255,c.exchange(0).value());xor^=b&255;}assertEquals(xor,c.exchange(0).value());assertFalse(c.exchange(0).acknowledge());}
+    /** Card-swap detection rewrites the write-test frame (a copy of frame 0) every few seconds;
+     *  that is not a save and must not be persisted or announced as one. */
+    @Test public void unchangedWritesAreAcceptedWithoutReportingAChange(){
+        int[] changes={0};byte[] image=MemoryCard.formatted();MemoryCard c=new MemoryCard(image,()->changes[0]++);
+        byte[] header=java.util.Arrays.copyOfRange(image,0,128);
+        for(int i=0;i<5;i++)assertEquals(0x47,write(c,63,header,false));
+        assertEquals("write-test rewrites are not changes",0,changes[0]);
+        assertEquals("an accepted write still clears the new-card flag",0,readFlags(c));
+        byte[] save=new byte[128];new java.util.Random(7).nextBytes(save);
+        assertEquals(0x47,write(c,200,save,false));assertEquals(1,changes[0]);
+        assertEquals(0x47,write(c,200,save,false));assertEquals("the same save written again is not a second change",1,changes[0]);
+    }
+    private int readFlags(MemoryCard c){c.deselect();c.exchange(0x81);return c.exchange(0x52).value()&8;}
     @Test public void badChecksumInvalidAddressAndAbortedWritePreserveCard(){MemoryCard c=new MemoryCard(MemoryCard.formatted(),null);byte[] before=c.image();assertEquals(0x4e,write(c,64,new byte[128],true));assertArrayEquals(before,c.image());assertEquals(255,write(c,1024,new byte[128],false));assertArrayEquals(before,c.image());begin(c,0x57,64);for(int i=0;i<70;i++)c.exchange(0);c.deselect();assertArrayEquals(before,c.image());}
 }

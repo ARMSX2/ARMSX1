@@ -40,7 +40,14 @@ public final class MemoryCard {
             else if(at==134){result=address>=1024?255:checksum!=value?0x4e:0x47;out=previous;}
             else if(at==135)out=0x5c;
             else if(at==136)out=0x5d;
-            else{out=result;last=true;if(result==0x47){synchronized(this){System.arraycopy(incoming,0,data,address*128,128);}flags&=~8;if(changed!=null)changed.run();}}
+            else{out=result;last=true;if(result==0x47){
+                // Games and the BIOS rewrite the write-test frame (63) to detect a swapped card, and
+                // some rewrite unchanged frames; only a write that alters the card is a change to
+                // persist and announce. The new-card flag clears on any accepted write.
+                boolean altered=false;
+                synchronized(this){int base=address*128;for(int i=0;i<128;i++)if(data[base+i]!=incoming[i]){altered=true;break;}if(altered)System.arraycopy(incoming,0,data,base,128);}
+                flags&=~8;if(altered&&changed!=null)changed.run();
+            }}
         }
         previous=value;if(last)finished=true;return new SerialPad.Reply(out,!last);
     }
