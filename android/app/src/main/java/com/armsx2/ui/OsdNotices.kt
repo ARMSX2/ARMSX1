@@ -13,15 +13,16 @@ object OsdNotices {
     private const val KEY_CHEATS = "osd.notice.cheats"
     private const val KEY_SETTINGS = "osd.notice.settings"
 
-    val memoryCard = mutableStateOf(true)
-    val cheats = mutableStateOf(true)
-    val settings = mutableStateOf(true)
+    // All off by default: each one is opt-in from the in-game OSD menu.
+    val memoryCard = mutableStateOf(false)
+    val cheats = mutableStateOf(false)
+    val settings = mutableStateOf(false)
 
     fun load() {
         val prefs = runCatching { MainActivityRuntime.prefs }.getOrNull() ?: return
-        memoryCard.value = runCatching { prefs.getBoolean(KEY_MEMORY_CARD, true) }.getOrDefault(true)
-        cheats.value = runCatching { prefs.getBoolean(KEY_CHEATS, true) }.getOrDefault(true)
-        settings.value = runCatching { prefs.getBoolean(KEY_SETTINGS, true) }.getOrDefault(true)
+        memoryCard.value = runCatching { prefs.getBoolean(KEY_MEMORY_CARD, false) }.getOrDefault(false)
+        cheats.value = runCatching { prefs.getBoolean(KEY_CHEATS, false) }.getOrDefault(false)
+        settings.value = runCatching { prefs.getBoolean(KEY_SETTINGS, false) }.getOrDefault(false)
     }
 
     fun setMemoryCard(show: Boolean) = store(memoryCard, KEY_MEMORY_CARD, show)
