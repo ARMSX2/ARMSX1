@@ -45,6 +45,8 @@ public final class ArmSxBackend {
     private final Object gate=new Object();
     private final ConcurrentLinkedQueue<Runnable> commands=new ConcurrentLinkedQueue<>();
     private final PadState[] pads={new PadState(),new PadState()};
+    /** Developer rolling trace; null unless the deeptrace.on flag file exists in the log folder. */
+    private volatile DeepTrace deepTrace;
     private final StartupTiming startupTiming=new StartupTiming(2048);
     private volatile boolean traceStartup;
     private volatile boolean active,stop,paused,audioSuspended,presentationSuspended,fast;
@@ -243,8 +245,11 @@ public final class ArmSxBackend {
         public void close()throws IOException{if(cue!=null)cue.close();else source.close();}
     }
     public ArmSxBackend(Context context,Consumer<Boolean> pauseCallback,Consumer<String> notice){
-        this(context,pauseCallback,notice,new File(context.getFilesDir(),"logs/psxlab"));
+        this(context,pauseCallback,notice,defaultLogDirectory(context));
     }
+    /** App-specific external storage when available, so a connected developer can read engine logs and deep
+     *  traces over adb while the game runs; other apps still cannot. Internal storage otherwise. */
+    public static File defaultLogDirectory(Context context){File external=context.getExternalFilesDir(null);return new File(external!=null?external:context.getFilesDir(),"logs/psxlab");}
     public ArmSxBackend(Context context,Consumer<Boolean> pauseCallback,Consumer<String> notice,File logDirectory){
         this.context=context.getApplicationContext();this.pauseCallback=pauseCallback;this.notice=notice;
         journal=new EngineLog(logDirectory,new EngineLog.Clock(){public long wall(){return System.nanoTime();}public long cpu(){return android.os.Debug.threadCpuTimeNanos();}public long tid(){return android.os.Process.myTid();}});
@@ -423,7 +428,7 @@ public final class ArmSxBackend {
         synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;sessionReady=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;stateId="";lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
         boolean booted=false;Restore restore=null;int priority=boostThread();startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=hostThermalSample=0;hostThermalStatus=-1;hostCpuPercent=hostRssMb=hostAvailableMb=-1;timeline.start(System.nanoTime());event("launch");
         try{
-            options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));capturedGraphicsClocks=-1;lastGraphicsCapture=Map.of("status","recording when logging is enabled; pause at the problem to capture");try{Files.deleteIfExists(new File(journal.directory(),GpuReplay.FILE_NAME).toPath());}catch(IOException error){journal.error("gpu.replay.reset",error);}bios=readBios();configureCheats();Achievements.sessionBegin();
+            options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);deepTrace=DeepTrace.openIfRequested(journal.directory());if(deepTrace!=null)journal.event(EngineLog.INFO,"deeptrace.enabled",Map.of("directory",journal.directory().getAbsolutePath(),"interval_fields",DeepTrace.INTERVAL));journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));capturedGraphicsClocks=-1;lastGraphicsCapture=Map.of("status","recording when logging is enabled; pause at the problem to capture");try{Files.deleteIfExists(new File(journal.directory(),GpuReplay.FILE_NAME).toPath());}catch(IOException error){journal.error("gpu.replay.reset",error);}bios=readBios();configureCheats();Achievements.sessionBegin();
             do{
                 restart=null;performance.reset();
                 int scale=Math.max(1,Math.min(5,Integer.parseInt(options.getOrDefault("video.internal_scale","1"))));
@@ -465,7 +470,7 @@ public final class ArmSxBackend {
                 restore=restart;
             }while(!stop&&restore!=null);
         }catch(Exception e){booted=false;error(e);if(restore!=null)restore.ready().complete(false);if(restart!=null)restart.ready().complete(false);}
-        finally{restoreThread(priority);performance.reset();resetButtons();fps=0;renderer="Stopped";sessionReady=false;synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");Achievements.sessionEnd();achievementHashes.clear();writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
+        finally{DeepTrace endingTrace=deepTrace;deepTrace=null;if(endingTrace!=null)endingTrace.close();restoreThread(priority);performance.reset();resetButtons();fps=0;renderer="Stopped";sessionReady=false;synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");Achievements.sessionEnd();achievementHashes.clear();writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
         return booted;
     }
     /** The host reuses its VM thread: raise it to the GPU worker's and DSP's level for the session only. */
@@ -571,7 +576,7 @@ public final class ArmSxBackend {
             long perfStarted=ticket!=0?System.nanoTime():0;
             cpu.configureProfiling(journal.enabled());
             if(diagnosticFrame==null)diagnosticFrame=journal.frame(cpu.instructions,cpu.pc);
-            long emulationStarted=System.nanoTime(),emulationCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}frameEmulation+=System.nanoTime()-emulationStarted;frameEmulationCpu+=threadCpu()-emulationCpu;pcSamples.add(cpu.pc);guestClocks=cpu.instructions;lastPc=cpu.pc;if(perfStarted!=0)perfCpu+=System.nanoTime()-perfStarted;
+            long emulationStarted=System.nanoTime(),emulationCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}DeepTrace activeTrace=deepTrace;if(activeTrace!=null)activeTrace.onVm(bus.gpu.vblanks,cpu,bus,pads[0].get().pressed());frameEmulation+=System.nanoTime()-emulationStarted;frameEmulationCpu+=threadCpu()-emulationCpu;pcSamples.add(cpu.pc);guestClocks=cpu.instructions;lastPc=cpu.pc;if(perfStarted!=0)perfCpu+=System.nanoTime()-perfStarted;
             if(gpu.vblanks==last)continue;last=gpu.vblanks;if(achievements)Achievements.frame(bus.achievementMemory(),bus.ram,bus.scratchpadView(),cheats.armedCount()>0);cheats.apply(bus);if(diagnosticFrame!=null)diagnosticFrame.cpuDone(cpu.instructions,cpu.pc);
             long flushStarted=ticket!=0?System.nanoTime():0;
             long devicesStarted=System.nanoTime(),devicesCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.flush_devices",EngineLog.DEBUG)){bus.flushClocks();bus.spu.flushAudio();}frameEmulation+=System.nanoTime()-devicesStarted;frameEmulationCpu+=threadCpu()-devicesCpu;

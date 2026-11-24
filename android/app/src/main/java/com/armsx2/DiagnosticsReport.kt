@@ -175,7 +175,7 @@ object DiagnosticsReport {
         }
         w.appendLine()
         section(w, "saved settings.toml (requested configuration)", File(context.filesDir, "settings.toml"))
-        val engineLogs = File(context.filesDir, "logs/psxlab")
+        val engineLogs = dev.psxlab.ArmSxBackend.defaultLogDirectory(context)
         GpuReplayReport.append(w, File(engineLogs, GpuReplay.FILE_NAME))
         section(w, "PSX Lab session checkpoint (historical, timestamped)", File(engineLogs,"last-session.json"))
         section(w, "PSX Lab structured engine log (current tail)", File(engineLogs,"engine-current.jsonl"))
