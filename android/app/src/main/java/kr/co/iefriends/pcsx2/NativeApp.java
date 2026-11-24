@@ -141,11 +141,27 @@ public class NativeApp {
 		com.armsx2.RetroAchievementsHostOverrideReceiver.applyPending(context);
 	}
 
+	/** Load the RetroAchievements module once and resume the saved login. HTTPS, the encrypted
+	 *  token and notifications go through SwanAchievementsTransport. */
+	private static void initializeAchievements() {
+		dev.psxlab.Achievements.initialize(new dev.psxlab.Achievements.Transport() {
+			@Override public String[] request(String url, String post, String contentType) { return SwanAchievementsTransport.request(url, post, contentType); }
+			@Override public void store(String user, String token) { SwanAchievementsTransport.store(user, token); }
+			@Override public String[] restore() { return SwanAchievementsTransport.restore(); }
+			@Override public int optionValue(String key, int fallback) { return SwanAchievementsTransport.optionValue(key, fallback); }
+			@Override public void option(String key, int value) { SwanAchievementsTransport.option(key, value); }
+			@Override public void unlocked(String title, int points, int seconds) { SwanAchievementsTransport.notifyUnlock(title, points, seconds); }
+			@Override public void event(int kind, int id, String text, boolean visible) { SwanAchievementsTransport.event(kind, id, text, visible); }
+			@Override public void unlockSound(String path) { SwanAchievementsTransport.unlockSound(path); }
+		});
+	}
+
 	public static void initialize(String path, String biosFolder, int apiVer) {
         Context context = getContext();
         if (context == null) throw new IllegalStateException("Backend context is unavailable");
         String config = new File(context.getFilesDir(), "settings.toml").getAbsolutePath();
         if (lab == null) { lab = new dev.psxlab.ArmSxBackend(context, NativeApp::vmSetPaused, NativeApp::backendNotice); lab.setAdpf(adpf); lab.osdListener(com.armsx2.ui.OsdNotices.INSTANCE::post); }
+        initializeAchievements();
         lab.mediaResolver(source -> {
             com.armsx2.core.Ps1SafAccess.Session prepared = com.armsx2.core.Ps1SafAccess.INSTANCE.prepare(context, source, () -> !hasActiveVM());
             return new dev.psxlab.ArmSxBackend.PreparedMedia(prepared.getLaunchPath(), prepared);
@@ -366,7 +382,8 @@ public class NativeApp {
 
 	// ---- RetroAchievements ----
 	//
-	// Backed by frontend/achievements.cpp (rcheevos) through frontend/android_jni.cpp.
+	// Backed by psxlab/app/src/main/cpp/achievements_jni.cpp (rcheevos rc_client) through
+	// dev.psxlab.Achievements; ArmSxBackend feeds it each machine's disc hash and every guest frame.
 	// SOFTCORE ONLY: hardcore is refused natively and both hardcore queries always answer
 	// false, so no unlock earned here can ever claim hardcore credit on an RA account.
 	//
@@ -378,54 +395,54 @@ public class NativeApp {
 	 *  in-game overlay's right-side panel. See armsx_ach_get_json() for the schema — it is the
 	 *  same one ARMSX2 emits. Returns the empty-state payload (active=false, items=[]) when no
 	 *  game is loaded or nobody is signed in, never null. */
-	public static String getAchievementsJSON() { unsupported("getAchievementsJSON"); return "{}"; }
+	public static String getAchievementsJSON() { return dev.psxlab.Achievements.json(); }
 
 	/** RetroAchievements hash for a disc image, computed without booting it — the key used to look
 	 *  a game up in RA's game list so the library can show progress for games never played. This
 	 *  is the PS1 disc hash (RC_CONSOLE_PLAYSTATION), NOT the local save-state fingerprint.
 	 *  Empty string if the image is unreadable or has no PS1 executable. Reads the disc: call
 	 *  off the UI thread. */
-	public static String getAchievementsHashForPath(String imagePath) { unsupported("getAchievementsHashForPath"); return ""; }
+	public static String getAchievementsHashForPath(String imagePath) { dev.psxlab.ArmSxBackend backend = lab; return backend == null ? "" : backend.achievementHash(imagePath); }
 
 	/** Live RetroAchievements rich-presence string, recomputed on the native side from the
 	 *  game's RAM. Empty when no game, no client, or RP not supported by the loaded set. */
-	public static String getRichPresence() { unsupported("getRichPresence"); return ""; }
+	public static String getRichPresence() { return dev.psxlab.Achievements.presence(); }
 
 	/** RetroAchievements password login. Returns an empty string on success or a
 	 *  human-readable error. Synchronous — runs the HTTP login request to completion, may take
 	 *  a few seconds. Callers MUST dispatch off the Main thread (Dispatchers.IO from Compose).
 	 *  After success the next getAchievementsJSON poll reflects loggedIn=true, and a running
 	 *  game is identified against RA on its next frame; no separate callback wiring needed. */
-	public static String loginAchievements(String username, String password) { unsupported("loginAchievements"); return "RetroAchievements is not connected to this backend."; }
+	public static String loginAchievements(String username, String password) { return dev.psxlab.Achievements.login(username, password); }
 
 	/** RetroAchievements logout. Idempotent. Drops the saved token. */
-	public static void logoutAchievements() { unsupported("logoutAchievements"); }
+	public static void logoutAchievements() { dev.psxlab.Achievements.logout(); }
 
 	/** Accepted and ignored. ARMSX RetroAchievements support is softcore only until the
 	 *  emulator has had a lot more testing, so there is no hardcore path to enable; passing
 	 *  true logs a warning natively and changes nothing. */
-	public static void setHardcoreMode(boolean enabled) { unsupported("setHardcoreMode"); }
+	public static void setHardcoreMode(boolean enabled) { if (enabled) android.util.Log.w("PSXLabBackend", "RetroAchievements hardcore is not available; staying in softcore"); }
 
 	/** Always false — see {@link #setHardcoreMode}. */
-	public static boolean isHardcoreMode() { unsupported("isHardcoreMode"); return false; }
+	public static boolean isHardcoreMode() { return false; }
 
 	/** Always false — see {@link #setHardcoreMode}. */
-	public static boolean isHardcorePersisted() { unsupported("isHardcorePersisted"); return false; }
+	public static boolean isHardcorePersisted() { return false; }
 
 	/** Toggle a RetroAchievements presentation option. {@code key} is one of
 	 *  "notifications", "leaderboardNotifications", "overlays", "lbOverlays", "soundEffects",
 	 *  "encoreMode", "spectatorMode", "unofficialTestMode". Persisted natively and reported
 	 *  back in {@link #getAchievementsJSON}. "hardcore" is deliberately not a valid key. */
-	public static void setAchievementsOption(String key, boolean enabled) { unsupported("setAchievementsOption"); }
+	public static void setAchievementsOption(String key, boolean enabled) { dev.psxlab.Achievements.option(key, enabled); }
 
 	/** Integer-valued options: "notificationsDuration", "leaderboardsDuration",
 	 *  "notificationPosition", "overlayPosition". Clamped natively. */
-	public static void setAchievementsOptionInt(String key, int value) { unsupported("setAchievementsOptionInt"); }
+	public static void setAchievementsOptionInt(String key, int value) { dev.psxlab.Achievements.optionInt(key, value); }
 
 	// Custom achievement-unlock sound. `path` is an app-private absolute file the MediaPlayer
 	// can read; an empty string clears it. ARMSX bundles no RA sounds of its own, so unlocks
 	// are silent until the user imports one.
-	public static void setAchievementsUnlockSound(String path) { unsupported("setAchievementsUnlockSound"); }
+	public static void setAchievementsUnlockSound(String path) { dev.psxlab.Achievements.setUnlockSound(path); }
 
 	/** Repoint the RetroAchievements client at a loopback proxy. Persisted and applied live, so
 	 *  a running session picks up the new host. */

@@ -21,6 +21,8 @@ import javax.net.ssl.HttpsURLConnection;
 
 /** TLS-only, bounded RA transport. Never logs passwords, tokens, requests or responses. */
 public final class SwanAchievementsTransport {
+    /** ARMSX1 identifies as itself, "Name/Version (Platform)", plus the rcheevos client clause. */
+    static final String USER_AGENT="ARMSX1/"+com.armsx2.BuildConfig.VERSION_NAME+" (Android "+android.os.Build.VERSION.RELEASE+") rcheevos/12.3.0";
     private static Context context(){return NativeApp.mContext==null?null:NativeApp.mContext.get();}
     public static int optionValue(String key,int fallback){Context ctx=context();return ctx==null?fallback:ctx.getSharedPreferences("swan-ra",Context.MODE_PRIVATE).getInt("option."+key,fallback);}
     public static void option(String key,int value){Context ctx=context();if(ctx!=null)ctx.getSharedPreferences("swan-ra",Context.MODE_PRIVATE).edit().putInt("option."+key,value).apply();}
@@ -53,7 +55,7 @@ public final class SwanAchievementsTransport {
                 return new String[]{"-1",""};
             connection=(HttpsURLConnection)url.openConnection();connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(10000);connection.setReadTimeout(10000);
-            connection.setRequestProperty("User-Agent","EmuCorePSX-SwanStation/1.0");
+            connection.setRequestProperty("User-Agent",USER_AGENT);
             if(!post.isEmpty()) {byte[] bytes=post.getBytes(StandardCharsets.UTF_8);
                 connection.setRequestMethod("POST");connection.setDoOutput(true);
                 connection.setRequestProperty("Content-Type",contentType);

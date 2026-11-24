@@ -16,6 +16,9 @@ public final class Bus {
     public byte[] snapshotRam(){if(nativeMemory==null)return ram.clone();byte[] copy=new byte[ram.length];nativeMemory.duplicate().get(copy);return copy;}
     /** The 1 KiB data scratchpad, from native memory when the recompiler owns it. */
     public byte[] snapshotScratchpad(){if(nativeMemory==null)return scratch.clone();byte[] copy=new byte[scratch.length];java.nio.ByteBuffer bytes=nativeMemory.duplicate();bytes.position(SCRATCH_OFFSET);bytes.get(copy);return copy;}
+    /** Live guest memory for RetroAchievements: the recompiler buffer when active, otherwise null (use ram and scratchpadView). */
+    public java.nio.ByteBuffer achievementMemory(){return nativeMemory;}
+    public byte[] scratchpadView(){return scratch;}
     void prepareSnapshot(){flushClocks();if(nativeMemory!=null){nativeMemory.duplicate().get(ram);java.nio.ByteBuffer bytes=nativeMemory.duplicate();bytes.position(SCRATCH_OFFSET);bytes.get(scratch);}}
     void restoreSnapshotMemory(){if(nativeMemory!=null){nativeMemory.duplicate().put(ram);java.nio.ByteBuffer bytes=nativeMemory.duplicate();bytes.position(SCRATCH_OFFSET);bytes.put(scratch);}invalidateInstructionFetch();updateDeadline();}
     private int memory8(byte[] data,int offset,int base){return nativeMemory==null?data[offset]&255:nativeMemory.get(base+offset)&255;}

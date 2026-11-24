@@ -397,6 +397,25 @@ public final class ArmSxBackend {
             return result;
         }catch(Exception e){try{source.close();}catch(IOException closing){e.addSuppressed(closing);}throw e;}
     }
+    // ---- RetroAchievements: hash each started machine's disc and feed guest frames to rc_client ----
+    private final Map<String,String> achievementHashes=new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile boolean achievements;
+    private void achievementMachine(Media mounted,boolean restored){
+        achievements=Achievements.available();if(!achievements)return;
+        String hash="";
+        if(mounted!=null&&mounted.disc!=null){
+            String key=discPath+"#"+mounted.discIndex();hash=achievementHashes.get(key);
+            if(hash==null){long started=System.nanoTime();hash=Achievements.hash(mounted.disc);achievementHashes.put(key,hash);
+                journal.event(EngineLog.INFO,"achievements.hash",Map.of("found",!hash.isEmpty(),"millis",(System.nanoTime()-started)/1_000_000));}
+        }
+        Achievements.machine(hash,restored);
+    }
+    /** RetroAchievements hash of a disc image without booting it (library progress). Reads the disc: call off the UI thread. */
+    public String achievementHash(String path){
+        if(!Achievements.available()||path==null||path.isEmpty())return "";
+        try(Media mounted=openMediaImage(path,0,false)){return mounted.disc==null?"":Achievements.hash(mounted.disc);}
+        catch(Exception e){return "";}
+    }
     /** Blocking, as ArmSX1's existing runVMThread contract requires. */
     public boolean run(String path){return run(path, () -> true);}
     /** The host's session cancellation and this active/stop transition share this monitor. */
@@ -404,7 +423,7 @@ public final class ArmSxBackend {
         synchronized(this){if(!allowed.getAsBoolean()||active||root==null)return false;active=true;stop=false;paused=false;sessionReady=false;frames=nonzero=guestClocks=0;gamePath=configuredGame.isEmpty()?path:configuredGame;stateId="";lastGameId=MigrationBackup.digest(gamePath.getBytes(StandardCharsets.UTF_8));configuredGame="";bootPath=discPath=path;lastError="";lastFailureCpuContext="";lastPc=0;lastAudio=lastCore="Not started";lastCpuTiming=lastGpuTiming=Map.of();fps=0;}
         boolean booted=false;Restore restore=null;int priority=boostThread();startupTiming.reset();performance.reset();hostSampleTime=hostSampleCpu=hostThermalSample=0;hostThermalStatus=-1;hostCpuPercent=hostRssMb=hostAvailableMb=-1;timeline.start(System.nanoTime());event("launch");
         try{
-            options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));capturedGraphicsClocks=-1;lastGraphicsCapture=Map.of("status","recording when logging is enabled; pause at the problem to capture");try{Files.deleteIfExists(new File(journal.directory(),GpuReplay.FILE_NAME).toPath());}catch(IOException error){journal.error("gpu.replay.reset",error);}bios=readBios();configureCheats();
+            options=readConfig();if(options.containsKey("video.texture_dump")||options.containsKey("video.texture_replacements")||options.containsKey("video.texture_dir"))textureOptions=null;configureLogging(options);journal.startSession(MigrationBackup.digest(path.getBytes(StandardCharsets.UTF_8)));capturedGraphicsClocks=-1;lastGraphicsCapture=Map.of("status","recording when logging is enabled; pause at the problem to capture");try{Files.deleteIfExists(new File(journal.directory(),GpuReplay.FILE_NAME).toPath());}catch(IOException error){journal.error("gpu.replay.reset",error);}bios=readBios();configureCheats();Achievements.sessionBegin();
             do{
                 restart=null;performance.reset();
                 int scale=Math.max(1,Math.min(5,Integer.parseInt(options.getOrDefault("video.internal_scale","1"))));
@@ -431,6 +450,7 @@ public final class ArmSxBackend {
                                 timeline.incident(System.nanoTime(),"CPU execution mode: "+cpu.executionMode());
                                 timeline.incident(System.nanoTime(),"start: "+renderer+", scale "+scale+", "+output.deviceDiagnostic()+", GPU "+(gpu.hardwareDescription().isEmpty()?"none (software renderer)":gpu.hardwareDescription())+", ADPF "+(adpf?"on":"off")+", VM thread priority "+threadPriority()+", "+Runtime.getRuntime().availableProcessors()+" cores"+", disc "+discLayout(media));
                                 if(restore!=null){discPath=restore.disc();restore.ready().complete(true);}pauseCallback.accept(paused);event("ready");
+                                achievementMachine(media,restore!=null&&restore.state()!=null);
                                 // A save-state load restarts this machine; announce settings once per launch, cheats every start.
                                 if(!sessionReady)announceSettings();sessionReady=true;if(cheats.armedCount()>0)announceCheats();
                                 try{loop(output);}catch(Exception failure){lastFailureCpuContext=cpu.diagnostic();journal.event(EngineLog.FATAL,"runtime.cpu_context",Map.of("cpu",lastFailureCpuContext,"exception",failure.toString(),"guest_clocks",cpu.instructions));throw failure;}finally{try{lastAudio=output.diagnostic();}catch(IllegalStateException ignored){}saveGraphicsCapture("stop");}
@@ -445,7 +465,7 @@ public final class ArmSxBackend {
                 restore=restart;
             }while(!stop&&restore!=null);
         }catch(Exception e){booted=false;error(e);if(restore!=null)restore.ready().complete(false);if(restart!=null)restart.ready().complete(false);}
-        finally{restoreThread(priority);performance.reset();resetButtons();fps=0;renderer="Stopped";sessionReady=false;synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
+        finally{restoreThread(priority);performance.reset();resetButtons();fps=0;renderer="Stopped";sessionReady=false;synchronized(this){active=false;}Runnable job;while((job=commands.poll())!=null)job.run();event("stopped");Achievements.sessionEnd();achievementHashes.clear();writeReport();cheats.arm(false,null);for(PreparedMedia prepared:restoredMedia)try{prepared.close();}catch(Exception e){error(e);}restoredMedia.clear();discSources.clear();clearSessionOverrides();gamePath=discPath=bootPath="";serial="";}
         return booted;
     }
     /** The host reuses its VM thread: raise it to the GPU worker's and DSP's level for the session only. */
@@ -552,7 +572,7 @@ public final class ArmSxBackend {
             cpu.configureProfiling(journal.enabled());
             if(diagnosticFrame==null)diagnosticFrame=journal.frame(cpu.instructions,cpu.pc);
             long emulationStarted=System.nanoTime(),emulationCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.runToFrame",EngineLog.TRACE)){cpu.runToFrame(100000);}frameEmulation+=System.nanoTime()-emulationStarted;frameEmulationCpu+=threadCpu()-emulationCpu;pcSamples.add(cpu.pc);guestClocks=cpu.instructions;lastPc=cpu.pc;if(perfStarted!=0)perfCpu+=System.nanoTime()-perfStarted;
-            if(gpu.vblanks==last)continue;last=gpu.vblanks;cheats.apply(bus);if(diagnosticFrame!=null)diagnosticFrame.cpuDone(cpu.instructions,cpu.pc);
+            if(gpu.vblanks==last)continue;last=gpu.vblanks;if(achievements)Achievements.frame(bus.achievementMemory(),bus.ram,bus.scratchpadView(),cheats.armedCount()>0);cheats.apply(bus);if(diagnosticFrame!=null)diagnosticFrame.cpuDone(cpu.instructions,cpu.pc);
             long flushStarted=ticket!=0?System.nanoTime():0;
             long devicesStarted=System.nanoTime(),devicesCpu=threadCpu();try(EngineLog.Span span=journal.begin("cpu.flush_devices",EngineLog.DEBUG)){bus.flushClocks();bus.spu.flushAudio();}frameEmulation+=System.nanoTime()-devicesStarted;frameEmulationCpu+=threadCpu()-devicesCpu;
             if(flushStarted!=0)perfCpu+=System.nanoTime()-flushStarted;
