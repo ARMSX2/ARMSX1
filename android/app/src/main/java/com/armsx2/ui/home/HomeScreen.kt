@@ -6,6 +6,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -462,6 +463,19 @@ fun HomeScreen(
                     if (CoverArtCache.prefetch(context, sources)) ready++
                 }
                 android.util.Log.i("ARMSX-Covers", "Library artwork preload completed: $ready/${state.allGames.size} covers ready")
+            }
+            // Remember the first screenful's covers so the next cold start can decode them
+            // during the boot splash (see CoverArtCache.warmFromDisk).
+            LaunchedEffect(state.visibleGames, shownRecents, coverStyle, coverGeneration, customVersion,
+                customCoverMap, state.query) {
+                if (state.query.isNotBlank() || state.visibleGames.isEmpty()) return@LaunchedEffect
+                delay(1_500)
+                withContext(Dispatchers.IO) {
+                    val games = (shownRecents + state.visibleGames).distinctBy { it.uri }
+                    CoverArtCache.rememberWarmSet(context, games.asSequence().take(240).map { game ->
+                        listOfNotNull(CustomCovers.matchIn(customCoverMap, game)) + game.coverUrls
+                    }.toList())
+                }
             }
             LaunchedEffect(gridState, state.visibleGames, shownRecents, state.layout, estimatedColumns,
                 leadingItems, coverStyle, coverGeneration, customVersion, customCoverMap, lifecycleState) {

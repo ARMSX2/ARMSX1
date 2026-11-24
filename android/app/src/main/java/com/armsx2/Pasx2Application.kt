@@ -55,6 +55,11 @@ class Pasx2Application : Application(), ImageLoaderFactory {
 	 * the status quo.
 	 */
 	private fun warmUpOffMainThread() {
+		// Library thumbnails: decode the first screenful from the disk cache while the splash
+		// plays, so a relaunch draws covers from memory instead of placeholders.
+		kotlin.concurrent.thread(isDaemon = true, name = "armsx-cover-warm") {
+			runCatching { com.armsx2.ui.common.CoverArtCache.warmFromDisk(this) }
+		}
 		kotlin.concurrent.thread(isDaemon = true, name = "armsx-warmup") {
 			CoverCatalogue.load(this)
 			// 1. SharedPreferences. getSharedPreferences() only SCHEDULES the XML parse; the first

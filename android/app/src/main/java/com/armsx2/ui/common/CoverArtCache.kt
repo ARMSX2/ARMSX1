@@ -7,7 +7,13 @@ import coil.imageLoader
 import coil.memory.MemoryCache
 import coil.request.ImageRequest
 import coil.request.SuccessResult
+import coil.request.CachePolicy
 import coil.size.Precision
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.io.FileNotFoundException
 import java.util.concurrent.ConcurrentHashMap
@@ -91,5 +97,58 @@ internal object CoverArtCache {
         } finally {
             prefetching.remove(key)
         }
+    }
+
+    /** Covers decoded during the boot splash so the library's first screen draws from memory. */
+    private const val WARM_FILE = "cover-warm-list.txt"
+    private const val WARM_LIMIT = 160
+    @Volatile private var lastWarmList: String? = null
+
+    /**
+     * Record the source each game will load first, in display order. Called off the main thread
+     * whenever the library order or cover preferences change; rewrites only when the list differs.
+     */
+    fun rememberWarmSet(context: Context, games: List<List<Any>>) {
+        val firstChoices = games.asSequence().mapNotNull { ordered(context, it).firstOrNull() }
+            .take(WARM_LIMIT).toList()
+        val text = CoverSourcePolicy.encodeWarmList(firstChoices)
+        if (text == lastWarmList) return
+        runCatching {
+            val target = File(context.filesDir, WARM_FILE)
+            if (target.exists() && target.readText() == text) { lastWarmList = text; return }
+            val temp = File(context.filesDir, "$WARM_FILE.tmp")
+            temp.writeText(text)
+            if (!temp.renameTo(target)) { target.delete(); temp.renameTo(target) }
+            lastWarmList = text
+        }
+    }
+
+    /**
+     * Decode the recorded thumbnails from the disk cache into Coil's memory cache. Runs on a worker
+     * at process start; never touches the network and stops before crowding the memory cache.
+     */
+    fun warmFromDisk(context: Context) {
+        val text = runCatching { File(context.filesDir, WARM_FILE).readText() }.getOrNull() ?: return
+        lastWarmList = text
+        val models = CoverSourcePolicy.decodeWarmList(text)
+        if (models.isEmpty()) return
+        val loader = context.imageLoader
+        val cache = loader.memoryCache ?: return
+        val started = System.nanoTime()
+        val permits = Semaphore(4)
+        val ready = runBlocking {
+            models.map { model ->
+                async {
+                    permits.withPermit {
+                        if (cache.get(memoryKey(model)) != null) return@withPermit true
+                        if (cache.size > cache.maxSize * 3 / 4) return@withPermit false
+                        val request = request(context, model).newBuilder()
+                            .networkCachePolicy(CachePolicy.DISABLED).build()
+                        loader.execute(request) is SuccessResult
+                    }
+                }
+            }.awaitAll().count { it }
+        }
+        println("@@LAUNCH@@ cover-warm $ready/${models.size} in ${(System.nanoTime() - started) / 1_000_000}ms")
     }
 }
