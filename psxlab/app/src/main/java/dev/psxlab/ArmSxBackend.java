@@ -287,7 +287,7 @@ public final class ArmSxBackend {
             Map<String,Object> metadata=new LinkedHashMap<>();metadata.put("session",journal.summary().get("session"));metadata.put("game_id",lastGameId);metadata.put("renderer",gpu.renderer());metadata.put("gpu",gpu.renderStatistics());metadata.put("reason",reason);metadata.put("guest_clocks",cpu.instructions);metadata.put("pc",Integer.toHexString(cpu.pc));metadata.put("registers",cpu.r.clone());metadata.put("cop0",cpu.cop0.clone());metadata.put("dma",bus.dma.loggingSnapshot());metadata.put("cd_data",bus.cdrom.dataSnapshot());metadata.put("mdec",bus.mdec.diagnostic());
             // Guest RAM lets a stuck-game report be disassembled offline: what the CPU loop
             // waits on, ring buffers, callback state. Game memory only; paused VM thread.
-            GpuReplay.write(file,EngineLog.json(metadata),capture,bus.snapshotRam(),bus.snapshotScratchpad());capturedGraphicsClocks=cpu.instructions;
+            GpuReplay.write(file,EngineLog.json(metadata),capture,bus.snapshotRam(),bus.snapshotScratchpad(),bus.spu.snapshotRam(),bus.spu.snapshotRegisters());capturedGraphicsClocks=cpu.instructions;
             lastGraphicsCapture=Map.of("status","captured","file",GpuReplay.FILE_NAME,"bytes",file.length(),"game_id",lastGameId,"session",journal.summary().get("session"),"first_frame",capture.firstFrame(),"last_frame",capture.lastFrame(),"operations",capture.operations().size(),"reason",reason);
             journal.event(EngineLog.INFO,"gpu.replay.saved",lastGraphicsCapture);
         }catch(IOException|RuntimeException error){lastGraphicsCapture=Map.of("status","capture failed","error",error.toString());journal.error("gpu.replay.capture",error);}

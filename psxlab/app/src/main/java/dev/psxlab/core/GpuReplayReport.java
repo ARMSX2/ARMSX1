@@ -16,9 +16,9 @@ public final class GpuReplayReport {
         }
         if(bytes.length==0||bytes.length>MAX_BYTES){writer.write("Capture unavailable: invalid attachment size.\n\n");return;}
         String digest;try{byte[] hash=MessageDigest.getInstance("SHA-256").digest(bytes);StringBuilder hex=new StringBuilder();for(byte value:hash)hex.append(String.format(Locale.ROOT,"%02x",value&255));digest=hex.toString();}catch(NoSuchAlgorithmException e){throw new IOException(e);}
-        writer.write("Format: ArmSX1 graphics replay v2, gzip/base64; bytes="+bytes.length+"; sha256="+digest+"\n");
+        writer.write("Format: ArmSX1 graphics replay v3, gzip/base64; bytes="+bytes.length+"; sha256="+digest+"\n");
         writer.write("Capture metadata identifies its session/game; this is the last paused/stopped capture, not a live measurement.\n");
-        writer.write("Includes guest RAM and scratchpad at the capture point (game memory only) for offline analysis.\n");
+        writer.write("Includes guest RAM, scratchpad, sound RAM and SPU registers at the capture point (game memory only) for offline analysis.\n");
         writer.write(BEGIN+"\n");Base64.Encoder encoder=Base64.getEncoder();
         for(int at=0;at<bytes.length;at+=3072)writer.write(encoder.encodeToString(Arrays.copyOfRange(bytes,at,Math.min(bytes.length,at+3072)))+"\n");
         writer.write(END+"\n\n");

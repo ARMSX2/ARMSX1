@@ -18,7 +18,7 @@ payload = ''.join(payload.split(end, 1)[0].split())
 if len(payload) > 12 * 1024 * 1024:
     raise SystemExit('Graphics attachment exceeds size limit')
 data = base64.b64decode(payload, validate=True)
-matches = re.findall(r'Format: ArmSX1 graphics replay v[12], gzip/base64; bytes=(\d+); sha256=([0-9a-f]{64})', header)
+matches = re.findall(r'Format: ArmSX1 graphics replay v[123], gzip/base64; bytes=(\d+); sha256=([0-9a-f]{64})', header)
 if not matches:
     raise SystemExit('Missing graphics attachment checksum')
 size, digest = matches[-1]

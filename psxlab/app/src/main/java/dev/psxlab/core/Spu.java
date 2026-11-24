@@ -24,6 +24,10 @@ public final class Spu {
     Spu(Bus bus,boolean nativeExecution){this.bus=bus;nativeCore=nativeExecution && NativeCore.AVAILABLE?new NativeSpu(bus):null;for(int i=0;i<24;i++)voices[i]=new Voice();}
     public boolean nativeExecution(){return nativeCore!=null;}
     byte[] snapshotNative(){return nativeCore==null?new byte[0]:nativeCore.snapshot();}
+    /** Sound RAM (512 KiB) for diagnostic captures; read-only, any thread while the VM is paused. */
+    public byte[] snapshotRam(){return nativeCore!=null?nativeCore.ram():ram.clone();}
+    /** Raw register halfwords 0x1F801C00..0x1F801DFE as last written, for diagnostic captures. */
+    public int[] snapshotRegisters(){if(nativeCore!=null)return nativeCore.registers();int[] values=new int[256];for(int i=0;i<256;i++)values[i]=registers[i]&65535;return values;}
     void restoreNative(byte[] bytes){if(nativeCore==null){if(bytes.length!=0)throw new IllegalArgumentException("State requires native SPU");}else nativeCore.restore(bytes);outputCount=0;nativeCounters();}
     private void nativeCounters(){if(nativeCore==null)return;frames=nativeCore.counter(0);nonzeroFrames=nativeCore.counter(1);decodedBlocks=nativeCore.counter(2);keyOns=nativeCore.counter(3);manualLoopWrites=nativeCore.counter(4);protectedLoopStarts=nativeCore.counter(5);cdNonzeroFrames=nativeCore.counter(6);cdMixedFrames=nativeCore.counter(7);}
     public void setAudioSink(AudioSink sink){this.sink=sink;outputCount=0;}

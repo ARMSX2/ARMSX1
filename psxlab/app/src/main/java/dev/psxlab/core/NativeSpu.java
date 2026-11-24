@@ -11,6 +11,11 @@ final class NativeSpu {
     long counter(int n){return counters.get(n);}
     byte[] snapshot(){byte[] bytes=new byte[state.capacity()];state.duplicate().get(bytes);return bytes;}
     void restore(byte[] bytes){if(bytes.length!=state.capacity())throw new IllegalArgumentException("Native SPU state size differs");state.duplicate().put(bytes);}
+    /** Copy of sound RAM (512 KiB) for diagnostics; no emulated state changes. */
+    byte[] ram(){byte[] bytes=new byte[512*1024];ByteBuffer view=state.duplicate();view.position(layout(state,0));view.get(bytes);return bytes;}
+    /** The 256 raw SPU register halfwords as last written, for diagnostics. */
+    int[] registers(){int[] values=new int[256];ByteBuffer view=state.duplicate().order(ByteOrder.nativeOrder());int at=layout(state,1);for(int i=0;i<256;i++)values[i]=view.getInt(at+i*4)&65535;return values;}
+    private static native int layout(ByteBuffer state,int which);
     private static native int stateSize();
     private static native void initialize(ByteBuffer state);
     private static native long operation(ByteBuffer state,int op,int a,int b);

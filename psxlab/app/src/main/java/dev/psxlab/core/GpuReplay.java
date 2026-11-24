@@ -12,15 +12,18 @@ public final class GpuReplay {
     public static final int BATCH=1,FILL=2,COPY=3,UPLOAD=4,FRAME=5;
     /** Guest main RAM and data scratchpad, stored whole or not at all (version 2). */
     public static final int RAM_BYTES=2*1024*1024,SCRATCHPAD_BYTES=1024;
+    /** Sound RAM and the raw SPU register file, stored whole or not at all (version 3). */
+    public static final int SPU_RAM_BYTES=512*1024,SPU_REGISTERS=256;
     private static final long MAGIC=0x41524d5358475055L;
-    private static final int VERSION=2;
+    private static final int VERSION=3;
     public record Operation(int kind,int[] words){}
     /** Arrays belong to this immutable capture; callers must not change them. */
     public record Capture(int[] before,List<Operation> operations,int[] after,int[] display,int[] environment,
                           long firstFrame,long lastFrame,long startedNanos,long capturedNanos){}
     /** ram and scratchpad are null for version-1 captures or when memory was not recorded. */
-    public record Document(String metadata,Capture capture,byte[] ram,byte[] scratchpad){
-        public Document(String metadata,Capture capture){this(metadata,capture,null,null);}
+    public record Document(String metadata,Capture capture,byte[] ram,byte[] scratchpad,byte[] spuRam,int[] spuRegisters){
+        public Document(String metadata,Capture capture){this(metadata,capture,null,null,null,null);}
+        public Document(String metadata,Capture capture,byte[] ram,byte[] scratchpad){this(metadata,capture,ram,scratchpad,null,null);}
     }
     public record Picture(int width,int height,int[] pixels){}
 
@@ -42,7 +45,10 @@ public final class GpuReplay {
     }
     public static void write(File file,String metadata,Capture capture)throws IOException{write(file,metadata,capture,null,null);}
     /** ram/scratchpad: whole guest memory at the capture point, or both null to omit it. */
-    public static void write(File file,String metadata,Capture capture,byte[] ram,byte[] scratchpad)throws IOException{
+    public static void write(File file,String metadata,Capture capture,byte[] ram,byte[] scratchpad)throws IOException{write(file,metadata,capture,ram,scratchpad,null,null);}
+    /** spuRam/spuRegisters: sound RAM and SPU registers at the capture point, or both null to omit them. */
+    public static void write(File file,String metadata,Capture capture,byte[] ram,byte[] scratchpad,byte[] spuRam,int[] spuRegisters)throws IOException{
+        if((spuRam==null)!=(spuRegisters==null)||spuRam!=null&&(spuRam.length!=SPU_RAM_BYTES||spuRegisters.length!=SPU_REGISTERS))throw new IOException("Sound memory snapshot has the wrong size");
         if((ram==null)!=(scratchpad==null)||ram!=null&&(ram.length!=RAM_BYTES||scratchpad.length!=SCRATCHPAD_BYTES))throw new IOException("Guest memory snapshot has the wrong size");
         if(metadata.length()>16000||capture.before().length!=VRAM_WORDS||capture.after().length!=VRAM_WORDS||capture.display().length!=8||capture.environment().length!=7||capture.operations().size()>MAX_OPERATIONS)throw new IOException("Graphics capture exceeds limits");
         int words=0;for(Operation operation:capture.operations()){validate(operation);words+=operation.words().length;if(words>MAX_WORDS)throw new IOException("Graphics commands exceed limit");}
@@ -57,6 +63,7 @@ public final class GpuReplay {
                 for(Operation operation:capture.operations()){out.writeInt(operation.kind());out.writeInt(operation.words().length);for(int value:operation.words())out.writeInt(value);}
                 for(int value:capture.after())out.writeShort(value);
                 out.writeInt(ram==null?0:RAM_BYTES);if(ram!=null){out.write(ram);out.writeInt(SCRATCHPAD_BYTES);out.write(scratchpad);}
+                out.writeInt(spuRam==null?0:SPU_RAM_BYTES);if(spuRam!=null){out.write(spuRam);for(int value:spuRegisters)out.writeShort(value);}
             }
             Files.move(pending,file.toPath(),StandardCopyOption.REPLACE_EXISTING);
         }finally{Files.deleteIfExists(pending);}
@@ -78,8 +85,14 @@ public final class GpuReplay {
                 if(ramLength==RAM_BYTES){ram=new byte[RAM_BYTES];in.readFully(ram);if(in.readInt()!=SCRATCHPAD_BYTES)throw new IOException("Invalid scratchpad snapshot");scratchpad=new byte[SCRATCHPAD_BYTES];in.readFully(scratchpad);}
                 else if(ramLength!=0)throw new IOException("Invalid guest memory snapshot");
             }
+            byte[] spuRam=null;int[] spuRegisters=null;
+            if(version>=3){
+                int spuLength=in.readInt();
+                if(spuLength==SPU_RAM_BYTES){spuRam=new byte[SPU_RAM_BYTES];in.readFully(spuRam);spuRegisters=new int[SPU_REGISTERS];for(int i=0;i<SPU_REGISTERS;i++)spuRegisters[i]=in.readUnsignedShort();}
+                else if(spuLength!=0)throw new IOException("Invalid sound memory snapshot");
+            }
             if(in.read()!=-1)throw new IOException("Trailing graphics data");
-            return new Document(metadata,new Capture(before,List.copyOf(operations),after,display,environment,first,last,start,end),ram,scratchpad);
+            return new Document(metadata,new Capture(before,List.copyOf(operations),after,display,environment,first,last,start,end),ram,scratchpad,spuRam,spuRegisters);
         }
     }
     /** Independent Java raster replay. Live texture feedback can differ from the hardware snapshot contract. */

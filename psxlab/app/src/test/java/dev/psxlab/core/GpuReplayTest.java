@@ -52,12 +52,19 @@ public class GpuReplayTest {
             gpu.setJournal(log);GpuReplay.Capture capture=scene(gpu);
             Bus bus=new Bus(gpu,new PadState(),false);if(nativeRam)bus.enableNativeMemory();
             bus.write32(0x800bede4,0x1000ffff);bus.write32(0x801ffffc,0xcafef00d);bus.write32(0x1f800000,0x12345678);bus.write32(0x1f8003fc,0x0badf00d);
-            GpuReplay.write(captureFile,"{}",capture,bus.snapshotRam(),bus.snapshotScratchpad());GpuReplay.Document decoded=GpuReplay.read(captureFile);
+            // Park a block high in sound RAM the way Linda Cube stores files there, then capture it.
+            bus.spu.write(0x1f801da6,0x7B560/8);for(int i=0;i<4;i++)bus.spu.writeTransfer(0x1234+i);bus.spu.write(0x1f801d80,0x3fff);
+            GpuReplay.write(captureFile,"{}",capture,bus.snapshotRam(),bus.snapshotScratchpad(),bus.spu.snapshotRam(),bus.spu.snapshotRegisters());GpuReplay.Document decoded=GpuReplay.read(captureFile);
+            assertNotNull(decoded.spuRam());assertEquals(GpuReplay.SPU_RAM_BYTES,decoded.spuRam().length);
+            java.nio.ByteBuffer spu=java.nio.ByteBuffer.wrap(decoded.spuRam()).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            for(int i=0;i<4;i++)assertEquals(0x1234+i,spu.getShort(0x7B560+i*2)&65535);
+            assertEquals("main volume left register",0x3fff,decoded.spuRegisters()[(0x1f801d80-0x1f801c00)/2]);
+            assertEquals("transfer address register",0x7B560/8,decoded.spuRegisters()[(0x1f801da6-0x1f801c00)/2]);
             assertNotNull(decoded.ram());assertEquals(GpuReplay.RAM_BYTES,decoded.ram().length);assertEquals(GpuReplay.SCRATCHPAD_BYTES,decoded.scratchpad().length);
             java.nio.ByteBuffer ram=java.nio.ByteBuffer.wrap(decoded.ram()).order(java.nio.ByteOrder.LITTLE_ENDIAN),scratch=java.nio.ByteBuffer.wrap(decoded.scratchpad()).order(java.nio.ByteOrder.LITTLE_ENDIAN);
             assertEquals(0x1000ffff,ram.getInt(0x0bede4));assertEquals(0xcafef00d,ram.getInt(0x1ffffc));assertEquals(0x12345678,scratch.getInt(0));assertEquals(0x0badf00d,scratch.getInt(0x3fc));
             assertArrayEquals(capture.after(),GpuReplay.replay(decoded.capture()));
-            StringWriter report=new StringWriter();GpuReplayReport.append(report,captureFile);assertTrue(report.toString().contains("graphics replay v2"));
+            StringWriter report=new StringWriter();GpuReplayReport.append(report,captureFile);assertTrue(report.toString().contains("graphics replay v3"));
             try{GpuReplay.write(captureFile,"{}",capture,new byte[16],bus.snapshotScratchpad());fail("Partial RAM accepted");}catch(IOException expected){}
         }
         // A capture written before memory snapshots existed: version 1, nothing after the final VRAM.

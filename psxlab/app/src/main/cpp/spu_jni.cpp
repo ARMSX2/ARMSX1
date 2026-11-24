@@ -119,5 +119,11 @@ struct SpuCore {
 };
 static SpuCore* core(JNIEnv* env,jobject buffer){auto* p=static_cast<SpuCore*>(env->GetDirectBufferAddress(buffer));if(!p||env->GetDirectBufferCapacity(buffer)<jlong(sizeof(SpuCore))){env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid native SPU memory");return nullptr;}return p;}
 extern "C" JNIEXPORT jint JNICALL Java_dev_psxlab_core_NativeSpu_stateSize(JNIEnv*,jclass){return sizeof(SpuCore);}
+/* Byte offsets of sound RAM (0) and the raw register array (1) inside the Java-owned state, measured
+   on the live object, so diagnostics can copy them without touching emulated SPU state. */
+extern "C" JNIEXPORT jint JNICALL Java_dev_psxlab_core_NativeSpu_layout(JNIEnv* env,jclass,jobject buffer,jint which){
+    auto* p=core(env,buffer);if(!p)return -1;const char* base=reinterpret_cast<const char*>(p);
+    return jint((which==0?reinterpret_cast<const char*>(p->ram):reinterpret_cast<const char*>(p->registers))-base);
+}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeSpu_initialize(JNIEnv* env,jclass,jobject buffer){if(auto* p=core(env,buffer))new(p)SpuCore();}
 extern "C" JNIEXPORT jlong JNICALL Java_dev_psxlab_core_NativeSpu_operation(JNIEnv* env,jclass,jobject buffer,jint op,jint a,jint b){auto* p=core(env,buffer);if(!p)return 0;p->raised=false;int result=0;switch(op){case 0:result=p->read(a);break;case 1:p->write(a,b);break;case 2:result=p->readTransfer();break;case 3:p->writeTransfer(a);break;case 4:result=p->sample(a);break;default:env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"),"Invalid SPU operation");return 0;}return jlong(uint64_t(uint32_t(result))|(p->raised?(uint64_t(1)<<32):0));}
