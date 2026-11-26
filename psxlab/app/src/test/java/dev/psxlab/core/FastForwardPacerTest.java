@@ -4,10 +4,23 @@ import static org.junit.Assert.*;
 
 public class FastForwardPacerTest {
     @Test public void normalPresentationCannotBuildAQueueBehindAStalledDisplay(){
-        FastForwardPacer p=new FastForwardPacer();assertTrue(p.presentNormally());
+        FastForwardPacer p=new FastForwardPacer();assertTrue(p.presentNormally());assertTrue(p.presentNormally());
         for(int field=0;field<120;field++){p.reset();assertFalse(p.presentNormally());}
         p.presentationComplete();assertTrue(p.presentNormally());assertFalse(p.present(1_000_000_000,120));
-        p.presentationComplete();assertTrue(p.present(1_000_000_000,120));
+        p.presentationComplete();p.presentationComplete();assertTrue(p.present(1_000_000_000,120));
+        p.presentationComplete();p.presentationComplete();assertTrue(p.present(2_000_000_000,120));
+    }
+    @Test public void aPresentFinishingJustAfterTheNextFieldDoesNotDropThatField(){
+        // Digimon World 3 on a 120 Hz panel: the previous present was still completing when the next
+        // field arrived, so one field in ~120 was never shown and idle battle animations hitched.
+        FastForwardPacer p=new FastForwardPacer();int shown=0;boolean outstanding=false,finishesLate=false;
+        for(int field=0;field<600;field++){
+            if(outstanding&&!finishesLate)p.presentationComplete();
+            boolean accepted=p.presentNormally();if(accepted)shown++;
+            if(outstanding&&finishesLate)p.presentationComplete();
+            outstanding=accepted;finishesLate=field%120==60;
+        }
+        assertEquals("every field reaches the display",600,shown);
     }
     @Test public void allMenuMultipliersAndSupportedCustomSpeedsScaleDeadlines(){
         FastForwardPacer p=new FastForwardPacer();
