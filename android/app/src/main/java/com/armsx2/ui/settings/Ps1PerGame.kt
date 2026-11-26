@@ -181,6 +181,7 @@ private val ROWS: List<RowKeys> = listOf(
     RowKeys(Ps1Tab.Video, "renderer.textureDir.label", listOf("video.texture_dir")),
     // Emulation
     RowKeys(Ps1Tab.Emulation, "perf.cpuMode.label", listOf("cpu.execution_mode")),
+    RowKeys(Ps1Tab.Emulation, "perf.overclock.label", listOf("cpu.overclock")),
     RowKeys(Ps1Tab.Emulation, "Recompiler memory access", listOf("cpu.fastmem_mode")),
     RowKeys(Ps1Tab.Emulation, "JIT block linking", listOf("cpu.block_linking")),
     RowKeys(Ps1Tab.Emulation, "Emulate instruction cache", listOf("cpu.instruction_cache")),

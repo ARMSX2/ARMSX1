@@ -20,6 +20,10 @@ data class Ps1Settings(
     val cpuInstructionCache: Boolean = false,
     val cpuFastmemRewrite: Boolean = false,
     val cdReadThread: Boolean = true,
+    // CPU overclock, percent of the PS1's 33.8688 MHz CPU. 100 is the real console. Higher values
+    // give games that slow down in busy scenes more instructions per frame; devices, timers and
+    // the frame rate keep real time. PSX Lab's native CPU modes only. Read at game start.
+    val cpuOverclock: Int = 100,
     // Skip BIOS. Boots the game's executable directly at the BIOS shell entry, skipping the
     // startup animation. The [cpu] table owns it because it is the CPU's entry state that gets
     // rewritten. Default FALSE: it is a shortcut, not a free speed-up — whatever the BIOS would
@@ -426,6 +430,11 @@ data class Ps1Settings(
             speed == speed.toInt().toFloat() -> "${speed.toInt()}×"
             else -> "${speed}×"
         }
+
+        /** CPU overclock percentages offered by the UI; 100 = the real console. */
+        val OVERCLOCK_PERCENTS = listOf(100, 125, 150, 200, 300, 400)
+        const val MIN_OVERCLOCK = 25
+        const val MAX_OVERCLOCK = 1000
 
         /** Emulation-speed percentages offered by the UI. */
         val SPEED_PERCENTS = listOf(25, 50, 75, 90, 100, 110, 125, 150, 200)

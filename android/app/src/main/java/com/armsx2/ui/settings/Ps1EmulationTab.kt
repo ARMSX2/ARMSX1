@@ -48,6 +48,17 @@ fun Ps1EmulationTab() {
         )
         SettingsDivider()
 
+        SegmentedRow(
+            label = str("perf.overclock.label"),
+            options = Ps1Settings.OVERCLOCK_PERCENTS.map { "$it%" },
+            // A hand-edited settings.toml value has no segment; the description names it instead.
+            selectedIndex = Ps1Settings.OVERCLOCK_PERCENTS.indexOf(s.cpuOverclock).takeIf { it >= 0 } ?: 0,
+            description = str("perf.overclock.description") +
+                (if (s.cpuOverclock !in Ps1Settings.OVERCLOCK_PERCENTS) " (${s.cpuOverclock}% set in settings.toml)" else ""),
+            onChange = { idx -> editor.update { it.copy(cpuOverclock = Ps1Settings.OVERCLOCK_PERCENTS[idx]) } },
+        )
+        SettingsDivider()
+
         Ps1CpuPerformanceOptions(editor)
 
         SegmentedRow(
@@ -186,6 +197,7 @@ fun Ps1EmulationTab() {
             editor.update {
                 it.copy(
                     cpuEngine = d.cpuEngine,
+                    cpuOverclock = d.cpuOverclock,
                     cpuFastmemMode = d.cpuFastmemMode,
                     cpuBlockLinking = d.cpuBlockLinking,
                     cpuInstructionCache = d.cpuInstructionCache,

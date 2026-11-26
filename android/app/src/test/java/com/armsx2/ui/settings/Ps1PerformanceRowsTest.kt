@@ -7,7 +7,8 @@ import org.junit.Test
 class Ps1PerformanceRowsTest {
     @Test fun emulationTabResetIncludesTheNewCpuOptions() {
         assertTrue(ps1KeysForCategory(SettingsCategory.Performance).containsAll(listOf(
-            "cpu.fastmem_mode", "cpu.block_linking", "cpu.instruction_cache", "cpu.fastmem_rewrite", "cpu.cd_read_thread")))
+            "cpu.fastmem_mode", "cpu.block_linking", "cpu.instruction_cache", "cpu.fastmem_rewrite", "cpu.cd_read_thread",
+            "cpu.overclock")))
     }
     @Test fun videoTabResetIncludesTheNewGpuOptions() {
         assertTrue(ps1KeysForCategory(SettingsCategory.Graphics).containsAll(listOf(

@@ -125,6 +125,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("renderer.affinity.label", true, SettingsCategory.Graphics),
     // Emulation tab — settings.toml [cpu] + [console] + [runtime]
     SettingsSearchEntry("perf.cpuMode.label", true, SettingsCategory.Performance),
+    SettingsSearchEntry("perf.overclock.label", true, SettingsCategory.Performance),
     SettingsSearchEntry("perf.region.label", true, SettingsCategory.Performance),
     SettingsSearchEntry("perf.skipBios.label", true, SettingsCategory.Performance),
     SettingsSearchEntry("perf.frameLimit.label", true, SettingsCategory.Performance),

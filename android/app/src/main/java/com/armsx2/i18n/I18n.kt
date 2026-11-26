@@ -1841,6 +1841,12 @@ val EN: Map<String, String> = mapOf(
     "perf.cpuMode.description" to
         "Cached is the fast default. Interpreter is slower but the accuracy reference. Try it if " +
         "a game misbehaves. Applies on next launch.",
+    "perf.overclock.label" to "CPU overclock",
+    "perf.overclock.description" to
+        "Runs the PlayStation CPU faster than the real console so games that slow down in busy " +
+        "scenes keep their frame rate. Game speed, music and timers stay normal. Higher values " +
+        "make the phone work harder, even when the game is idle, and a few games glitch or play " +
+        "some animations too fast. Recompiler and cached interpreter only. Applies on next launch.",
     "perf.cpuMode.cached" to "Cached",
     "perf.cpuMode.interpreter" to "Interpreter",
     "perf.region.label" to "Console region",

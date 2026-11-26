@@ -429,6 +429,7 @@ object Ps1SettingsStore {
         appendLine("    instruction_cache = ${s.cpuInstructionCache}")
         appendLine("    fastmem_rewrite = ${s.cpuFastmemRewrite}")
         appendLine("    cd_read_thread = ${s.cdReadThread}")
+        appendLine("    overclock = ${s.cpuOverclock}")
         appendLine()
         appendLine("[runtime]")
         appendLine("    display_scale = ${s.displayScale}")
@@ -584,6 +585,8 @@ object Ps1SettingsStore {
             "instruction_cache" -> s.copy(cpuInstructionCache = value.trim().toBooleanStrictOrNull() ?: false)
             "fastmem_rewrite" -> s.copy(cpuFastmemRewrite = value.trim().toBooleanStrictOrNull() ?: false)
             "cd_read_thread" -> s.copy(cdReadThread = value.trim().toBooleanStrictOrNull() ?: true)
+            "overclock" -> s.copy(cpuOverclock = value.trim().toIntOrNull()
+                ?.coerceIn(Ps1Settings.MIN_OVERCLOCK, Ps1Settings.MAX_OVERCLOCK) ?: 100)
             else -> s
         }
         "runtime" -> when (key) {

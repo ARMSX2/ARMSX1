@@ -10,8 +10,14 @@ public final class Cpu {
     public boolean enableNative(boolean recompile,boolean events,boolean ramWaitStates){
         if(!NativeCore.AVAILABLE || !gte.nativeExecution())return false;
         if(nativeCpu!=null)return true;
-        bus.setEventScheduling(events);nativeCpu=new NativeCpu(bus,recompile,ramWaitStates);nativeCpu.importState(this);this.recompile=recompile;return true;
+        bus.setEventScheduling(events);nativeCpu=new NativeCpu(bus,recompile,ramWaitStates);nativeCpu.importState(this);nativeCpu.setOverclock(overclock);this.recompile=recompile;return true;
     }
+    /** Host setting, not machine state: kept out of save states and reapplied to every native core. */
+    private int overclock=100;
+    public static final int MIN_OVERCLOCK=25,MAX_OVERCLOCK=1000;
+    /** Percent of the 33.8688 MHz CPU clock. Native modes only; the Java interpreter always runs at 100%. */
+    public void setOverclock(int percent){overclock=Math.max(MIN_OVERCLOCK,Math.min(MAX_OVERCLOCK,percent));if(nativeCpu!=null)nativeCpu.setOverclock(overclock);}
+    public int overclock(){return nativeCpu==null?100:overclock;}
     public void closeNative(){if(nativeCpu!=null){nativeCpu.exportState(this);nativeCpu.close();nativeCpu=null;}}
     public String executionDiagnostic(){return nativeCpu==null?"CPU Java interpreter":nativeCpu.diagnostic()+" · device dispatches="+bus.deviceDispatches;}
     public String executionMode(){

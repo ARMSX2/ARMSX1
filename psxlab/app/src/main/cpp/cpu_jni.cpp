@@ -16,6 +16,10 @@ struct CpuCore {
     JNIEnv* env=nullptr;jobject bus; jmethodID clockMethod,finishMethod,readMethod,writeMethod,biosWaitMethod,cdWaitMethod;
     CpuState* s;uint8_t* memory;uint64_t* generations;
     int elapsed=0,deadline=32,biosReadWaits=0,cdReadWaits=0;bool irq=false,recompile,frameBoundary=false,ramWaitStates;int projectionScale=65536;
+    // CPU overclock, percent of the 33.8688 MHz clock. Instruction and wait costs are charged to
+    // the machine's clock (devices, timers, the frame budget) scaled by 100/overclock; the fraction
+    // carries in clockUnits, so 100 is exactly the unscaled path and no cycles are lost or gained.
+    int overclock=100,clockUnits=0,stepClocks=1;
     std::unordered_map<uint32_t,std::unique_ptr<CpuBlock>> blocks;
     std::deque<uint32_t> blockOrder;
     CpuBlock* previous=nullptr;NativeTiming timing;HardwareRegisterCounters registers;
@@ -27,8 +31,11 @@ struct CpuCore {
     }
     void status(jlong packed){deadline=int((uint64_t(packed)>>32)&0x1fffffff);irq=(uint64_t(packed)>>62)&1;frameBoundary=(uint64_t(packed)>>61)&1;elapsed=0;bridges++;if(env->ExceptionCheck()){s->faultPc=currentAt;s->faultInstruction=currentWord;throw Stop{};}}
     jlong clockCall(jmethodID method){jvalue args[2]{};args[0].i=elapsed;args[1].i=int(s->cacheIsolated);return env->CallLongMethodA(bus,method,args);}
-    void tick(){if(++elapsed>=deadline)status(clockCall(clockMethod));}
-    void wait(int clocks){elapsed+=clocks;s->instructions+=clocks;if(elapsed>=deadline)status(clockCall(clockMethod));}
+    int charge(int cpuClocks){if(overclock==100)return cpuClocks;int64_t units=int64_t(cpuClocks)*100+clockUnits;clockUnits=int(units%overclock);return int(units/overclock);}
+    // CPU clocks that charge() turns into at most this many machine clocks, whatever the carry.
+    int cpuClocksWithin(int clocks)const{return overclock==100||clocks<=0?clocks:int(std::min<int64_t>(INT32_MAX,int64_t(clocks)*overclock/100));}
+    void tick(){stepClocks=charge(1);elapsed+=stepClocks;if(elapsed>=deadline)status(clockCall(clockMethod));}
+    void wait(int clocks){clocks=charge(clocks);elapsed+=clocks;s->instructions+=clocks;if(elapsed>=deadline)status(clockCall(clockMethod));}
     int biosWait(int width)const{return (biosReadWaits>>(width==4?16:width==2?8:0))&255;}
     int fetchWait(uint32_t pc)const{return ramWaitStates && pc>=0xbfc00000 && pc<0xbfc80000?biosWait(4):0;}
     // Bus.writeLatch: JOY_STAT, GPUSTAT, timer counts and GPU DMA CHCR, exact for latch[0] clocks after the last Java boundary.
@@ -47,7 +54,7 @@ struct CpuCore {
         if(width>1 && (address&uint32_t(width-1)))throw AddressFault{address,false};uint32_t a=address&0x1fffffff,offset;
         // Data RAM reads consume six bus clocks in addition to the instruction.
         // Cached instruction fetches and scratchpad accesses do not use this wait.
-        if(a<0x800000){offset=a&0x1fffff;if(ramWaitStates&&!instruction){elapsed+=6;s->instructions+=6;if(elapsed>=deadline)status(clockCall(clockMethod));}}
+        if(a<0x800000){offset=a&0x1fffff;if(ramWaitStates&&!instruction)wait(6);}
         else if(a>=0x1fc00000&&a<0x1fc80000){offset=Bios+a-0x1fc00000;if(ramWaitStates&&!instruction)wait(biosWait(width));}
         else if(a>=0x1f800000&&a<0x1f800400)offset=Scratch+a-0x1f800000;
         else{
@@ -96,12 +103,12 @@ struct CpuCore {
         if(irq)s->cop0[13]|=0x400;else s->cop0[13]&=~0x400;
         if((s->cop0[12]&1)&&(s->cop0[12]&s->cop0[13]&0xff00)){
             commit();if(s->cop0[12]&0x40000000){try{uint32_t w=read(at,4,true);if((w&0xfe000000)==0x4a000000)gteExecute(w);}catch(AddressFault&){} }
-            trap(0,at,delay);s->instructions++;interpreted++;return;
+            trap(0,at,delay);s->instructions+=stepClocks;interpreted++;return;
         }
         uint32_t word;
         // Decoded/JIT host caches do not turn KSEG1 ROM into guest cached memory.
         wait(fetchWait(at));
-        try{word=cached?cached->word:read(at,4,true);}catch(AddressFault& e){commit();trap(4,at,delay,e.address);s->instructions++;interpreted++;return;}
+        try{word=cached?cached->word:read(at,4,true);}catch(AddressFault& e){commit();trap(4,at,delay,e.address);s->instructions+=stepClocks;interpreted++;return;}
         currentWord=word;Decoded d=cached?*cached:Decoded(word,at);int a=s->r[d.s],b=s->r[d.t];uint32_t merge=s->loadReg==uint32_t(d.t)&&d.t?s->loadValue:b;
         commit();s->pc=s->next;s->next+=4;s->branchPending=s->branchTaken=0;
         try{
@@ -148,7 +155,7 @@ struct CpuCore {
                 default:trap(10,at,delay);break;
             }
         }catch(int code){trap(code,at,delay);}catch(AddressFault& fault){trap(fault.store?5:4,at,delay,fault.address);}
-        s->r[0]=0;s->instructions++;interpreted++;
+        s->r[0]=0;s->instructions+=stepClocks;interpreted++;
     }
     bool valid(CpuBlock* block)const{return block && block->pc==s->pc && (block->page<0||block->version==generations[block->page]);}
     bool revalidate(CpuBlock* block){
@@ -228,9 +235,9 @@ struct CpuCore {
                 int blockClocks=block?int(block->code.size())*instructionClocks+(ramWaitStates?block->ramReadClocks.back():0):0;
                 if(block&&block->function&&block->codePage->executable&&!s->branchPending&&!s->cacheIsolated&&!pendingIrq&&remaining>0&&deadline-elapsed>instructionClocks){
                     if(irq)s->cop0[13]|=0x400;else s->cop0[13]&=~0x400;
-                    int available=std::min(remaining,deadline-elapsed-1),limit=int(block->code.size());
+                    int available=cpuClocksWithin(std::min(remaining,deadline-elapsed-1)),limit=int(block->code.size());
                     if(blockClocks>available)limit=block->instructionLimit(available,instructionClocks,ramWaitStates);
-                    int count=block->function(s,memory,generations,memory+CodeMask,limit,projectionScale);int clocks=count*instructionClocks+(ramWaitStates?block->ramReadClocks[size_t(count)]:0);s->instructions+=clocks;elapsed+=clocks;jitInstructions+=count;
+                    int count=block->function(s,memory,generations,memory+CodeMask,limit,projectionScale);int clocks=charge(count*instructionClocks+(ramWaitStates?block->ramReadClocks[size_t(count)]:0));s->instructions+=clocks;elapsed+=clocks;jitInstructions+=count;
                     if(count<int(block->code.size())&&s->instructions-start<uint64_t(budget)){if(elapsed+1>=deadline)step();else step(&block->code[size_t(count)]);}
                 }else if(block){
                     for(const Decoded& d:block->code){if(s->pc!=d.at||s->instructions-start>=uint64_t(budget))break;
@@ -258,6 +265,7 @@ extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_destroy(JNIEnv*
 extern "C" JNIEXPORT jlongArray JNICALL Java_dev_psxlab_core_NativeCpu_statisticsNative(JNIEnv* env,jclass,jlong handle){auto* c=reinterpret_cast<CpuCore*>(handle);jlong values[]={jlong(c->compiled),jlong(c->jitInstructions),jlong(c->interpreted),jlong(c->cacheHits),jlong(c->linked),jlong(c->invalidations),jlong(c->bridges),jlong(c->compileFailures),jlong(c->revalidated),jlong(CpuCodePage::allocatedBytes.load(std::memory_order_relaxed)),jlong(c->changedPc),jlong(c->changedAddress),jlong(c->oldInstruction),jlong(c->newInstruction),jlong(c->cacheClears),jlong(c->cacheTrims)};jlongArray result=env->NewLongArray(16);env->SetLongArrayRegion(result,0,16,values);return result;}
 
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProjectionNative(JNIEnv*,jclass,jlong handle,jint scale){reinterpret_cast<CpuCore*>(handle)->projectionScale=scale;}
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setOverclockNative(JNIEnv*,jclass,jlong handle,jint percent){auto* c=reinterpret_cast<CpuCore*>(handle);int value=percent<25?25:percent>1000?1000:int(percent);if(value!=c->overclock){c->overclock=value;c->clockUnits=0;}}
 
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_NativeCpu_setProfilingNative(JNIEnv*,jclass,jlong handle,jboolean enabled){auto* c=reinterpret_cast<CpuCore*>(handle);c->timing.enabled.store(enabled);}
 // Register deltas since the previous call, top 8; VM (core) thread only, like every CpuCore access.

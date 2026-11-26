@@ -21,7 +21,9 @@ final class NativeCpu implements AutoCloseable {
     private static native long[] registerDeltasNative(long handle);
     long[] registerDeltas(){return registerDeltasNative(handle);}
 
-    private int projectionScale=65536;
+    private int projectionScale=65536,overclock=100;
+    /** Percent of the PS1 CPU clock; applies from the next instruction. */
+    void setOverclock(int percent){if(percent!=overclock){overclock=percent;setOverclockNative(handle,percent);}}
     NativeCpu(Bus bus,boolean recompile,boolean ramWaitStates){this.bus=bus;this.ramWaitStates=ramWaitStates;memory=bus.enableNativeMemory();handle=create(bus,state,memory,(recompile?1:0)|(ramWaitStates?2:0));if(handle==0)throw new IllegalStateException("Native CPU initialization failed");}
     void importState(Cpu cpu){
         int requested=cpu.gte.projectionScale();if(requested!=projectionScale){projectionScale=requested;setProjectionNative(handle,requested);}
@@ -36,11 +38,12 @@ final class NativeCpu implements AutoCloseable {
     }
     int run(Cpu cpu,int count){return run(cpu,count,false);}
     int run(Cpu cpu,int count,boolean stopAtFrame){importState(cpu);bus.beginNativeFrame();try{return runNative(handle,count,stopAtFrame);}finally{exportState(cpu);}}
-    String diagnostic(){long[] s=statisticsNative(handle);return "CPU native blocks · RAM waits="+(ramWaitStates?"6":"off")+" · ARM64 blocks="+s[0]+" JIT instructions="+s[1]+" interpreted="+s[2]+" hits="+s[3]+" links="+s[4]+" invalidations="+s[5]+" device/MMIO calls="+s[6]+" compile failures="+s[7]+" unchanged blocks reused="+s[8]+" process JIT mapped bytes="+s[9]+" cache trims="+s[15];}
+    String diagnostic(){long[] s=statisticsNative(handle);return "CPU native blocks · RAM waits="+(ramWaitStates?"6":"off")+(overclock!=100?" · overclock "+overclock+"%":"")+" · ARM64 blocks="+s[0]+" JIT instructions="+s[1]+" interpreted="+s[2]+" hits="+s[3]+" links="+s[4]+" invalidations="+s[5]+" device/MMIO calls="+s[6]+" compile failures="+s[7]+" unchanged blocks reused="+s[8]+" process JIT mapped bytes="+s[9]+" cache trims="+s[15];}
     long[] statistics(){return statisticsNative(handle);}
     @Override public void close(){if(handle!=0){destroy(handle);handle=0;}}
     private static native long create(Bus bus,ByteBuffer state,ByteBuffer memory,int options);
     private static native void setProjectionNative(long handle,int projectionScale);
+    private static native void setOverclockNative(long handle,int percent);
     private static native int runNative(long handle,int count,boolean stopAtFrame);
     private static native long[] statisticsNative(long handle);
     private static native void destroy(long handle);
