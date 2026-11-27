@@ -1232,17 +1232,14 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         ) { v -> editPs1 { it.copy(accurateMaskBit = v) } }
     }
 
-    // Kept, deliberately inert. Whole-number scaling is a genuine want for a PlayStation image —
-    // it is what keeps 320x240 pixels square on a 1080p panel — but the core's present path has
-    // no such option: armsx_render_frame_params_t carries stretch, linear_filter and aspect and
-    // nothing else. Shown disabled rather than deleted so the capability is not quietly lost.
+    // Integer scaling uses the same live presentation setting as the Video tab.
     MenuOrderItem("MenuSwitchRow.fixes.integerScaling.label") {
         MenuSwitchRow(
-            str("fixes.integerScaling.label"),
-            checked = false,
-            enabled = false,
-            description = str("fixes.integerScaling.description"),
-        ) { }
+            str("renderer.integerScaling.label"),
+            ps1.integerScaling,
+            description = str("renderer.integerScaling.description"),
+            notDefault = ps1.integerScaling != Ps1Stock.integerScaling,
+        ) { v -> editRunningGraphics { it.copy(integerScaling = v) } }
     }
 
     // Shadeboost, Anti-Blur, Screen Offsets, Show Overscan and the three legacy
