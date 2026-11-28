@@ -15,6 +15,7 @@
 #include <memory>
 #include <atomic>
 #include "shader_chain.h"
+#include "frame_generation_vk.h"
 #include "prerotate_shaders.h"
 #include "vulkan_gpu_android.h"
 
@@ -34,6 +35,9 @@ class Output {
     jlong previousJavaToken=0;int previousJavaWindowW=0,previousJavaWindowH=0;bool previousJavaFilter=false;
     bool shadersTouched=false,lastInputShared=false,lastInputValid=false,lastDisplayedShader=false,displayedBlack=false;int lastW=0,lastH=0,nativeW=0,nativeH=0;
     VkImage directImage=VK_NULL_HANDLE;
+    // Frame generation (frame_generation_vk.h). requestCapture() turns the next present call into a copy of
+    // its input into the history; presentFrameGen() then shows generated or newest pictures in order.
+    psxfg::VkFrameGen frameGen;int captureMode=0;bool captureReset=false,frameGenShown=false,frameGenFilter=false;std::atomic<uint64_t> generatedFrames{0};std::string frameGenError;
     double outputAspect=4.0/3.0;bool outputStretch=false,outputInteger=false;PsxDisplayWindow outputWindow;
     std::atomic<uint64_t> presented{0},reused{0},javaUploadBytes{0},chainBuilds{0},suboptimalPresents{0},outdatedPresents{0};
     // Pre-rotation. A landscape game on a portrait-native panel reports a rotated currentTransform.
@@ -192,6 +196,11 @@ class Output {
         }
         checked(result,operation);presented++;return true;
     }
+    // After the fence wait, before recording. A device that cannot run the compute passes keeps presenting normally.
+    bool prepareFrameGen(int w,int h){try{frameGen.attach(physical,device);frameGen.resize(w,h);if(captureReset)frameGen.reset();captureReset=false;return true;}catch(const std::exception& error){frameGenError=error.what();frameGen.destroy();captureMode=0;return false;}}
+    void submitCapture(VkSemaphore producer){NativeTiming::Scope measured(timing,NativeTiming::VK_SUBMIT);checked(vkEndCommandBuffer(command),"End frame capture");VkPipelineStageFlags stage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;VkSubmitInfo info{VK_STRUCTURE_TYPE_SUBMIT_INFO};info.commandBufferCount=1;info.pCommandBuffers=&command;if(producer){info.waitSemaphoreCount=1;info.pWaitSemaphores=&producer;info.pWaitDstStageMask=&stage;}if(shadersTouched)armsx_shader_vk_queue_lock();VkResult result=vkQueueSubmit(queue,1,&info,fence);if(shadersTouched)armsx_shader_vk_queue_unlock();checked(result,"Submit frame capture");}
+    void captured(bool filter){captureMode=0;frameGenFilter=filter;previousJavaToken=0;}
+    bool useWindow(JNIEnv* env,jobject target){ANativeWindow* requested=ANativeWindow_fromSurface(env,target);if(!requested)return false;if(requested!=window){detach();window=requested;VkAndroidSurfaceCreateInfoKHR s{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};s.window=window;checked(vkCreateAndroidSurfaceKHR(instance,&s,nullptr,&surface),"Create generated-frame surface");VkBool32 supported=VK_FALSE;checked(vkGetPhysicalDeviceSurfaceSupportKHR(physical,family,surface,&supported),"Generated-frame presentation support");if(!supported)throw std::runtime_error("Vulkan queue cannot present this surface");}else ANativeWindow_release(requested);return true;}
 public:
     PsxVulkanContext gpuContext(){return{physical,device,queue,family,armsx_shader_vk_queue_lock,armsx_shader_vk_queue_unlock,[](void* owner,VkImage image){static_cast<Output*>(owner)->forgetImage(image);},this,orderedColor};}
     void forgetImage(VkImage image){
@@ -201,6 +210,7 @@ public:
         previousJavaToken=0;
     }
     bool presentDirect(JNIEnv* env,jobject target,VkImage image,int w,int h,bool filter,jlong token){
+        if(captureMode){waitFence("Native Vulkan capture fence");if(prepareFrameGen(w,h)){beginAfterFence();imageBarrier(image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT);frameGen.recordCapture(command,image,captureMode==2);imageBarrier(image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_READ_BIT,VK_ACCESS_SHADER_WRITE_BIT);submitCapture(VK_NULL_HANDLE);captured(filter);return true;}}
         for(int attempt=0;attempt<2;attempt++){
             std::unique_ptr<ANativeWindow,decltype(&ANativeWindow_release)> requested(ANativeWindow_fromSurface(env,target),ANativeWindow_release);if(!requested)return false;
             int targetW=ANativeWindow_getWidth(requested.get()),targetH=ANativeWindow_getHeight(requested.get());
@@ -218,7 +228,7 @@ public:
             imageBarrier(image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_SHADER_WRITE_BIT);finishTarget(index);submit(true,finished);
             VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};present.waitSemaphoreCount=1;present.pWaitSemaphores=&finished;present.swapchainCount=1;present.pSwapchains=&chain;present.pImageIndices=&index;
             if(shadersTouched)armsx_shader_vk_queue_lock();result=presentImage(&present);if(shadersTouched)armsx_shader_vk_queue_unlock();if(!finishPresent(result,"Present native Vulkan image"))continue;
-            directImage=image;lastInputShared=false;lastInputValid=true;lastDisplayedShader=usedShader;displayedBlack=false;lastW=w;lastH=h;previousJavaToken=token;previousJavaWindowW=targetW;previousJavaWindowH=targetH;previousJavaFilter=filter;return true;
+            directImage=image;lastInputShared=false;lastInputValid=true;lastDisplayedShader=usedShader;displayedBlack=false;frameGenShown=false;lastW=w;lastH=h;previousJavaToken=token;previousJavaWindowW=targetW;previousJavaWindowH=targetH;previousJavaFilter=filter;return true;
         }
         return false;
     }
@@ -247,13 +257,14 @@ public:
     }
     void configureWindow(float x,float y,float w,float h){PsxDisplayWindow next{x,y,w,h};if(next.x==outputWindow.x&&next.y==outputWindow.y&&next.w==outputWindow.w&&next.h==outputWindow.h)return;outputWindow=next;previousJavaToken=0;}
     ~Output(){destroy();}
-    void destroy(){if(device)psx_shader_detach(device);idle();detach();if(device){dropShared();dropSource();dropStaging();if(producerReady)vkDestroySemaphore(device,producerReady,nullptr);if(acquired)vkDestroySemaphore(device,acquired,nullptr);if(rendered)vkDestroySemaphore(device,rendered,nullptr);if(fence)vkDestroyFence(device,fence,nullptr);if(pool)vkDestroyCommandPool(device,pool,nullptr);vkDestroyDevice(device,nullptr);device=VK_NULL_HANDLE;}if(instance){vkDestroyInstance(instance,nullptr);instance=VK_NULL_HANDLE;}}
+    void destroy(){if(device)psx_shader_detach(device);idle();detach();if(device){frameGen.destroy();dropShared();dropSource();dropStaging();if(producerReady)vkDestroySemaphore(device,producerReady,nullptr);if(acquired)vkDestroySemaphore(device,acquired,nullptr);if(rendered)vkDestroySemaphore(device,rendered,nullptr);if(fence)vkDestroyFence(device,fence,nullptr);if(pool)vkDestroyCommandPool(device,pool,nullptr);vkDestroyDevice(device,nullptr);device=VK_NULL_HANDLE;}if(instance){vkDestroyInstance(instance,nullptr);instance=VK_NULL_HANDLE;}}
     bool present(JNIEnv* env,jobject target,const jint* pixels,int w,int h,bool filter,bool rgba=false,jintArray javaPixels=nullptr,jlong frameToken=0){
         // Android may resize a newly attached surface between creation and acquisition.
         for(int attempt=0;attempt<2;attempt++)if(presentOnce(env,target,pixels,w,h,filter,rgba,javaPixels,frameToken))return true;
         return false;
     }
     bool presentOnce(JNIEnv* env,jobject target,const jint* pixels,int w,int h,bool filter,bool rgba,jintArray javaPixels,jlong frameToken){
+        if(captureMode){waitFence("Capture fence");if(prepareFrameGen(w,h)){if(javaPixels){uploadJava(env,javaPixels,w,h);if(env->ExceptionCheck())return false;}else upload(pixels,w,h,rgba);if(javaPixels||!rgba){nativeW=w;nativeH=h;}beginAfterFence();copyUpload();frameGen.recordCapture(command,source,captureMode==2);submitCapture(VK_NULL_HANDLE);captured(filter);return true;}}
         std::unique_ptr<ANativeWindow,decltype(&ANativeWindow_release)> requested(ANativeWindow_fromSurface(env,target),ANativeWindow_release);if(!requested)return false;
         int targetW=ANativeWindow_getWidth(requested.get()),targetH=ANativeWindow_getHeight(requested.get());
         // An unchanged picture remains in the compositor. Do not upload or submit it again.
@@ -269,9 +280,9 @@ public:
         if(!sameInput){if(javaPixels){uploadJava(env,javaPixels,w,h);if(env->ExceptionCheck())return false;}else upload(pixels,w,h,rgba);}if(javaPixels||!rgba){nativeW=w;nativeH=h;}beginAfterFence();if(!sameInput)copyUpload();imageBarrier(drawTarget(index),VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue black{{0,0,0,1}};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};vkCmdClearColorImage(command,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&black,1,&range);
         VkMemoryBarrier order{VK_STRUCTURE_TYPE_MEMORY_BARRIER};order.srcAccessMask=order.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&order,0,nullptr,0,nullptr);
         auto rect=psxDisplayRect(int(extent.width),int(extent.height),w,h,outputAspect,outputStretch,outputInteger,outputWindow);int dw=rect.w,dh=rect.h,x=rect.x,y=rect.y;VkImageBlit blit{};blit.srcSubresource=blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.srcOffsets[1]={w,h,1};blit.dstOffsets[0]={x,y,0};blit.dstOffsets[1]={x+dw,y+dh,1};bool usedShader=drawShader(source,w,h,drawTarget(index),rect);if(!usedShader)vkCmdBlitImage(command,source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,filter&&linear?VK_FILTER_LINEAR:VK_FILTER_NEAREST);finishTarget(index);submit(true,finished);
-        VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();if(!finishPresent(r,"Present display image"))return false;previousJavaToken=javaPixels&&chain?frameToken:0;previousJavaWindowW=targetW;previousJavaWindowH=targetH;previousJavaFilter=filter;lastDisplayedShader=usedShader;displayedBlack=false;directImage=VK_NULL_HANDLE;lastInputShared=false;lastInputValid=true;lastW=w;lastH=h;return true;
+        VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();if(!finishPresent(r,"Present display image"))return false;previousJavaToken=javaPixels&&chain?frameToken:0;previousJavaWindowW=targetW;previousJavaWindowH=targetH;previousJavaFilter=filter;lastDisplayedShader=usedShader;displayedBlack=false;frameGenShown=false;directImage=VK_NULL_HANDLE;lastInputShared=false;lastInputValid=true;lastW=w;lastH=h;return true;
     }
-    bool needsPresent()const{return psx_shader_requested()||lastDisplayedShader||displayedBlack;}
+    bool needsPresent()const{return psx_shader_requested()||lastDisplayedShader||displayedBlack||frameGenShown||captureMode!=0;}
     void nativeDimensions(int w,int h){nativeW=w;nativeH=h;}
     bool drawShader(VkImage input,int w,int h,VkImage target,const PsxDisplayRect& rect){
         if(!psx_shader_requested()&&!shadersTouched)return false;shadersTouched=true;
@@ -301,11 +312,42 @@ public:
         if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();if(black)previousJavaToken=0;
         bool shown=finishPresent(r,black?"Present black frame":"Present shader subframe");if(shown){displayedBlack=black;lastDisplayedShader=usedShader;}return shown&&(black||usedShader);
     }
+    void requestCapture(bool estimate,bool reset){captureMode=estimate?2:1;captureReset=captureReset||reset;}
+    /** True when the last requestCapture() was taken by a present call; clears an untaken one. */
+    bool finishCapture(){bool taken=captureMode==0;captureMode=0;return taken;}
+    uint64_t generatedCount()const{return generatedFrames.load();}
+    const std::string& frameGenFailure()const{return frameGenError;}
+    /** Show the history: t < 1 an interpolated picture, otherwise the newest captured frame. */
+    bool presentFrameGen(JNIEnv* env,jobject target,float t){
+        if(!frameGen.attached()||frameGen.width()<1)return false;
+        bool generated=t<1.0f&&frameGen.canInterpolate();
+        for(int attempt=0;attempt<2;attempt++){
+            waitFence("Generated frame fence");if(!useWindow(env,target))return false;if(!chain)createChain();uint32_t index=0;VkResult r=acquireImage(&index);if(r==VK_ERROR_OUT_OF_DATE_KHR){dropChain();continue;}if(r!=VK_SUBOPTIMAL_KHR)checked(r,"Acquire generated frame image");
+            if(hdFinished.empty()){hdFinished.resize(images.size(),VK_NULL_HANDLE);VkSemaphoreCreateInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};for(auto& semaphore:hdFinished)checked(vkCreateSemaphore(device,&info,nullptr,&semaphore),"Generated frame semaphore");}VkSemaphore finished=hdFinished[index];
+            beginAfterFence();
+            if(generated)frameGen.recordInterpolate(command,t,!frameGenFilter);
+            VkImage picture=generated?frameGen.output():frameGen.newest();int w=frameGen.width(),h=frameGen.height();
+            frameGen.presentable(command,picture);
+            imageBarrier(drawTarget(index),VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue black{{0,0,0,1}};VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};vkCmdClearColorImage(command,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&black,1,&range);
+            VkMemoryBarrier order{VK_STRUCTURE_TYPE_MEMORY_BARRIER};order.srcAccessMask=order.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&order,0,nullptr,0,nullptr);
+            auto rect=psxDisplayRect(int(extent.width),int(extent.height),w,h,outputAspect,outputStretch,outputInteger,outputWindow);
+            bool usedShader=drawShader(picture,w,h,drawTarget(index),rect);
+            if(!usedShader){VkImageBlit blit{};blit.srcSubresource=blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.srcOffsets[1]={w,h,1};blit.dstOffsets[0]={rect.x,rect.y,0};blit.dstOffsets[1]={rect.x+rect.w,rect.y+rect.h,1};vkCmdBlitImage(command,picture,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,drawTarget(index),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,frameGenFilter&&linear?VK_FILTER_LINEAR:VK_FILTER_NEAREST);}
+            frameGen.restore(command,picture);finishTarget(index);submit(true,finished);
+            VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;
+            if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();
+            if(!finishPresent(r,"Present generated frame"))continue;
+            frameGenShown=true;displayedBlack=false;lastDisplayedShader=usedShader;previousJavaToken=0;if(generated)generatedFrames++;return true;
+        }
+        return false;
+    }
     bool supportsShared()const{return sharedSupported;}
     bool supportsSharedAsync()const{return sharedAsync;}
     bool presentShared(JNIEnv* env,jobject target,AHardwareBuffer* buffer,int w,int h,bool filter,int readyFd){struct OwnedFd{int value;~OwnedFd(){if(value>=0)close(value);}} ready{readyFd};for(int attempt=0;attempt<2;attempt++)if(presentSharedOnce(env,target,buffer,w,h,filter,ready.value))return true;return false;}
     bool presentSharedOnce(JNIEnv* env,jobject target,AHardwareBuffer* buffer,int w,int h,bool filter,int& readyFd){
         previousJavaToken=0;waitFence("Shared display fence");importShared(buffer,w,h);
+        if(captureMode&&prepareFrameGen(w,h)){VkSemaphore producer=VK_NULL_HANDLE;if(readyFd>=0){VkImportSemaphoreFdInfoKHR imported{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};imported.semaphore=producerReady;imported.flags=VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;imported.handleType=VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;imported.fd=readyFd;checked(importReadyFd(device,&imported),"Import shared capture fence");readyFd=-1;producer=producerReady;}
+            beginAfterFence();sharedBarrier(true);frameGen.recordCapture(command,sharedImage,captureMode==2);sharedBarrier(false);submitCapture(producer);captured(filter);return true;}
         ANativeWindow* requested=ANativeWindow_fromSurface(env,target);if(!requested)return false;
         if(requested!=window){detach();window=requested;VkAndroidSurfaceCreateInfoKHR s{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};s.window=window;checked(vkCreateAndroidSurfaceKHR(instance,&s,nullptr,&surface),"Create shared presentation surface");VkBool32 supported=VK_FALSE;checked(vkGetPhysicalDeviceSurfaceSupportKHR(physical,family,surface,&supported),"Shared presentation support");if(!supported)throw std::runtime_error("Shared presentation queue unavailable");}else ANativeWindow_release(requested);
         if(!chain)createChain();uint32_t index=0;VkResult r=acquireImage(&index);if(r==VK_ERROR_OUT_OF_DATE_KHR){dropChain();return false;}if(r!=VK_SUBOPTIMAL_KHR)checked(r,"Acquire shared presentation image");
@@ -317,7 +359,7 @@ public:
         sharedBarrier(false);finishTarget(index);submit(true,finished,producer);
         VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&finished;p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;if(shadersTouched)armsx_shader_vk_queue_lock();r=presentImage(&p);if(shadersTouched)armsx_shader_vk_queue_unlock();
         // The next call waits this fence; ping-pong allocations let GL render concurrently.
-        bool accepted=finishPresent(r,"Present shared image");if(accepted){lastDisplayedShader=usedShader;displayedBlack=false;directImage=VK_NULL_HANDLE;lastInputShared=true;lastInputValid=true;lastW=w;lastH=h;}return accepted;
+        bool accepted=finishPresent(r,"Present shared image");if(accepted){lastDisplayedShader=usedShader;displayedBlack=false;frameGenShown=false;directImage=VK_NULL_HANDLE;lastInputShared=true;lastInputValid=true;lastW=w;lastH=h;}return accepted;
     }
     void statistics(jlong* values)const{values[0]=presented.load();values[1]=reused.load();values[2]=javaUploadBytes.load();values[3]=chainBuilds.load();values[4]=suboptimalPresents.load();values[5]=outdatedPresents.load();values[6]=stagingBytes.load();values[7]=stagingAllocated.load();values[8]=stagingAllocations.load();}
     void verify(JNIEnv* env){
@@ -349,6 +391,10 @@ bool psxVulkanSharedAsyncSupported(jlong handle){return reinterpret_cast<Output*
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_configureWindowNative(JNIEnv*,jclass,jlong h,jfloat x,jfloat y,jfloat w,jfloat height){reinterpret_cast<Output*>(h)->configureWindow(x,y,w,height);}
 extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_configureDisplayNative(JNIEnv*,jclass,jlong h,jfloat aspect,jboolean stretch,jboolean integerScale){reinterpret_cast<Output*>(h)->configureDisplay(aspect,stretch,integerScale);}
 
+extern "C" JNIEXPORT void JNICALL Java_dev_psxlab_core_VulkanPresenter_requestCaptureNative(JNIEnv*,jclass,jlong handle,jboolean estimate,jboolean reset){reinterpret_cast<Output*>(handle)->requestCapture(estimate,reset);}
+extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_VulkanPresenter_finishCaptureNative(JNIEnv*,jclass,jlong handle){return reinterpret_cast<Output*>(handle)->finishCapture();}
+extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_VulkanPresenter_presentGeneratedNative(JNIEnv* e,jclass,jlong handle,jobject surface,jfloat t){try{return reinterpret_cast<Output*>(handle)->presentFrameGen(e,surface,t);}catch(const std::exception& x){failure(e,x);return false;}}
+extern "C" JNIEXPORT jstring JNICALL Java_dev_psxlab_core_VulkanPresenter_frameGenerationErrorNative(JNIEnv* e,jclass,jlong handle){return e->NewStringUTF(reinterpret_cast<Output*>(handle)->frameGenFailure().c_str());}
 extern "C" JNIEXPORT jboolean JNICALL Java_dev_psxlab_core_VulkanPresenter_presentExtraNative(JNIEnv* e,jclass,jlong handle,jobject surface,jboolean black){try{return reinterpret_cast<Output*>(handle)->presentStored(e,surface,black);}catch(const std::exception& x){failure(e,x);return false;}}
 bool psxVulkanNeedsPresent(jlong handle){return reinterpret_cast<Output*>(handle)->needsPresent();}
 void psxVulkanNativeDimensions(jlong handle,int w,int h){reinterpret_cast<Output*>(handle)->nativeDimensions(w,h);}

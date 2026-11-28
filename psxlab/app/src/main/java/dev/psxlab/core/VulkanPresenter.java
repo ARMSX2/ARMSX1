@@ -1,7 +1,7 @@
 package dev.psxlab.core;
 import android.view.Surface;
 /** Vulkan upload/scaling/presentation; game primitives use our native software rasterizer. */
-public final class VulkanPresenter implements AutoCloseable {
+public final class VulkanPresenter implements AutoCloseable,FrameGenerationTarget {
     private long handle;
     private boolean profiling;
     private final NativeTiming timing=new NativeTiming();
@@ -20,6 +20,14 @@ public final class VulkanPresenter implements AutoCloseable {
     boolean presentBlack(Surface surface){return presentExtraNative(handle,surface,true);}
     boolean presentSubframe(Surface surface){return presentExtraNative(handle,surface,false);}
     private static native boolean presentExtraNative(long handle,Surface surface,boolean black);
+    @Override public void requestCapture(boolean estimate,boolean reset){requestCaptureNative(handle,estimate,reset);}
+    @Override public boolean finishCapture(){return finishCaptureNative(handle);}
+    @Override public boolean presentGenerated(Surface surface,float t){return presentGeneratedNative(handle,surface,t);}
+    @Override public String frameGenerationError(){return handle==0?"":frameGenerationErrorNative(handle);}
+    private static native void requestCaptureNative(long handle,boolean estimate,boolean reset);
+    private static native boolean finishCaptureNative(long handle);
+    private static native boolean presentGeneratedNative(long handle,Surface surface,float t);
+    private static native String frameGenerationErrorNative(long handle);
     void configureDisplay(float aspect,boolean stretch,boolean integerScale){configureDisplayNative(handle,aspect,stretch,integerScale);}
     void configureWindow(float[] window){configureWindowNative(handle,window[0],window[1],window[2],window[3]);}
     private static native void configureWindowNative(long handle,float x,float y,float width,float height);

@@ -59,10 +59,81 @@ public final class Gpu implements AutoCloseable {
     private boolean displayVsync;
     public void configurePresentation(int mode,int multiple,float hz,boolean allowed){highRefresh=new HighRefresh(Math.max(0,Math.min(2,mode)),Math.max(2,Math.min(4,multiple)),hz,allowed);}
     public boolean presentationNeedsRestore(){return presentationDecision==PresentationPolicy.BFI;}
-    public boolean requiresEveryFieldPresentation(){HighRefresh setting=highRefresh;return setting.mode!=0&&setting.allowed;}
+    public boolean requiresEveryFieldPresentation(){HighRefresh setting=highRefresh;return setting.allowed&&(setting.mode!=0||frameGenerationEnabled&&frameGenerationFailure.isEmpty());}
     public String presentationStatus(){HighRefresh setting=highRefresh;int decision=PresentationPolicy.evaluate(setting.mode,setting.multiple,setting.hz,presentationRate,setting.allowed,hardware!=null||vulkan!=null,vulkan!=null,setting.mode==2&&ShaderChain.active());return PresentationPolicy.describe(decision,setting.multiple,setting.hz,presentationRate);}
     public long blackFramesPresented(){return blackPresented;}
     public long shaderSubframesPresented(){return shaderSubframes;}
+    // ---- Frame generation: FrameGeneration schedules on the emulation thread, the display paths make the pictures.
+    private final FrameGeneration frameGeneration=new FrameGeneration();
+    private volatile boolean frameGenerationEnabled;
+    private volatile String frameGenerationFailure="";
+    private volatile long generatedPresented;
+    private volatile int frameGenerationCadence=1,frameGenerationMultiple=1;
+    private volatile boolean frameGenerationPal;
+    private boolean frameGenerationActive;            // emulation thread
+    private NativeFrameGeneration cpuFrameGeneration;  // GPU worker, software display only
+    private volatile java.util.function.BiConsumer<android.view.Surface,Frame> softwareFrameSink;
+    public void configureFrameGeneration(boolean enabled){frameGenerationEnabled=enabled;}
+    /** Where the software display draws in-between pictures (the receiver of requestSurfaceFrame draws the rest). */
+    public void setSoftwareFrameSink(java.util.function.BiConsumer<android.view.Surface,Frame> sink){softwareFrameSink=sink;}
+    public long generatedFramesPresented(){return generatedPresented;}
+    private boolean frameGenerationRuns(){HighRefresh s=highRefresh;return frameGenerationEnabled&&s.allowed&&s.mode==0&&frameGenerationFailure.isEmpty()&&NativeRasterizer.AVAILABLE;}
+    public String frameGenerationStatus(){
+        HighRefresh s=highRefresh;
+        if(!frameGenerationEnabled)return "Frame generation is off";
+        if(!NativeRasterizer.AVAILABLE)return "Unavailable: the native display code is missing";
+        if(!frameGenerationFailure.isEmpty())return "Unavailable on this device: "+frameGenerationFailure;
+        if(s.mode!=0)return "Inactive while high-refresh presentation (BFI or shader subframes) is on";
+        if(!s.allowed)return "Paused during fast-forward, rewind or a pause";
+        int cadence=frameGenerationCadence,multiple=frameGenerationMultiple,between=cadence*multiple-1;
+        float game=frameGenerationPal?50f:60f;
+        String rate=String.format(java.util.Locale.ROOT,"game at %.0f fps, display %s",game/cadence,multiple>1?String.format(java.util.Locale.ROOT,"%.0f Hz",game*multiple):"not a multiple of the game rate");
+        if(between<=0)return "Active, nothing to fill: "+rate+" (in-between pictures appear when the game drops below full speed or on a 2x/3x/4x refresh display)";
+        return String.format(java.util.Locale.ROOT,"Active: %s, %d in-between picture%s per game frame, %,d shown",rate,between,between==1?"":"s",generatedPresented);
+    }
+    /** Emulation thread, once per presented field. Null when frame generation is not running. */
+    private FrameGeneration.Plan frameGenerationPlan(int[] state,boolean extras){
+        if(!extras||!frameGenerationRuns()){if(frameGenerationActive){frameGeneration.reset();frameGenerationActive=false;}return null;}
+        frameGenerationActive=true;
+        boolean pal=(state[0]&0x100000)!=0;
+        int multiple=FrameGeneration.displayMultiple(highRefresh.hz,pal);
+        FrameGeneration.Plan plan=frameGeneration.next(state[0],state[1],state[2],multiple);
+        frameGenerationMultiple=multiple;frameGenerationCadence=frameGeneration.cadence();frameGenerationPal=pal;
+        return plan;
+    }
+    private void frameGenerationFailed(String error){
+        String reason=error==null||error.isEmpty()?"unknown error":error;
+        frameGenerationFailure=reason;
+        if(journal!=null)journal.event(EngineLog.WARN,"frame_generation.unavailable",java.util.Map.of("error",reason));
+    }
+    /** GPU worker: one field under frame generation. `regular` is the display path's ordinary present call. */
+    private boolean presentWithGeneration(android.view.Surface surface,FrameGeneration.Plan plan,FrameGenerationTarget target,java.util.function.BooleanSupplier regular,EngineLog.Frame timing){
+        if(plan==null||target==null||plan.ordinary())return regular.getAsBoolean();
+        if(plan.capture()){
+            target.requestCapture(plan.estimate(),plan.reset());
+            boolean shown;
+            try{shown=regular.getAsBoolean();}
+            catch(RuntimeException error){target.finishCapture();frameGenerationFailed(error.getMessage());return regular.getAsBoolean();}
+            if(!target.finishCapture()){String error=target.frameGenerationError();if(error!=null&&!error.isEmpty())frameGenerationFailed(error);return shown;}
+        }
+        boolean shown=false;
+        try{
+            for(float t:plan.generated())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.generated")){if(target.presentGenerated(surface,t)){shown=true;generatedPresented++;}}
+            if(plan.real())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.generated_newest")){shown|=target.presentGenerated(surface,1f);}
+        }catch(RuntimeException error){frameGenerationFailed(error.getMessage());return regular.getAsBoolean();}
+        return shown;
+    }
+    /** GPU worker: the software display, with in-between pictures from the CPU. */
+    private void presentSoftwareWithGeneration(android.view.Surface surface,FrameGeneration.Plan plan,Frame frame,boolean filter,java.util.function.Consumer<Frame> completed){
+        java.util.function.BiConsumer<android.view.Surface,Frame> sink=softwareFrameSink;
+        boolean any=false;
+        try{
+            if(cpuFrameGeneration==null)cpuFrameGeneration=new NativeFrameGeneration();
+            if(plan.capture())cpuFrameGeneration.capture(frame,plan.estimate(),plan.reset());
+            if(sink!=null&&surface!=null&&surface.isValid())for(float t:plan.generated()){Frame between=cpuFrameGeneration.interpolate(t,!filter);if(between!=null){sink.accept(surface,between);generatedPresented++;any=true;}}
+        }catch(RuntimeException|UnsatisfiedLinkError error){frameGenerationFailed(error.getMessage());}
+        completed.accept(plan.real()||!any?frame:null);
+    }
     private int presentationDecision(int[] state,boolean allowed){
         HighRefresh setting=highRefresh;presentationRate=(state[0]&0x100000)!=0?50:60;
         int decision=PresentationPolicy.evaluate(setting.mode,setting.multiple,setting.hz,presentationRate,setting.allowed&&allowed,hardware!=null||vulkan!=null,vulkan!=null,setting.mode==2&&ShaderChain.active());
@@ -472,6 +543,7 @@ public final class Gpu implements AutoCloseable {
     }
     private void requestSurfaceFrame(android.view.Surface surface,boolean filter,java.util.function.Consumer<Frame> receiver,EngineLog.Frame timing,boolean extras){
         flushUpload();int[] state=displayState(filter);float[] window=displayWindow(gpuStatus,horizontalStart,horizontalEnd,verticalStart,verticalEnd);long queued=System.nanoTime();
+        FrameGeneration.Plan plan=frameGenerationPlan(state,extras);
         submit(()->{
             replayBoundary(state);
             applyWindow(window);
@@ -493,7 +565,7 @@ public final class Gpu implements AutoCloseable {
                 if(internalScale>1||(hardwareDrawing&&hardware!=null&&vulkan!=null)){
                     if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage((state[0]&0x200000)!=0?(vulkan!=null?"gpu.present.vulkan.movie24":"gpu.present.gles.movie24"):vulkan!=null?"gpu.present.vulkan.shared":"gpu.present.gles.hd")){
                         boolean accepted;
-                        try{accepted=vulkan!=null?hardware.presentResolved(surface,state,vulkan.nativeHandle()):hardware.present(surface,state);}
+                        try{accepted=presentWithGeneration(surface,plan,vulkan!=null?vulkan:hardware,()->vulkan!=null?hardware.presentResolved(surface,state,vulkan.nativeHandle()):hardware.present(surface,state),timing);}
                         catch(RuntimeException error){if(baseVulkanOutput||vulkan==null)throw error;shaderPresentationFailed(error);accepted=hardware.present(surface,state);}
                         if(timing!=null)timing.presentation(accepted);
                     }
@@ -506,11 +578,11 @@ public final class Gpu implements AutoCloseable {
                         else{Frame previous=vulkanFrames.frame();vulkanFrames.update(softwareVramRevision,state,captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6],previous==null?null:previous.pixels()));}
                     }
                     convert=System.nanoTime()-converting;
-                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){boolean accepted=vulkan.present(surface,frame,filter,vulkanFrames.token());if(timing!=null)timing.presentation(accepted);}presentExtra(surface,decision,timing);completed.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";completed.accept(frame);}
+                    Frame frame=vulkanFrames.frame();try{if(surface!=null&&surface.isValid())try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.vulkan")){boolean accepted=presentWithGeneration(surface,plan,vulkan,()->vulkan.present(surface,frame,filter,vulkanFrames.token()),timing);if(timing!=null)timing.presentation(accepted);}presentExtra(surface,decision,timing);completed.accept(null);}catch(RuntimeException e){if(journal!=null)journal.error("gpu.present.vulkan",e);vulkan.close();vulkan=null;renderer="Software (Vulkan unavailable)";completed.accept(frame);}
                 }else if(hardware!=null){if(surface!=null&&surface.isValid()){
                     if(!hardwareDrawing)try(EngineLog.Span span=timing==null?null:timing.stage("gpu.upload.gles")){hardware.setDisplayVram(vram,state,softwareVramRevision);}
-                    try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.gles")){boolean accepted=hardware.present(surface,state);if(timing!=null)timing.presentation(accepted);}
-                }presentExtra(surface,decision,timing);completed.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){completed.accept(captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]));}
+                    try(EngineLog.Span span=timing==null?null:timing.stage("gpu.present.gles")){boolean accepted=presentWithGeneration(surface,plan,hardware,()->hardware.present(surface,state),timing);if(timing!=null)timing.presentation(accepted);}
+                }presentExtra(surface,decision,timing);completed.accept(null);}else try(EngineLog.Span span=timing==null?null:timing.stage("gpu.scanout.software")){Frame frame=captureFrame(state[0],state[1],state[2],state[3],state[4],state[5],state[6]);if(plan==null||plan.ordinary())completed.accept(frame);else presentSoftwareWithGeneration(surface,plan,frame,filter,completed);}
             }finally{recordPresent(queued,started,convert,System.nanoTime(),threadCpu()-cpuStarted);if(timing!=null)timing.complete();}
         });
     }
@@ -583,7 +655,7 @@ public final class Gpu implements AutoCloseable {
     // A failure the caller already received is not thrown again on close: rethrowing that same
     // exception from try-with-resources replaced it with "Self-suppression not permitted".
     @Override public void close() {boolean reported=failureReported;try{sync();}catch(RuntimeException e){if(e!=failure||!reported)throw e;}finally{
-        Runnable cleanup=()->{try{if(textures!=null)try{textures.close();}finally{textures=null;}}finally{try{if(hardware!=null)try{hardware.close();}finally{hardware=null;}}finally{if(vulkan!=null)try{vulkan.close();}finally{vulkan=null;}}}};
+        Runnable cleanup=()->{if(cpuFrameGeneration!=null)try{cpuFrameGeneration.close();}finally{cpuFrameGeneration=null;}try{if(textures!=null)try{textures.close();}finally{textures=null;}}finally{try{if(hardware!=null)try{hardware.close();}finally{hardware=null;}}finally{if(vulkan!=null)try{vulkan.close();}finally{vulkan=null;}}}};
         if(worker!=null){FutureTask<Void> close=new FutureTask<>(cleanup,null);try{worker.execute(close);close.get();}catch(InterruptedException e){Thread.currentThread().interrupt();}catch(ExecutionException e){throw new IllegalStateException(e);}finally{worker.shutdown();}}
         else cleanup.run();
     }}

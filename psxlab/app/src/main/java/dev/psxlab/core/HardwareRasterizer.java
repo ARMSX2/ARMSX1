@@ -4,7 +4,7 @@ import android.view.Surface;
 import java.util.*;
 
 /** Original GLES integer rasterizer; all calls belong to the GPU worker thread. */
-public class HardwareRasterizer implements AutoCloseable {
+public class HardwareRasterizer implements AutoCloseable,FrameGenerationTarget {
     private long handle;
     private boolean profiling;
     private final NativeTiming timing=new NativeTiming();
@@ -38,6 +38,14 @@ public class HardwareRasterizer implements AutoCloseable {
     void detachPresentation(){detachPresentationNative(handle);}
     private static native void detachPresentationNative(long handle);
     boolean presentBlack(Surface surface){return presentBlackNative(handle,surface);}
+    @Override public void requestCapture(boolean estimate,boolean reset){requestCaptureNative(handle,estimate,reset);}
+    @Override public boolean finishCapture(){return finishCaptureNative(handle);}
+    @Override public boolean presentGenerated(Surface surface,float t){return presentGeneratedNative(handle,surface,t);}
+    @Override public String frameGenerationError(){return frameGenerationErrorNative(handle);}
+    private static native void requestCaptureNative(long handle,boolean estimate,boolean reset);
+    private static native boolean finishCaptureNative(long handle);
+    private static native boolean presentGeneratedNative(long handle,Surface surface,float t);
+    private static native String frameGenerationErrorNative(long handle);
     private static native void setVsyncNative(long handle,boolean enabled);
     private static native boolean presentBlackNative(long handle,Surface surface);
     void configureDisplay(float aspect,boolean stretch,boolean integerScale){configureDisplayNative(handle,aspect,stretch,integerScale);}

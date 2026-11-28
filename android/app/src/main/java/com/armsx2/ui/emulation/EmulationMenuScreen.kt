@@ -1276,6 +1276,7 @@ private fun GraphicsPane(state: EmulationMenuUiState, viewModel: EmulationMenuVi
         com.armsx2.ui.settings.FramePresentationSettings(ps1,
             onMode = { mode -> editPs1 { it.copy(framePresentation = mode) } },
             onMultiplier = { multiple -> editPs1 { it.copy(presentationMultiplier = multiple) } },
+            onFrameGeneration = { enabled -> editPs1 { it.copy(frameGeneration = enabled) } },
         )
     }
     if (com.armsx2.BuildConfig.PACING_DIAGNOSTICS) {

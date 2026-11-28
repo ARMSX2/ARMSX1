@@ -272,6 +272,7 @@ fun Ps1VideoTab() {
         FramePresentationSettings(s,
             onMode = { mode -> editor.update { it.copy(framePresentation = mode) } },
             onMultiplier = { multiple -> editor.update { it.copy(presentationMultiplier = multiple) } },
+            onFrameGeneration = { enabled -> editor.update { it.copy(frameGeneration = enabled) } },
         )
         PacingDiagnosticSection()
         SettingsDivider()
@@ -617,6 +618,7 @@ fun Ps1VideoTab() {
                     downsample = d.downsample,
                     framePresentation = d.framePresentation,
                     presentationMultiplier = d.presentationMultiplier,
+                    frameGeneration = d.frameGeneration,
                     deinterlace = d.deinterlace,
                     overscanCrop = d.overscanCrop,
                     displayRotation = d.displayRotation,

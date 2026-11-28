@@ -47,6 +47,7 @@ object Ps1Display {
                 when (s.framePresentation) { "bfi" -> 1; "shader_subframes" -> 2; else -> 0 },
                 s.presentationMultiplier.coerceIn(2, 4),
             )
+            NativeApp.setFrameGeneration(s.frameGeneration)
         }
     }
 }

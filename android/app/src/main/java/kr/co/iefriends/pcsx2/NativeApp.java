@@ -1220,6 +1220,8 @@ public class NativeApp {
 	public static void setDisplayVsyncTimestamp(long frameTimeNanos) { unsupported("setDisplayVsyncTimestamp"); }
 	public static void setFramePresentation(int mode, int multiple) { if(lab!=null)lab.framePresentation(mode,multiple); }
     public static String framePresentationStatus(){return lab==null?"Start a game to see presentation status":lab.framePresentationStatus();}
+    public static void setFrameGeneration(boolean enabled){if(lab!=null)lab.frameGeneration(enabled);}
+    public static String frameGenerationStatus(){return lab==null?"Start a game to see frame generation status":lab.frameGenerationStatus();}
 	/** Diagnostic APK only; normal builds ignore the request. */
 	public static void setPacingDiagnosticMode(int mode) { unsupported("setPacingDiagnosticMode"); }
 	public static void configureSwanCardPaths(String first, String second) { if (lab == null) return; String[] paths = {first, second}; for (int i = 0; i < paths.length; i++) if (paths[i] != null && !paths[i].isBlank() && !paths[i].equals(lab.cardPath(i))) { if (!lab.importCard(i, new File(paths[i]))) throw new IllegalStateException(lab.lastError()); } }

@@ -157,6 +157,9 @@ data class Ps1Settings(
     // Presentation only: never run emulation/audio again for an inserted frame.
     val framePresentation: String = "off", // off | bfi | shader_subframes
     val presentationMultiplier: Int = 2,
+    // Motion-compensated in-between pictures (frame_generation.h in PSX Lab). Presentation only, like the
+    // two above: the game still runs at its own speed. Off by default because it adds delay.
+    val frameGeneration: Boolean = false,
     // Deinterlacing for 480-line modes. weave is the historical behaviour.
     val deinterlace: String = DEINTERLACE_WEAVE,  // legacy weave means core default; progressive disables interlacing
     val overscanCrop: String = OVERSCAN_NONE,     // none | small | full

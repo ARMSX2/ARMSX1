@@ -10,14 +10,37 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
 import com.armsx2.config.Ps1Settings
+import com.armsx2.i18n.str
 
 @Composable
-internal fun FramePresentationSettings(s: Ps1Settings, onMode: (String) -> Unit, onMultiplier: (Int) -> Unit) {
+internal fun FramePresentationSettings(
+    s: Ps1Settings,
+    onMode: (String) -> Unit,
+    onMultiplier: (Int) -> Unit,
+    onFrameGeneration: (Boolean) -> Unit,
+) {
+    val generationStatus by produceState(initialValue = "Checking frame generation status") {
+        while (true) {
+            value = runCatching { kr.co.iefriends.pcsx2.NativeApp.frameGenerationStatus() }
+                .getOrDefault("Frame generation status unavailable")
+            delay(500)
+        }
+    }
     val status by produceState(initialValue="Checking presentation status") {
         while(true){value=runCatching { kr.co.iefriends.pcsx2.NativeApp.framePresentationStatus() }.getOrDefault("Presentation status unavailable");delay(500)}
     }
     val modes = listOf("off", "bfi", "shader_subframes")
     Column(Modifier.fillMaxWidth()) {
+    ToggleRow(
+        str("video.frameGeneration.label"),
+        s.frameGeneration,
+        description = str("video.frameGeneration.description"),
+        idSuffix = "ps1.frameGeneration",
+    ) { v -> onFrameGeneration(v) }
+    if (s.frameGeneration) {
+        Text(generationStatus, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    SettingsDivider()
     SegmentedRow(
         label = "High-refresh presentation (experimental)",
         options = listOf("Off", "Black frame insertion", "Shader subframes"),

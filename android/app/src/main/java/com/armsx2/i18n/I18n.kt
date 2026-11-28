@@ -1841,6 +1841,15 @@ val EN: Map<String, String> = mapOf(
     "perf.cpuMode.description" to
         "Cached is the fast default. Interpreter is slower but the accuracy reference. Try it if " +
         "a game misbehaves. Applies on next launch.",
+    "video.frameGeneration.label" to "Frame generation",
+    "video.frameGeneration.description" to
+        "Draws in-between pictures from the motion between game frames, so games that run at 30 or " +
+        "20 fps look smoother, and on a 120 Hz display every game gets an extra picture between frames. " +
+        "The game itself still runs at its normal speed. Adds up to one game frame of delay, and fast " +
+        "motion, see-through effects and text over moving scenes can smear or wobble. Works with every " +
+        "renderer: on the GPU with Vulkan or OpenGL display, on the CPU (native resolution only) with " +
+        "the software display. Paused during fast-forward and rewind, and off while black frame " +
+        "insertion or shader subframes are on.",
     "perf.overclock.label" to "CPU overclock",
     "perf.overclock.description" to
         "Runs the PlayStation CPU faster than the real console so games that slow down in busy " +

@@ -29,7 +29,8 @@ class Ps1PerformanceSettingsTest {
             cpuFastmemRewrite = true, cdReadThread = false, threadedGlSubmission = true,
             threadedHardwareBackend = true,
             softwareGpuThread = false, softwareReadbacks = true, shaderPrecompile = "Enabled",
-            texturePreload = true, displayAspectCustom = 1.5f, cpuOverclock = 200)
+            texturePreload = true, displayAspectCustom = 1.5f, cpuOverclock = 200,
+            frameGeneration = true)
         assertEquals(s, parse(serialize(s)))
     }
     @Test fun performanceOptionsParticipateInSparsePerGameOverrides() {
@@ -66,6 +67,14 @@ class Ps1PerformanceSettingsTest {
         assertEquals(100, parse("[cpu]\noverclock=fast").cpuOverclock)
         assertTrue("cpu.overclock" in Ps1SettingsStore.PER_GAME_KEYS)
         assertTrue(serialize(Ps1Settings()).contains("overclock = 100"))
+    }
+    @Test fun frameGenerationIsOffByDefaultAndPerGame() {
+        assertFalse(Ps1Settings().frameGeneration)
+        assertFalse(parse("[video]\nframe_presentation=\"off\"").frameGeneration)
+        assertTrue(parse("[video]\nframe_generation=true").frameGeneration)
+        assertFalse(parse("[video]\nframe_generation=maybe").frameGeneration)
+        assertTrue("video.frame_generation" in Ps1SettingsStore.PER_GAME_KEYS)
+        assertTrue(serialize(Ps1Settings()).contains("frame_generation = false"))
     }
     @Test fun explicitDisabledHardwareWorkerSurvivesRoundTrip() {
         val s = parse("[video]\nthreaded_hardware_backend=false\noptimal_frame_pacing=false")

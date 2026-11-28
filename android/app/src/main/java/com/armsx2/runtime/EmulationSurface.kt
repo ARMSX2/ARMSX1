@@ -160,7 +160,8 @@ class EmulationSurface(context: Context) :
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
             !gameActive ||
             !holder.surface.isValid ||
-            (!lowLatencyEnabled() && displayRefreshPreference() == 0 && presentationMultiple() == 1)
+            (!lowLatencyEnabled() && displayRefreshPreference() == 0 && presentationMultiple() == 1 &&
+                !frameGenerationEnabled())
         ) {
             clearFrameRatePreference()
             return
@@ -223,6 +224,11 @@ class EmulationSurface(context: Context) :
         val s = com.armsx2.config.Ps1SettingsStore.active(context)
         if (s.framePresentation == "off") 1 else s.presentationMultiplier.coerceIn(2, 4)
     }.getOrDefault(1)
+
+    // Frame generation fills a 120 Hz refresh too, so it asks for the highest whole multiple like Low Latency Mode.
+    private fun frameGenerationEnabled(): Boolean = runCatching {
+        com.armsx2.config.Ps1SettingsStore.active(context).frameGeneration
+    }.getOrDefault(false)
 
     private fun lowLatencyEnabled(): Boolean = runCatching {
         val settingsKey = MainActivityRuntime.currentGame.value?.settingsKey

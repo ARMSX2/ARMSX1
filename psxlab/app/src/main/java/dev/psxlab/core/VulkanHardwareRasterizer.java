@@ -29,6 +29,11 @@ final class VulkanHardwareRasterizer extends HardwareRasterizer {
     @Override void setVsync(boolean enabled){vsync=enabled;if(compatibility!=null)compatibility.setVsync(enabled);}
     @Override void detachPresentation(){if(compatibility!=null)compatibility.detachPresentation();}
     @Override boolean presentBlack(Surface surface){return output.presentBlack(surface);}
+    // Pictures reach the screen through the Vulkan display, so its history is the one to use.
+    @Override public void requestCapture(boolean estimate,boolean reset){output.requestCapture(estimate,reset);}
+    @Override public boolean finishCapture(){return output.finishCapture();}
+    @Override public boolean presentGenerated(Surface surface,float t){return output.presentGenerated(surface,t);}
+    @Override public String frameGenerationError(){return output.frameGenerationError();}
     @Override void configureProfiling(boolean enabled){profiling=enabled;if(compatibility!=null)compatibility.configureProfiling(enabled);}
     @Override synchronized Map<String,Object> nativeTimings(){return compatibility!=null?compatibility.nativeTimings():Map.of("available",false,"backend","native Vulkan");}
     @Override synchronized String describe(){return compatibility!=null?compatibility.describe()+" (compatibility rendering)":nativeGpu==0?"":describeNative(nativeGpu);}

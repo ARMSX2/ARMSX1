@@ -159,6 +159,7 @@ private val ROWS: List<RowKeys> = listOf(
     RowKeys(Ps1Tab.Video, "renderer.downsample.label", listOf("video.downsample")),
     RowKeys(Ps1Tab.Video, "High-refresh presentation (experimental)", listOf("video.frame_presentation")),
     RowKeys(Ps1Tab.Video, "Presentation multiplier", listOf("video.presentation_multiplier")),
+    RowKeys(Ps1Tab.Video, "video.frameGeneration.label", listOf("video.frame_generation")),
     RowKeys(Ps1Tab.Video, "renderer.hdPreset.label",
         listOf("video.renderer", "video.internal_scale", "video.downsample")),
     RowKeys(Ps1Tab.Video, "renderer.verticalSync.label", listOf("video.vsync")),

@@ -93,6 +93,7 @@ internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> = listOf(
     SettingsSearchEntry("renderer.hwRasterizer.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.internalRes.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.pgxp.label", true, SettingsCategory.Graphics),
+    SettingsSearchEntry("video.frameGeneration.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.widescreenHack.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.textureFilter.label", true, SettingsCategory.Graphics),
     SettingsSearchEntry("renderer.textureReplacements.label", true, SettingsCategory.Graphics),
